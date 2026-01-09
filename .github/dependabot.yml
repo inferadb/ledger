@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=https://json.schemastore.org/dependabot-2.0.json
+# Managed by github/tools/repos.sh - edits will be overwritten
+# Customize via repos.json, then run ./repos.sh --dependabot
+
+version: 2
+updates:
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "area/deps"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      rust-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/.github/workflows"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "area/deps"
+      - "area/ci"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "area/deps"
+      - "area/docker"
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+    groups:
+      docker-images:
+        patterns:
+          - "*"
