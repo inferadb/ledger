@@ -1031,25 +1031,27 @@ struct PageToken {
 }
 ```
 
-| Field          | Purpose                                                      |
-| -------------- | ------------------------------------------------------------ |
-| `version`      | Forward compatibility for token format changes               |
-| `namespace_id` | Validates token matches request; rejects cross-namespace reuse |
-| `vault_id`     | Validates token matches request; rejects cross-vault reuse   |
-| `last_key`     | Resume position: first result after this key                 |
-| `at_height`    | Consistent pagination: all pages read from same height       |
+| Field          | Purpose                                                                |
+| -------------- | ---------------------------------------------------------------------- |
+| `version`      | Forward compatibility for token format changes                         |
+| `namespace_id` | Validates token matches request; rejects cross-namespace reuse         |
+| `vault_id`     | Validates token matches request; rejects cross-vault reuse             |
+| `last_key`     | Resume position: first result after this key                           |
+| `at_height`    | Consistent pagination: all pages read from same height                 |
 | `query_hash`   | Detects filter changes mid-pagination (reject with `INVALID_ARGUMENT`) |
-| `hmac`         | Prevents client tampering; keyed with node-local secret      |
+| `hmac`         | Prevents client tampering; keyed with node-local secret                |
 
 **Encoding**: `base64(bincode::serialize(PageToken))`
 
 **Validation on each request**:
+
 1. Decode and verify HMAC
 2. Check `namespace_id` and `vault_id` match request
 3. Check `query_hash` matches current query params
 4. Resume from `last_key` at `at_height`
 
 **Error cases**:
+
 - Invalid/expired token: `INVALID_ARGUMENT` with message "invalid page token"
 - Mismatched namespace/vault: `INVALID_ARGUMENT` with message "page token does not match request"
 - Changed filters: `INVALID_ARGUMENT` with message "query parameters changed; start new pagination"
@@ -3200,11 +3202,11 @@ fn assign_actor(auth_context: &AuthContext) -> String {
 }
 ```
 
-| Actor Format    | Example               | Derived From                    |
-| --------------- | --------------------- | ------------------------------- |
-| `user:{id}`     | `user:789`            | Session token (authenticated user) |
-| `client:{id}`   | `client:api_key_abc`  | API key authentication          |
-| `system:{name}` | `system:gc`           | Internal system operation       |
+| Actor Format    | Example              | Derived From                       |
+| --------------- | -------------------- | ---------------------------------- |
+| `user:{id}`     | `user:789`           | Session token (authenticated user) |
+| `client:{id}`   | `client:api_key_abc` | API key authentication             |
+| `system:{name}` | `system:gc`          | Internal system operation          |
 
 **Security**: Clients cannot specify actor—it's always derived from the authenticated request context. This prevents impersonation attacks where a malicious client claims to be a different user.
 
@@ -3255,11 +3257,11 @@ message SetCondition {
 }
 ```
 
-| Condition      | Use Case                                         | Error Code               |
-| -------------- | ------------------------------------------------ | ------------------------ |
-| `not_exists`   | Create-only operations, unique constraints       | `KEY_EXISTS`             |
-| `version`      | Optimistic locking, concurrent update protection | `VERSION_MISMATCH`       |
-| `value_equals` | Exact state assertions                           | `VALUE_MISMATCH`         |
+| Condition      | Use Case                                         | Error Code         |
+| -------------- | ------------------------------------------------ | ------------------ |
+| `not_exists`   | Create-only operations, unique constraints       | `KEY_EXISTS`       |
+| `version`      | Optimistic locking, concurrent update protection | `VERSION_MISMATCH` |
+| `value_equals` | Exact state assertions                           | `VALUE_MISMATCH`   |
 
 **Error response structure:**
 
@@ -3333,14 +3335,15 @@ Version enables conditional writes for optimistic concurrency control.
 
 `BatchWriteRequest` provides atomic multi-write operations:
 
-| Property              | Guarantee                                                    |
-| --------------------- | ------------------------------------------------------------ |
+| Property              | Guarantee                                                         |
+| --------------------- | ----------------------------------------------------------------- |
 | **Atomicity**         | All-or-nothing—if ANY write's condition fails, entire batch fails |
-| **Ordering**          | Writes applied in array order (`writes[0]` before `writes[1]`) |
-| **Single block**      | All writes committed in same block (shared `block_height`)   |
-| **Failure isolation** | On failure, no writes applied—vault state unchanged          |
+| **Ordering**          | Writes applied in array order (`writes[0]` before `writes[1]`)    |
+| **Single block**      | All writes committed in same block (shared `block_height`)        |
+| **Failure isolation** | On failure, no writes applied—vault state unchanged               |
 
 **Use cases**:
+
 - Entity + index created/deleted atomically
 - Multi-key transactions requiring consistent state
 - Ordered operations where later writes depend on earlier writes' effects
@@ -3517,9 +3520,9 @@ Client resumes from `last_committed_sequence + 1`.
 
 Client state is tracked at two levels, matching write scope:
 
-| Write Scope        | GetClientState call                     | Use Case                                   |
-| ------------------ | --------------------------------------- | ------------------------------------------ |
-| Namespace entities | `GetClientState(ns_id, client_id)`      | Control writing users, sessions, orgs      |
+| Write Scope         | GetClientState call                          | Use Case                                |
+| ------------------- | -------------------------------------------- | --------------------------------------- |
+| Namespace entities  | `GetClientState(ns_id, client_id)`           | Control writing users, sessions, orgs   |
 | Vault relationships | `GetClientState(ns_id, vault_id, client_id)` | App writing authorization relationships |
 
 When `vault_id` is omitted, client state tracks namespace-level entity writes. When `vault_id` is provided, client state tracks vault-level writes (relationships + vault entities). A single client can have separate sequence streams for each scope.
@@ -3759,7 +3762,27 @@ struct CreateOrgSaga {
 }
 ```
 
-Sagas are stored in `_system` namespace under `saga:{saga_id}` keys. Background workers poll for incomplete sagas and advance them.
+Sagas are stored in `_system` namespace under `saga:{saga_id}` keys.
+
+**Saga recovery mechanism:**
+
+| Aspect          | Design                                                                         |
+| --------------- | ------------------------------------------------------------------------------ |
+| Storage         | `saga:{saga_id}` in `_system` namespace with full state serialized             |
+| Ownership       | Leader-only execution (avoids distributed coordination complexity)             |
+| Detection       | Leader polls `saga:*` keys on startup and periodically (every 30s)             |
+| Filter          | Incomplete = `state != Completed && state != Failed && state != Compensated`   |
+| Leader failover | New leader discovers incomplete sagas on next poll cycle                       |
+| Idempotency     | Each saga step is idempotent; re-execution on failover is safe                 |
+| Retry policy    | Exponential backoff: 1s, 2s, 4s, ... up to 5 min; max 10 retries then `Failed` |
+| Distributed?    | No—single leader executes all sagas (sufficient for expected volume)           |
+
+**Worker crash recovery**: If the leader crashes mid-saga:
+
+1. Raft elects new leader
+2. New leader's saga worker polls `_system` for incomplete sagas
+3. Saga resumes from last persisted state (steps are idempotent)
+4. No saga coordinator state outside `_system`—all state is in the namespace
 
 #### Saga Pattern: User Deletion Cascade
 
@@ -4007,6 +4030,41 @@ struct ChainCommitment {
 ```
 
 `ChainCommitment` enables verification continuity: even with transaction bodies compacted, the chain of `state_root` values proves state evolved through valid transitions. Each snapshot links to the previous, forming a verifiable chain back to genesis.
+
+**ChainCommitment computation algorithm:**
+
+```rust
+fn compute_chain_commitment(
+    blocks: &[BlockHeader],  // blocks[0].height = from_height
+    from_height: u64,
+    to_height: u64,
+) -> ChainCommitment {
+    // accumulated_header_hash: Sequential hash chain (not merkle tree)
+    // Ensures header ordering is preserved and any tampering invalidates chain
+    let mut header_acc = Hash::zero();
+    for header in blocks {
+        header_acc = sha256(header_acc || header.hash());
+    }
+
+    // state_root_accumulator: Merkle tree over state_roots
+    // Enables O(log n) proofs that a specific state_root was in the range
+    let state_roots: Vec<Hash> = blocks.iter().map(|b| b.state_root).collect();
+    let state_acc = merkle_root(&state_roots);
+
+    ChainCommitment {
+        accumulated_header_hash: header_acc,
+        state_root_accumulator: state_acc,
+        from_height,
+        to_height,
+    }
+}
+```
+
+**Verification**: Given a trusted snapshot at height N and a new snapshot at height M, verify by:
+
+1. Fetch block headers N+1..M from any source (even untrusted)
+2. Recompute `ChainCommitment` locally
+3. Compare against snapshot's embedded commitment
 
 **Storage tiers**:
 
