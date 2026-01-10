@@ -1,0 +1,534 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+option go_package = "github.com/inferadb/ledger/gen/go/ledger/v1;ledgerv1";
+
+import "google/protobuf/timestamp.proto";
+
+// =============================================================================
+// Core Types
+// =============================================================================
+
+// 256-bit hash (SHA-256)
+message Hash {
+  bytes value = 1; // 32 bytes
+}
+
+// Unique vault identifier
+message VaultId {
+  int64 id = 1;
+}
+
+// Unique node identifier
+message NodeId {
+  string id = 1;
+}
+
+// Unique client identifier (for idempotency)
+message ClientId {
+  string id = 1;
+}
+
+// Unique transaction identifier
+message TxId {
+  bytes id = 1; // UUID as 16 bytes
+}
+
+// =============================================================================
+// Block & Transaction Types
+// =============================================================================
+
+message BlockHeader {
+  uint64 height = 1;
+  VaultId vault_id = 2;
+  Hash previous_hash = 3;
+  Hash tx_merkle_root = 4;
+  Hash state_root = 5;
+  google.protobuf.Timestamp timestamp = 6;
+  NodeId leader_id = 7;
+  uint64 term = 8;
+  uint64 committed_index = 9;
+}
+
+message Block {
+  BlockHeader header = 1;
+  repeated Transaction transactions = 2;
+}
+
+// Lightweight block notification for streaming (excludes transaction bodies)
+message BlockAnnouncement {
+  VaultId vault_id = 1;
+  uint64 height = 2;
+  Hash block_hash = 3;
+  Hash state_root = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+message Transaction {
+  TxId id = 1;
+  ClientId client_id = 2;
+  uint64 sequence = 3;
+  repeated Operation operations = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  optional string actor = 6;  // Who performed this action (e.g., "user:123", "client:456")
+}
+
+message Operation {
+  oneof op {
+    CreateRelationship create_relationship = 1;
+    DeleteRelationship delete_relationship = 2;
+    SetEntity set_entity = 3;
+    DeleteEntity delete_entity = 4;
+  }
+}
+
+message CreateRelationship {
+  string resource = 1;
+  string relation = 2;
+  string subject = 3;
+}
+
+message DeleteRelationship {
+  string resource = 1;
+  string relation = 2;
+  string subject = 3;
+}
+
+message SetEntity {
+  string key = 1;
+  bytes value = 2;
+  optional uint64 expires_at = 3;  // Unix epoch seconds; 0 or omit = never expires
+  optional SetCondition condition = 4;  // Optional conditional write (CAS)
+}
+
+// Condition for compare-and-set writes (used for coordination primitives)
+message SetCondition {
+  oneof condition {
+    bool not_exists = 1;     // Only set if key doesn't exist
+    uint64 version = 2;      // Only set if key was last modified at this block height
+    bytes value_equals = 3;  // Only set if current value matches exactly
+  }
+}
+
+message DeleteEntity {
+  string key = 1;
+}
+
+// Relationship tuple (used in query results)
+message Relationship {
+  string resource = 1;
+  string relation = 2;
+  string subject = 3;
+}
+
+// Entity (used in query results)
+message Entity {
+  string key = 1;
+  bytes value = 2;
+  optional uint64 expires_at = 3;  // Unix epoch seconds; 0 = never expires
+  uint64 version = 4;              // Block height when last modified (for conditional writes)
+}
+
+// =============================================================================
+// Merkle Proof Types
+// =============================================================================
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_LEFT = 1;
+  DIRECTION_RIGHT = 2;
+}
+
+message MerkleProof {
+  Hash leaf_hash = 1;
+  repeated MerkleSibling siblings = 2;
+}
+
+message MerkleSibling {
+  Hash hash = 1;
+  Direction direction = 2;
+}
+
+message ChainProof {
+  repeated BlockHeader headers = 1;
+}
+
+// =============================================================================
+// Read Service
+// =============================================================================
+
+service ReadService {
+  // Read a value from the state tree
+  rpc Read(ReadRequest) returns (ReadResponse);
+
+  // Read with merkle proof for verification
+  rpc VerifiedRead(VerifiedReadRequest) returns (VerifiedReadResponse);
+
+  // Read state at a specific block height
+  rpc HistoricalRead(HistoricalReadRequest) returns (HistoricalReadResponse);
+
+  // Stream block announcements as they're committed (lightweight notifications)
+  rpc WatchBlocks(WatchBlocksRequest) returns (stream BlockAnnouncement);
+
+  // Get block by height
+  rpc GetBlock(GetBlockRequest) returns (GetBlockResponse);
+
+  // Get current chain tip
+  rpc GetTip(GetTipRequest) returns (GetTipResponse);
+
+  // Get client's last committed sequence (for recovery after client restart)
+  rpc GetClientState(GetClientStateRequest) returns (GetClientStateResponse);
+
+  // Query relationships with optional filters (uses dual indexes)
+  rpc ListRelationships(ListRelationshipsRequest) returns (ListRelationshipsResponse);
+
+  // List distinct resources matching a type prefix
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+
+  // List entities matching a key prefix (for Control data queries)
+  rpc ListEntities(ListEntitiesRequest) returns (ListEntitiesResponse);
+}
+
+message ReadRequest {
+  VaultId vault_id = 1;
+  string key = 2;
+}
+
+message ReadResponse {
+  optional bytes value = 1;
+  uint64 block_height = 2;
+}
+
+message VerifiedReadRequest {
+  VaultId vault_id = 1;
+  string key = 2;
+  bool include_chain_proof = 3;
+  optional uint64 trusted_height = 4; // Chain proof starts from here
+}
+
+message VerifiedReadResponse {
+  optional bytes value = 1;
+  uint64 block_height = 2;
+  BlockHeader block_header = 3;
+  MerkleProof merkle_proof = 4;
+  optional ChainProof chain_proof = 5;
+}
+
+message HistoricalReadRequest {
+  VaultId vault_id = 1;
+  string key = 2;
+  uint64 at_height = 3;
+}
+
+message HistoricalReadResponse {
+  optional bytes value = 1;
+  uint64 block_height = 2;
+  BlockHeader block_header = 3;
+  MerkleProof merkle_proof = 4;
+}
+
+message WatchBlocksRequest {
+  VaultId vault_id = 1;
+  uint64 start_height = 2; // 0 = start from current tip
+}
+
+message GetBlockRequest {
+  VaultId vault_id = 1;
+  uint64 height = 2;
+}
+
+message GetBlockResponse {
+  Block block = 1;
+}
+
+message GetTipRequest {
+  VaultId vault_id = 1;
+}
+
+message GetTipResponse {
+  uint64 height = 1;
+  Hash block_hash = 2;
+  Hash state_root = 3;
+}
+
+message GetClientStateRequest {
+  VaultId vault_id = 1;
+  ClientId client_id = 2;
+}
+
+message GetClientStateResponse {
+  uint64 last_committed_sequence = 1;
+}
+
+message ListRelationshipsRequest {
+  VaultId vault_id = 1;
+  optional string resource = 2;      // Filter by resource (exact match)
+  optional string relation = 3;      // Filter by relation (exact match)
+  optional string subject = 4;       // Filter by subject (exact match)
+  optional uint64 at_height = 5;     // Read at specific height (0 or omit = current)
+  uint32 limit = 6;                  // Max results (0 = default limit)
+  string page_token = 7;             // Pagination cursor
+}
+
+message ListRelationshipsResponse {
+  repeated Relationship relationships = 1;
+  uint64 block_height = 2;
+  string next_page_token = 3;        // Empty if no more results
+}
+
+message ListResourcesRequest {
+  VaultId vault_id = 1;
+  string resource_type = 2;          // Type prefix (e.g., "document" matches "document:*")
+  optional uint64 at_height = 3;     // Read at specific height (0 or omit = current)
+  uint32 limit = 4;                  // Max results (0 = default limit)
+  string page_token = 5;             // Pagination cursor
+}
+
+message ListResourcesResponse {
+  repeated string resources = 1;     // Full resource IDs (e.g., ["document:1", "document:2"])
+  uint64 block_height = 2;
+  string next_page_token = 3;        // Empty if no more results
+}
+
+message ListEntitiesRequest {
+  VaultId vault_id = 1;
+  string key_prefix = 2;             // e.g., "user:", "_idx:email:", "session:"
+  optional uint64 at_height = 3;     // Read at specific height (0 or omit = current)
+  bool include_expired = 4;          // Include entities past expires_at (default: false)
+  uint32 limit = 5;                  // Max results (0 = default limit)
+  string page_token = 6;             // Pagination cursor
+}
+
+message ListEntitiesResponse {
+  repeated Entity entities = 1;
+  uint64 block_height = 2;
+  string next_page_token = 3;        // Empty if no more results
+}
+
+// =============================================================================
+// Write Service
+// =============================================================================
+
+service WriteService {
+  // Submit a transaction
+  rpc Write(WriteRequest) returns (WriteResponse);
+
+  // Submit multiple transactions in a batch
+  rpc BatchWrite(BatchWriteRequest) returns (BatchWriteResponse);
+}
+
+message WriteRequest {
+  VaultId vault_id = 1;
+  ClientId client_id = 2;
+  uint64 sequence = 3;
+  repeated Operation operations = 4;
+  optional string actor = 5;  // Who performed this action (e.g., "user:123", "client:456")
+}
+
+message WriteResponse {
+  TxId tx_id = 1;
+  uint64 block_height = 2;
+  optional MerkleProof tx_proof = 3; // Proof tx is in block
+}
+
+message BatchWriteRequest {
+  VaultId vault_id = 1;
+  repeated WriteRequest writes = 2;
+}
+
+message BatchWriteResponse {
+  repeated WriteResponse responses = 1;
+  uint64 block_height = 2;
+}
+
+// =============================================================================
+// Admin Service
+// =============================================================================
+
+service AdminService {
+  // Create a new vault
+  rpc CreateVault(CreateVaultRequest) returns (CreateVaultResponse);
+
+  // Delete a vault (marks for garbage collection)
+  rpc DeleteVault(DeleteVaultRequest) returns (DeleteVaultResponse);
+
+  // Get vault info
+  rpc GetVault(GetVaultRequest) returns (GetVaultResponse);
+
+  // List all vaults on this node
+  rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
+
+  // Trigger snapshot
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+  // Run integrity check
+  rpc CheckIntegrity(CheckIntegrityRequest) returns (CheckIntegrityResponse);
+}
+
+message CreateVaultRequest {
+  VaultId vault_id = 1;
+  uint32 replication_factor = 2;
+  repeated NodeId initial_nodes = 3;
+}
+
+message CreateVaultResponse {
+  VaultId vault_id = 1;
+  BlockHeader genesis = 2;
+}
+
+message DeleteVaultRequest {
+  VaultId vault_id = 1;
+}
+
+message DeleteVaultResponse {
+  google.protobuf.Timestamp deleted_at = 1;
+}
+
+message GetVaultRequest {
+  VaultId vault_id = 1;
+}
+
+message GetVaultResponse {
+  VaultId vault_id = 1;
+  uint64 height = 2;
+  Hash state_root = 3;
+  repeated NodeId nodes = 4;
+  NodeId leader = 5;
+  VaultStatus status = 6;
+}
+
+enum VaultStatus {
+  VAULT_STATUS_UNSPECIFIED = 0;
+  VAULT_STATUS_ACTIVE = 1;
+  VAULT_STATUS_READ_ONLY = 2;
+  VAULT_STATUS_DELETED = 3;
+}
+
+message ListVaultsRequest {
+  // Empty - lists all vaults on this node
+}
+
+message ListVaultsResponse {
+  repeated GetVaultResponse vaults = 1;
+}
+
+message CreateSnapshotRequest {
+  VaultId vault_id = 1;
+}
+
+message CreateSnapshotResponse {
+  uint64 block_height = 1;
+  Hash state_root = 2;
+  string snapshot_path = 3;
+}
+
+message CheckIntegrityRequest {
+  VaultId vault_id = 1;
+  bool full_check = 2; // Replay from genesis vs quick check
+}
+
+message CheckIntegrityResponse {
+  bool healthy = 1;
+  repeated IntegrityIssue issues = 2;
+}
+
+message IntegrityIssue {
+  uint64 block_height = 1;
+  string issue_type = 2; // "chain_break", "state_divergence", etc.
+  string description = 3;
+}
+
+// =============================================================================
+// Health Service
+// =============================================================================
+
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message HealthCheckRequest {
+  optional VaultId vault_id = 1; // If empty, check node health
+}
+
+message HealthCheckResponse {
+  HealthStatus status = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY = 1;
+  HEALTH_STATUS_DEGRADED = 2;
+  HEALTH_STATUS_UNAVAILABLE = 3;
+}
+
+// =============================================================================
+// System Discovery Service
+// =============================================================================
+
+service SystemDiscoveryService {
+  // Get known peers (subset of _system state, lightweight)
+  rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+
+  // Announce a new or updated peer to the cluster
+  rpc AnnouncePeer(AnnouncePeerRequest) returns (AnnouncePeerResponse);
+
+  // Get full system state (nodes + vault registry)
+  rpc GetSystemState(GetSystemStateRequest) returns (GetSystemStateResponse);
+}
+
+message GetPeersRequest {
+  uint32 max_peers = 1; // Limit response size (0 = no limit)
+}
+
+message GetPeersResponse {
+  repeated PeerInfo peers = 1;
+  uint64 system_version = 2; // For cache invalidation
+}
+
+message PeerInfo {
+  NodeId node_id = 1;
+  repeated string addresses = 2; // WireGuard IPs
+  uint32 grpc_port = 3;
+  google.protobuf.Timestamp last_seen = 4;
+}
+
+message AnnouncePeerRequest {
+  PeerInfo peer = 1;
+}
+
+message AnnouncePeerResponse {
+  bool accepted = 1;
+}
+
+message GetSystemStateRequest {
+  uint64 if_version_greater_than = 1; // Return empty if version <= this (cache optimization)
+}
+
+message GetSystemStateResponse {
+  uint64 version = 1;
+  repeated NodeInfo nodes = 2;
+  repeated VaultRegistry vaults = 3;
+}
+
+message NodeInfo {
+  NodeId node_id = 1;
+  repeated string addresses = 2; // WireGuard IPs
+  uint32 grpc_port = 3;
+  NodeCapabilities capabilities = 4;
+  google.protobuf.Timestamp last_heartbeat = 5;
+}
+
+message NodeCapabilities {
+  bool can_lead = 1;
+  uint64 max_vaults = 2;
+}
+
+message VaultRegistry {
+  VaultId vault_id = 1;
+  repeated NodeId members = 2;
+  optional NodeId leader_hint = 3; // May be stale
+  uint64 config_version = 4;
+}
