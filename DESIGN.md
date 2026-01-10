@@ -3493,7 +3493,7 @@ struct ClientState {
 
 1. Persist `last_used_sequence` to durable storage before sending
 2. Increment by exactly 1 for each new transaction
-3. Reuse sequence number only for retries of the exact same transaction
+3. Reuse sequence number only for retries of the same transaction
 4. On restart, resume from persisted sequence
 
 **Server guarantees:**
