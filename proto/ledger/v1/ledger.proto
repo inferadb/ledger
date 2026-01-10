@@ -2,9 +2,9 @@ syntax = "proto3";
 
 package ledger.v1;
 
-option go_package = "github.com/inferadb/ledger/gen/go/ledger/v1;ledgerv1";
-
 import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/inferadb/ledger/gen/go/ledger/v1;ledgerv1";
 
 // =============================================================================
 // Core Types
@@ -15,9 +15,22 @@ message Hash {
   bytes value = 1; // 32 bytes
 }
 
-// Unique vault identifier
+// Unique namespace identifier (one per organization)
+// Sequential int64 assigned by Ledger leader from "_meta:seq:namespace"
+// Special case: namespace_id = 0 is reserved for _system
+message NamespaceId {
+  int64 id = 1;
+}
+
+// Unique vault identifier (relationship store within a namespace)
+// Sequential int64 assigned by Ledger leader from "_meta:seq:vault"
 message VaultId {
   int64 id = 1;
+}
+
+// Unique shard identifier (Raft group hosting multiple namespaces)
+message ShardId {
+  uint32 id = 1;
 }
 
 // Unique node identifier
@@ -25,9 +38,57 @@ message NodeId {
   string id = 1;
 }
 
+// Unique user identifier (global, stored in _system namespace)
+// Sequential int64 assigned by Ledger leader (see ID Generation Strategy in DESIGN.md)
+message UserId {
+  int64 id = 1;
+}
+
+// User record (stored in _system namespace as Entity with key "user:{id}")
+// Users can have multiple email addresses via separate UserEmail entities.
+// Namespace access is derived from membership records (member:{id} in each org namespace).
+// ID assigned by Ledger leader from sequence counter "_meta:seq:user"
+message User {
+  UserId id = 1;
+  string name = 2; // Display name (1-200 characters)
+  string password_hash = 3; // Argon2id PHC string format (empty for passkey-only users)
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+  google.protobuf.Timestamp tos_accepted_at = 6; // When Terms of Service was accepted
+  google.protobuf.Timestamp deleted_at = 7; // Soft-delete timestamp (null if active)
+  bool disabled = 8; // Admin-disabled flag
+  int64 primary_email_id = 9; // References UserEmail.id (single source of truth)
+}
+
+// User email address (stored in _system namespace as Entity with key "user_email:{id}")
+// Each user can have multiple emails; primary is referenced by User.primary_email_id.
+// Constraint: Primary email cannot be deleted (must reassign primary first).
+// Global email uniqueness is enforced via index: "_idx:email:{email}" → email_id
+// ID assigned by Ledger leader from sequence counter "_meta:seq:user_email"
+message UserEmail {
+  int64 id = 1; // Sequential ID (Ledger-assigned)
+  UserId user_id = 2; // Owning user
+  string email = 3; // Normalized to lowercase (max 320 chars per RFC 5321)
+  google.protobuf.Timestamp verified_at = 4; // When verified (null if unverified)
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// Email verification token (stored in _system namespace with TTL)
+// Key: "email_verify:{id}", Index: "_idx:email_verify:token:{token}" → token_id
+// Tokens expire after 24 hours via Ledger's TTL mechanism.
+// ID assigned by Ledger leader from sequence counter "_meta:seq:email_verify"
+message EmailVerificationToken {
+  int64 id = 1; // Sequential ID (Ledger-assigned)
+  int64 user_email_id = 2; // Email being verified
+  string token = 3; // 64-char hex string (32 random bytes)
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp expires_at = 5; // For application-level validation
+  google.protobuf.Timestamp used_at = 6; // When token was consumed (null if unused)
+}
+
 // Unique client identifier (for idempotency)
 message ClientId {
-  string id = 1;
+  string id = 1; // Opaque string (max 256 chars, typically API key ID)
 }
 
 // Unique transaction identifier
@@ -41,14 +102,15 @@ message TxId {
 
 message BlockHeader {
   uint64 height = 1;
-  VaultId vault_id = 2;
-  Hash previous_hash = 3;
-  Hash tx_merkle_root = 4;
-  Hash state_root = 5;
-  google.protobuf.Timestamp timestamp = 6;
-  NodeId leader_id = 7;
-  uint64 term = 8;
-  uint64 committed_index = 9;
+  NamespaceId namespace_id = 2; // Owning namespace (organization)
+  VaultId vault_id = 3; // Vault within namespace
+  Hash previous_hash = 4;
+  Hash tx_merkle_root = 5;
+  Hash state_root = 6;
+  google.protobuf.Timestamp timestamp = 7;
+  NodeId leader_id = 8;
+  uint64 term = 9;
+  uint64 committed_index = 10;
 }
 
 message Block {
@@ -58,11 +120,12 @@ message Block {
 
 // Lightweight block notification for streaming (excludes transaction bodies)
 message BlockAnnouncement {
-  VaultId vault_id = 1;
-  uint64 height = 2;
-  Hash block_hash = 3;
-  Hash state_root = 4;
-  google.protobuf.Timestamp timestamp = 5;
+  NamespaceId namespace_id = 1; // Owning namespace
+  VaultId vault_id = 2; // Vault within namespace
+  uint64 height = 3;
+  Hash block_hash = 4;
+  Hash state_root = 5;
+  google.protobuf.Timestamp timestamp = 6;
 }
 
 message Transaction {
@@ -71,7 +134,13 @@ message Transaction {
   uint64 sequence = 3;
   repeated Operation operations = 4;
   google.protobuf.Timestamp timestamp = 5;
-  optional string actor = 6;  // Who performed this action (e.g., "user:123", "client:456")
+  // Actor identity, ALWAYS server-assigned from authenticated context.
+  // Clients cannot specify this - derived from auth:
+  //   - Session token → "user:{user_id}"
+  //   - API key → "client:{client_id}"
+  //   - Internal operation → "system:{component}" (e.g., "system:gc")
+  // Format: {type}:{id}, max 128 characters.
+  string actor = 6;
 }
 
 message Operation {
@@ -80,54 +149,61 @@ message Operation {
     DeleteRelationship delete_relationship = 2;
     SetEntity set_entity = 3;
     DeleteEntity delete_entity = 4;
+    ExpireEntity expire_entity = 5; // GC-initiated removal (distinct from user delete)
   }
 }
 
 message CreateRelationship {
-  string resource = 1;
-  string relation = 2;
-  string subject = 3;
+  string resource = 1; // Format: "type:id" (max 512 chars total)
+  string relation = 2; // Relation name (max 64 chars, e.g., "viewer", "editor")
+  string subject = 3;  // Format: "type:id" or "type:id#relation" (max 512 chars)
 }
 
 message DeleteRelationship {
-  string resource = 1;
-  string relation = 2;
-  string subject = 3;
+  string resource = 1; // Format: "type:id" (max 512 chars total)
+  string relation = 2; // Relation name (max 64 chars)
+  string subject = 3;  // Format: "type:id" or "type:id#relation" (max 512 chars)
 }
 
 message SetEntity {
-  string key = 1;
-  bytes value = 2;
-  optional uint64 expires_at = 3;  // Unix epoch seconds; 0 or omit = never expires
-  optional SetCondition condition = 4;  // Optional conditional write (CAS)
+  string key = 1;   // Entity key (max 1024 bytes, UTF-8)
+  bytes value = 2;  // Entity value (max 1MB)
+  optional uint64 expires_at = 3; // Unix epoch seconds; 0 or omit = never expires
+  optional SetCondition condition = 4; // Optional conditional write (CAS)
 }
 
 // Condition for compare-and-set writes (used for coordination primitives)
 message SetCondition {
   oneof condition {
-    bool not_exists = 1;     // Only set if key doesn't exist
-    uint64 version = 2;      // Only set if key was last modified at this block height
-    bytes value_equals = 3;  // Only set if current value matches exactly
+    bool not_exists = 1; // Only set if key doesn't exist
+    uint64 version = 2; // Only set if key was last modified at this block height
+    bytes value_equals = 3; // Only set if current value matches exactly
   }
 }
 
 message DeleteEntity {
-  string key = 1;
+  string key = 1; // Entity key (max 1024 bytes, UTF-8)
+}
+
+// GC-initiated entity removal (distinct from user deletion for audit trail)
+message ExpireEntity {
+  string key = 1;         // Entity key (max 1024 bytes, UTF-8)
+  uint64 expired_at = 2;  // When the entity's TTL was reached (Unix epoch seconds)
 }
 
 // Relationship tuple (used in query results)
 message Relationship {
-  string resource = 1;
-  string relation = 2;
-  string subject = 3;
+  string resource = 1; // Format: "type:id" (max 512 chars)
+  string relation = 2; // Relation name (max 64 chars)
+  string subject = 3;  // Format: "type:id" or "type:id#relation" (max 512 chars)
 }
 
 // Entity (used in query results)
 message Entity {
-  string key = 1;
-  bytes value = 2;
-  optional uint64 expires_at = 3;  // Unix epoch seconds; 0 = never expires
-  uint64 version = 4;              // Block height when last modified (for conditional writes)
+  string key = 1;               // Entity key (max 1024 bytes, UTF-8)
+  bytes value = 2;              // Entity value (max 1MB)
+  optional uint64 expires_at = 3; // Unix epoch seconds; 0 = never expires
+  uint64 version = 4;           // Block height when last modified (for conditional writes)
 }
 
 // =============================================================================
@@ -174,6 +250,9 @@ service ReadService {
   // Get block by height
   rpc GetBlock(GetBlockRequest) returns (GetBlockResponse);
 
+  // Get multiple blocks for sync/catchup (max 1000 blocks per request)
+  rpc GetBlockRange(GetBlockRangeRequest) returns (GetBlockRangeResponse);
+
   // Get current chain tip
   rpc GetTip(GetTipRequest) returns (GetTipResponse);
 
@@ -191,8 +270,9 @@ service ReadService {
 }
 
 message ReadRequest {
-  VaultId vault_id = 1;
-  string key = 2;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2; // Optional: omit for namespace-level entity reads
+  string key = 3;
 }
 
 message ReadResponse {
@@ -201,10 +281,11 @@ message ReadResponse {
 }
 
 message VerifiedReadRequest {
-  VaultId vault_id = 1;
-  string key = 2;
-  bool include_chain_proof = 3;
-  optional uint64 trusted_height = 4; // Chain proof starts from here
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  string key = 3;
+  bool include_chain_proof = 4;
+  optional uint64 trusted_height = 5; // Chain proof starts from here
 }
 
 message VerifiedReadResponse {
@@ -216,9 +297,10 @@ message VerifiedReadResponse {
 }
 
 message HistoricalReadRequest {
-  VaultId vault_id = 1;
-  string key = 2;
-  uint64 at_height = 3;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  string key = 3;
+  uint64 at_height = 4;
 }
 
 message HistoricalReadResponse {
@@ -229,21 +311,47 @@ message HistoricalReadResponse {
 }
 
 message WatchBlocksRequest {
-  VaultId vault_id = 1;
-  uint64 start_height = 2; // 0 = start from current tip
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  // First block height to stream. Must be >= 1 (0 is rejected with INVALID_ARGUMENT).
+  //
+  // Behavior:
+  // - If start_height <= current tip: replays committed blocks first, then streams new
+  // - If start_height > current tip: waits for that block, then streams
+  //
+  // Typical usage:
+  //   tip = GetTip()
+  //   stream = WatchBlocks(start_height = tip.height + 1)
+  uint64 start_height = 3;
 }
 
 message GetBlockRequest {
-  VaultId vault_id = 1;
-  uint64 height = 2;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  uint64 height = 3;
 }
 
 message GetBlockResponse {
   Block block = 1;
 }
 
+// Fetch multiple blocks for sync/catchup.
+// Use case: Client reconnecting after downtime needs to catch up.
+message GetBlockRangeRequest {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  uint64 start_height = 3; // First block to return (inclusive)
+  uint64 end_height = 4;   // Last block to return (inclusive), max range: 1000 blocks
+}
+
+message GetBlockRangeResponse {
+  repeated Block blocks = 1; // Ordered by height ascending
+  uint64 current_tip = 2;    // Current chain tip (for client to know if more syncing needed)
+}
+
 message GetTipRequest {
-  VaultId vault_id = 1;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
 }
 
 message GetTipResponse {
@@ -253,8 +361,9 @@ message GetTipResponse {
 }
 
 message GetClientStateRequest {
-  VaultId vault_id = 1;
-  ClientId client_id = 2;
+  NamespaceId namespace_id = 1;
+  optional VaultId vault_id = 2; // Omit for namespace-level entity writes
+  ClientId client_id = 3;
 }
 
 message GetClientStateResponse {
@@ -262,48 +371,54 @@ message GetClientStateResponse {
 }
 
 message ListRelationshipsRequest {
-  VaultId vault_id = 1;
-  optional string resource = 2;      // Filter by resource (exact match)
-  optional string relation = 3;      // Filter by relation (exact match)
-  optional string subject = 4;       // Filter by subject (exact match)
-  optional uint64 at_height = 5;     // Read at specific height (0 or omit = current)
-  uint32 limit = 6;                  // Max results (0 = default limit)
-  string page_token = 7;             // Pagination cursor
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  optional string resource = 3; // Filter by resource (exact match)
+  optional string relation = 4; // Filter by relation (exact match)
+  optional string subject = 5; // Filter by subject (exact match)
+  optional uint64 at_height = 6; // Read at specific height (0 or omit = current)
+  uint32 limit = 7; // Max results (0 = default limit)
+  // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
+  // Encodes position and query context for consistent pagination across requests.
+  string page_token = 8;
 }
 
 message ListRelationshipsResponse {
   repeated Relationship relationships = 1;
   uint64 block_height = 2;
-  string next_page_token = 3;        // Empty if no more results
+  string next_page_token = 3; // Opaque cursor for next page; empty if no more results
 }
 
 message ListResourcesRequest {
-  VaultId vault_id = 1;
-  string resource_type = 2;          // Type prefix (e.g., "document" matches "document:*")
-  optional uint64 at_height = 3;     // Read at specific height (0 or omit = current)
-  uint32 limit = 4;                  // Max results (0 = default limit)
-  string page_token = 5;             // Pagination cursor
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  string resource_type = 3; // Type prefix (e.g., "document" matches "document:*")
+  optional uint64 at_height = 4; // Read at specific height (0 or omit = current)
+  uint32 limit = 5; // Max results (0 = default limit)
+  // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
+  string page_token = 6;
 }
 
 message ListResourcesResponse {
-  repeated string resources = 1;     // Full resource IDs (e.g., ["document:1", "document:2"])
+  repeated string resources = 1; // Full resource IDs (e.g., ["document:1", "document:2"])
   uint64 block_height = 2;
-  string next_page_token = 3;        // Empty if no more results
+  string next_page_token = 3; // Opaque cursor for next page; empty if no more results
 }
 
 message ListEntitiesRequest {
-  VaultId vault_id = 1;
-  string key_prefix = 2;             // e.g., "user:", "_idx:email:", "session:"
-  optional uint64 at_height = 3;     // Read at specific height (0 or omit = current)
-  bool include_expired = 4;          // Include entities past expires_at (default: false)
-  uint32 limit = 5;                  // Max results (0 = default limit)
-  string page_token = 6;             // Pagination cursor
+  NamespaceId namespace_id = 1;
+  string key_prefix = 2; // e.g., "user:", "_idx:email:", "session:"
+  optional uint64 at_height = 3; // Read at specific height (0 or omit = current)
+  bool include_expired = 4; // Include entities past expires_at (default: false)
+  uint32 limit = 5; // Max results (0 = default limit)
+  // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
+  string page_token = 6;
 }
 
 message ListEntitiesResponse {
   repeated Entity entities = 1;
   uint64 block_height = 2;
-  string next_page_token = 3;        // Empty if no more results
+  string next_page_token = 3; // Opaque cursor for next page; empty if no more results
 }
 
 // =============================================================================
@@ -318,28 +433,77 @@ service WriteService {
   rpc BatchWrite(BatchWriteRequest) returns (BatchWriteResponse);
 }
 
+// Note: actor is NOT specified by client. Server assigns Transaction.actor
+// from authenticated context (session token, API key, or system identity).
 message WriteRequest {
-  VaultId vault_id = 1;
-  ClientId client_id = 2;
-  uint64 sequence = 3;
-  repeated Operation operations = 4;
-  optional string actor = 5;  // Who performed this action (e.g., "user:123", "client:456")
+  NamespaceId namespace_id = 1;
+  optional VaultId vault_id = 2; // Required for relationships; omit for namespace-level entities
+  ClientId client_id = 3;
+  uint64 sequence = 4;
+  repeated Operation operations = 5;
 }
 
 message WriteResponse {
+  oneof result {
+    WriteSuccess success = 1;
+    WriteError error = 2;
+  }
+}
+
+message WriteSuccess {
   TxId tx_id = 1;
   uint64 block_height = 2;
   optional MerkleProof tx_proof = 3; // Proof tx is in block
 }
 
-message BatchWriteRequest {
-  VaultId vault_id = 1;
-  repeated WriteRequest writes = 2;
+// Detailed error for conditional write failures.
+// Provides enough context for clients to retry with correct values.
+message WriteError {
+  WriteErrorCode code = 1;
+  string key = 2;                     // Which key's condition failed
+  optional uint64 current_version = 3; // Actual version (for version mismatch)
+  optional bytes current_value = 4;   // Actual value (for value_equals mismatch, if small)
+  string message = 5;                 // Human-readable error description
 }
 
+enum WriteErrorCode {
+  WRITE_ERROR_CODE_UNSPECIFIED = 0;
+  WRITE_ERROR_CODE_KEY_EXISTS = 1;       // not_exists condition failed: key already exists
+  WRITE_ERROR_CODE_KEY_NOT_FOUND = 2;    // version/value_equals condition: key doesn't exist
+  WRITE_ERROR_CODE_VERSION_MISMATCH = 3; // version condition: block height differs
+  WRITE_ERROR_CODE_VALUE_MISMATCH = 4;   // value_equals condition: value differs
+  WRITE_ERROR_CODE_SEQUENCE_ERROR = 5;   // client sequence gap or duplicate
+}
+
+// Batch write with all-or-nothing atomicity.
+//
+// Semantics:
+// - All writes are committed in a SINGLE block (shared block_height in response)
+// - Writes are applied in ARRAY ORDER (writes[0] before writes[1], etc.)
+// - If ANY write's condition fails (e.g., CAS mismatch), the ENTIRE batch fails
+// - On failure, no writes are applied—the vault state is unchanged
+//
+// Use cases:
+// - Multi-key transactions requiring atomic commit
+// - Ordered operations where later writes depend on earlier writes' effects
+message BatchWriteRequest {
+  NamespaceId namespace_id = 1;
+  optional VaultId vault_id = 2; // Default for writes; omit for namespace-level entities
+  repeated WriteRequest writes = 3; // Inherits namespace_id/vault_id if not set per-write
+}
+
+// Response for batch write.
+// All-or-nothing: either all writes succeed or none are applied.
 message BatchWriteResponse {
-  repeated WriteResponse responses = 1;
-  uint64 block_height = 2;
+  oneof result {
+    BatchWriteSuccess success = 1;
+    WriteError error = 2; // First failing write; no writes applied
+  }
+}
+
+message BatchWriteSuccess {
+  repeated TxId tx_ids = 1;  // Transaction IDs, same order as BatchWriteRequest.writes
+  uint64 block_height = 2;   // Shared by all writes (single block commit)
 }
 
 // =============================================================================
@@ -367,9 +531,30 @@ service AdminService {
 }
 
 message CreateVaultRequest {
-  VaultId vault_id = 1;
-  uint32 replication_factor = 2;
-  repeated NodeId initial_nodes = 3;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  uint32 replication_factor = 3;
+  repeated NodeId initial_nodes = 4;
+  optional BlockRetentionPolicy retention_policy = 5; // Default: FULL
+}
+
+// Block retention modes for storage/compliance trade-off.
+// See DESIGN.md "Snapshot & Retention Policy" for details.
+enum BlockRetentionMode {
+  BLOCK_RETENTION_MODE_UNSPECIFIED = 0;
+  // Keep all blocks with full transactions indefinitely.
+  // Use case: SOC 2, HIPAA compliance requiring full audit trail.
+  BLOCK_RETENTION_MODE_FULL = 1;
+  // After snapshot, remove transaction bodies for old blocks (headers preserved).
+  // Use case: High-volume workloads prioritizing storage efficiency.
+  BLOCK_RETENTION_MODE_COMPACTED = 2;
+}
+
+message BlockRetentionPolicy {
+  BlockRetentionMode mode = 1;
+  // For COMPACTED mode: blocks newer than tip - retention_blocks keep full transactions.
+  // Ignored for FULL mode. Default: 10000 blocks.
+  uint64 retention_blocks = 2;
 }
 
 message CreateVaultResponse {
@@ -378,7 +563,8 @@ message CreateVaultResponse {
 }
 
 message DeleteVaultRequest {
-  VaultId vault_id = 1;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
 }
 
 message DeleteVaultResponse {
@@ -386,16 +572,19 @@ message DeleteVaultResponse {
 }
 
 message GetVaultRequest {
-  VaultId vault_id = 1;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
 }
 
 message GetVaultResponse {
-  VaultId vault_id = 1;
-  uint64 height = 2;
-  Hash state_root = 3;
-  repeated NodeId nodes = 4;
-  NodeId leader = 5;
-  VaultStatus status = 6;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  uint64 height = 3;
+  Hash state_root = 4;
+  repeated NodeId nodes = 5;
+  NodeId leader = 6;
+  VaultStatus status = 7;
+  BlockRetentionPolicy retention_policy = 8;
 }
 
 enum VaultStatus {
@@ -414,7 +603,8 @@ message ListVaultsResponse {
 }
 
 message CreateSnapshotRequest {
-  VaultId vault_id = 1;
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
 }
 
 message CreateSnapshotResponse {
@@ -424,8 +614,9 @@ message CreateSnapshotResponse {
 }
 
 message CheckIntegrityRequest {
-  VaultId vault_id = 1;
-  bool full_check = 2; // Replay from genesis vs quick check
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  bool full_check = 3; // Replay from genesis vs quick check
 }
 
 message CheckIntegrityResponse {
@@ -490,8 +681,11 @@ message GetPeersResponse {
 
 message PeerInfo {
   NodeId node_id = 1;
-  repeated string addresses = 2; // WireGuard IPs
-  uint32 grpc_port = 3;
+  // IP addresses only (no port). IPv4 or IPv6, e.g., ["10.0.0.1", "fd00::1"].
+  // Must be private/WireGuard IPs—public IPs rejected.
+  // Connect via: addresses[i] + ":" + grpc_port
+  repeated string addresses = 2;
+  uint32 grpc_port = 3; // gRPC port (same for all addresses), typically 5000
   google.protobuf.Timestamp last_seen = 4;
 }
 
@@ -510,13 +704,16 @@ message GetSystemStateRequest {
 message GetSystemStateResponse {
   uint64 version = 1;
   repeated NodeInfo nodes = 2;
-  repeated VaultRegistry vaults = 3;
+  repeated NamespaceRegistry namespaces = 3; // Routing table: namespace → shard
 }
 
 message NodeInfo {
   NodeId node_id = 1;
-  repeated string addresses = 2; // WireGuard IPs
-  uint32 grpc_port = 3;
+  // IP addresses only (no port). IPv4 or IPv6, e.g., ["10.0.0.1", "fd00::1"].
+  // Must be private/WireGuard IPs—public IPs rejected.
+  // Connect via: addresses[i] + ":" + grpc_port
+  repeated string addresses = 2;
+  uint32 grpc_port = 3; // gRPC port (same for all addresses), typically 5000
   NodeCapabilities capabilities = 4;
   google.protobuf.Timestamp last_heartbeat = 5;
 }
@@ -526,9 +723,11 @@ message NodeCapabilities {
   uint64 max_vaults = 2;
 }
 
-message VaultRegistry {
-  VaultId vault_id = 1;
-  repeated NodeId members = 2;
-  optional NodeId leader_hint = 3; // May be stale
-  uint64 config_version = 4;
+// Routing entry: namespace → shard assignment
+message NamespaceRegistry {
+  NamespaceId namespace_id = 1;
+  ShardId shard_id = 2; // Which Raft group hosts this namespace
+  repeated NodeId members = 3; // Nodes in the shard
+  optional NodeId leader_hint = 4; // May be stale
+  uint64 config_version = 5;
 }

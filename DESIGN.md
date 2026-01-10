@@ -4,45 +4,71 @@ Ledger is InferaDB's storage layer — a blockchain database for cryptographical
 
 ## Overview
 
-Ledger uses a Raft-based replicated log with cryptographic block structure and materialized state indexes. The architecture mirrors FoundationDB's "fearless replication" model, replacing the transaction log with a verifiable chain.
-
-**Key differentiator**: Unlike Amazon QLDB (deprecated 2024) which only verified the transaction log, Ledger's merkle-ized state tree includes indexes — enabling verifiable queries, not just verifiable writes.
+Ledger uses a Raft-based replicated log with cryptographic block structure and materialized state indexes. The merkle-ized state tree includes indexes, enabling verifiable queries in addition to verifiable writes.
 
 ### Design Goals
 
 1. **High Performance**: Sub-millisecond reads, <50ms writes
-2. **Fault Isolation**: Chain-per-vault ensures tenant failures don't cascade
+2. **Fault Isolation**: Chain-per-vault within isolated namespaces ensures failures don't cascade
 3. **Cryptographic Auditability**: Every state can be proven against a merkle root
 4. **Fearless Replication**: Raft consensus with self-verifying chain structure
 5. **Operational Simplicity**: Snapshot recovery, zero-downtime migrations
 
-### Inspiration
+### Terminology
 
-- FoundationDB — "fearless replication", deterministic simulation testing
-- SpacetimeDB — database-blockchain convergence
-- Amazon QLDB — verifiable ledger (lessons from its deprecation)
-- Hyperledger Fabric — permissioned blockchain architecture
-- Bitcoin/Nostr — cryptographic chain linking
+Ledger uses specific terminology that aligns with InferaDB's Control and Engine services:
+
+| Term                    | Definition                                                                                                                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Namespace**           | Ledger's storage unit. Each organization gets one namespace containing all its data (entities, vaults, relationships). Namespaces are isolated, with separate Raft consensus per shard.   |
+| **Vault**               | A relationship store within a namespace. Organizations can have multiple vaults. Each vault maintains its own cryptographic chain (separate `state_root`, `previous_hash`, block height). |
+| **Entity**              | Key-value data stored in a namespace (users, teams, clients, sessions). Entities support TTL, versioning, and conditional writes.                                                         |
+| **Relationship**        | Authorization tuple stored in a vault: `(resource, relation, subject)`. Used by Engine for permission checks.                                                                             |
+| **`_system` namespace** | Special namespace for global data: user accounts and namespace routing. Replicated to all nodes.                                                                                          |
+
+**Hierarchy:**
+
+```
+_system namespace (global)
+├── Users (global accounts)
+└── Namespace routing table
+
+org namespace (per-organization)
+├── Organization metadata
+├── Members, Teams, Clients
+├── Vault A (relationships + grants) ─── separate chain
+├── Vault B (relationships + grants) ─── separate chain
+└── ...
+```
 
 ### Table of Contents
 
 - [Architecture](#architecture)
-  - [Chain-per-Vault with Raft Consensus](#chain-per-vault-with-raft-consensus)
+  - [Namespace and Vault Model](#namespace-and-vault-model)
   - [Block Structure](#block-structure)
+  - [ID Generation Strategy](#id-generation-strategy)
   - [Operation Semantics](#operation-semantics)
   - [State Layer: Hybrid Storage](#state-layer-hybrid-storage)
   - [Write Amplification Analysis](#write-amplification-analysis)
   - [State Root Computation](#state-root-computation)
+    - [Key Encoding](#key-encoding)
+    - [Per-Vault Bucket Structure](#per-vault-bucket-structure)
+    - [Determinism Requirements](#determinism-requirements)
+  - [Multi-Vault Failure Isolation](#multi-vault-failure-isolation)
   - [Write Path](#write-path)
   - [Transaction Batching](#transaction-batching)
   - [Read Path](#read-path)
   - [Fault Tolerance & Recovery](#fault-tolerance--recovery)
   - [Historical Reads](#historical-reads)
+  - [Namespace Lifecycle](#namespace-lifecycle)
   - [Vault Lifecycle](#vault-lifecycle)
   - [Performance Characteristics](#performance-characteristics)
   - [Scaling Architecture: Shard Groups](#scaling-architecture-shard-groups)
 - [Discovery & Coordination](#discovery--coordination)
-  - [System Raft Group](#system-raft-group-_system)
+  - [System Namespace](#system-namespace-_system)
+    - [Data Model](#data-model)
+    - [Scaling Model](#scaling-model)
+    - [Learner Staleness Handling](#learner-staleness-handling)
   - [Client Discovery Flow](#client-discovery-flow)
   - [Block Announcements](#block-announcements)
   - [Peer-to-Peer Properties](#peer-to-peer-properties)
@@ -50,7 +76,7 @@ Ledger uses a Raft-based replicated log with cryptographic block structure and m
   - [Node Join](#node-join)
   - [Node Leave](#node-leave)
   - [Membership Reconfiguration Safety](#membership-reconfiguration-safety)
-  - [Vault Routing](#vault-routing)
+  - [Namespace Routing](#namespace-routing)
   - [Failure Modes](#failure-modes)
 - [Durability & Finality Model](#durability--finality-model)
 - [Persistent Storage Architecture](#persistent-storage-architecture)
@@ -64,10 +90,17 @@ Ledger uses a Raft-based replicated log with cryptographic block structure and m
 - [Corruption Detection & Resolution](#corruption-detection--resolution)
 - [Network Partition Handling](#network-partition-handling)
 - [Control Data Storage](#control-data-storage)
+  - [Namespace Data Model](#namespace-data-model)
+  - [Entity Key Patterns](#entity-key-patterns)
+  - [TTL and Expiration](#ttl-and-expiration)
+  - [Garbage Collection](#garbage-collection)
+  - [Cross-Namespace Operations](#cross-namespace-operations)
+  - [Token Issuance Auditability](#token-issuance-auditability)
 - [Client Idempotency & Retry Semantics](#client-idempotency--retry-semantics)
 - [Vault Owner Verification Protocol](#vault-owner-verification-protocol)
 - [Observability & Monitoring](#observability--monitoring)
 - [Consistency Guarantees](#consistency-guarantees)
+  - [Cross-Namespace Consistency](#cross-namespace-consistency)
 - [Limitations & Trade-offs](#limitations--trade-offs)
 - [Snapshot & Retention Policy](#snapshot--retention-policy)
 - [Testing & Validation Strategy](#testing--validation-strategy)
@@ -77,71 +110,80 @@ Ledger uses a Raft-based replicated log with cryptographic block structure and m
 
 ## Architecture
 
-### Chain-per-Vault with Raft Consensus
+### Namespace and Vault Model
 
-Each vault maintains its own cryptographic blockchain. For scalability, multiple vaults share a Raft group (see [Shard Groups](#scaling-architecture-shard-groups)). The chain provides:
+Ledger organizes data into **namespaces** (one per organization) containing **vaults** (relationship stores). Each vault maintains its own cryptographic blockchain. For scalability, namespaces share Raft groups via shards (see [Shard Groups](#scaling-architecture-shard-groups)).
 
-- Consensus and ordering (Raft, shared across vaults in a shard)
+**What the chain provides:**
+
+- Consensus and ordering (Raft, shared across namespaces in a shard)
 - Replication and fault tolerance (Raft followers)
 - Immutability and verification (per-vault cryptographic chain linking)
 - Audit trail (chain IS the history)
 
 ```mermaid
 graph TB
-    subgraph vault1["Vault: acme-prod"]
-        subgraph nodeA["Node A (Leader)"]
-            chainA["Chain<br/>[0]→[1]→[2]→[3]"]
-            stateA["State (index)"]
+    subgraph ns1["Namespace: org_acme"]
+        subgraph vault1["Vault: prod"]
+            chain1["Chain [0]→[1]→[2]"]
         end
-        subgraph nodeB["Node B (Follower)"]
-            chainB["Chain<br/>[0]→[1]→[2]→[3]"]
-            stateB["State (index)"]
+        subgraph vault2["Vault: staging"]
+            chain2["Chain [0]→[1]"]
         end
-        subgraph nodeC["Node C (Follower)"]
-            chainC["Chain<br/>[0]→[1]→[2]→[3]"]
-            stateC["State (index)"]
+        entities1["Entities: members, teams, clients"]
+    end
+
+    subgraph ns2["Namespace: org_startup"]
+        subgraph vault3["Vault: main"]
+            chain3["Chain [0]→[1]→[2]→[3]"]
         end
+        entities2["Entities: members, teams"]
+    end
+
+    subgraph shard["Shard Group (Raft)"]
+        nodeA["Node A (Leader)"]
+        nodeB["Node B (Follower)"]
+        nodeC["Node C (Follower)"]
         nodeA <--> nodeB <--> nodeC
     end
 
-    subgraph vault2["Vault: startup-dev"]
-        subgraph nodeB2["Node B (Leader)"]
-            chainB2["Chain + State"]
-        end
-        subgraph nodeD["Node D (Follower)"]
-            chainD["Chain + State"]
-        end
-        subgraph nodeE["Node E (Follower)"]
-            chainE["Chain + State"]
-        end
-        nodeB2 <--> nodeD <--> nodeE
-    end
+    ns1 --> shard
+    ns2 --> shard
 ```
 
-Vaults share physical nodes and Raft groups (shard groups) but maintain independent cryptographic chains. In this example, Vault 1 and Vault 2 could share the same shard group while keeping separate chain histories.
+**Isolation model:**
+
+| Level     | Isolation                         | Shared                 |
+| --------- | --------------------------------- | ---------------------- |
+| Namespace | Entities, vaults, keys            | Shard (Raft consensus) |
+| Vault     | Cryptographic chain, `state_root` | Namespace storage      |
+| Shard     | Physical nodes                    | Cluster                |
+
+Namespaces share physical nodes and Raft groups but maintain independent data. Vaults within a namespace share storage but maintain separate cryptographic chains for independent verification.
 
 **Raft transport**: gRPC/HTTP2 over TCP. TCP's kernel implementation and hardware offload provide optimal latency for single-stream consensus.
 
 ### Block Structure
 
-Each vault maintains a logical block chain. Physically, vault blocks are packed into `ShardBlock` entries for Raft efficiency (see [Shard Groups](#scaling-architecture-shard-groups)).
+Each vault maintains its own logical blockchain within a namespace. Physically, blocks are packed into `ShardBlock` entries for Raft efficiency (see [Shard Groups](#scaling-architecture-shard-groups)).
 
 ```rust
 /// Per-vault block (logical view, extracted from ShardBlock for verification)
 struct VaultBlock {
     // Identity
     height: u64,
-    vault_id: VaultId,
+    namespace_id: NamespaceId,  // Owning namespace (organization)
+    vault_id: VaultId,          // Vault within namespace
 
     // Chain linking (immutability)
     previous_hash: Hash,      // SHA-256 of previous vault block
 
     // Content
     transactions: Vec<Transaction>,
-    tx_merkle_root: Hash,     // Merkle root of transactions
+    tx_merkle_root: Hash,     // merkle_root(self.transactions) — this block's txs only
 
     // State commitment (verification)
-    state_root: Hash,         // Merkle root of state AFTER applying this block
+    state_root: Hash,         // Vault state AFTER applying this block
 
     // Metadata
     timestamp: DateTime<Utc>,
@@ -166,8 +208,109 @@ enum Operation {
     DeleteRelationship { resource: String, relation: String, subject: String },
 
     // Entity operations (Control)
-    SetEntity { key: String, value: Bytes },
+    SetEntity { key: String, value: Bytes, expires_at: Option<u64> },
     DeleteEntity { key: String },
+    ExpireEntity { key: String, expired_at: u64 },  // GC-initiated, distinct from delete
+}
+```
+
+### ID Generation Strategy
+
+Ledger operates under strict **determinism requirements** for Raft consensus—all nodes must produce identical state from the same input log. This constrains how identifiers can be generated.
+
+**Core principle**: Ledger uses **leader-assigned sequential IDs** for entities it manages. The leader assigns IDs during block construction; followers replay the same IDs from the Raft log. This is fully deterministic and self-contained—no external coordination required.
+
+| ID Type       | Size     | Generated By  | Strategy                                             |
+| ------------- | -------- | ------------- | ---------------------------------------------------- |
+| `NamespaceId` | int64    | Ledger Leader | Sequential from `_meta:seq:namespace` (0 = \_system) |
+| `VaultId`     | int64    | Ledger Leader | Sequential from `_meta:seq:vault`                    |
+| `UserId`      | int64    | Ledger Leader | Sequential from `_meta:seq:user`                     |
+| `UserEmailId` | int64    | Ledger Leader | Sequential from `_meta:seq:user_email`               |
+| `ClientId`    | string   | Control       | Opaque API key identifier                            |
+| `TxId`        | 16 bytes | Ledger Leader | UUID assigned during block creation                  |
+| `NodeId`      | string   | Admin         | Configuration (hostname or UUID)                     |
+| `ShardId`     | uint32   | Admin         | Sequential at shard creation                         |
+
+**Why sequential IDs over Snowflake:**
+
+Snowflake IDs embed timestamp and worker ID, making them non-deterministic across nodes. Sequential IDs are simpler and fully Ledger-controlled:
+
+| Property      | Sequential (Ledger)   | Snowflake (External)     |
+| ------------- | --------------------- | ------------------------ |
+| Deterministic | ✅ Leader-assigned    | ❌ Requires coordination |
+| Dependencies  | None (self-contained) | External service         |
+| Compactness   | 8 bytes               | 8 bytes                  |
+| Sortable      | By creation order     | By time                  |
+| Complexity    | Counter increment     | Worker ID + heartbeat    |
+
+**Sequence counter storage:**
+
+Sequence counters are stored in `_system` namespace as entities:
+
+```
+Key: "_meta:seq:namespace"    → next NamespaceId (int64), starts at 1 (0 = _system)
+Key: "_meta:seq:vault"        → next VaultId (int64)
+Key: "_meta:seq:user"         → next UserId (int64)
+Key: "_meta:seq:user_email"   → next UserEmailId (int64)
+Key: "_meta:seq:email_verify" → next TokenId (int64)
+```
+
+**Reserved IDs:**
+
+- `NamespaceId = 0` is reserved for `_system` (global namespace for users and routing)
+
+**Leader ID assignment:**
+
+```rust
+impl Leader {
+    /// Allocate the next ID for an entity type. Called during block construction.
+    /// The increment is included in the same block, ensuring deterministic replay.
+    fn allocate_id(&mut self, entity_type: &str) -> i64 {
+        let key = format!("_meta:seq:{}", entity_type);
+        let next_id = self.state.get(&key).map(|v| i64::from_le_bytes(v)).unwrap_or(1);
+
+        // Include the increment in pending operations for this block
+        self.pending_ops.push(SetEntity {
+            key: key.clone(),
+            value: (next_id + 1).to_le_bytes().to_vec(),
+        });
+
+        next_id
+    }
+
+    fn create_user(&mut self, name: String, email: String) -> User {
+        let user_id = self.allocate_id("user");
+        let email_id = self.allocate_id("user_email");
+
+        // Both IDs and their counter increments are in the same block
+        // Followers replay the block and see the same IDs
+        User { id: user_id, name, /* ... */ }
+    }
+}
+```
+
+**Determinism guarantee:**
+
+1. Leader allocates ID and increments counter atomically (same block)
+2. Block is proposed to Raft with the assigned ID
+3. Followers apply the block—they read the ID from the log, never generate
+4. All nodes arrive at identical state
+
+**All IDs are Ledger-assigned:**
+
+Every entity ID in Ledger is a sequential int64 assigned by the leader. This provides a uniform, simple model with no external dependencies:
+
+```rust
+// All IDs are opaque integers assigned by Ledger
+let namespace_id = ledger.create_namespace(config).await?;  // Returns NamespaceId(1)
+let vault_id = ledger.create_vault(namespace_id, config).await?;  // Returns VaultId(1)
+let user_id = ledger.create_user(user_data).await?;  // Returns UserId(1)
+
+// Human-readable names are stored as entity attributes, not IDs
+struct Namespace {
+    id: NamespaceId,      // Sequential: 1, 2, 3, ...
+    name: String,         // Human-readable: "acme_corp"
+    // ...
 }
 ```
 
@@ -184,6 +327,8 @@ All operations are **idempotent** and resolved by **Raft total ordering**:
 | `SetEntity`          | any        | value set  | `OK`             |
 | `DeleteEntity`       | exists     | deleted    | `DELETED`        |
 | `DeleteEntity`       | not exists | no change  | `NOT_FOUND`      |
+| `ExpireEntity`       | exists     | removed    | `EXPIRED`        |
+| `ExpireEntity`       | not exists | no change  | `NOT_FOUND`      |
 
 **Concurrent operation resolution:**
 
@@ -267,7 +412,7 @@ graph TD
 **Verification approach:**
 
 - **Transaction inclusion**: Standard merkle proof against `tx_merkle_root`
-- **State verification**: Replay transactions from trusted snapshot to derive state
+- **State verification**: Replay transactions from snapshot (within retention window; see [Retention Policy](#retention-policy))
 - **On-demand proofs**: Compute merkle path when explicitly requested (not precomputed)
 
 ```rust
@@ -358,14 +503,16 @@ Interactive single-tuple writes are bounded by Raft RTT (~3-5ms). Batch imports 
 
 **Trade-offs:**
 
-| Aspect              | Naive MPT      | Hybrid               |
-| ------------------- | -------------- | -------------------- |
-| Write amplification | 10-50x         | ~1x                  |
-| Per-key proofs      | Instant        | Requires computation |
-| State verification  | O(log n) proof | Replay from snapshot |
-| Query latency       | O(log n)       | O(1)                 |
+| Aspect              | Naive MPT      | Hybrid                 |
+| ------------------- | -------------- | ---------------------- |
+| Write amplification | 10-50x         | ~1x                    |
+| Per-key proofs      | Instant        | Requires computation   |
+| State verification  | O(log n) proof | Replay from snapshot\* |
+| Query latency       | O(log n)       | O(1)                   |
 
-**Design rationale**: Authorization workloads are read-heavy (permission checks) with bursty writes (policy updates). Fast queries and low write amplification matter more than instant per-key proofs. Vault owners can request proofs on-demand or verify by replaying the transaction log.
+\*Replay requires transaction bodies (Full mode or within Compacted retention window).
+
+**Design rationale**: Authorization workloads are read-heavy (permission checks) with bursty writes (policy updates). Fast queries and low write amplification matter more than instant per-key proofs. Vault owners can request proofs on-demand or verify by replaying transactions within the retention window.
 
 **References:**
 
@@ -377,54 +524,149 @@ Interactive single-tuple writes are bounded by Raft RTT (~3-5ms). Batch imports 
 
 **When computed**: After applying all block transactions, before Raft commit. The leader includes `state_root` in the block header; followers verify their computed root matches.
 
-**Computation strategy**: Incremental bucket-based hashing avoids O(n) full traversal.
+**Computation strategy**: Per-vault incremental bucket hashing avoids O(n) full traversal.
+
+#### Key Encoding
+
+Storage keys encode vault isolation and bucket assignment for efficient range queries:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  vault_id   │  bucket_id  │         local_key              │
+│  (8 bytes)  │  (1 byte)   │         (N bytes)              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ```rust
-struct StateCommitment {
-    /// Keyspace divided into 256 buckets by first byte of key hash
+/// Encode a storage key with vault and bucket prefixes
+fn encode_storage_key(vault_id: VaultId, local_key: &[u8]) -> Vec<u8> {
+    let bucket_id = (seahash::hash(local_key) % 256) as u8;
+
+    let mut key = Vec::with_capacity(9 + local_key.len());
+    key.extend_from_slice(&vault_id.to_be_bytes());  // 8 bytes
+    key.push(bucket_id);                              // 1 byte
+    key.extend_from_slice(local_key);                 // N bytes
+    key
+}
+
+/// Decode bucket_id and local_key from storage key
+fn decode_storage_key(storage_key: &[u8]) -> (VaultId, u8, &[u8]) {
+    let vault_id = VaultId::from_be_bytes(storage_key[0..8].try_into().unwrap());
+    let bucket_id = storage_key[8];
+    let local_key = &storage_key[9..];
+    (vault_id, bucket_id, local_key)
+}
+```
+
+**Hash function choice**: `seahash` for bucket assignment—fast (8 GB/s), deterministic, no external dependencies. SHA-256 remains the cryptographic hash for `state_root` and `bucket_roots`.
+
+#### Per-Vault Bucket Structure
+
+Each vault maintains independent bucket tracking. Vaults in the same shard share a redb instance but compute separate `state_root` values.
+
+```rust
+struct ShardState {
+    /// Shared K/V storage for all vaults in shard
+    kv: Database,
+
+    /// Per-vault commitment state
+    vault_commitments: HashMap<VaultId, VaultCommitment>,
+}
+
+struct VaultCommitment {
+    /// 256 bucket roots (SHA-256 each)
     bucket_roots: [Hash; 256],
 
-    /// Keys modified in current block (cleared after commit)
+    /// Buckets modified since last state_root computation
     dirty_buckets: BitSet<256>,
 }
 
-impl StateCommitment {
-    /// O(k) where k = keys modified, not total keys
-    fn compute_state_root(&mut self, kv: &Database, dirty_keys: &[Key]) -> Hash {
+impl ShardState {
+    /// Compute state_root for a single vault. O(k) where k = dirty keys.
+    fn compute_vault_state_root(
+        &mut self,
+        vault_id: VaultId,
+        dirty_keys: &[LocalKey]
+    ) -> Hash {
+        let commitment = self.vault_commitments
+            .entry(vault_id)
+            .or_insert_with(VaultCommitment::new);
+
         // Mark affected buckets
-        for key in dirty_keys {
-            let bucket = key.hash()[0] as usize;
-            self.dirty_buckets.set(bucket);
+        for local_key in dirty_keys {
+            let bucket_id = (seahash::hash(local_key) % 256) as u8;
+            commitment.dirty_buckets.set(bucket_id as usize);
         }
 
         // Recompute only dirty bucket roots
-        for bucket in self.dirty_buckets.iter() {
-            self.bucket_roots[bucket] = self.hash_bucket(kv, bucket);
+        for bucket_id in commitment.dirty_buckets.iter() {
+            commitment.bucket_roots[bucket_id] =
+                self.hash_vault_bucket(vault_id, bucket_id as u8);
         }
 
-        self.dirty_buckets.clear();
+        commitment.dirty_buckets.clear();
 
-        // Final root = hash of all bucket roots
-        hash_concat(&self.bucket_roots)
+        // Final state_root = SHA-256 of concatenated bucket roots
+        sha256_concat(&commitment.bucket_roots)
     }
 
-    fn hash_bucket(&self, kv: &Database, bucket: u8) -> Hash {
-        let mut hasher = BucketHasher::new();
-        for (key, value) in kv.prefix_iter(bucket) {
-            hasher.update(key, value);
+    /// Hash all keys in a specific vault's bucket via range query
+    fn hash_vault_bucket(&self, vault_id: VaultId, bucket_id: u8) -> Hash {
+        // Construct range: [vault_id][bucket_id][0x00...] to [vault_id][bucket_id][0xFF...]
+        let mut start = [0u8; 9];
+        start[0..8].copy_from_slice(&vault_id.to_be_bytes());
+        start[8] = bucket_id;
+
+        let mut end = start;
+        end[8] = bucket_id.wrapping_add(1);  // Next bucket (or wraps to 0 for bucket 255)
+
+        let mut hasher = Sha256::new();
+        let txn = self.kv.begin_read().unwrap();
+        let table = txn.open_table(STATE_TABLE).unwrap();
+
+        // Range query: all keys matching [vault_id][bucket_id][*]
+        // For bucket 255, query to end of vault's keyspace
+        let range = if bucket_id == 255 {
+            let vault_end = [0u8; 9];
+            // ... handle vault boundary
+            table.range(start..)
+                .take_while(|r| r.as_ref().map(|(k, _)| k.value()[0..8] == vault_id.to_be_bytes()).unwrap_or(false))
+        } else {
+            table.range(start..end)
+        };
+
+        for result in range {
+            let (key, value) = result.unwrap();
+            // Hash key-value pair in deterministic order
+            hasher.update(&(key.value().len() as u32).to_le_bytes());
+            hasher.update(key.value());
+            hasher.update(&(value.value().len() as u32).to_le_bytes());
+            hasher.update(value.value());
         }
-        hasher.finalize()
+
+        hasher.finalize().into()
     }
 }
 ```
 
-**Complexity analysis**:
+#### Complexity Analysis
 
 | Scenario                   | Naive O(n)   | Bucket-based               |
 | -------------------------- | ------------ | -------------------------- |
 | 1M keys, 100 ops/block     | Hash 1M keys | Hash ~100 keys + 256 roots |
 | 1M keys, 10K ops/block     | Hash 1M keys | Hash ~10K keys + 256 roots |
 | Cold start (snapshot load) | Hash 1M keys | Hash 1M keys (unavoidable) |
+
+**Vault isolation guarantee**: Updating Vault A's keys never touches Vault B's bucket roots. The `vault_id` prefix in storage keys ensures range queries stay within vault boundaries.
+
+#### Determinism Requirements
+
+State root computation must be identical on all nodes:
+
+1. **Hash function**: seahash for bucket assignment, SHA-256 for roots
+2. **Iteration order**: redb guarantees lexicographic key order within range
+3. **Key-value encoding**: Length-prefixed (prevents ambiguous concatenation)
+4. **Empty bucket**: Hash of empty input → `SHA-256("")`
 
 **Raft integration sequence**:
 
@@ -447,6 +689,148 @@ impl StateCommitment {
 4. Resolution: Follower rebuilds state from snapshot + log replay, or is removed from Raft group
 
 Divergence indicates a bug or corruption, not a consensus failure. The committing quorum is authoritative.
+
+### Multi-Vault Failure Isolation
+
+Multiple vaults share a Raft group (shard). A `state_root` divergence in one vault must not cascade to other vaults in the same shard.
+
+**Isolation boundaries:**
+
+| Component                       | Shared | Independent |
+| ------------------------------- | ------ | ----------- |
+| Raft log (ordering, durability) | ✓      |             |
+| ShardBlock delivery             | ✓      |             |
+| VaultEntry application          |        | ✓           |
+| State commitment (state_root)   |        | ✓           |
+| Failure handling (vault health) |        | ✓           |
+
+**Divergence handling:**
+
+When a follower computes a `state_root` that differs from the block header:
+
+1. Rollback uncommitted state for that vault only
+2. Mark vault `Diverged { expected, computed, height }`
+3. Emit `state_root_divergence{vault_id, shard_id}` alert
+4. Continue processing remaining vaults in the block
+5. Return `VAULT_UNAVAILABLE` for reads to diverged vault
+6. Continue replicating Raft log; store but don't apply diverged vault's entries
+
+```rust
+#[derive(Debug, Clone, PartialEq)]
+enum VaultHealth {
+    Healthy,
+    Diverged { expected: Hash, computed: Hash, at_height: u64 },
+    Recovering { started_at: DateTime<Utc>, attempt: u8 },
+}
+
+impl Node {
+    fn apply_shard_block(&mut self, block: &ShardBlock) -> ShardBlockResult {
+        let mut results = Vec::with_capacity(block.vault_entries.len());
+
+        for entry in &block.vault_entries {
+            if !matches!(self.vault_health(&entry.vault_id), VaultHealth::Healthy) {
+                results.push(VaultApplyResult::Skipped(entry.vault_id));
+                continue;
+            }
+
+            let savepoint = self.state_db.savepoint()?;
+            let computed = self.apply_vault_entry(entry)?;
+
+            if computed == entry.state_root {
+                savepoint.commit()?;
+                results.push(VaultApplyResult::Success(entry.vault_id));
+            } else {
+                savepoint.rollback()?;
+                self.set_vault_health(entry.vault_id, VaultHealth::Diverged {
+                    expected: entry.state_root,
+                    computed,
+                    at_height: entry.vault_height,
+                });
+                self.trigger_auto_recovery(entry.vault_id);
+                results.push(VaultApplyResult::Diverged(entry.vault_id));
+            }
+        }
+
+        ShardBlockResult { shard_height: block.shard_height, vault_results: results }
+    }
+}
+```
+
+**Automatic recovery with circuit breaker:**
+
+Diverged vaults recover automatically with bounded retries:
+
+```rust
+const MAX_RECOVERY_ATTEMPTS: u8 = 3;
+
+impl Node {
+    async fn auto_recover_vault(&mut self, vault_id: VaultId) {
+        let attempt = match self.vault_health(&vault_id) {
+            VaultHealth::Diverged { .. } => 1,
+            VaultHealth::Recovering { attempt, .. } if attempt < MAX_RECOVERY_ATTEMPTS => attempt + 1,
+            _ => return, // Max attempts reached, require manual intervention
+        };
+
+        self.set_vault_health(vault_id, VaultHealth::Recovering {
+            started_at: Utc::now(),
+            attempt,
+        });
+
+        match self.replay_vault_from_snapshot(vault_id).await {
+            Ok(()) => self.set_vault_health(vault_id, VaultHealth::Healthy),
+            Err(Error::DeterminismBug { .. }) => {
+                // Divergence reproduced—escalate, don't retry
+                self.emit_alert(Alert::DeterminismBug { vault_id });
+            }
+            Err(_) => {
+                // Transient failure—schedule retry with backoff
+                self.schedule_recovery_retry(vault_id, attempt);
+            }
+        }
+    }
+
+    async fn replay_vault_from_snapshot(&mut self, vault_id: VaultId) -> Result<()> {
+        let snapshot = self.find_vault_snapshot(vault_id)?;
+        self.reset_vault_state(vault_id, &snapshot)?;
+
+        for height in (snapshot.vault_height + 1)..=self.shard_height() {
+            let block = self.block_archive.read_block(height)?;
+            if let Some(entry) = block.vault_entries.iter().find(|e| e.vault_id == vault_id) {
+                let computed = self.apply_vault_entry(entry)?;
+                if computed != entry.state_root {
+                    return Err(Error::DeterminismBug { vault_id, height, expected: entry.state_root, computed });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+```
+
+Recovery behavior:
+
+| Attempt | Backoff    | Action on Failure           |
+| ------- | ---------- | --------------------------- |
+| 1       | Immediate  | Retry                       |
+| 2       | 30 seconds | Retry                       |
+| 3       | 5 minutes  | Require manual intervention |
+
+After 3 failed attempts, the vault remains in `Recovering` state and emits `vault_recovery_exhausted{vault_id}`. Operators must investigate the root cause before manually triggering recovery via `ledger-admin recover-vault <vault_id> --force`.
+
+**Determinism requirements:**
+
+All `VaultEntry.apply()` code must be deterministic:
+
+- No floating point, random values, or system time
+- Sort iteration over unordered collections
+- Serialize concurrent access
+
+**Invariants:**
+
+34. Vault divergence does not affect read availability of other vaults in the same shard
+35. Vault divergence does not block writes to other vaults in the same shard
+36. Vault recovery requires no shard-wide coordination
+37. Determinism bugs surface during recovery replay
 
 ### Write Path
 
@@ -629,6 +1013,47 @@ ListResources(vault, "document") → ["document:1", "document:2", "document:read
 
 Both support pagination via `page_token` and `limit`, and historical reads via `at_height`.
 
+#### Pagination Token Format
+
+Page tokens are **opaque to clients**—base64-encoded, server-managed cursors. Clients should not parse or modify tokens.
+
+**Internal structure** (implementation detail):
+
+```rust
+struct PageToken {
+    version: u8,           // Token format version (for future changes)
+    namespace_id: i64,     // Request context validation
+    vault_id: i64,         // Request context validation
+    last_key: Vec<u8>,     // Position: last key returned
+    at_height: u64,        // Consistent reads: height when pagination started
+    query_hash: [u8; 8],   // SeaHash of query params (prevents filter changes)
+    hmac: [u8; 16],        // HMAC-SHA256 truncated (prevents tampering)
+}
+```
+
+| Field          | Purpose                                                      |
+| -------------- | ------------------------------------------------------------ |
+| `version`      | Forward compatibility for token format changes               |
+| `namespace_id` | Validates token matches request; rejects cross-namespace reuse |
+| `vault_id`     | Validates token matches request; rejects cross-vault reuse   |
+| `last_key`     | Resume position: first result after this key                 |
+| `at_height`    | Consistent pagination: all pages read from same height       |
+| `query_hash`   | Detects filter changes mid-pagination (reject with `INVALID_ARGUMENT`) |
+| `hmac`         | Prevents client tampering; keyed with node-local secret      |
+
+**Encoding**: `base64(bincode::serialize(PageToken))`
+
+**Validation on each request**:
+1. Decode and verify HMAC
+2. Check `namespace_id` and `vault_id` match request
+3. Check `query_hash` matches current query params
+4. Resume from `last_key` at `at_height`
+
+**Error cases**:
+- Invalid/expired token: `INVALID_ARGUMENT` with message "invalid page token"
+- Mismatched namespace/vault: `INVALID_ARGUMENT` with message "page token does not match request"
+- Changed filters: `INVALID_ARGUMENT` with message "query parameters changed; start new pagination"
+
 Vault owners verify responses locally:
 
 ```rust
@@ -749,7 +1174,7 @@ graph LR
 **Implementation:**
 
 ```rust
-async fn historical_read(vault_id: VaultId, key: &str, at_height: u64) -> Option<Value> {
+async fn historical_read(vault_id: VaultId, key: &str, at_height: u64) -> Option<Entity> {
     // 1. Find nearest snapshot at or before at_height
     let snapshot = find_snapshot_for_height(vault_id, at_height)?;
 
@@ -764,8 +1189,19 @@ async fn historical_read(vault_id: VaultId, key: &str, at_height: u64) -> Option
         state.apply(&block.transactions);
     }
 
-    // 5. Return value at reconstructed state
-    state.get(key)
+    // 5. Get entity from reconstructed state
+    let entity = state.get(key)?;
+
+    // 6. Filter by expiration (compare against BLOCK timestamp, not current time)
+    // See "TTL and Expiration" section for detailed semantics
+    let block = blocks.last().unwrap_or(&snapshot);
+    if let Some(expires_at) = entity.expires_at {
+        if block.timestamp >= expires_at {
+            return None;  // Was expired at this historical point
+        }
+    }
+
+    Some(entity)
 }
 ```
 
@@ -841,18 +1277,9 @@ Scaling dimensions:
 - More writes: Batching amortizes consensus cost
 - More reads: Add followers (reads can go to any replica)
 
-### Benchmark Baseline
+### Performance Targets
 
-Reference hardware for performance targets:
-
-| Component | Spec                                                 |
-| --------- | ---------------------------------------------------- |
-| CPU       | AMD EPYC 7763 (64 cores) or Apple M2 Pro (12 cores)  |
-| RAM       | 128 GB DDR4/DDR5                                     |
-| Storage   | NVMe SSD with power-loss protection (fsync p99 <1ms) |
-| Network   | 10 Gbps between nodes, <1ms RTT (same datacenter)    |
-
-**Target metrics** (3-node Raft cluster, 1M keys in state tree, **same datacenter**):
+**Target metrics** (3-node Raft cluster, 1M keys in state tree, same datacenter):
 
 | Metric             | Target          | Measurement                    | Rationale                         |
 | ------------------ | --------------- | ------------------------------ | --------------------------------- |
@@ -872,19 +1299,7 @@ Reference hardware for performance targets:
   - Single Raft RTT: ~1-2ms same datacenter
   - NVMe fsync: <1ms with power-loss protection
   - Batching amortizes merkle cost across transactions
-- **Throughput 5K tx/sec**: TigerBeetle achieves 400K tx/sec with aggressive batching; we target 1/80th with simpler batching
-
-**Industry comparison:**
-
-| System                    | Write p99  | Notes                         |
-| ------------------------- | ---------- | ----------------------------- |
-| etcd (Raft, no merkle)    | ~10ms      | Pure consensus, no blockchain |
-| TiKV (Raft)               | ~10ms      | RocksDB backend               |
-| CockroachDB (Raft + SQL)  | 5-20ms     | Single AZ                     |
-| Hyperledger Fabric (Raft) | 100-500ms  | Block-based batching          |
-| TigerBeetle (custom)      | ~100ms p99 | 400K tx/sec batched           |
-
-InferaDB targets Raft-like latency (10-50ms) while adding merkle commitments. This is aggressive but achievable with the bucket-based state root design.
+- **Throughput 5K tx/sec**: Batched transactions amortize Raft consensus overhead
 
 **Multi-region targets** (cross-region, ~50ms RTT):
 
@@ -901,31 +1316,6 @@ InferaDB targets Raft-like latency (10-50ms) while adding merkle commitments. Th
 - Warm up caches before measurement
 - Report p50, p95, p99, p99.9 percentiles
 
-**Benchmark suite**:
-
-```
-ledger-bench/
-├── micro/
-│   ├── state_tree_get.rs      # Raw state tree lookup
-│   ├── state_tree_insert.rs   # State tree mutation
-│   ├── merkle_proof.rs        # Proof generation
-│   └── hash_block.rs          # Block hashing
-├── system/
-│   ├── single_node.rs         # Single node operations
-│   ├── three_node.rs          # 3-node Raft cluster
-│   └── mixed_workload.rs      # 90% read, 10% write
-├── authz/                     # Authorization-specific
-│   ├── check_direct.rs        # Direct tuple lookup
-│   ├── check_expand.rs        # Group expansion traversal
-│   ├── list_objects.rs        # Fanout query (all docs user can access)
-│   ├── bulk_write.rs          # 1000 tuples to same resource
-│   └── watch_latency.rs       # Write-to-notification delay
-└── stress/
-    ├── hot_key.rs             # Contention on single key
-    ├── large_batch.rs         # 10K transactions/batch
-    └── recovery.rs            # Time to recover from snapshot
-```
-
 **Authorization benchmark targets:**
 
 | Benchmark                 | Pattern                         | Target     | Notes                 |
@@ -936,50 +1326,39 @@ ledger-bench/
 | Bulk relationship write   | 1000 tuples to same resource    | p99 <100ms | Batched, single block |
 | Watch latency             | Write → subscriber notification | p99 <100ms | Includes Raft commit  |
 
-### What This Enables for Engine/Control
-
-Engine benefits:
-
-- Relationship storage with built-in history (no more soft-delete overhead)
-- Time-travel queries native: "What permissions existed at block N?"
-- Watch API becomes trivial: Subscribe to block stream
-- Dual indexes can be merkle-ized for verifiable graph traversal
-
-Control benefits:
-
-- Audit log is free — it's just the chain
-- TTL can be modeled as "valid_until" in entity, garbage collected later
-- Session/token verification can include proof of issuance
-- Per-vault chains provide cryptographic tenant isolation
-
 ### Scaling Architecture: Shard Groups
 
-A naive 1:1 vault-to-Raft mapping doesn't scale:
+A naive 1:1 namespace-to-Raft mapping doesn't scale:
 
-| Vaults  | Replicas | Raft State Machines | Heartbeat Traffic (150ms) |
-| ------- | -------- | ------------------- | ------------------------- |
-| 1,000   | 3        | 3,000               | ~20K msgs/sec             |
-| 10,000  | 3        | 30,000              | ~200K msgs/sec            |
-| 100,000 | 3        | 300,000             | ~2M msgs/sec              |
+| Namespaces | Replicas | Raft State Machines | Heartbeat Traffic (150ms) |
+| ---------- | -------- | ------------------- | ------------------------- |
+| 1,000      | 3        | 3,000               | ~20K msgs/sec             |
+| 10,000     | 3        | 30,000              | ~200K msgs/sec            |
+| 100,000    | 3        | 300,000             | ~2M msgs/sec              |
 
-**Solution: Vault Shard Groups**
+**Solution: Namespace Shard Groups**
 
-Multiple vaults share a single Raft group while maintaining independent cryptographic chains:
+Multiple namespaces share a single Raft group. Within each namespace, vaults maintain independent cryptographic chains:
 
 ```mermaid
 graph TB
     subgraph shard1["Shard Group 1 (Raft)"]
         raft1["Single Raft:<br/>heartbeats, elections,<br/>log replication"]
-        vault_a["Vault A<br/>height=100"]
-        vault_b["Vault B<br/>height=50"]
-        vault_c["Vault C<br/>height=75"]
+        subgraph ns_acme["Namespace: Acme Corp"]
+            vault_a["vault:prod<br/>height=100"]
+            vault_b["vault:dev<br/>height=50"]
+        end
+        subgraph ns_startup["Namespace: Startup Inc"]
+            vault_c["vault:main<br/>height=75"]
+        end
     end
 
     subgraph shard2["Shard Group 2 (Raft)"]
         raft2["Single Raft"]
-        vault_d["Vault D"]
-        vault_e["Vault E"]
-        vault_f["Vault F"]
+        subgraph ns_corp["Namespace: Big Corp"]
+            vault_d["vault:hr"]
+            vault_e["vault:eng"]
+        end
     end
 ```
 
@@ -989,7 +1368,7 @@ graph TB
 - Physical replication
 - Snapshot coordination
 
-**What's independent (per vault):**
+**What's independent (per vault within any namespace):**
 
 - Cryptographic chain (height, previous_hash, state_root)
 - State tree and indexes
@@ -1012,51 +1391,115 @@ struct ShardBlock {
 }
 
 struct VaultEntry {
-    vault_id: VaultId,
+    namespace_id: NamespaceId,   // Owning namespace (organization)
+    vault_id: VaultId,           // Vault within namespace
     vault_height: u64,           // Per-vault height (continues across shard blocks)
     previous_vault_hash: Hash,   // Per-vault chain linking
 
     transactions: Vec<Transaction>,
-    tx_merkle_root: Hash,
-    state_root: Hash,
+    tx_merkle_root: Hash,        // merkle_root(self.transactions) — per-vault, NOT per-shard
+    state_root: Hash,            // Vault state after applying self.transactions
+}
+```
+
+**Merkle root scope**: Each VaultEntry computes `tx_merkle_root` from its own transactions only. Clients verify transaction inclusion without accessing other namespaces' or vaults' data.
+
+```rust
+impl VaultEntry {
+    fn compute_tx_merkle_root(&self) -> Hash {
+        // Binary merkle tree of transaction hashes
+        let tx_hashes: Vec<Hash> = self.transactions
+            .iter()
+            .map(|tx| sha256(serialize(tx)))
+            .collect();
+        merkle_root(&tx_hashes)
+    }
+}
+```
+
+**Physical storage model:**
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                              ShardBlock (on disk)                                  │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│  shard_id │ shard_height │ previous_shard_hash │ term │ timestamp                  │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│  VaultEntry[0]: ns_acme/prod   │ height=100 │ txs... │ tx_merkle │ state          │
+│  VaultEntry[1]: ns_acme/dev    │ height=50  │ txs... │ tx_merkle │ state          │
+│  VaultEntry[2]: ns_startup/main │ height=75 │ txs... │ tx_merkle │ state          │
+└───────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Stored**: ShardBlocks only (single write path, Raft-aligned)
+- **Extracted**: VaultBlocks on-demand via O(1) offset lookup (index maps (namespace_id, vault_id) → byte offset)
+- **Served to clients**: VaultBlock (no shard context exposed)
+
+```rust
+impl ShardBlock {
+    /// Extract standalone VaultBlock for client verification.
+    /// O(1) via pre-computed offset index; no shard context needed.
+    fn extract_vault_block(
+        &self,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
+    ) -> Option<VaultBlock> {
+        self.vault_entries
+            .iter()
+            .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)
+            .map(|entry| VaultBlock {
+                namespace_id: entry.namespace_id,
+                vault_id: entry.vault_id,
+                height: entry.vault_height,
+                previous_hash: entry.previous_vault_hash,
+                transactions: entry.transactions.clone(),
+                tx_merkle_root: entry.tx_merkle_root,
+                state_root: entry.state_root,
+                timestamp: self.timestamp,
+                leader_id: self.leader_id,
+                term: self.term,
+                committed_index: self.committed_index,
+            })
+    }
 }
 ```
 
 **Verification semantics:**
 
-- Clients verify per-vault chains using `previous_vault_hash` → independent of shard structure
-- Shard blocks provide ordering and replication
+- Clients verify per-vault chains using `previous_vault_hash` → independent of shard/namespace structure
+- Shard blocks provide ordering and replication; clients never see ShardBlock directly
 - Each vault's chain is extractable and independently verifiable
 
 **Scaling with shard groups:**
 
-| Vaults    | Vaults/Shard | Shard Groups | Raft Machines | Heartbeats |
-| --------- | ------------ | ------------ | ------------- | ---------- |
-| 1,000     | 100          | 10           | 30            | ~200/sec   |
-| 10,000    | 100          | 100          | 300           | ~2K/sec    |
-| 100,000   | 100          | 1,000        | 3,000         | ~20K/sec   |
-| 1,000,000 | 1,000        | 1,000        | 3,000         | ~20K/sec   |
+| Namespaces | Vaults (avg 3/ns) | Vaults/Shard | Shard Groups | Raft Machines | Heartbeats |
+| ---------- | ----------------- | ------------ | ------------ | ------------- | ---------- |
+| 1,000      | 3,000             | 100          | 30           | 90            | ~600/sec   |
+| 10,000     | 30,000            | 100          | 300          | 900           | ~6K/sec    |
+| 100,000    | 300,000           | 1,000        | 300          | 900           | ~6K/sec    |
 
 **Shard assignment:**
 
-- New vaults assigned to shard with lowest load
-- Vaults can migrate between shards (coordinated via `_system`)
-- Hot vaults can be promoted to dedicated shards
+- New namespaces assigned to shard with lowest load
+- All vaults within a namespace reside on the same shard (locality)
+- Namespaces can migrate between shards (coordinated via `_system`)
+- High-traffic namespaces can be promoted to dedicated shards
 
-**Trade-offs vs dedicated Raft per vault:**
+**Trade-offs vs dedicated Raft per namespace:**
 
 | Aspect           | Dedicated Raft | Shard Groups         |
 | ---------------- | -------------- | -------------------- |
-| Raft overhead    | O(vaults)      | O(vaults / N)        |
+| Raft overhead    | O(namespaces)  | O(namespaces / N)    |
 | Fault isolation  | Physical       | Logical              |
 | Noisy neighbor   | None           | Possible (mitigated) |
 | Verification     | Same           | Same                 |
 | Operational cost | High           | Low                  |
+| Vault locality   | N/A            | Guaranteed           |
 
 **Noisy neighbor mitigation:**
 
-- Per-vault rate limiting at shard leader
-- Promote high-throughput vaults to dedicated shards
+- Per-namespace rate limiting at shard leader
+- Promote high-throughput namespaces to dedicated shards
 - Shard rebalancing when load skews
 
 ---
@@ -1077,39 +1520,98 @@ A dedicated `_system` Raft group serves as the authoritative service registry, r
 ```mermaid
 graph TB
     subgraph client["CLIENT LAYER"]
-        sdk["Engine & Control<br/>servers via gRPC"]
+        sdk["Control<br/>server via gRPC"]
     end
 
     subgraph registry["SYSTEM REGISTRY (Raft)"]
         system["_system Raft group<br/>(all nodes participate)"]
+        users["users: HashMap<UserId, User>"]
+        namespaces["namespaces: HashMap<NamespaceId, NamespaceRegistry>"]
         nodes["nodes: HashMap<NodeId, NodeInfo>"]
-        vaults["vaults: HashMap<VaultId, VaultRegistry>"]
     end
 
-    subgraph consensus["VAULT CONSENSUS"]
-        raft1["acme-prod Raft"]
-        raft2["startup-dev Raft"]
-        raft3["corp-hr Raft"]
+    subgraph shards["SHARD GROUPS (Raft)"]
+        shard1["Shard 1: ns_acme, ns_startup"]
+        shard2["Shard 2: ns_corp, ns_agency"]
     end
 
-    client -->|"GetVaultRegistry()"| registry
-    registry --> consensus
+    client -->|"GetNamespace()"| registry
+    registry --> shards
 ```
 
-**Why this works**: Vault membership already exists in Raft state machines—make them directly queryable instead of syncing to a separate registry.
+**Why this works**: Namespace routing already exists in Raft state machines—make it directly queryable instead of syncing to a separate registry.
 
-### System Raft Group (`_system`)
+### System Namespace (`_system`)
+
+The `_system` namespace serves two purposes:
+
+1. **Global user storage**: User accounts exist globally, independent of organizations
+2. **Namespace routing**: Maps namespace IDs to shards for request routing
+
+#### Data Model
 
 ```rust
+/// _system namespace stores global entities and routing
 struct SystemState {
-    /// All nodes and their addresses
-    nodes: HashMap<NodeId, NodeInfo>,
+    /// Global user accounts (key: user:{id})
+    users: HashMap<UserId, User>,
 
-    /// Vault → member nodes mapping
-    vaults: HashMap<VaultId, VaultRegistry>,
+    /// User email addresses (key: user_email:{id})
+    /// Users can have multiple emails; one must be primary
+    user_emails: HashMap<EmailId, UserEmail>,
+
+    /// Global email uniqueness index (key: _idx:email:{email} → email_id)
+    email_index: HashMap<String, EmailId>,
+
+    /// Namespace → shard routing (key: ns:{namespace_id})
+    namespaces: HashMap<NamespaceId, NamespaceRegistry>,
+
+    /// Cluster node membership (key: node:{id})
+    nodes: HashMap<NodeId, NodeInfo>,
 
     /// Version for cache invalidation
     version: u64,
+}
+
+struct User {
+    id: UserId,
+    name: String,
+    password_hash: Option<String>,  // Argon2id (optional for passkey-only users)
+    // Namespace access derived from membership records (member:{id} in each org namespace)
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    tos_accepted_at: Option<DateTime<Utc>>,
+    deleted_at: Option<DateTime<Utc>>,
+    disabled: bool,
+    primary_email_id: EmailId,      // References UserEmail.id (single source of truth)
+}
+
+/// User email address (separate entity, not embedded in User)
+struct UserEmail {
+    id: EmailId,                    // Sequential ID from Ledger leader
+    user_id: UserId,
+    email: String,                  // Normalized to lowercase
+    // Primary email is referenced by User.primary_email_id, not a flag here
+    verified_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+/// Email verification token (stored with TTL)
+struct EmailVerificationToken {
+    id: TokenId,
+    user_email_id: EmailId,
+    token: String,                  // 64-char hex (32 random bytes)
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,      // 24 hours after creation
+    used_at: Option<DateTime<Utc>>,
+}
+
+struct NamespaceRegistry {
+    namespace_id: NamespaceId,
+    shard_id: ShardId,           // Which shard hosts this namespace
+    member_nodes: Vec<NodeId>,   // Nodes in the shard
+    leader_hint: Option<NodeId>, // May be stale
+    config_version: u64,
 }
 
 struct NodeInfo {
@@ -1119,21 +1621,139 @@ struct NodeInfo {
     capabilities: Capabilities,
     last_heartbeat: DateTime<Utc>,
 }
+```
 
-struct VaultRegistry {
-    vault_id: VaultId,
-    members: Vec<NodeId>,
-    leader_hint: Option<NodeId>,  // May be stale
-    config_version: u64,
+**Key patterns in `_system`:**
+
+| Key Pattern                       | Value                  | Purpose                          |
+| --------------------------------- | ---------------------- | -------------------------------- |
+| `user:{id}`                       | User entity            | Global user account              |
+| `user_email:{id}`                 | UserEmail entity       | Email address record             |
+| `_idx:email:{email}`              | email_id               | Global email uniqueness + lookup |
+| `_idx:user_emails:{user_id}`      | [email_id, ...]        | List user's emails (single read) |
+| `email_verify:{id}`               | EmailVerificationToken | Verification token (TTL: 24h)    |
+| `_idx:email_verify:token:{token}` | token_id               | Token lookup by value (TTL: 24h) |
+| `_meta:seq:namespace`             | next_id (int64)        | NamespaceId sequence counter     |
+| `_meta:seq:vault`                 | next_id (int64)        | VaultId sequence counter         |
+| `_meta:seq:user`                  | next_id (int64)        | UserId sequence counter          |
+| `_meta:seq:user_email`            | next_id (int64)        | UserEmailId sequence counter     |
+| `_meta:seq:email_verify`          | next_id (int64)        | TokenId sequence counter         |
+| `ns:{namespace_id}`               | NamespaceRegistry      | Routing table entry              |
+| `node:{id}`                       | NodeInfo               | Cluster membership               |
+
+**Multi-email design rationale:**
+
+- Users can have multiple email addresses (work, personal, etc.)
+- Primary email is a reference on `User` (`primary_email_id`), not a flag on `UserEmail`—single source of truth avoids inconsistency
+- Primary email must be verified before being set as primary
+- **Primary email cannot be deleted**—must reassign primary to another verified email first (prevents dangling reference)
+- Global email uniqueness prevents account conflicts
+- Separate `UserEmail` entity avoids User record bloat and simplifies index maintenance
+
+**What does NOT live in `_system`:**
+
+- Organization entities (live in their own namespace)
+- Org membership (lives in org namespace)
+- Teams, clients, vaults (live in org namespace)
+
+**Scaling model:**
+
+Raft quorum size limits voter count. Large clusters use a fixed voter set with learners:
+
+| Cluster Size | Voters | Learners | Quorum  |
+| ------------ | ------ | -------- | ------- |
+| 1-5 nodes    | all    | 0        | (n/2)+1 |
+| 6-10 nodes   | 5      | rest     | 3       |
+| 11+ nodes    | 5      | rest     | 3       |
+
+```rust
+const SYSTEM_VOTER_COUNT: usize = 5;
+
+#[derive(Clone, Copy)]
+enum SystemRole {
+    Voter,    // Participates in consensus, always has authoritative state
+    Learner,  // Receives replication stream, state may lag
+}
+
+impl Node {
+    fn determine_system_role(&self, cluster_size: usize) -> SystemRole {
+        if cluster_size <= SYSTEM_VOTER_COUNT {
+            SystemRole::Voter
+        } else if self.is_system_voter_elected() {
+            SystemRole::Voter
+        } else {
+            SystemRole::Learner
+        }
+    }
 }
 ```
 
+**Voter election**: When cluster exceeds 5 nodes, the 5 oldest nodes (by join time) become voters. On voter departure, next-oldest learner promotes.
+
+**Learner staleness handling:**
+
+Learners receive `_system` updates via Raft replication but may lag during network issues:
+
+```rust
+struct SystemConfig {
+    /// Maximum age before learner considers cache stale
+    learner_cache_ttl: Duration,  // Default: 5s
+
+    /// Interval for learner to poll voter for freshness check
+    learner_refresh_interval: Duration,  // Default: 1s
+}
+
+impl Node {
+    async fn get_namespace_registry(&self, namespace_id: &NamespaceId) -> Result<NamespaceRegistry> {
+        match self.system_role {
+            SystemRole::Voter => {
+                // Voter state is authoritative
+                self.system_state.namespaces.get(namespace_id)
+                    .cloned()
+                    .ok_or(Error::NamespaceNotFound)
+            }
+            SystemRole::Learner => {
+                let cache_age = self.system_cache.last_updated.elapsed();
+
+                if cache_age > self.config.learner_cache_ttl {
+                    // Stale: query a voter directly
+                    self.refresh_from_voter().await?;
+                }
+
+                self.system_cache.namespaces.get(namespace_id)
+                    .cloned()
+                    .ok_or(Error::NamespaceNotFound)
+            }
+        }
+    }
+
+    async fn refresh_from_voter(&mut self) -> Result<()> {
+        let voter = self.pick_random_voter()?;
+        let fresh_state = voter.get_system_state().await?;
+
+        if fresh_state.version > self.system_cache.version {
+            self.system_cache = fresh_state;
+        }
+
+        Ok(())
+    }
+}
+```
+
+**Consistency guarantees by role:**
+
+| Role                  | Local Query       | Consistency        | Latency    |
+| --------------------- | ----------------- | ------------------ | ---------- |
+| Voter                 | Always valid      | Linearizable       | O(1)       |
+| Learner (fresh cache) | Valid             | Eventual (≤5s lag) | O(1)       |
+| Learner (stale cache) | Fallback to voter | Linearizable       | O(network) |
+
 **Properties:**
 
-- Every node participates in `_system` (voter for small clusters, learner for large)
-- Any node can answer "where is vault X?" from local state
-- Updates propagate via Raft consensus (strongly consistent)
-- No separate DHT maintenance or gossip mesh overhead
+- Fixed 5-voter ceiling ensures bounded quorum latency
+- Learners serve 99%+ of discovery queries from local cache
+- Stale learners transparently fall back to voter queries
+- No separate DHT or gossip infrastructure needed
 
 ### Client Discovery Flow
 
@@ -1204,6 +1824,22 @@ impl VaultReplica {
     }
 }
 ```
+
+**Subscription pattern:**
+
+```rust
+// Get current tip, then subscribe from tip+1
+let tip = client.get_tip(GetTipRequest { vault_id }).await?;
+let stream = client.watch_blocks(WatchBlocksRequest {
+    vault_id,
+    start_height: tip.height + 1,
+}).await?;
+
+// Server replays any blocks committed between GetTip and WatchBlocks,
+// then streams new blocks as they commit. No blocks are missed.
+```
+
+`start_height` must be >= 1 (no magic values). For full replay from genesis, use `start_height = 1`.
 
 ### Peer-to-Peer Properties
 
@@ -1346,12 +1982,11 @@ New Node Startup:
   6. Once accepted, node receives full _system log
   7. Node persists peer list locally (survives restarts)
 
-Vault Assignment:
-  1. Operator calls: create_vault(vault_id, [node_a, node_b, node_c])
-  2. Control plane queries _system for node addresses
-  3. Sends bootstrap_vault RPC to each node
-  4. Nodes initialize genesis block and Raft group
-  5. Vault leader updates _system with VaultRegistry
+Namespace Assignment:
+  1. Control creates namespace via create_namespace(namespace_id)
+  2. _system assigns namespace to shard with lowest load
+  3. Shard leader initializes namespace state
+  4. Shard leader updates _system with NamespaceRegistry
 ```
 
 ### Node Leave
@@ -1362,9 +1997,9 @@ Vault Assignment:
   1. Node announces intention to leave via LeaveCluster RPC
   2. _system leader proposes RemoveNode to Raft
   3. Node is removed from _system membership
-  4. Vault Raft groups handle the departure:
-     - If node was vault member, Raft reconfigures
-     - If node was vault leader, triggers election
+  4. Shard Raft groups handle the departure:
+     - If node was shard member, Raft reconfigures
+     - If node was shard leader, triggers election
   5. Other nodes update cached peer lists
 ```
 
@@ -1467,7 +2102,7 @@ Openraft implements this automatically via its leader initialization sequence.
 
 | Constraint                                 | Enforcement                            |
 | ------------------------------------------ | -------------------------------------- |
-| No concurrent membership changes per vault | Vault-level mutex                      |
+| No concurrent membership changes per shard | Shard-level mutex                      |
 | Learner must sync before promotion         | `wait_for_log_sync()` check            |
 | No-op after leader election                | Openraft built-in                      |
 | Joint consensus required                   | Openraft-only mode                     |
@@ -1529,15 +2164,17 @@ fn test_membership_change_during_leader_failure() {
 }
 ```
 
-### Vault Routing
+### Namespace Routing
+
+Clients route requests to the correct shard by looking up namespace → shard mappings in `_system`. Control handles this internally; Engine never queries `_system` directly.
 
 ```mermaid
 flowchart TD
-    start["Client wants vault 'acme-prod'"]
+    start["Control request for namespace_id=1"]
     cache{"Local cache?"}
     fresh{"Fresh?"}
-    lookup["Query any node"]
-    connect["Connect to leader"]
+    lookup["Query _system: ns:1"]
+    connect["Connect to shard leader"]
     success["Proceed with request"]
     redirect["Follow redirect, update cache"]
 
@@ -1551,17 +2188,42 @@ flowchart TD
     connect -->|NotLeader| redirect
 ```
 
+**Routing lookup**:
+
+```rust
+// Control's internal routing
+async fn route_to_namespace(&self, namespace_id: &NamespaceId) -> Result<ShardConnection> {
+    // 1. Check local cache
+    if let Some(cached) = self.cache.get(namespace_id) {
+        if !cached.is_stale() {
+            return Ok(cached.connection.clone());
+        }
+    }
+
+    // 2. Query _system for shard assignment
+    let registry: NamespaceRegistry = self.system
+        .get(&format!("ns:{}", namespace_id))
+        .await?;
+
+    // 3. Connect to shard leader
+    let conn = self.connect_to_shard(registry.shard_id).await?;
+    self.cache.insert(namespace_id.clone(), conn.clone());
+    Ok(conn)
+}
+```
+
 ### Failure Modes
 
-| Scenario                 | Behavior                                                   |
-| ------------------------ | ---------------------------------------------------------- |
-| All bootstrap nodes down | Client uses cached peer list from previous session         |
-| Vault leader unknown     | Query any node's `_system` state                           |
-| Network partition        | Majority partition continues; minority becomes read-only   |
-| Node crashes             | Removed from `_system` after 30s heartbeat timeout         |
-| Node gracefully leaves   | Immediately removed from `_system`, Raft reconfigures      |
-| `_system` leader fails   | Raft elects new leader automatically (<500ms)              |
-| Majority of nodes fail   | Cluster halts until quorum restored (safety over liveness) |
+| Scenario                    | Behavior                                                      |
+| --------------------------- | ------------------------------------------------------------- |
+| All bootstrap nodes down    | Control uses cached peer list from previous session           |
+| Namespace shard unknown     | Query any node's `_system` state for routing                  |
+| Network partition           | Majority partition continues; minority becomes read-only      |
+| Node crashes                | Removed from `_system` after 30s heartbeat timeout            |
+| Node gracefully leaves      | Immediately removed from `_system`, Raft reconfigures         |
+| `_system` leader fails      | Raft elects new leader automatically (<500ms)                 |
+| Majority of nodes fail      | Cluster halts until quorum restored (safety over liveness)    |
+| Namespace shard unavailable | Requests for that namespace fail; other namespaces unaffected |
 
 ---
 
@@ -2167,49 +2829,149 @@ When partitions heal:
 
 ## Control Data Storage
 
-Ledger serves as the unified storage layer for both Engine (authorization relationships) and Control (users, organizations, sessions). This provides a single operational model while supporting different data semantics.
+Ledger serves as the unified storage layer for both Engine (authorization relationships) and Control (users, organizations, sessions). This replaces FoundationDB as Control's storage backend.
 
-### Data Model
+### Namespace Data Model
 
-Vaults store two types of data:
+Data is distributed across two namespace types:
 
-| Type              | Operations                             | Use Case                       |
-| ----------------- | -------------------------------------- | ------------------------------ |
-| **Relationships** | CreateRelationship, DeleteRelationship | Authorization tuples           |
-| **Entities**      | SetEntity, DeleteEntity                | Users, orgs, sessions, configs |
+**`_system` namespace** (global):
 
-Both types live in the same vault and follow the same consistency model (Raft consensus, merkle commitments).
+| Key Pattern               | Entity            | Purpose                   |
+| ------------------------- | ----------------- | ------------------------- |
+| `user:{id}`               | User              | Global user account       |
+| `_idx:user:email:{email}` | user_id           | Email lookup + uniqueness |
+| `ns:{namespace_id}`       | NamespaceRegistry | Routing table             |
+| `node:{id}`               | NodeInfo          | Cluster membership        |
+
+**Organization namespace** (per-org):
+
+| Key Pattern                        | Entity             | Purpose                   |
+| ---------------------------------- | ------------------ | ------------------------- |
+| `_meta`                            | Organization       | Org settings (name, tier) |
+| `member:{id}`                      | OrganizationMember | User membership in org    |
+| `_idx:member:user:{user_id}`       | member_id          | User's membership lookup  |
+| `team:{id}`                        | Team               | Team entity               |
+| `team_member:{id}`                 | TeamMember         | Team membership           |
+| `_idx:team_members:{team_id}`      | [member_id, ...]   | List team's members       |
+| `team_perm:{id}`                   | TeamPermission     | Delegated permission      |
+| `_idx:team_perms:{team_id}`        | [perm_id, ...]     | List team's permissions   |
+| `client:{id}`                      | Client             | OAuth2/API client         |
+| `client_cert:{id}`                 | ClientCertificate  | Client certificate        |
+| `session:{token}`                  | Session            | User session (TTL)        |
+| `vault:{vault_id}:_meta`           | Vault              | Vault metadata            |
+| `vault:{vault_id}:grant:user:{id}` | VaultUserGrant     | Direct vault access       |
+| `vault:{vault_id}:grant:team:{id}` | VaultTeamGrant     | Team vault access         |
+| `vault:{vault_id}:rel:...`         | Relationship       | Authorization tuples      |
+
+**Namespace structure diagram:**
+
+```
+_system namespace (namespace_id = 0, global, all nodes)
+├── user:1 → {name: "Alice", primary_email_id: 1, ...}
+├── user:2 → {name: "Bob", primary_email_id: 3, ...}
+├── user_email:1 → {user_id: 1, email: "alice@example.com", verified_at: ...}
+├── user_email:2 → {user_id: 1, email: "alice@work.com", verified_at: ...}
+├── user_email:3 → {user_id: 2, email: "bob@example.com", verified_at: null}
+├── _idx:email:alice@example.com → 1
+├── _idx:email:alice@work.com → 2
+├── _idx:email:bob@example.com → 3
+├── _idx:user_emails:1 → [1, 2]
+├── _idx:user_emails:2 → [3]
+├── _meta:seq:namespace → 3
+├── _meta:seq:vault → 2
+├── _meta:seq:user → 3
+├── _meta:seq:user_email → 4
+├── ns:1 → {name: "Acme Corp", shard_id: 1, member_nodes: [A, B, C]}
+├── ns:2 → {name: "Startup Inc", shard_id: 2, member_nodes: [D, E, F]}
+└── node:A → {addresses: [...], grpc_port: 9000}
+
+namespace 1 (Acme Corp, org-scoped, shard 1)
+├── _meta → {name: "Acme Corp", tier: "pro", created_at: ...}
+├── member:100 → {user_id: 1, role: "owner"}
+├── member:101 → {user_id: 2, role: "member"}
+├── _idx:member:user:1 → 100
+├── _idx:member:user:2 → 101
+├── team:200 → {name: "Engineering", description: "..."}
+├── team_member:300 → {team_id: 200, user_id: 2, manager: false}
+├── _idx:team_members:200 → [300]
+├── client:400 → {name: "CI Pipeline", org_id: ...}
+├── vault:1:_meta → {name: "Production", description: "Production vault"}
+├── vault:1:grant:user:500 → {user_id: 1, role: "admin"}
+├── vault:1:grant:team:501 → {team_id: 200, role: "writer"}
+└── vault:1:rel:doc:readme#viewer@user:alice → {}
+```
 
 ### Entity Key Patterns
 
-Control data uses convention-based key prefixes:
+Control data uses convention-based key prefixes within each namespace:
 
-| Entity Type   | Key Pattern          | Example           |
-| ------------- | -------------------- | ----------------- |
-| User          | `user:{id}`          | `user:789`        |
-| Organization  | `org:{id}`           | `org:123`         |
-| Team          | `team:{org_id}:{id}` | `team:123:456`    |
-| Session       | `session:{token}`    | `session:abc123`  |
-| OAuth2 Client | `client:{id}`        | `client:456`      |
-| Refresh Token | `token:{hash}`       | `token:sha256...` |
+**In `_system` (namespace_id = 0):**
 
-**Secondary indexes** use the `_idx:` prefix:
+| Entity Type       | Key Pattern               | Example                        |
+| ----------------- | ------------------------- | ------------------------------ |
+| User              | `user:{id}`               | `user:1`                       |
+| User email        | `user_email:{id}`         | `user_email:1`                 |
+| Email index       | `_idx:email:{email}`      | `_idx:email:alice@example.com` |
+| Namespace routing | `ns:{namespace_id}`       | `ns:1`                         |
+| Sequence counter  | `_meta:seq:{entity_type}` | `_meta:seq:user`               |
 
-| Index          | Key Pattern                           | Value            |
-| -------------- | ------------------------------------- | ---------------- |
-| Email → User   | `_idx:user:email:{email}`             | `user:789`       |
-| Org Name → Org | `_idx:org:name:{name}`                | `org:123`        |
-| Session → User | `_idx:session:user:{user_id}:{token}` | `session:abc123` |
+**In organization namespace:**
 
-**Index maintenance**: Applications maintain indexes atomically via BatchWrite:
+| Entity Type    | Key Pattern                        | Example                               |
+| -------------- | ---------------------------------- | ------------------------------------- |
+| Org metadata   | `_meta`                            | `_meta`                               |
+| Member         | `member:{id}`                      | `member:100`                          |
+| Team           | `team:{id}`                        | `team:200`                            |
+| Client         | `client:{id}`                      | `client:400`                          |
+| Session        | `session:{token}`                  | `session:abc123`                      |
+| Vault metadata | `vault:{vault_id}:_meta`           | `vault:1:_meta`                       |
+| User grant     | `vault:{vault_id}:grant:user:{id}` | `vault:1:grant:user:500`              |
+| Team grant     | `vault:{vault_id}:grant:team:{id}` | `vault:1:grant:team:501`              |
+| Relationship   | `vault:{vault_id}:rel:{tuple}`     | `vault:1:rel:doc:1#viewer@user:alice` |
+
+**Index maintenance**: Entities and their indexes must be created/deleted atomically in the same transaction. This prevents orphaned indexes (index pointing to non-existent entity) and orphaned entities (entity without required indexes).
 
 ```rust
-// Create user with email index
-batch_write(vec![
+// Create user with email index - ATOMIC
+batch_write(NamespaceId::System, vec![
     SetEntity { key: "user:789", value: user_json, expires_at: None },
-    SetEntity { key: "_idx:user:email:alice@example.com", value: b"user:789", expires_at: None },
+    SetEntity { key: "_idx:email:alice@example.com", value: b"789", expires_at: None },
+]);
+
+// Delete user with email index - ATOMIC
+batch_write(NamespaceId::System, vec![
+    DeleteEntity { key: "user:789" },
+    DeleteEntity { key: "_idx:email:alice@example.com" },
+    DeleteEntity { key: "user_email:1" },  // All related emails
+    DeleteEntity { key: "user_email:2" },
 ]);
 ```
+
+**Index invariants**:
+
+| Rule                                     | Enforcement                                     |
+| ---------------------------------------- | ----------------------------------------------- |
+| Entity + indexes created atomically      | Single BatchWrite transaction                   |
+| Entity + indexes deleted atomically      | Single BatchWrite transaction                   |
+| Index TTL matches entity TTL             | Same `expires_at` value in both SetEntity calls |
+| Uniqueness indexes use conditional write | `SetCondition::NotExists` on index key          |
+
+**Why not entity-embedded index tracking**: Storing `_indexes: ["_idx:email:..."]` on each entity adds storage overhead and requires read-modify-write on every index change. The atomic transaction pattern is simpler and equally safe.
+
+**Index value patterns**:
+
+| Relationship | Index Pattern                     | Value           | Example                              |
+| ------------ | --------------------------------- | --------------- | ------------------------------------ |
+| 1:1 lookup   | `_idx:{type}:{lookup_key}`        | entity_id       | `_idx:email:alice@example.com` → `1` |
+| 1:many list  | `_idx:{parent_type}s:{parent_id}` | [child_id, ...] | `_idx:user_emails:1` → `[1, 2]`      |
+
+**Why list values for 1:many**: Single read to fetch all children vs prefix scan. The read-modify-write cost for updates is acceptable when:
+
+- Reads are frequent, writes are rare (listing emails vs adding emails)
+- List size is bounded (max ~10 emails per user, ~100 members per team)
+
+For unbounded 1:many relationships (e.g., all documents a user can access), use prefix scan instead.
 
 ### TTL and Expiration
 
@@ -2225,18 +2987,51 @@ message SetEntity {
 
 **Expiration semantics**:
 
-| Behavior         | Description                                                     |
-| ---------------- | --------------------------------------------------------------- |
-| Read filtering   | `Read` and `ListEntities` return null/skip for expired entities |
-| State inclusion  | Expired entities remain in state tree until GC                  |
-| state_root       | Includes expired entities (until GC deletes them)               |
-| Historical reads | Expired entities visible at historical heights if not yet GC'd  |
+| Behavior         | Description                                                        |
+| ---------------- | ------------------------------------------------------------------ |
+| Read filtering   | `Read` and `ListEntities` return null/skip if `now > expires_at`   |
+| State inclusion  | Expired entities remain in state tree until GC                     |
+| state_root       | Includes expired entities (until GC removes them)                  |
+| Historical reads | Check `block.timestamp > expires_at`, not current time (see below) |
 
-**Why lazy expiration?** Automatic state changes would break the "state_root = f(block N)" invariant. Instead, expiration is a read-time filter; deletion is a committed operation.
+**Historical read expiration**: Server-side enforcement using block timestamp (not current time). This ensures consistent behavior across all clients—the server filters expired entities before returning results.
+
+```rust
+async fn historical_read(vault_id: VaultId, key: &str, at_height: u64) -> Option<Entity> {
+    let block = get_block(vault_id, at_height)?;
+    let entity = state_at_height(vault_id, at_height).get(key)?;
+
+    // Critical: compare against BLOCK timestamp, not current time
+    if let Some(expires_at) = entity.expires_at {
+        if block.timestamp >= expires_at {
+            return None;  // Was expired at this historical point
+        }
+    }
+
+    Some(entity)
+}
+```
+
+Example timeline:
+
+```
+T0:   SetEntity(session:abc, expires_at=T1)  →  Block height 100
+T0.5: Block height 105 (timestamp < T1)
+T1:   Session expires logically
+T1.5: Block height 110 (timestamp > T1)
+T4:   GC runs, ExpireEntity(session:abc)    →  Block height 150
+
+Historical reads:
+- at_height=105 → returns session (block.timestamp < expires_at)
+- at_height=110 → returns null (block.timestamp >= expires_at)
+- at_height=150 → returns null (entity removed from state)
+```
+
+**Why lazy expiration?** Automatic state changes would break the "state_root = f(block N)" invariant. Instead, expiration is a read-time filter; removal is a committed operation.
 
 ### Garbage Collection
 
-The leader periodically garbage-collects expired entities:
+The leader periodically garbage-collects expired entities using a distinct operation type:
 
 ```rust
 // Runs every 60 seconds on leader
@@ -2249,31 +3044,124 @@ async fn garbage_collect_expired(&self, vault_id: VaultId) {
         limit: 1000,
     }).await;
 
-    let to_delete: Vec<_> = expired.entities
+    let to_expire: Vec<_> = expired.entities
         .iter()
         .filter(|e| e.expires_at > 0 && e.expires_at < now)
         .collect();
 
-    if !to_delete.is_empty() {
-        self.write(WriteRequest {
+    if !to_expire.is_empty() {
+        // Internal API: system operations specify actor directly
+        // (Public WriteRequest does not expose actor - it's derived from auth context)
+        self.write_internal(
             vault_id,
-            operations: to_delete.iter()
-                .map(|e| DeleteEntity { key: e.key.clone() })
+            to_expire.iter()
+                .map(|e| ExpireEntity { key: e.key.clone(), expired_at: e.expires_at })
                 .collect(),
-            actor: Some("system:gc".into()),
-            // ...
-        }).await;
+            "system:gc",  // Server-assigned actor for GC operations
+        ).await;
     }
+}
+```
+
+**ExpireEntity vs DeleteEntity**: Distinct operations for audit trail compliance.
+
+| Operation      | Actor        | Audit Meaning                |
+| -------------- | ------------ | ---------------------------- |
+| `DeleteEntity` | user/service | Intentional removal by user  |
+| `ExpireEntity` | system:gc    | Automatic removal due to TTL |
+
+Both remove the entity from state, but the audit log distinguishes cause:
+
+```rust
+// Audit query: "Was session revoked or did it expire?"
+fn analyze_session_removal(key: &str, audit_log: &[Transaction]) -> RemovalCause {
+    for tx in audit_log {
+        for op in &tx.operations {
+            match op {
+                Operation::DeleteEntity { key: k } if k == key => {
+                    return RemovalCause::UserDeleted { actor: tx.actor.clone() };
+                }
+                Operation::ExpireEntity { key: k, expired_at } if k == key => {
+                    return RemovalCause::Expired { at: *expired_at };
+                }
+                _ => {}
+            }
+        }
+    }
+    RemovalCause::NotFound
 }
 ```
 
 **GC properties**:
 
 - Runs only on leader (followers skip)
-- Batched deletions (max 1000 per cycle)
+- Batched removals (max 1000 per cycle)
 - Creates normal committed transactions
+- Uses `ExpireEntity` operation (distinct from user deletion)
 - Actor recorded as `system:gc` for audit trail
 - Expired entities queryable with `include_expired: true` until GC runs
+
+### Cross-Namespace Orphan Cleanup
+
+Entities in org namespaces can reference entities in `_system` (e.g., `member.user_id` → `User`). When a User is deleted, membership records become orphaned. A periodic consistency job cleans these up.
+
+```rust
+// Runs hourly on _system leader
+async fn cleanup_orphaned_memberships(&self) {
+    // Get all deleted user IDs from _system
+    let deleted_users: HashSet<UserId> = self.list_entities(ListEntitiesRequest {
+        namespace_id: NamespaceId::SYSTEM,
+        key_prefix: "user:",
+        include_expired: false,
+    }).await
+        .entities
+        .iter()
+        .filter(|e| decode_user(e).deleted_at.is_some())
+        .map(|e| decode_user(e).id)
+        .collect();
+
+    // For each org namespace, find and remove orphaned memberships
+    for ns in self.list_namespaces().await {
+        let members = self.list_entities(ListEntitiesRequest {
+            namespace_id: ns.id,
+            key_prefix: "member:",
+            include_expired: false,
+        }).await;
+
+        let orphaned: Vec<_> = members.entities
+            .iter()
+            .filter(|m| deleted_users.contains(&decode_member(m).user_id))
+            .collect();
+
+        if !orphaned.is_empty() {
+            // Internal API: system operations specify actor directly
+            self.write_internal(
+                ns.id,
+                None,  // No vault_id for namespace-level entities
+                orphaned.iter()
+                    .flat_map(|m| vec![
+                        DeleteEntity { key: m.key.clone() },
+                        DeleteEntity { key: format!("_idx:member:user:{}", decode_member(m).user_id) },
+                    ])
+                    .collect(),
+                "system:orphan_cleanup",
+            ).await;
+        }
+    }
+}
+```
+
+**Orphan cleanup properties**:
+
+| Property   | Value                                    |
+| ---------- | ---------------------------------------- |
+| Frequency  | Hourly                                   |
+| Scope      | All org namespaces                       |
+| Trigger    | User soft-delete (`deleted_at` set)      |
+| Actor      | `system:orphan_cleanup`                  |
+| Idempotent | Yes (deleting non-existent key is no-op) |
+
+**Why eventual cleanup vs cascading delete**: Cross-namespace atomic deletes would require distributed transactions. Eventual cleanup is simpler, and orphaned memberships are harmless in the interim (user can't authenticate, so membership grants nothing).
 
 ### Vault Structure for Multi-Tenancy
 
@@ -2299,20 +3187,26 @@ Cross-org entities (global users, system config) live in the `_system` vault.
 
 ### Actor Metadata
 
-Every transaction includes an optional `actor` field:
+Every transaction includes a **server-assigned** `actor` field for audit attribution:
 
-```proto
-message WriteRequest {
-  // ...
-  optional string actor = 5;  // "user:123", "client:456", "system:gc"
+```rust
+// Server derives actor from authenticated context - clients cannot specify it
+fn assign_actor(auth_context: &AuthContext) -> String {
+    match auth_context {
+        AuthContext::Session { user_id, .. } => format!("user:{}", user_id),
+        AuthContext::ApiKey { client_id, .. } => format!("client:{}", client_id),
+        AuthContext::System { component } => format!("system:{}", component),
+    }
 }
 ```
 
-| Actor Format    | Example      | Meaning                       |
-| --------------- | ------------ | ----------------------------- |
-| `user:{id}`     | `user:789`   | Human user                    |
-| `client:{id}`   | `client:456` | OAuth2 client/service account |
-| `system:{name}` | `system:gc`  | Internal system operation     |
+| Actor Format    | Example               | Derived From                    |
+| --------------- | --------------------- | ------------------------------- |
+| `user:{id}`     | `user:789`            | Session token (authenticated user) |
+| `client:{id}`   | `client:api_key_abc`  | API key authentication          |
+| `system:{name}` | `system:gc`           | Internal system operation       |
+
+**Security**: Clients cannot specify actor—it's always derived from the authenticated request context. This prevents impersonation attacks where a malicious client claims to be a different user.
 
 **Audit query**:
 
@@ -2361,13 +3255,95 @@ message SetCondition {
 }
 ```
 
-| Condition      | Use Case                                         | Error on Failure      |
-| -------------- | ------------------------------------------------ | --------------------- |
-| `not_exists`   | Create-only operations, unique constraints       | `FAILED_PRECONDITION` |
-| `version`      | Optimistic locking, concurrent update protection | `FAILED_PRECONDITION` |
-| `value_equals` | Exact state assertions                           | `FAILED_PRECONDITION` |
+| Condition      | Use Case                                         | Error Code               |
+| -------------- | ------------------------------------------------ | ------------------------ |
+| `not_exists`   | Create-only operations, unique constraints       | `KEY_EXISTS`             |
+| `version`      | Optimistic locking, concurrent update protection | `VERSION_MISMATCH`       |
+| `value_equals` | Exact state assertions                           | `VALUE_MISMATCH`         |
 
-**Version tracking**: Each entity includes a `version` field (block height when last modified) in query results, enabling version-based conditional writes.
+**Error response structure:**
+
+```proto
+message WriteError {
+  WriteErrorCode code = 1;    // Specific failure reason
+  string key = 2;             // Which key's condition failed
+  uint64 current_version = 3; // Actual version (for retry)
+  bytes current_value = 4;    // Actual value (if small)
+  string message = 5;         // Human-readable description
+}
+```
+
+This enables smart retry logic:
+
+```rust
+match write_response.result {
+    WriteResult::Success(s) => Ok(s.block_height),
+    WriteResult::Error(e) if e.code == VERSION_MISMATCH => {
+        // Retry with current version
+        retry_with_version(e.current_version)
+    }
+    WriteResult::Error(e) if e.code == KEY_EXISTS => {
+        // Key already created, maybe read existing
+        Err(AlreadyExists(e.key))
+    }
+    WriteResult::Error(e) => Err(WriteError(e)),
+}
+```
+
+**Version tracking**: Each entity stores version (block height when last modified) embedded in the value for single-read latency:
+
+```rust
+/// Physical storage format for entities
+struct StoredEntity {
+    version: u64,       // Block height of last modification (8 bytes)
+    expires_at: u64,    // Expiration timestamp, 0 = never (8 bytes)
+    value: Vec<u8>,     // User-provided value
+}
+
+impl StoredEntity {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(16 + self.value.len());
+        buf.extend_from_slice(&self.version.to_le_bytes());
+        buf.extend_from_slice(&self.expires_at.to_le_bytes());
+        buf.extend_from_slice(&self.value);
+        buf
+    }
+
+    fn decode(bytes: &[u8]) -> Self {
+        StoredEntity {
+            version: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            expires_at: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            value: bytes[16..].to_vec(),
+        }
+    }
+}
+```
+
+**Storage overhead**: 16 bytes per entity (version + expires_at). For typical 100-500 byte entities, this is 3-16% overhead—acceptable for single-read latency.
+
+| Alternative       | Overhead | Reads | Why Not                                 |
+| ----------------- | -------- | ----- | --------------------------------------- |
+| Embedded (chosen) | 16B      | 1     | —                                       |
+| Separate table    | 0B       | 2     | Doubles read latency, complex atomicity |
+| Compressed varint | 2-10B    | 1     | Marginal savings, decode complexity     |
+
+Version enables conditional writes for optimistic concurrency control.
+
+### Batch Write Semantics
+
+`BatchWriteRequest` provides atomic multi-write operations:
+
+| Property              | Guarantee                                                    |
+| --------------------- | ------------------------------------------------------------ |
+| **Atomicity**         | All-or-nothing—if ANY write's condition fails, entire batch fails |
+| **Ordering**          | Writes applied in array order (`writes[0]` before `writes[1]`) |
+| **Single block**      | All writes committed in same block (shared `block_height`)   |
+| **Failure isolation** | On failure, no writes applied—vault state unchanged          |
+
+**Use cases**:
+- Entity + index created/deleted atomically
+- Multi-key transactions requiring consistent state
+- Ordered operations where later writes depend on earlier writes' effects
 
 **Example: Unique email constraint**
 
@@ -2471,7 +3447,7 @@ struct Transaction {
     sequence: u64,         // Strictly monotonic per-client sequence number
     operations: Vec<Operation>,
     timestamp: DateTime<Utc>,
-    actor: Option<String>, // Who performed this action (see Actor Metadata)
+    actor: String,         // Server-assigned from auth context (see Actor Metadata)
 }
 ```
 
@@ -2536,6 +3512,17 @@ rpc GetClientState(GetClientStateRequest) returns (GetClientStateResponse);
 ```
 
 Client resumes from `last_committed_sequence + 1`.
+
+**Namespace-level vs vault-level tracking:**
+
+Client state is tracked at two levels, matching write scope:
+
+| Write Scope        | GetClientState call                     | Use Case                                   |
+| ------------------ | --------------------------------------- | ------------------------------------------ |
+| Namespace entities | `GetClientState(ns_id, client_id)`      | Control writing users, sessions, orgs      |
+| Vault relationships | `GetClientState(ns_id, vault_id, client_id)` | App writing authorization relationships |
+
+When `vault_id` is omitted, client state tracks namespace-level entity writes. When `vault_id` is provided, client state tracks vault-level writes (relationships + vault entities). A single client can have separate sequence streams for each scope.
 
 ### Sequence Wrap-around
 
@@ -2718,13 +3705,212 @@ Ledger inherits Raft's consistency guarantees:
 
 **Default**: Reads go to any replica. Clients requiring strict consistency should read from leader or use verified reads.
 
-### Cross-Vault Consistency
+### Cross-Namespace Consistency
 
-Vaults are independent—no cross-vault transactions. Cross-vault coordination requires:
+Namespaces are fully isolated—no cross-namespace transactions within Ledger. Operations spanning namespaces use the **saga pattern** with eventual consistency.
 
-1. Application-layer coordination
-2. Saga pattern or two-phase commit
-3. Each vault's chain as source of truth for its data
+**Design principle**: Each namespace's chain is the source of truth for its data. Cross-namespace operations are coordinated through background jobs, not blocking transactions.
+
+#### Saga Pattern: User + Organization Creation
+
+Creating a new organization with its first owner requires writes to both `_system` (user) and the new namespace (membership).
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Create Organization Saga                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Step 1: Create user in _system (if not exists)                        │
+│          user:123 → {name: "Alice", email: "alice@acme.com"}           │
+│          Status: PENDING_ORG                                            │
+│                                                                         │
+│  Step 2: Create namespace ns_org_456                                    │
+│          _meta → {name: "Acme Corp", created_by: 123}                   │
+│          member:123 → {user_id: 123, role: "owner"}                     │
+│                                                                         │
+│  Step 3: Update user status in _system                                  │
+│          user:123.status → ACTIVE                                       │
+│          user:123.orgs += org_456                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Failure handling**:
+
+| Failure Point | Recovery Action                                          |
+| ------------- | -------------------------------------------------------- |
+| After Step 1  | Background job retries Step 2, or marks user for cleanup |
+| After Step 2  | Background job completes Step 3                          |
+| Step 2 fails  | Rollback: mark user as FAILED, cleanup job deletes       |
+
+**Implementation pattern**:
+
+```rust
+enum SagaState {
+    UserCreated { user_id: UserId },
+    NamespaceCreated { user_id: UserId, namespace_id: NamespaceId },
+    Completed,
+    Failed { step: u8, error: String },
+}
+
+struct CreateOrgSaga {
+    id: SagaId,
+    state: SagaState,
+    created_at: DateTime<Utc>,
+    retries: u8,
+}
+```
+
+Sagas are stored in `_system` namespace under `saga:{saga_id}` keys. Background workers poll for incomplete sagas and advance them.
+
+#### Saga Pattern: User Deletion Cascade
+
+Deleting a user requires removing memberships from all organizations they belong to.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Delete User Saga                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Step 1: Mark user as DELETING in _system                              │
+│          user:123.status → DELETING                                     │
+│          (User can no longer authenticate)                              │
+│                                                                         │
+│  Step 2: For each org in user.orgs (background, parallel):             │
+│          ns_org_456: delete member:123                                  │
+│          ns_org_789: delete member:123                                  │
+│          (Eventual consistency - may take seconds to minutes)           │
+│                                                                         │
+│  Step 3: Delete user from _system                                       │
+│          delete user:123                                                │
+│          delete _idx:user:email:alice@acme.com                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Consistency guarantees**:
+
+- User cannot authenticate after Step 1 completes
+- Membership records are eventually removed (Step 2 is idempotent)
+- Any remaining orphaned memberships cleaned up by hourly job (see [Cross-Namespace Orphan Cleanup](#cross-namespace-orphan-cleanup))
+
+#### Saga Pattern: Team Deletion
+
+Deleting a team requires removing all team memberships and team permissions.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Delete Team Saga                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│  All operations in single namespace - ATOMIC via BatchWrite             │
+│                                                                         │
+│  delete team:200                                                        │
+│  delete team_member:300                                                 │
+│  delete team_member:301                                                 │
+│  delete team_perm:400                                                   │
+│  delete team_perm:401                                                   │
+│  delete _idx:team_members:200                                           │
+│  delete _idx:team_perms:200                                             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Team deletion is simpler than user deletion**: All team-related entities live in the same org namespace, so atomic deletion via BatchWrite is possible. No saga coordination needed.
+
+**Pre-deletion query**:
+
+```rust
+// Find all entities to delete
+let team_members = list_entities(prefix: "team_member:")
+    .filter(|tm| tm.team_id == team_id);
+let team_perms = list_entities(prefix: "team_perm:")
+    .filter(|tp| tp.team_id == team_id);
+
+batch_write(vec![
+    DeleteEntity { key: format!("team:{}", team_id) },
+    // ... all team_members
+    // ... all team_perms
+    // ... all indexes
+]);
+```
+
+#### Saga Pattern: Grant Token Issuance
+
+When Engine issues an access token for a vault, the issuance is recorded in the vault's chain for auditability.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Token Issuance Flow                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  1. Engine requests token for user:123 on vault:prod                    │
+│                                                                         │
+│  2. Control verifies:                                                   │
+│     - User exists in _system                                            │
+│     - Membership exists in ns_org_456                                   │
+│     - Grant exists: vault:prod:grant:user:123                           │
+│                                                                         │
+│  3. Control writes to vault chain:                                      │
+│     vault:prod:token:abc123 → {                                         │
+│       user_id: 123,                                                     │
+│       issued_at: "2024-01-15T10:30:00Z",                               │
+│       expires_at: "2024-01-15T11:30:00Z",                              │
+│       scopes: ["read", "write"],                                        │
+│       request_context: {ip: "10.0.0.1", user_agent: "..."}             │
+│     }                                                                   │
+│                                                                         │
+│  4. Control returns signed token to Engine                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Auditability**:
+
+- Every token issuance is recorded in the vault's immutable chain
+- Audit queries can list all tokens ever issued for a vault
+- Token verification can include proof of issuance (merkle proof)
+- Revocation is recorded as separate transaction (soft delete)
+
+```rust
+struct TokenIssuance {
+    token_id: TokenId,
+    user_id: UserId,
+    vault_id: VaultId,
+    issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    scopes: Vec<Scope>,
+    request_context: RequestContext,
+}
+
+struct TokenRevocation {
+    token_id: TokenId,
+    revoked_at: DateTime<Utc>,
+    reason: RevocationReason,
+    revoked_by: UserId,
+}
+```
+
+#### Cross-Namespace Read Patterns
+
+For queries that span namespaces (e.g., "list all orgs for user X"), Control performs fan-out reads:
+
+```rust
+async fn list_user_orgs(user_id: UserId) -> Vec<OrgSummary> {
+    // 1. Get user from _system
+    let user = system.get(format!("user:{}", user_id))?;
+
+    // 2. Fan-out to each org namespace (parallel)
+    let futures: Vec<_> = user.org_ids
+        .iter()
+        .map(|org_id| async move {
+            let ns = format!("ns_org_{}", org_id);
+            ledger.get(&ns, "_meta").await
+        })
+        .collect();
+
+    // 3. Gather results (eventual consistency - some may be stale)
+    join_all(futures).await
+}
+```
+
+**Staleness window**: Cross-namespace reads may see data up to a few seconds stale. This is acceptable for:
+
+- Dashboard views
+- Permission checks (cached anyway)
+- Audit logs (append-only)
 
 ---
 
@@ -2760,18 +3946,7 @@ Vaults are independent—no cross-vault transactions. Cross-vault coordination r
 - ~1KB per proof for 1M keys, ~1.5KB for 1B keys
 - Bulk verification uses proof aggregation
 
-### Trade-offs vs FoundationDB
-
-| Aspect           | FoundationDB              | Ledger                                  |
-| ---------------- | ------------------------- | --------------------------------------- |
-| Replication      | Leaderless (f+1 replicas) | Leader-based Raft (2f+1 replicas)       |
-| Write latency    | Lower (no consensus)      | Higher (Raft round-trip)                |
-| Verification     | None                      | Per-vault merkle proofs                 |
-| Audit trail      | Operational logs          | Immutable per-vault chain               |
-| Tenant isolation | Logical (key prefix)      | Logical (shard) + Cryptographic (chain) |
-| Scaling          | Single cluster            | Shard groups (1000 vaults/shard)        |
-
-**Index verification trade-off**:
+### Index Verification Trade-off
 
 - Indexes (obj_index, subj_index) are non-merkleized for O(1) queries
 - Individual index entries cannot be proven with instant merkle proofs
@@ -2857,7 +4032,22 @@ For compliance requirements:
 
 - Chains export to S3 Glacier or equivalent immutable storage
 - Archived chains remain verifiable (hash linking preserved)
-- State reconstructs by replaying archived blocks
+
+**State reconstruction depends on retention mode:**
+
+| Mode      | State Reconstruction                                   | Verification Capability                        |
+| --------- | ------------------------------------------------------ | ---------------------------------------------- |
+| Full      | Replay transactions from genesis                       | Full derivation from chain                     |
+| Compacted | Load nearest snapshot + replay within retention window | Chain integrity + snapshot-anchored derivation |
+
+In Compacted mode after transaction bodies are removed:
+
+- ✓ Chain integrity verifiable (header hash links)
+- ✓ Transaction inclusion provable (if client provides tx body + merkle proof)
+- ✓ Historical reads within snapshot coverage
+- ✗ State derivation from genesis (transactions gone)
+
+For auditors requiring full derivation capability, use Full retention mode or export chains before compaction.
 
 ---
 
@@ -3104,26 +4294,6 @@ struct SimRuntime {
 | Chaos (Docker)  | High      | Real network issues | Weekly       |
 | Simulation      | Very High | Rare edge cases     | Pre-release  |
 
-**CI Pipeline**:
-
-```yaml
-# Every commit
-- cargo test # Unit tests
-- cargo test --features proptest # Property tests
-
-# Every PR
-- cargo test --features integration
-
-# Nightly
-- cargo test --features chaos-turmoil
-
-# Weekly
-- ./scripts/chaos-docker.sh # Real network faults
-
-# Pre-release
-- ./scripts/simulation.sh --hours 10000
-```
-
 ---
 
 ## System Invariants
@@ -3157,7 +4327,7 @@ struct SimRuntime {
 ### Reconfiguration Invariants
 
 15. **Joint consensus atomicity**: Membership changes use joint consensus; no single-step reconfiguration
-16. **Serialized membership changes**: At most one membership change in progress per vault
+16. **Serialized membership changes**: At most one membership change in progress per shard
 17. **No-op commit on election**: New leaders commit no-op before accepting membership changes
 
 ### Verification Invariants
@@ -3169,7 +4339,7 @@ struct SimRuntime {
 ### Shard Group Invariants
 
 21. **Vault chain independence**: Each vault's chain is independently verifiable regardless of shard assignment
-22. **Shard membership consistency**: Vault-to-shard mapping in `_system` matches actual shard state
+22. **Shard membership consistency**: Namespace-to-shard mapping in `_system` matches actual shard state
 23. **Cross-shard isolation**: Transactions in one shard cannot affect state in another shard
 
 ### Idempotency Invariants

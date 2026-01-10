@@ -24,24 +24,47 @@ Recommended libraries for core Ledger components.
 
 **raft-rs alternative:** [raft-rs](https://github.com/tikv/raft-rs) offers finer control at the cost of more integration work. Extensively validated in TiKV production.
 
-## State Tree: Merkle Patricia Trie
+## State Commitment: Bucket-Based Hashing
 
-### Recommendation: [paritytech/trie](https://github.com/paritytech/trie) (trie-db crate)
+Ledger uses a **hybrid approach** that separates state commitment from state storage, avoiding the severe write amplification of fully-merkleized structures like MPTs.
 
-| Library                | Pros                                          | Cons                          |
-| ---------------------- | --------------------------------------------- | ----------------------------- |
-| **trie-db**            | Battle-tested (Substrate), flexible backend   | Substrate-oriented API        |
-| **reth_trie**          | Parallel support (rayon), Ethereum-compatible | Ethereum-specific assumptions |
-| **sparse-merkle-tree** | Simpler, no-std support                       | Less mature                   |
+### Design
 
-**Why trie-db:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│  vault_id   │  bucket_id  │         local_key              │
+│  (8 bytes)  │  (1 byte)   │         (N bytes)              │
+└─────────────────────────────────────────────────────────────┘
+```
 
-- Production-proven in Substrate/Polkadot
-- Generic backend trait allows custom storage
-- Apache 2.0 license
-- Active maintenance
+- **256 buckets** per vault, assigned via `seahash(key) % 256`
+- **Incremental updates**: Only dirty buckets are rehashed per block
+- **Final state_root**: `SHA-256(bucket_roots[0..256])`
 
-**Alternative:** Sparse Merkle Trees suit simpler key-value patterns. SMTs have fixed depth (256 levels for SHA-256 keys), simplifying proof generation.
+### Why Not MPT?
+
+| Aspect              | Merkle Patricia Trie | Bucket Hashing  |
+| ------------------- | -------------------- | --------------- |
+| Write amplification | O(log n) per key     | O(1) per key    |
+| Per-key proofs      | Instant              | Requires replay |
+| Query latency       | O(log n)             | O(1)            |
+| Implementation      | Complex              | Simple          |
+
+Authorization workloads are read-heavy with bursty writes. Fast queries and low write amplification matter more than instant per-key proofs.
+
+### Dependencies
+
+| Component         | Library                                        | Purpose                  |
+| ----------------- | ---------------------------------------------- | ------------------------ |
+| Bucket assignment | [seahash](https://github.com/redox-os/seahash) | Fast, deterministic hash |
+| Cryptographic     | [sha2](https://github.com/RustCrypto/hashes)   | Bucket roots, state_root |
+
+**Why seahash**: 8 GB/s throughput, deterministic, no external dependencies. Used only for bucket assignment—SHA-256 remains the cryptographic hash for all commitments.
+
+**References:**
+
+- [QMDB](https://github.com/LayerZero-Labs/qmdb): Append-only log with O(1) merkleization
+- [SeiDB](https://docs.sei.io/learn/seidb): Separates state commitment from state storage
 
 ## Networking: gRPC
 
@@ -122,8 +145,9 @@ prost = "0.13"
 # Storage
 redb = "2.2"
 
-# Crypto
-sha2 = "0.10"
+# State commitment
+seahash = "4.1"  # Bucket assignment (fast, deterministic)
+sha2 = "0.10"    # Cryptographic hashing (bucket roots, state_root)
 
 # Serialization
 bincode = "2.0"
@@ -141,6 +165,6 @@ metrics = "0.23"
 
 - [Openraft](https://lib.rs/crates/openraft)
 - [raft-rs (TiKV)](https://github.com/tikv/raft-rs)
-- [paritytech/trie](https://github.com/paritytech/trie)
-- [reth_trie](https://reth.rs/docs/reth_trie/index.html)
-- [Sparse Merkle Tree topic](https://github.com/topics/sparse-merkle-tree)
+- [seahash](https://github.com/redox-os/seahash)
+- [QMDB](https://github.com/LayerZero-Labs/qmdb) — Append-only log with O(1) merkleization
+- [SeiDB](https://docs.sei.io/learn/seidb) — Separates state commitment from state storage
