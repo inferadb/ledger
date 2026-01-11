@@ -48,6 +48,9 @@ chrono.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+# Metrics
+metrics.workspace = true
+
 # Streaming
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"

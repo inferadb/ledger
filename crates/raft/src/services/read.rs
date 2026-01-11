@@ -5,13 +5,16 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::StreamExt;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
+use tracing::{debug, instrument, warn};
 
+use crate::metrics;
 use crate::proto::read_service_server::ReadService;
 use crate::proto::{
     BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
@@ -47,17 +50,35 @@ impl ReadServiceImpl {
 
 #[tonic::async_trait]
 impl ReadService for ReadServiceImpl {
+    #[instrument(
+        skip(self, request),
+        fields(vault_id = tracing::field::Empty, key = tracing::field::Empty)
+    )]
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
+        let start = Instant::now();
         let req = request.into_inner();
 
         // Extract vault ID (0 for namespace-level reads)
         let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
 
+        // Record span fields
+        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("key", &req.key);
+
         // Read from state layer
         let state = self.state.read();
         let entity = state
             .get_entity(vault_id as i64, req.key.as_bytes())
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(|e| {
+                warn!(error = %e, "Read failed");
+                metrics::record_read(false, start.elapsed().as_secs_f64());
+                Status::internal(format!("Storage error: {}", e))
+            })?;
+
+        let latency = start.elapsed().as_secs_f64();
+        let found = entity.is_some();
+        debug!(found, latency_ms = latency * 1000.0, "Read completed");
+        metrics::record_read(true, latency);
 
         Ok(Response::new(ReadResponse {
             value: entity.map(|e| e.value),
@@ -65,26 +86,44 @@ impl ReadService for ReadServiceImpl {
         }))
     }
 
+    #[instrument(
+        skip(self, request),
+        fields(vault_id = tracing::field::Empty, key = tracing::field::Empty)
+    )]
     async fn verified_read(
         &self,
         request: Request<VerifiedReadRequest>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
+        let start = Instant::now();
         let req = request.into_inner();
 
         // Extract vault ID
         let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
 
+        // Record span fields
+        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("key", &req.key);
+
         // Read from state layer
         let state = self.state.read();
         let entity = state
             .get_entity(vault_id as i64, req.key.as_bytes())
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(|e| {
+                warn!(error = %e, "Verified read failed");
+                metrics::record_verified_read(false, start.elapsed().as_secs_f64());
+                Status::internal(format!("Storage error: {}", e))
+            })?;
 
         // TODO: Generate real merkle proof
         let merkle_proof = crate::proto::MerkleProof {
             leaf_hash: None,
             siblings: vec![],
         };
+
+        let latency = start.elapsed().as_secs_f64();
+        let found = entity.is_some();
+        debug!(found, latency_ms = latency * 1000.0, "Verified read completed");
+        metrics::record_verified_read(true, latency);
 
         Ok(Response::new(VerifiedReadResponse {
             value: entity.map(|e| e.value),

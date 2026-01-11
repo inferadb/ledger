@@ -3,11 +3,14 @@
 //! Handles transaction submission through Raft consensus.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use openraft::Raft;
 use tonic::{Request, Response, Status};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
+use crate::metrics;
 use crate::proto::write_service_server::WriteService;
 use crate::proto::{
     BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
@@ -75,10 +78,20 @@ impl WriteServiceImpl {
 
 #[tonic::async_trait]
 impl WriteService for WriteServiceImpl {
+    #[instrument(
+        skip(self, request),
+        fields(
+            client_id = tracing::field::Empty,
+            namespace_id = tracing::field::Empty,
+            vault_id = tracing::field::Empty,
+            sequence = tracing::field::Empty,
+        )
+    )]
     async fn write(
         &self,
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
+        let start = Instant::now();
         let req = request.into_inner();
 
         // Extract client ID and sequence for idempotency
@@ -89,12 +102,20 @@ impl WriteService for WriteServiceImpl {
             .unwrap_or_default();
         let sequence = req.sequence;
 
+        // Record span fields
+        tracing::Span::current().record("client_id", &client_id);
+        tracing::Span::current().record("sequence", sequence);
+
         // Check idempotency cache for duplicate
         if let Some(cached) = self.idempotency.check(&client_id, sequence) {
+            debug!("Returning cached result for duplicate request");
+            metrics::record_idempotency_hit();
+            metrics::record_write(true, start.elapsed().as_secs_f64());
             return Ok(Response::new(WriteResponse {
                 result: Some(crate::proto::write_response::Result::Success(cached)),
             }));
         }
+        metrics::record_idempotency_miss();
 
         // Extract namespace and vault IDs
         let namespace_id = req
@@ -105,18 +126,30 @@ impl WriteService for WriteServiceImpl {
 
         let vault_id = req.vault_id.as_ref().map(|v| v.id);
 
+        // Record span fields
+        tracing::Span::current().record("namespace_id", namespace_id);
+        if let Some(vid) = vault_id {
+            tracing::Span::current().record("vault_id", vid);
+        }
+
         // Convert to internal request
         let ledger_request = self.operations_to_request(namespace_id, vault_id, &req.operations, &client_id, sequence)?;
 
         // Submit to Raft
+        metrics::record_raft_proposal();
         let result = self
             .raft
             .client_write(ledger_request)
             .await
-            .map_err(|e| Status::internal(format!("Raft error: {}", e)))?;
+            .map_err(|e| {
+                warn!(error = %e, "Raft write failed");
+                metrics::record_write(false, start.elapsed().as_secs_f64());
+                Status::internal(format!("Raft error: {}", e))
+            })?;
 
         // Extract response
         let response = result.data;
+        let latency = start.elapsed().as_secs_f64();
 
         match response {
             LedgerResponse::Write {
@@ -134,32 +167,55 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency
-                    .insert(client_id, sequence, success.clone());
+                    .insert(client_id.clone(), sequence, success.clone());
+                metrics::set_idempotency_cache_size(self.idempotency.len());
+
+                info!(block_height, latency_ms = latency * 1000.0, "Write committed");
+                metrics::record_write(true, latency);
 
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Success(success)),
                 }))
             }
-            LedgerResponse::Error { message } => Ok(Response::new(WriteResponse {
-                result: Some(crate::proto::write_response::Result::Error(WriteError {
-                    code: WriteErrorCode::Unspecified.into(),
-                    key: String::new(),
-                    current_version: None,
-                    current_value: None,
-                    message,
-                    committed_tx_id: None,
-                    committed_block_height: None,
-                    last_committed_sequence: None,
-                })),
-            })),
-            _ => Err(Status::internal("Unexpected response type")),
+            LedgerResponse::Error { message } => {
+                warn!(error = %message, "Write failed");
+                metrics::record_write(false, latency);
+
+                Ok(Response::new(WriteResponse {
+                    result: Some(crate::proto::write_response::Result::Error(WriteError {
+                        code: WriteErrorCode::Unspecified.into(),
+                        key: String::new(),
+                        current_version: None,
+                        current_value: None,
+                        message,
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        last_committed_sequence: None,
+                    })),
+                }))
+            }
+            _ => {
+                metrics::record_write(false, latency);
+                Err(Status::internal("Unexpected response type"))
+            }
         }
     }
 
+    #[instrument(
+        skip(self, request),
+        fields(
+            client_id = tracing::field::Empty,
+            namespace_id = tracing::field::Empty,
+            vault_id = tracing::field::Empty,
+            sequence = tracing::field::Empty,
+            batch_size = tracing::field::Empty,
+        )
+    )]
     async fn batch_write(
         &self,
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
+        let start = Instant::now();
         let req = request.into_inner();
 
         // Extract client ID and sequence for idempotency
@@ -170,8 +226,15 @@ impl WriteService for WriteServiceImpl {
             .unwrap_or_default();
         let sequence = req.sequence;
 
+        // Record span fields
+        tracing::Span::current().record("client_id", &client_id);
+        tracing::Span::current().record("sequence", sequence);
+
         // Check idempotency cache for duplicate
         if let Some(cached) = self.idempotency.check(&client_id, sequence) {
+            debug!("Returning cached result for duplicate batch request");
+            metrics::record_idempotency_hit();
+            metrics::record_batch_write(true, 0, start.elapsed().as_secs_f64());
             return Ok(Response::new(BatchWriteResponse {
                 result: Some(crate::proto::batch_write_response::Result::Success(
                     BatchWriteSuccess {
@@ -183,6 +246,7 @@ impl WriteService for WriteServiceImpl {
                 )),
             }));
         }
+        metrics::record_idempotency_miss();
 
         // Extract namespace and vault IDs
         let namespace_id = req
@@ -193,6 +257,12 @@ impl WriteService for WriteServiceImpl {
 
         let vault_id = req.vault_id.as_ref().map(|v| v.id);
 
+        // Record span fields
+        tracing::Span::current().record("namespace_id", namespace_id);
+        if let Some(vid) = vault_id {
+            tracing::Span::current().record("vault_id", vid);
+        }
+
         // Flatten all operations from all groups
         let all_operations: Vec<crate::proto::Operation> = req
             .operations
@@ -200,18 +270,27 @@ impl WriteService for WriteServiceImpl {
             .flat_map(|group| group.operations.clone())
             .collect();
 
+        let batch_size = all_operations.len();
+        tracing::Span::current().record("batch_size", batch_size);
+
         // Convert to internal request
         let ledger_request = self.operations_to_request(namespace_id, vault_id, &all_operations, &client_id, sequence)?;
 
         // Submit to Raft
+        metrics::record_raft_proposal();
         let result = self
             .raft
             .client_write(ledger_request)
             .await
-            .map_err(|e| Status::internal(format!("Raft error: {}", e)))?;
+            .map_err(|e| {
+                warn!(error = %e, "Raft batch write failed");
+                metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
+                Status::internal(format!("Raft error: {}", e))
+            })?;
 
         // Extract response
         let response = result.data;
+        let latency = start.elapsed().as_secs_f64();
 
         match response {
             LedgerResponse::Write {
@@ -229,7 +308,11 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency
-                    .insert(client_id, sequence, success.clone());
+                    .insert(client_id.clone(), sequence, success.clone());
+                metrics::set_idempotency_cache_size(self.idempotency.len());
+
+                info!(block_height, batch_size, latency_ms = latency * 1000.0, "Batch write committed");
+                metrics::record_batch_write(true, batch_size, latency);
 
                 Ok(Response::new(BatchWriteResponse {
                     result: Some(crate::proto::batch_write_response::Result::Success(
@@ -242,21 +325,29 @@ impl WriteService for WriteServiceImpl {
                     )),
                 }))
             }
-            LedgerResponse::Error { message } => Ok(Response::new(BatchWriteResponse {
-                result: Some(crate::proto::batch_write_response::Result::Error(
-                    WriteError {
-                        code: WriteErrorCode::Unspecified.into(),
-                        key: String::new(),
-                        current_version: None,
-                        current_value: None,
-                        message,
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        last_committed_sequence: None,
-                    },
-                )),
-            })),
-            _ => Err(Status::internal("Unexpected response type")),
+            LedgerResponse::Error { message } => {
+                warn!(error = %message, batch_size, "Batch write failed");
+                metrics::record_batch_write(false, batch_size, latency);
+
+                Ok(Response::new(BatchWriteResponse {
+                    result: Some(crate::proto::batch_write_response::Result::Error(
+                        WriteError {
+                            code: WriteErrorCode::Unspecified.into(),
+                            key: String::new(),
+                            current_version: None,
+                            current_value: None,
+                            message,
+                            committed_tx_id: None,
+                            committed_block_height: None,
+                            last_committed_sequence: None,
+                        },
+                    )),
+                }))
+            }
+            _ => {
+                metrics::record_batch_write(false, batch_size, latency);
+                Err(Status::internal("Unexpected response type"))
+            }
         }
     }
 }

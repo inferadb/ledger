@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > Under active development. Not production-ready.
 
-Ledger is InferaDB's persistence layer — a blockchain database for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently. Reads complete in sub-milliseconds; writes in under 50ms p99.
+Ledger is InferaDB's persistence layer — a blockchain database for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently.
 
 ## Features
 
@@ -119,12 +119,12 @@ cargo run --release -- --config config.toml
 
 ## Crates
 
-| Crate            | Description                                     |
-| ---------------- | ----------------------------------------------- |
-| `ledger-types`   | Core types, hashing, and protobuf definitions   |
-| `ledger-storage` | redb storage layer, state management, snapshots |
-| `ledger-raft`    | Raft consensus, log storage, network transport  |
-| `ledger-server`  | gRPC server, request routing, client handling   |
+| Crate            | Description                                    |
+| ---------------- | ---------------------------------------------- |
+| `ledger-types`   | Core types, hashing, and protobuf definitions  |
+| `ledger-storage` | Storage layer, state management, snapshots     |
+| `ledger-raft`    | Raft consensus, log storage, network transport |
+| `ledger-server`  | gRPC server, request routing, client handling  |
 
 ## Design
 
@@ -136,16 +136,6 @@ See [DESIGN.md](DESIGN.md) for details on:
 - Historical reads and snapshot tiers
 - Multi-vault failure isolation
 - Shard group scaling architecture
-
-## Performance Targets
-
-| Metric             | Target          | Notes                          |
-| ------------------ | --------------- | ------------------------------ |
-| Read (p99)         | <2ms            | Single key, no proof, follower |
-| Read + proof (p99) | <10ms           | With merkle proof generation   |
-| Write (p99)        | <50ms           | Single tx, quorum commit       |
-| Write throughput   | 5,000 tx/sec    | Batched, sustained             |
-| Read throughput    | 100,000 req/sec | Per node                       |
 
 ## Community
 

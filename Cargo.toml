@@ -66,6 +66,10 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# Metrics and observability
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
 # Configuration
 config = "0.14"
 toml = "0.8"
@@ -75,6 +79,9 @@ humantime = "2.1"
 tempfile = "3.14"
 rand = "0.8"
 futures = "0.3"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 # Internal crates
 ledger-types = { path = "crates/types" }
