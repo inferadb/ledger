@@ -7,23 +7,17 @@
 //!
 //! Per DESIGN.md: State layer separates commitment (merkleized) from storage (fast K/V).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use redb::{Database, ReadableTable};
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{
-    EMPTY_HASH, Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus,
-    bucket_id,
-};
+use ledger_types::{Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus};
 
 use crate::bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment};
-use crate::entity::EntityStore;
 use crate::indexes::IndexManager;
 use crate::keys::{bucket_prefix, encode_storage_key};
-use crate::relationship::RelationshipStore;
 use crate::tables::Tables;
 
 /// State layer error types.
@@ -62,6 +56,7 @@ pub struct StateLayer {
     vault_commitments: DashMap<VaultId, VaultCommitment>,
 }
 
+#[allow(clippy::result_large_err)]
 impl StateLayer {
     /// Create a new state layer backed by the given database.
     pub fn new(db: Arc<Database>) -> Self {
@@ -76,9 +71,7 @@ impl StateLayer {
         &self,
         vault_id: VaultId,
     ) -> dashmap::mapref::one::RefMut<'_, VaultId, VaultCommitment> {
-        self.vault_commitments
-            .entry(vault_id)
-            .or_insert_with(VaultCommitment::new)
+        self.vault_commitments.entry(vault_id).or_default()
     }
 
     /// Apply a batch of operations to a vault's state.
@@ -586,6 +579,7 @@ impl Clone for StateLayer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::engine::StorageEngine;

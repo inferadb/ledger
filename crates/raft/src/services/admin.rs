@@ -68,9 +68,7 @@ impl AdminService for AdminServiceImpl {
         match result.data {
             LedgerResponse::NamespaceCreated { namespace_id } => {
                 Ok(Response::new(CreateNamespaceResponse {
-                    namespace_id: Some(NamespaceId {
-                        id: namespace_id as i64,
-                    }),
+                    namespace_id: Some(NamespaceId { id: namespace_id }),
                     shard_id: Some(ShardId { id: 0 }), // Default shard
                 }))
             }
@@ -92,9 +90,7 @@ impl AdminService for AdminServiceImpl {
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
         // Submit delete namespace through Raft
-        let ledger_request = LedgerRequest::DeleteNamespace {
-            namespace_id: namespace_id,
-        };
+        let ledger_request = LedgerRequest::DeleteNamespace { namespace_id };
 
         let result = self
             .raft
@@ -195,7 +191,7 @@ impl AdminService for AdminServiceImpl {
 
         // Submit create vault through Raft
         let ledger_request = LedgerRequest::CreateVault {
-            namespace_id: namespace_id,
+            namespace_id,
             name: None, // CreateVaultRequest doesn't have name field
         };
 
@@ -208,9 +204,7 @@ impl AdminService for AdminServiceImpl {
         match result.data {
             LedgerResponse::VaultCreated { vault_id } => {
                 Ok(Response::new(CreateVaultResponse {
-                    vault_id: Some(VaultId {
-                        id: vault_id as i64,
-                    }),
+                    vault_id: Some(VaultId { id: vault_id }),
                     genesis: None, // TODO: Include genesis block header
                 }))
             }
@@ -239,8 +233,8 @@ impl AdminService for AdminServiceImpl {
 
         // Submit delete vault through Raft
         let ledger_request = LedgerRequest::DeleteVault {
-            namespace_id: namespace_id,
-            vault_id: vault_id,
+            namespace_id,
+            vault_id,
         };
 
         let result = self

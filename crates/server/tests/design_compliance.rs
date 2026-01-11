@@ -4,6 +4,14 @@
 //! behaviors specified in DESIGN.md. Many tests are marked as #[ignore] because
 //! they require multi-node cluster infrastructure that is not yet implemented.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods,
+    clippy::manual_range_contains
+)]
+
 mod common;
 
 use std::time::Duration;

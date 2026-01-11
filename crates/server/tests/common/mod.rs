@@ -2,6 +2,13 @@
 //!
 //! Provides utilities for spawning and managing multi-node test clusters.
 
+#![allow(
+    dead_code,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods
+)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

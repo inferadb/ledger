@@ -177,6 +177,7 @@ impl SystemKeys {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

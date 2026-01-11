@@ -3,13 +3,12 @@
 //! Provides direct entity CRUD operations separate from the state layer.
 //! Used for lower-level access when the full state layer isn't needed.
 
-use redb::{ReadOnlyTable, ReadableTable, Table};
+use redb::{ReadOnlyTable, Table};
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{Entity, VaultId};
 
 use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
-use crate::tables::Tables;
 
 /// Entity store error types.
 #[derive(Debug, Snafu)]
@@ -97,9 +96,12 @@ impl EntityStore {
     ) -> Result<Vec<Entity>> {
         let prefix = vault_prefix(vault_id);
         let mut entities = Vec::new();
-        let mut count = 0;
 
-        for result in table.range(&prefix[..]..).context(StorageSnafu)? {
+        for (count, result) in table
+            .range(&prefix[..]..)
+            .context(StorageSnafu)?
+            .enumerate()
+        {
             let (key, value) = result.context(StorageSnafu)?;
             let key_bytes = key.value();
 
@@ -107,7 +109,7 @@ impl EntityStore {
             if key_bytes.len() < 8 {
                 break;
             }
-            if &key_bytes[..8] != &prefix[..] {
+            if key_bytes[..8] != prefix[..] {
                 break;
             }
 
@@ -122,7 +124,6 @@ impl EntityStore {
                 })?;
                 entities.push(entity);
             }
-            count += 1;
         }
 
         Ok(entities)
@@ -192,7 +193,7 @@ impl EntityStore {
             let (key, _) = result.context(StorageSnafu)?;
             let key_bytes = key.value();
 
-            if key_bytes.len() < 8 || &key_bytes[..8] != &prefix[..] {
+            if key_bytes.len() < 8 || key_bytes[..8] != prefix[..] {
                 break;
             }
             count += 1;
@@ -219,7 +220,7 @@ impl EntityStore {
             if key_bytes.len() < 9 {
                 break;
             }
-            if &key_bytes[..8] != &prefix[..] {
+            if key_bytes[..8] != prefix[..] {
                 break;
             }
 
@@ -246,9 +247,16 @@ impl EntityStore {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    unused_mut
+)]
 mod tests {
     use super::*;
     use crate::engine::StorageEngine;
+    use crate::tables::Tables;
 
     #[test]
     fn test_entity_crud() {

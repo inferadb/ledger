@@ -8,8 +8,11 @@ use tokio::signal;
 ///
 /// This function blocks until a shutdown signal is received.
 /// On Unix systems, it also handles SIGTERM for container environments.
+#[allow(clippy::expect_used)]
 pub async fn shutdown_signal() {
     let ctrl_c = async {
+        // Safety: If we can't install signal handlers, the process should panic
+        // since graceful shutdown is critical for data integrity.
         signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");
@@ -17,6 +20,7 @@ pub async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
+        // Safety: Same reasoning as above for SIGTERM in container environments.
         signal::unix::signal(signal::unix::SignalKind::terminate())
             .expect("failed to install SIGTERM handler")
             .recv()
@@ -55,6 +59,7 @@ impl ShutdownCoordinator {
     }
 
     /// Subscribe to shutdown notifications.
+    #[allow(dead_code)]
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
         self.notify.subscribe()
     }
@@ -65,6 +70,7 @@ impl ShutdownCoordinator {
     }
 
     /// Wait for shutdown signal and trigger coordinator.
+    #[allow(dead_code)]
     pub async fn wait_for_signal(&self) {
         shutdown_signal().await;
         self.shutdown();

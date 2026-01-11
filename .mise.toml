@@ -2,11 +2,10 @@
 #
 # Install mise: https://mise.jdx.dev/getting-started.html
 # Then run: mise install
+#
+# Note: Rust toolchain is managed by rust-toolchain.toml
 
 [tools]
-# Rust toolchain
-rust = "1.85"
-
 # Protocol Buffers compiler (required for building)
 protobuf = "29"
 

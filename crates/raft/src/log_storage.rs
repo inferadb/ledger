@@ -144,9 +144,10 @@ impl SequenceCounters {
 }
 
 /// Health status for a vault.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VaultHealthStatus {
     /// Vault is healthy and accepting writes.
+    #[default]
     Healthy,
     /// Vault has diverged and is in recovery.
     Diverged {
@@ -157,12 +158,6 @@ pub enum VaultHealthStatus {
         /// Height at which divergence was detected.
         at_height: u64,
     },
-}
-
-impl Default for VaultHealthStatus {
-    fn default() -> Self {
-        Self::Healthy
-    }
 }
 
 // ============================================================================
@@ -275,6 +270,7 @@ pub struct RaftLogStore {
     applied_state: Arc<RwLock<AppliedState>>,
 }
 
+#[allow(clippy::result_large_err)]
 impl RaftLogStore {
     /// Open or create a new log store at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError<LedgerNodeId>> {
@@ -825,7 +821,7 @@ fn to_storage_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
     StorageError::from_io_error(
         openraft::ErrorSubject::Store,
         openraft::ErrorVerb::Write,
-        std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+        std::io::Error::other(e.to_string()),
     )
 }
 
@@ -833,11 +829,17 @@ fn to_serde_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
     StorageError::from_io_error(
         openraft::ErrorSubject::Store,
         openraft::ErrorVerb::Read,
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+        std::io::Error::other(e.to_string()),
     )
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use openraft::CommittedLeaderId;

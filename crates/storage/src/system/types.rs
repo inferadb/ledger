@@ -34,10 +34,11 @@ pub struct User {
 }
 
 /// User account status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserStatus {
     /// User is active and can authenticate.
+    #[default]
     Active,
     /// User is pending organization creation (saga in progress).
     PendingOrg,
@@ -47,12 +48,6 @@ pub enum UserStatus {
     Deleting,
     /// User has been deleted (tombstone for audit).
     Deleted,
-}
-
-impl Default for UserStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 // ============================================================================
@@ -124,10 +119,11 @@ pub struct NamespaceRegistry {
 }
 
 /// Namespace lifecycle status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceStatus {
     /// Namespace is active and accepting requests.
+    #[default]
     Active,
     /// Namespace is being migrated to another shard.
     Migrating,
@@ -137,12 +133,6 @@ pub enum NamespaceStatus {
     Deleting,
     /// Namespace has been deleted (tombstone).
     Deleted,
-}
-
-impl Default for NamespaceStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 // ============================================================================
@@ -167,22 +157,18 @@ pub struct NodeInfo {
 }
 
 /// Node role in the cluster per DESIGN.md lines 1970-1996.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRole {
     /// Voter: Participates in Raft elections (max 5 per cluster).
     Voter,
     /// Learner: Replicates data but doesn't vote (for scaling).
+    #[default]
     Learner,
 }
 
-impl Default for NodeRole {
-    fn default() -> Self {
-        Self::Learner
-    }
-}
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

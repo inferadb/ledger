@@ -146,8 +146,8 @@ pub fn tx_hash(tx: &Transaction) -> Hash {
     }
 
     // timestamp: i64 BE (seconds) + u32 BE (nanos)
-    hasher.update(&tx.timestamp.timestamp().to_be_bytes());
-    hasher.update(&tx.timestamp.timestamp_subsec_nanos().to_be_bytes());
+    hasher.update(tx.timestamp.timestamp().to_be_bytes());
+    hasher.update(tx.timestamp.timestamp_subsec_nanos().to_be_bytes());
 
     hasher.finalize().into()
 }
@@ -162,7 +162,7 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
             relation,
             subject,
         } => {
-            hasher.update(&[0x01]); // type byte
+            hasher.update([0x01]); // type byte
             hash_length_prefixed_str(hasher, resource);
             hash_length_prefixed_str(hasher, relation);
             hash_length_prefixed_str(hasher, subject);
@@ -172,7 +172,7 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
             relation,
             subject,
         } => {
-            hasher.update(&[0x02]); // type byte
+            hasher.update([0x02]); // type byte
             hash_length_prefixed_str(hasher, resource);
             hash_length_prefixed_str(hasher, relation);
             hash_length_prefixed_str(hasher, subject);
@@ -183,20 +183,20 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
             condition,
             expires_at,
         } => {
-            hasher.update(&[0x03]); // type byte
+            hasher.update([0x03]); // type byte
             hash_length_prefixed_str(hasher, key);
             hash_length_prefixed_bytes(hasher, value);
 
             // condition: optional
             match condition {
-                None => hasher.update(&[0x00]),
+                None => hasher.update([0x00]),
                 Some(cond) => {
-                    hasher.update(&[cond.type_byte()]);
+                    hasher.update([cond.type_byte()]);
                     match cond {
                         crate::types::SetCondition::MustNotExist
                         | crate::types::SetCondition::MustExist => {}
                         crate::types::SetCondition::VersionEquals(v) => {
-                            hasher.update(&v.to_be_bytes());
+                            hasher.update(v.to_be_bytes());
                         }
                         crate::types::SetCondition::ValueEquals(v) => {
                             hash_length_prefixed_bytes(hasher, v);
@@ -206,16 +206,16 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
             }
 
             // expires_at: u64 BE (0 if None)
-            hasher.update(&expires_at.unwrap_or(0).to_be_bytes());
+            hasher.update(expires_at.unwrap_or(0).to_be_bytes());
         }
         Operation::DeleteEntity { key } => {
-            hasher.update(&[0x04]); // type byte
+            hasher.update([0x04]); // type byte
             hash_length_prefixed_str(hasher, key);
         }
         Operation::ExpireEntity { key, expired_at } => {
-            hasher.update(&[0x05]); // type byte
+            hasher.update([0x05]); // type byte
             hash_length_prefixed_str(hasher, key);
-            hasher.update(&expired_at.to_be_bytes());
+            hasher.update((*expired_at).to_be_bytes());
         }
     }
 }
@@ -223,14 +223,14 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
 /// Hash a length-prefixed string.
 #[inline]
 fn hash_length_prefixed_str(hasher: &mut Sha256, s: &str) {
-    hasher.update(&(s.len() as u32).to_le_bytes());
+    hasher.update((s.len() as u32).to_le_bytes());
     hasher.update(s.as_bytes());
 }
 
 /// Hash length-prefixed bytes.
 #[inline]
 fn hash_length_prefixed_bytes(hasher: &mut Sha256, data: &[u8]) {
-    hasher.update(&(data.len() as u32).to_le_bytes());
+    hasher.update((data.len() as u32).to_le_bytes());
     hasher.update(data);
 }
 
@@ -265,18 +265,18 @@ impl BucketHasher {
         self.has_entries = true;
 
         // key_len: u32 LE
-        self.hasher.update(&(entity.key.len() as u32).to_le_bytes());
+        self.hasher.update((entity.key.len() as u32).to_le_bytes());
         // key: variable
         self.hasher.update(&entity.key);
         // value_len: u32 LE
         self.hasher
-            .update(&(entity.value.len() as u32).to_le_bytes());
+            .update((entity.value.len() as u32).to_le_bytes());
         // value: variable
         self.hasher.update(&entity.value);
         // expires_at: u64 BE (0 = never)
-        self.hasher.update(&entity.expires_at.to_be_bytes());
+        self.hasher.update(entity.expires_at.to_be_bytes());
         // version: u64 BE (block height)
-        self.hasher.update(&entity.version.to_be_bytes());
+        self.hasher.update(entity.version.to_be_bytes());
     }
 
     /// Finalize and return the bucket root hash.
@@ -306,6 +306,7 @@ pub fn bucket_id(key: &[u8]) -> u8 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};

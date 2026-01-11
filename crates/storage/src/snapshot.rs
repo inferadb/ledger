@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use snafu::{ResultExt, Snafu};
 use zstd::stream::{Decoder, Encoder};
 
-use ledger_types::{EMPTY_HASH, Entity, Hash, ShardId, VaultId};
+use ledger_types::{Entity, Hash, ShardId, VaultId};
 
-use crate::bucket::{NUM_BUCKETS, VaultCommitment};
+use crate::bucket::NUM_BUCKETS;
 
 /// Snapshot file magic bytes.
 const SNAPSHOT_MAGIC: [u8; 4] = *b"LSNP";
@@ -333,6 +333,8 @@ impl SnapshotManager {
         }
 
         // List is sorted ascending, take the last one
+        // Safety: we just checked that snapshots is non-empty above
+        #[allow(clippy::expect_used)]
         let latest = snapshots.last().expect("not empty");
         let path = self.snapshot_dir.join(snapshot_filename(*latest));
 
@@ -387,13 +389,16 @@ impl SnapshotManager {
     /// Find the latest snapshot at or before the given height.
     pub fn find_snapshot_at_or_before(&self, height: u64) -> Result<Option<u64>> {
         let snapshots = self.list_snapshots()?;
-        Ok(snapshots.into_iter().filter(|&h| h <= height).last())
+        // list_snapshots returns ascending order, so reverse and find first <= height
+        Ok(snapshots.into_iter().rev().find(|&h| h <= height))
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use ledger_types::EMPTY_HASH;
     use tempfile::TempDir;
 
     fn create_test_snapshot() -> Snapshot {

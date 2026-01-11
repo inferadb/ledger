@@ -140,9 +140,10 @@ pub enum SystemRequest {
 /// Response from the Raft state machine.
 ///
 /// This is the "R" (response) type in OpenRaft's type configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LedgerResponse {
     /// Empty response (for operations that don't return data).
+    #[default]
     Empty,
 
     /// Write operation completed.
@@ -190,12 +191,6 @@ pub enum LedgerResponse {
     },
 }
 
-impl Default for LedgerResponse {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
-
 impl fmt::Display for LedgerResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -226,6 +221,12 @@ impl fmt::Display for LedgerResponse {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

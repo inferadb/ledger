@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::proto::{TxId, WriteSuccess};
+use crate::proto::WriteSuccess;
 
 /// Maximum number of entries in the cache.
 const MAX_CACHE_SIZE: usize = 10_000;
@@ -138,8 +138,10 @@ impl Default for IdempotencyCache {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use crate::proto::TxId;
 
     fn make_result(block_height: u64) -> WriteSuccess {
         WriteSuccess {

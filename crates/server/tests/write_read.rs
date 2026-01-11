@@ -2,6 +2,14 @@
 //!
 //! Tests single-node and multi-node write/read cycles through Raft consensus.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods,
+    clippy::manual_range_contains
+)]
+
 mod common;
 
 use std::time::Duration;

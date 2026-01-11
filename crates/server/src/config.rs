@@ -21,6 +21,7 @@ pub struct Config {
     pub peers: Vec<PeerConfig>,
     /// Batching configuration.
     #[serde(default)]
+    #[allow(dead_code)]
     pub batching: BatchConfig,
     /// Whether this node should bootstrap a new cluster.
     #[serde(default)]
@@ -38,6 +39,7 @@ pub struct PeerConfig {
 
 /// Transaction batching configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct BatchConfig {
     /// Maximum number of transactions per batch.
     #[serde(default = "default_max_batch_size")]
@@ -101,6 +103,7 @@ impl Config {
     }
 
     /// Create a configuration for testing.
+    #[allow(clippy::unwrap_used, clippy::disallowed_methods, dead_code)]
     pub fn for_test(node_id: u64, port: u16, data_dir: PathBuf) -> Self {
         Self {
             node_id,

@@ -116,6 +116,7 @@ impl Default for VaultCommitment {
 /// Use this when scanning a bucket to compute its root hash.
 pub struct BucketRootBuilder {
     hasher: BucketHasher,
+    #[allow(dead_code)]
     bucket_id: u8,
 }
 
@@ -129,6 +130,7 @@ impl BucketRootBuilder {
     }
 
     /// Get the bucket ID this builder is for.
+    #[allow(dead_code)]
     pub fn bucket_id(&self) -> u8 {
         self.bucket_id
     }
@@ -147,6 +149,7 @@ impl BucketRootBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

@@ -2,8 +2,8 @@
 //!
 //! Uses rs_merkle with SHA-256 for transaction merkle roots and proofs.
 
-use rs_merkle::algorithms::Sha256 as RsSha256;
 use rs_merkle::MerkleTree as RsMerkleTree;
+use rs_merkle::algorithms::Sha256 as RsSha256;
 
 use crate::hash::{EMPTY_HASH, Hash, sha256};
 
@@ -39,7 +39,7 @@ impl MerkleTree {
         }
 
         let proof = self.tree.proof(&[index]);
-        let proof_hashes: Vec<Hash> = proof.proof_hashes().iter().map(|h| *h).collect();
+        let proof_hashes: Vec<Hash> = proof.proof_hashes().to_vec();
 
         Some(MerkleProof {
             leaf_index: index,
@@ -130,6 +130,7 @@ pub fn leaf_hash(data: &[u8]) -> Hash {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::hash::sha256;

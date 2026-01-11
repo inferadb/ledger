@@ -8,12 +8,12 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use redb::{Database, ReadableTable};
+use redb::Database;
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{NamespaceId, ShardBlock, VaultId};
@@ -53,6 +53,7 @@ pub type Result<T> = std::result::Result<T, BlockArchiveError>;
 
 /// Index entry for a block within a segment.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 struct BlockIndex {
     /// Shard height of this block.
     shard_height: u64,
@@ -73,17 +74,20 @@ struct SegmentWriter {
 ///
 /// Uses redb for the primary block storage (Tables::BLOCKS) and maintains
 /// a vault_block_index for looking up shard heights by vault/namespace/height.
+#[allow(clippy::result_large_err)]
 pub struct BlockArchive {
     /// Database handle.
     db: Arc<Database>,
     /// Directory for segment files (optional, for large deployments).
     blocks_dir: Option<PathBuf>,
     /// Cached segment indexes.
+    #[allow(dead_code)]
     segment_indexes: RwLock<HashMap<u64, Vec<BlockIndex>>>,
     /// Current segment writer (for file-based storage).
     current_segment: RwLock<Option<SegmentWriter>>,
 }
 
+#[allow(clippy::result_large_err)]
 impl BlockArchive {
     /// Create a new block archive backed by redb.
     pub fn new(db: Arc<Database>) -> Self {
@@ -180,6 +184,8 @@ impl BlockArchive {
             });
         }
 
+        // Safety: we just set `current = Some(...)` above if it was None
+        #[allow(clippy::expect_used)]
         let writer = current.as_mut().expect("segment writer should exist");
 
         // Get current offset
@@ -302,6 +308,10 @@ impl BlockArchive {
     }
 
     /// Get segment file path.
+    ///
+    /// # Panics
+    /// Panics if `blocks_dir` is not set (only called when segment files are enabled).
+    #[allow(clippy::expect_used)]
     fn segment_path(&self, segment_id: u64) -> PathBuf {
         self.blocks_dir
             .as_ref()
@@ -326,11 +336,12 @@ fn encode_vault_block_index_key(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::engine::StorageEngine;
     use chrono::Utc;
-    use ledger_types::{Hash, VaultEntry};
+    use ledger_types::VaultEntry;
 
     fn create_test_block(shard_height: u64) -> ShardBlock {
         ShardBlock {

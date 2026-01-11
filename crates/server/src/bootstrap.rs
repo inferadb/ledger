@@ -13,8 +13,7 @@ use parking_lot::RwLock;
 use redb::Database;
 
 use ledger_raft::{
-    AppliedStateAccessor, GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig,
-    RaftLogStore,
+    GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig, RaftLogStore,
 };
 use ledger_storage::StateLayer;
 
@@ -49,8 +48,10 @@ impl std::error::Error for BootstrapError {}
 /// Bootstrapped node components.
 pub struct BootstrappedNode {
     /// The Raft instance.
+    #[allow(dead_code)]
     pub raft: Arc<Raft<LedgerTypeConfig>>,
     /// The shared state layer.
+    #[allow(dead_code)]
     pub state: Arc<RwLock<StateLayer>>,
     /// The configured Ledger server.
     pub server: LedgerServer,
@@ -172,6 +173,7 @@ async fn bootstrap_cluster(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use tempfile::tempdir;

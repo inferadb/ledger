@@ -13,12 +13,10 @@ use parking_lot::RwLock;
 use redb::Database;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{
-    EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultEntry, VaultHealth, VaultId,
-};
+use ledger_types::{EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultHealth, VaultId};
 
 use crate::block_archive::BlockArchive;
-use crate::bucket::{NUM_BUCKETS, VaultCommitment};
+use crate::bucket::NUM_BUCKETS;
 use crate::snapshot::{Snapshot, SnapshotManager, SnapshotStateData, VaultSnapshotMeta};
 use crate::state::StateLayer;
 
@@ -93,6 +91,7 @@ pub struct ShardManager {
     shard_height: RwLock<u64>,
 }
 
+#[allow(clippy::result_large_err)]
 impl ShardManager {
     /// Create a new shard manager.
     pub fn new(
@@ -179,7 +178,7 @@ impl ShardManager {
             // Apply operations
             let mut dirty_keys = Vec::new();
             for tx in &entry.transactions {
-                let statuses = self
+                let _statuses = self
                     .state
                     .apply_operations(entry.vault_id, &tx.operations, entry.vault_height)
                     .context(StateSnafu)?;
@@ -399,11 +398,12 @@ impl ShardManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::engine::StorageEngine;
     use chrono::Utc;
-    use ledger_types::{Operation, Transaction, TxId};
+    use ledger_types::{Operation, Transaction, VaultEntry};
     use tempfile::TempDir;
 
     fn create_test_manager() -> (ShardManager, TempDir) {

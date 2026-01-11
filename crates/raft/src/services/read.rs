@@ -321,7 +321,7 @@ impl ReadService for ReadServiceImpl {
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
         let req = request.into_inner();
 
-        let vault_id = req.vault_id.as_ref().map(|v| v.id as i64).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
         let limit = if req.limit == 0 {
             100
         } else {

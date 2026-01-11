@@ -11,8 +11,6 @@ use std::sync::Arc;
 use redb::{Database, ReadTransaction, WriteTransaction};
 use snafu::ResultExt;
 
-use ledger_types::error::Result;
-
 use crate::tables::Tables;
 
 /// Error context for storage operations.
@@ -43,6 +41,7 @@ pub struct StorageEngine {
     db: Arc<Database>,
 }
 
+#[allow(clippy::result_large_err)]
 impl StorageEngine {
     /// Open or create a database at the given path.
     ///
@@ -131,6 +130,7 @@ pub struct ReadTxn {
     txn: ReadTransaction,
 }
 
+#[allow(clippy::result_large_err)]
 impl ReadTxn {
     /// Access the underlying redb transaction.
     pub fn inner(&self) -> &ReadTransaction {
@@ -151,6 +151,7 @@ pub struct WriteTxn {
     txn: WriteTransaction,
 }
 
+#[allow(clippy::result_large_err)]
 impl WriteTxn {
     /// Access the underlying redb transaction.
     pub fn inner(&self) -> &WriteTransaction {
@@ -183,6 +184,12 @@ impl WriteTxn {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    unused_mut
+)]
 mod tests {
     use super::*;
 

@@ -110,6 +110,7 @@ impl BatchState {
         self.pending.len()
     }
 
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }

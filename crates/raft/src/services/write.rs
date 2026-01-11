@@ -27,6 +27,7 @@ pub struct WriteServiceImpl {
     idempotency: Arc<IdempotencyCache>,
 }
 
+#[allow(clippy::result_large_err)]
 impl WriteServiceImpl {
     /// Create a new write service.
     pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, idempotency: Arc<IdempotencyCache>) -> Self {
@@ -115,13 +116,8 @@ impl WriteServiceImpl {
         };
 
         Ok(LedgerRequest::Write {
-            namespace_id: namespace_id
-                .try_into()
-                .map_err(|_| Status::invalid_argument("Invalid namespace_id"))?,
-            vault_id: vault_id
-                .unwrap_or(0)
-                .try_into()
-                .map_err(|_| Status::invalid_argument("Invalid vault_id"))?,
+            namespace_id,
+            vault_id: vault_id.unwrap_or(0),
             transactions: vec![transaction],
         })
     }

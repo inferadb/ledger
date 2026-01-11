@@ -9,7 +9,6 @@ use snafu::{ResultExt, Snafu};
 use ledger_types::{Relationship, VaultId};
 
 use crate::keys::{encode_storage_key, vault_prefix};
-use crate::tables::Tables;
 
 /// Relationship store error types.
 #[derive(Debug, Snafu)]
@@ -126,14 +125,17 @@ impl RelationshipStore {
     ) -> Result<Vec<Relationship>> {
         let prefix = vault_prefix(vault_id);
         let mut relationships = Vec::new();
-        let mut count = 0;
 
-        for result in table.range(&prefix[..]..).context(StorageSnafu)? {
+        for (count, result) in table
+            .range(&prefix[..]..)
+            .context(StorageSnafu)?
+            .enumerate()
+        {
             let (key, value) = result.context(StorageSnafu)?;
             let key_bytes = key.value();
 
             // Check we're still in the same vault
-            if key_bytes.len() < 8 || &key_bytes[..8] != &prefix[..] {
+            if key_bytes.len() < 8 || key_bytes[..8] != prefix[..] {
                 break;
             }
 
@@ -148,7 +150,6 @@ impl RelationshipStore {
                 })?;
                 relationships.push(rel);
             }
-            count += 1;
         }
 
         Ok(relationships)
@@ -166,7 +167,7 @@ impl RelationshipStore {
             let (key, _) = result.context(StorageSnafu)?;
             let key_bytes = key.value();
 
-            if key_bytes.len() < 8 || &key_bytes[..8] != &prefix[..] {
+            if key_bytes.len() < 8 || key_bytes[..8] != prefix[..] {
                 break;
             }
             count += 1;
@@ -191,7 +192,7 @@ impl RelationshipStore {
             let key_bytes = key.value();
 
             // Check we're still in the same vault
-            if key_bytes.len() < 9 || &key_bytes[..8] != &prefix[..] {
+            if key_bytes.len() < 9 || key_bytes[..8] != prefix[..] {
                 break;
             }
 
@@ -218,9 +219,16 @@ impl RelationshipStore {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    unused_mut
+)]
 mod tests {
     use super::*;
     use crate::engine::StorageEngine;
+    use crate::tables::Tables;
 
     #[test]
     fn test_relationship_crud() {

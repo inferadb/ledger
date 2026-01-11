@@ -5,6 +5,8 @@
 //!
 //! Target: <1ms p99 latency for single-key reads.
 
+#![allow(clippy::expect_used, missing_docs)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

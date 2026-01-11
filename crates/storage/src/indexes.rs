@@ -7,7 +7,7 @@
 //! Per DESIGN.md: Indexes are NOT merkleized (no per-write amplification).
 
 use redb::{ReadOnlyTable, ReadableTable, Table};
-use snafu::{ResultExt, Snafu};
+use snafu::Snafu;
 
 use ledger_types::VaultId;
 
@@ -16,6 +16,7 @@ use crate::state::StateError;
 
 /// Index manager error types.
 #[derive(Debug, Snafu)]
+#[allow(dead_code)]
 pub enum IndexError {
     #[snafu(display("Storage error: {source}"))]
     Storage { source: redb::StorageError },
@@ -25,6 +26,7 @@ pub enum IndexError {
 }
 
 /// Result type for index operations.
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, IndexError>;
 
 /// Index entry for object index: list of subjects.
@@ -42,6 +44,7 @@ struct ResourceRelationSet {
 /// Dual index manager for relationship queries.
 pub struct IndexManager;
 
+#[allow(clippy::result_large_err)]
 impl IndexManager {
     /// Add a subject to the object index.
     ///
@@ -253,6 +256,12 @@ impl IndexManager {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    unused_mut
+)]
 mod tests {
     use super::*;
     use crate::engine::StorageEngine;
