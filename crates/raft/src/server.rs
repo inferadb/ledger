@@ -27,7 +27,7 @@ use crate::services::{
     AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, ReadServiceImpl, WriteServiceImpl,
 };
 use crate::types::LedgerTypeConfig;
-use crate::{IdempotencyCache, RaftLogStore};
+use crate::IdempotencyCache;
 
 use ledger_storage::StateLayer;
 
@@ -39,8 +39,6 @@ pub struct LedgerServer {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The shared state layer.
     state: Arc<RwLock<StateLayer>>,
-    /// The Raft log store.
-    log_store: Arc<RaftLogStore>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Block announcement broadcast channel.
@@ -54,7 +52,6 @@ impl LedgerServer {
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<RwLock<StateLayer>>,
-        log_store: Arc<RaftLogStore>,
         addr: SocketAddr,
     ) -> Self {
         // Create broadcast channel for block announcements (capacity 1000)
@@ -63,7 +60,6 @@ impl LedgerServer {
         Self {
             raft,
             state,
-            log_store,
             idempotency: Arc::new(IdempotencyCache::new()),
             block_announcements,
             addr,
@@ -91,7 +87,6 @@ impl LedgerServer {
         );
         let write_service = WriteServiceImpl::new(
             self.raft.clone(),
-            self.log_store.clone(),
             self.idempotency.clone(),
         );
         let admin_service = AdminServiceImpl::new(

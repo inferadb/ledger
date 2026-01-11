@@ -14,15 +14,12 @@ use crate::proto::{
     WriteRequest, WriteResponse, WriteSuccess,
 };
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
-use crate::{IdempotencyCache, RaftLogStore};
+use crate::IdempotencyCache;
 
 /// Write service implementation.
 pub struct WriteServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The log store for state machine access.
-    #[allow(dead_code)]
-    log_store: Arc<RaftLogStore>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
 }
@@ -31,12 +28,10 @@ impl WriteServiceImpl {
     /// Create a new write service.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        log_store: Arc<RaftLogStore>,
         idempotency: Arc<IdempotencyCache>,
     ) -> Self {
         Self {
             raft,
-            log_store,
             idempotency,
         }
     }

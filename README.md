@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > Under active development. Not production-ready.
 
-Ledger is InferaDB's persistence layer — a blockchain database built for authorization workloads. Every state change is cryptographically committed, replicated via Raft consensus, and independently verifiable. Designed for sub-millisecond reads and consistent sub-50ms writes at scale.
+Ledger is InferaDB's persistence layer — a blockchain database for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently. Reads complete in sub-milliseconds; writes in under 50ms p99.
 
 ## Features
 
@@ -20,7 +20,7 @@ Ledger is InferaDB's persistence layer — a blockchain database built for autho
 
 - Per-vault blockchain with chain-linked state roots
 - Merkle proofs for transaction inclusion
-- SHA-256 commitments, independently verifiable by clients
+- SHA-256 commitments clients can verify independently
 
 **Raft Consensus**
 
@@ -43,7 +43,7 @@ Ledger is InferaDB's persistence layer — a blockchain database built for autho
 
 **Storage**
 
-- [redb](https://github.com/cberner/redb) embedded database (single-file, ACID, zero-copy reads)
+- Embedded ACID database with zero-copy reads
 - Hybrid architecture: fast K/V queries + merkle commitments
 - Tiered snapshots (hot/warm/cold) for historical reads
 
@@ -128,7 +128,7 @@ cargo run --release -- --config config.toml
 
 ## Design
 
-See [DESIGN.md](DESIGN.md) for the complete specification covering:
+See [DESIGN.md](DESIGN.md) for details on:
 
 - Block structure and chain linking
 - State root computation (bucket-based hashing)

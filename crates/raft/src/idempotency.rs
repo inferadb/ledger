@@ -208,4 +208,41 @@ mod tests {
         let cached = cache.check("client-2", 1);
         assert!(cached.is_none());
     }
+
+    /// DESIGN.md compliance test: sequence numbers must be monotonically increasing.
+    /// Per Invariant 9: "Sequence numbers must be monotonically increasing per client."
+    #[test]
+    fn test_sequence_monotonicity() {
+        let cache = IdempotencyCache::new();
+
+        // Insert sequence 5
+        let result5 = make_result(100);
+        cache.insert("client-1".to_string(), 5, result5);
+
+        // Sequence 5 (same) should be duplicate
+        assert!(cache.check("client-1", 5).is_some());
+
+        // Sequence 4 (lower) should be duplicate (per idempotency semantics)
+        assert!(cache.check("client-1", 4).is_some());
+
+        // Sequence 3 (even lower) should still be duplicate
+        assert!(cache.check("client-1", 3).is_some());
+
+        // Sequence 6 (higher) should NOT be duplicate - new request
+        assert!(cache.check("client-1", 6).is_none());
+
+        // Insert sequence 10
+        let result10 = make_result(200);
+        cache.insert("client-1".to_string(), 10, result10.clone());
+
+        // Now sequence 5, 6, 7, 8, 9, 10 should all return the result for 10
+        for seq in 5..=10 {
+            let cached = cache.check("client-1", seq);
+            assert!(cached.is_some(), "sequence {} should be cached", seq);
+            assert_eq!(cached.unwrap().block_height, 200);
+        }
+
+        // Sequence 11 should NOT be cached
+        assert!(cache.check("client-1", 11).is_none());
+    }
 }

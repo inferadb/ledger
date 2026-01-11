@@ -1190,9 +1190,15 @@ name = "ledger-server"
 version = "0.1.0"
 dependencies = [
  "config",
+ "futures",
  "ledger-raft",
  "ledger-storage",
  "ledger-types",
+ "openraft",
+ "parking_lot",
+ "rand",
+ "redb",
+ "serde",
  "snafu",
  "tempfile",
  "tokio",

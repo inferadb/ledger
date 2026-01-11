@@ -33,7 +33,7 @@ pub mod proto {
 
 pub use idempotency::IdempotencyCache;
 pub use log_storage::{AppliedState, RaftLogStore, SequenceCounters, VaultHealthStatus};
-pub use raft_network::GrpcRaftNetwork;
+pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use server::LedgerServer;
 pub use types::{
     LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest,
