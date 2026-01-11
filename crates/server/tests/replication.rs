@@ -55,7 +55,10 @@ async fn test_ordered_replication() {
 
     // All nodes should have same last applied
     let leader_applied = leader.last_applied();
-    assert!(leader_applied >= 5, "leader should have applied at least 5 entries");
+    assert!(
+        leader_applied >= 5,
+        "leader should have applied at least 5 entries"
+    );
 
     for follower in cluster.followers() {
         assert_eq!(
@@ -189,7 +192,10 @@ async fn test_replication_after_delay() {
         include_tx_proof: false,
     };
 
-    client.write(request2).await.expect("second write should succeed");
+    client
+        .write(request2)
+        .await
+        .expect("second write should succeed");
 
     // Should still sync
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;

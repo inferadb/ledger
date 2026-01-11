@@ -124,7 +124,10 @@ async fn test_diverged_vault_returns_unavailable() {
         include_tx_proof: false,
     };
 
-    write_client.write(request).await.expect("write should succeed");
+    write_client
+        .write(request)
+        .await
+        .expect("write should succeed");
 
     // TODO: Corrupt the vault's state to cause divergence
     // TODO: Attempt to read from the diverged vault

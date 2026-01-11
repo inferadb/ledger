@@ -21,7 +21,9 @@ pub enum LedgerError {
     /// Storage layer error.
     #[snafu(display("Storage error at {location}: {message}"))]
     Storage {
+        /// Error description.
         message: String,
+        /// Source location.
         #[snafu(implicit)]
         location: Location,
     },
@@ -29,82 +31,132 @@ pub enum LedgerError {
     /// Raft consensus error.
     #[snafu(display("Consensus error at {location}: {message}"))]
     Consensus {
+        /// Error description.
         message: String,
+        /// Source location.
         #[snafu(implicit)]
         location: Location,
     },
 
     /// Hash verification failed.
     #[snafu(display("Hash mismatch: expected {expected:02x?}, got {actual:02x?}"))]
-    HashMismatch { expected: Hash, actual: Hash },
+    HashMismatch {
+        /// Expected hash value.
+        expected: Hash,
+        /// Actual hash value.
+        actual: Hash,
+    },
 
     /// Vault state has diverged from expected.
     #[snafu(display("Vault {vault_id} diverged at height {height}"))]
-    VaultDiverged { vault_id: VaultId, height: u64 },
+    VaultDiverged {
+        /// Vault identifier.
+        vault_id: VaultId,
+        /// Block height where divergence detected.
+        height: u64,
+    },
 
     /// Vault is currently unavailable (e.g., diverged, recovering).
     #[snafu(display("Vault {vault_id} is unavailable: {reason}"))]
-    VaultUnavailable { vault_id: VaultId, reason: String },
+    VaultUnavailable {
+        /// Vault identifier.
+        vault_id: VaultId,
+        /// Reason for unavailability.
+        reason: String,
+    },
 
     /// Namespace not found.
     #[snafu(display("Namespace {namespace_id} not found"))]
-    NamespaceNotFound { namespace_id: NamespaceId },
+    NamespaceNotFound {
+        /// Namespace identifier.
+        namespace_id: NamespaceId,
+    },
 
     /// Vault not found.
     #[snafu(display("Vault {vault_id} not found in namespace {namespace_id}"))]
     VaultNotFound {
+        /// Namespace identifier.
         namespace_id: NamespaceId,
+        /// Vault identifier.
         vault_id: VaultId,
     },
 
     /// Entity not found.
     #[snafu(display("Entity not found: {key}"))]
-    EntityNotFound { key: String },
+    EntityNotFound {
+        /// Entity key.
+        key: String,
+    },
 
     /// Precondition failed for conditional write.
     #[snafu(display("Precondition failed for key {key}: {reason}"))]
-    PreconditionFailed { key: String, reason: String },
+    PreconditionFailed {
+        /// Entity key.
+        key: String,
+        /// Failure reason.
+        reason: String,
+    },
 
     /// Duplicate transaction (idempotency).
     #[snafu(display("Transaction already committed: client={client_id}, sequence={sequence}"))]
-    AlreadyCommitted { client_id: String, sequence: u64 },
+    AlreadyCommitted {
+        /// Client identifier.
+        client_id: String,
+        /// Sequence number.
+        sequence: u64,
+    },
 
     /// Sequence number violation.
     #[snafu(display("Sequence violation for client {client_id}: expected {expected}, got {got}"))]
     SequenceViolation {
+        /// Client identifier.
         client_id: String,
+        /// Expected sequence number.
         expected: u64,
+        /// Actual sequence number received.
         got: u64,
     },
 
     /// Serialization error.
     #[snafu(display("Serialization error at {location}: {message}"))]
     Serialization {
+        /// Error description.
         message: String,
+        /// Source location.
         #[snafu(implicit)]
         location: Location,
     },
 
     /// Configuration error.
     #[snafu(display("Configuration error: {message}"))]
-    Config { message: String },
+    Config {
+        /// Error description.
+        message: String,
+    },
 
     /// I/O error.
     #[snafu(display("I/O error at {location}: {source}"))]
     Io {
+        /// Underlying I/O error.
         source: std::io::Error,
+        /// Source location.
         #[snafu(implicit)]
         location: Location,
     },
 
     /// Invalid argument.
     #[snafu(display("Invalid argument: {message}"))]
-    InvalidArgument { message: String },
+    InvalidArgument {
+        /// Error description.
+        message: String,
+    },
 
     /// Internal error (unexpected state).
     #[snafu(display("Internal error at {location}: {message}"))]
     Internal {
+        /// Error description.
         message: String,
+        /// Source location.
         #[snafu(implicit)]
         location: Location,
     },
@@ -116,27 +168,49 @@ pub enum LedgerError {
 pub enum StorageError {
     /// Database open failed.
     #[snafu(display("Failed to open database at {path}: {message}"))]
-    DatabaseOpen { path: String, message: String },
+    DatabaseOpen {
+        /// Database path.
+        path: String,
+        /// Error description.
+        message: String,
+    },
 
     /// Transaction failed.
     #[snafu(display("Transaction failed: {message}"))]
-    Transaction { message: String },
+    Transaction {
+        /// Error description.
+        message: String,
+    },
 
     /// Table operation failed.
     #[snafu(display("Table operation failed on {table}: {message}"))]
-    TableOperation { table: String, message: String },
+    TableOperation {
+        /// Table name.
+        table: String,
+        /// Error description.
+        message: String,
+    },
 
     /// Key encoding error.
     #[snafu(display("Key encoding error: {message}"))]
-    KeyEncoding { message: String },
+    KeyEncoding {
+        /// Error description.
+        message: String,
+    },
 
     /// Snapshot error.
     #[snafu(display("Snapshot error: {message}"))]
-    Snapshot { message: String },
+    Snapshot {
+        /// Error description.
+        message: String,
+    },
 
     /// Corruption detected.
     #[snafu(display("Data corruption detected: {message}"))]
-    Corruption { message: String },
+    Corruption {
+        /// Error description.
+        message: String,
+    },
 }
 
 impl From<StorageError> for LedgerError {
@@ -156,7 +230,10 @@ impl From<StorageError> for LedgerError {
 pub enum ConsensusError {
     /// Not the leader.
     #[snafu(display("Not the leader, current leader: {leader:?}"))]
-    NotLeader { leader: Option<String> },
+    NotLeader {
+        /// Current leader node ID, if known.
+        leader: Option<String>,
+    },
 
     /// Leader unknown.
     #[snafu(display("Leader unknown, cluster may be electing"))]
@@ -164,19 +241,33 @@ pub enum ConsensusError {
 
     /// Proposal failed.
     #[snafu(display("Proposal failed: {message}"))]
-    ProposalFailed { message: String },
+    ProposalFailed {
+        /// Error description.
+        message: String,
+    },
 
     /// Log storage error.
     #[snafu(display("Log storage error: {message}"))]
-    LogStorage { message: String },
+    LogStorage {
+        /// Error description.
+        message: String,
+    },
 
     /// State machine error.
     #[snafu(display("State machine error: {message}"))]
-    StateMachine { message: String },
+    StateMachine {
+        /// Error description.
+        message: String,
+    },
 
     /// Network error.
     #[snafu(display("Network error communicating with {node}: {message}"))]
-    Network { node: String, message: String },
+    Network {
+        /// Target node.
+        node: String,
+        /// Error description.
+        message: String,
+    },
 }
 
 impl From<ConsensusError> for LedgerError {

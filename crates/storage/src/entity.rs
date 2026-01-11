@@ -3,7 +3,7 @@
 //! Provides direct entity CRUD operations separate from the state layer.
 //! Used for lower-level access when the full state layer isn't needed.
 
-use redb::{ReadableTable, ReadOnlyTable, Table};
+use redb::{ReadOnlyTable, ReadableTable, Table};
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{Entity, VaultId};
@@ -38,11 +38,10 @@ impl EntityStore {
 
         match table.get(&storage_key[..]).context(StorageSnafu)? {
             Some(data) => {
-                let entity = postcard::from_bytes(data.value()).map_err(|e| {
-                    EntityError::Serialization {
+                let entity =
+                    postcard::from_bytes(data.value()).map_err(|e| EntityError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -151,8 +150,7 @@ impl EntityStore {
                 if key_bytes.len() < 9 {
                     break;
                 }
-                let key_vault_id =
-                    i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+                let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
                 if key_vault_id != vault_id || key_bytes[8] != 255 {
                     break;
                 }

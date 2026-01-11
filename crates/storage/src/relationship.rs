@@ -3,7 +3,7 @@
 //! Stores relationship tuples (resource, relation, subject) with dual indexing
 //! for efficient lookups in both directions.
 
-use redb::{ReadableTable, ReadOnlyTable, Table};
+use redb::{ReadOnlyTable, ReadableTable, Table};
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{Relationship, VaultId};

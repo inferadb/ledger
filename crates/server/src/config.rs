@@ -82,10 +82,12 @@ impl Config {
                 .add_source(config::File::with_name("/etc/ledger/config").required(false))
         };
 
-        // Add environment variables with LEDGER_ prefix
+        // Add environment variables with INFERADB__LEDGER__ prefix.
+        // Use "__" separator for nesting (e.g., INFERADB__LEDGER__BATCHING__MAX_BATCH_SIZE).
+        // Single underscores in field names are preserved (e.g., INFERADB__LEDGER__NODE_ID → node_id).
         let builder = builder.add_source(
-            config::Environment::with_prefix("LEDGER")
-                .separator("_")
+            config::Environment::with_prefix("INFERADB__LEDGER")
+                .separator("__")
                 .try_parsing(true),
         );
 

@@ -1,0 +1,33 @@
+# InferaDB Ledger Configuration
+#
+# Copy this file to ledger.toml and adjust for your environment.
+# All settings can be overridden via environment variables with INFERADB__LEDGER__ prefix.
+# Example: INFERADB__LEDGER__NODE_ID=1
+
+# Unique numeric identifier for this node (required)
+node_id = 1
+
+# gRPC listen address (required)
+listen_addr = "0.0.0.0:50051"
+
+# Data directory for Raft logs, snapshots, and state (required)
+data_dir = "/var/lib/ledger"
+
+# Bootstrap a new cluster (set true only for initial cluster creation)
+bootstrap = false
+
+# Peer nodes in the cluster (optional, empty for single-node)
+# [[peers]]
+# node_id = 2
+# addr = "node-2:50051"
+#
+# [[peers]]
+# node_id = 3
+# addr = "node-3:50051"
+
+# Transaction batching configuration (optional)
+[batching]
+# Maximum transactions per batch
+max_batch_size = 100
+# Maximum wait time for batch to fill (milliseconds)
+max_batch_delay_ms = 10

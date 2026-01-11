@@ -10,6 +10,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
+use crate::IdempotencyCache;
 use crate::metrics;
 use crate::proto::write_service_server::WriteService;
 use crate::proto::{
@@ -17,7 +18,6 @@ use crate::proto::{
     WriteRequest, WriteResponse, WriteSuccess,
 };
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
-use crate::IdempotencyCache;
 
 /// Write service implementation.
 pub struct WriteServiceImpl {
@@ -29,17 +29,67 @@ pub struct WriteServiceImpl {
 
 impl WriteServiceImpl {
     /// Create a new write service.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        idempotency: Arc<IdempotencyCache>,
-    ) -> Self {
-        Self {
-            raft,
-            idempotency,
+    pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, idempotency: Arc<IdempotencyCache>) -> Self {
+        Self { raft, idempotency }
+    }
+
+    /// Convert a proto SetCondition to internal SetCondition.
+    fn convert_set_condition(
+        proto_condition: &crate::proto::SetCondition,
+    ) -> Option<ledger_types::SetCondition> {
+        use crate::proto::set_condition::Condition;
+
+        proto_condition.condition.as_ref().map(|c| match c {
+            Condition::NotExists(true) => ledger_types::SetCondition::MustNotExist,
+            Condition::NotExists(false) => ledger_types::SetCondition::MustExist,
+            Condition::Version(v) => ledger_types::SetCondition::VersionEquals(*v),
+            Condition::ValueEquals(v) => ledger_types::SetCondition::ValueEquals(v.clone()),
+        })
+    }
+
+    /// Convert a proto Operation to internal Operation.
+    fn convert_operation(
+        proto_op: &crate::proto::Operation,
+    ) -> Result<ledger_types::Operation, Status> {
+        use crate::proto::operation::Op;
+
+        let op = proto_op
+            .op
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
+
+        match op {
+            Op::CreateRelationship(cr) => Ok(ledger_types::Operation::CreateRelationship {
+                resource: cr.resource.clone(),
+                relation: cr.relation.clone(),
+                subject: cr.subject.clone(),
+            }),
+            Op::DeleteRelationship(dr) => Ok(ledger_types::Operation::DeleteRelationship {
+                resource: dr.resource.clone(),
+                relation: dr.relation.clone(),
+                subject: dr.subject.clone(),
+            }),
+            Op::SetEntity(se) => {
+                let condition = se.condition.as_ref().and_then(Self::convert_set_condition);
+
+                Ok(ledger_types::Operation::SetEntity {
+                    key: se.key.clone(),
+                    value: se.value.clone(),
+                    condition,
+                    expires_at: se.expires_at,
+                })
+            }
+            Op::DeleteEntity(de) => Ok(ledger_types::Operation::DeleteEntity {
+                key: de.key.clone(),
+            }),
+            Op::ExpireEntity(ee) => Ok(ledger_types::Operation::ExpireEntity {
+                key: ee.key.clone(),
+                expired_at: ee.expired_at,
+            }),
         }
     }
 
-    /// Convert operations to LedgerRequest.
+    /// Convert proto operations to LedgerRequest.
     fn operations_to_request(
         &self,
         namespace_id: i64,
@@ -48,30 +98,31 @@ impl WriteServiceImpl {
         client_id: &str,
         sequence: u64,
     ) -> Result<LedgerRequest, Status> {
-        // Convert proto operations to internal Transaction type
-        let transactions = operations
+        // Convert proto operations to internal Operations
+        let internal_ops: Vec<ledger_types::Operation> = operations
             .iter()
-            .map(|_op| {
-                // TODO: Proper conversion from proto operations to Transaction
-                ledger_types::Transaction {
-                    id: *Uuid::new_v4().as_bytes(),
-                    client_id: client_id.to_string(),
-                    sequence,
-                    operations: vec![], // TODO: Convert operations
-                    timestamp: chrono::Utc::now(),
-                    actor: "system".to_string(),
-                }
-            })
-            .collect();
+            .map(Self::convert_operation)
+            .collect::<Result<Vec<_>, Status>>()?;
+
+        // Create a single transaction with all operations
+        let transaction = ledger_types::Transaction {
+            id: *Uuid::new_v4().as_bytes(),
+            client_id: client_id.to_string(),
+            sequence,
+            operations: internal_ops,
+            timestamp: chrono::Utc::now(),
+            actor: "system".to_string(), // Actor is set by upstream Engine/Control
+        };
 
         Ok(LedgerRequest::Write {
-            namespace_id: namespace_id.try_into().map_err(|_| {
-                Status::invalid_argument("Invalid namespace_id")
-            })?,
-            vault_id: vault_id.unwrap_or(0).try_into().map_err(|_| {
-                Status::invalid_argument("Invalid vault_id")
-            })?,
-            transactions,
+            namespace_id: namespace_id
+                .try_into()
+                .map_err(|_| Status::invalid_argument("Invalid namespace_id"))?,
+            vault_id: vault_id
+                .unwrap_or(0)
+                .try_into()
+                .map_err(|_| Status::invalid_argument("Invalid vault_id"))?,
+            transactions: vec![transaction],
         })
     }
 }
@@ -133,19 +184,21 @@ impl WriteService for WriteServiceImpl {
         }
 
         // Convert to internal request
-        let ledger_request = self.operations_to_request(namespace_id, vault_id, &req.operations, &client_id, sequence)?;
+        let ledger_request = self.operations_to_request(
+            namespace_id,
+            vault_id,
+            &req.operations,
+            &client_id,
+            sequence,
+        )?;
 
         // Submit to Raft
         metrics::record_raft_proposal();
-        let result = self
-            .raft
-            .client_write(ledger_request)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Raft write failed");
-                metrics::record_write(false, start.elapsed().as_secs_f64());
-                Status::internal(format!("Raft error: {}", e))
-            })?;
+        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
+            warn!(error = %e, "Raft write failed");
+            metrics::record_write(false, start.elapsed().as_secs_f64());
+            Status::internal(format!("Raft error: {}", e))
+        })?;
 
         // Extract response
         let response = result.data;
@@ -170,7 +223,11 @@ impl WriteService for WriteServiceImpl {
                     .insert(client_id.clone(), sequence, success.clone());
                 metrics::set_idempotency_cache_size(self.idempotency.len());
 
-                info!(block_height, latency_ms = latency * 1000.0, "Write committed");
+                info!(
+                    block_height,
+                    latency_ms = latency * 1000.0,
+                    "Write committed"
+                );
                 metrics::record_write(true, latency);
 
                 Ok(Response::new(WriteResponse {
@@ -274,19 +331,21 @@ impl WriteService for WriteServiceImpl {
         tracing::Span::current().record("batch_size", batch_size);
 
         // Convert to internal request
-        let ledger_request = self.operations_to_request(namespace_id, vault_id, &all_operations, &client_id, sequence)?;
+        let ledger_request = self.operations_to_request(
+            namespace_id,
+            vault_id,
+            &all_operations,
+            &client_id,
+            sequence,
+        )?;
 
         // Submit to Raft
         metrics::record_raft_proposal();
-        let result = self
-            .raft
-            .client_write(ledger_request)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Raft batch write failed");
-                metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
-                Status::internal(format!("Raft error: {}", e))
-            })?;
+        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
+            warn!(error = %e, "Raft batch write failed");
+            metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
+            Status::internal(format!("Raft error: {}", e))
+        })?;
 
         // Extract response
         let response = result.data;
@@ -311,7 +370,12 @@ impl WriteService for WriteServiceImpl {
                     .insert(client_id.clone(), sequence, success.clone());
                 metrics::set_idempotency_cache_size(self.idempotency.len());
 
-                info!(block_height, batch_size, latency_ms = latency * 1000.0, "Batch write committed");
+                info!(
+                    block_height,
+                    batch_size,
+                    latency_ms = latency * 1000.0,
+                    "Batch write committed"
+                );
                 metrics::record_batch_write(true, batch_size, latency);
 
                 Ok(Response::new(BatchWriteResponse {

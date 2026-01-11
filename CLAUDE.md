@@ -11,6 +11,33 @@ InferaDB Ledger is a blockchain database for cryptographically verifiable author
 - **DESIGN.md** — Authoritative specification for all implementations. Code must match the design doc.
 - **proto/** — gRPC service and message definitions. Keep in sync with DESIGN.md and implementation.
 
+## Serena (MCP Server)
+
+Always activate and use Serena for codebase navigation and editing. Serena provides semantic tooling that understands code structure rather than treating files as raw text.
+
+**Activation:** Run `mcp__plugin_serena_serena__activate_project` at session start if not already active.
+
+**Prefer semantic tools over file operations:**
+
+| Task                   | Use Serena                                       | Avoid                     |
+| ---------------------- | ------------------------------------------------ | ------------------------- |
+| Understand a file      | `get_symbols_overview`                           | Reading entire file       |
+| Find a function/struct | `find_symbol` with name pattern                  | Grep/glob searching       |
+| Find usages            | `find_referencing_symbols`                       | Grep for text             |
+| Edit a function        | `replace_symbol_body`                            | Raw text replacement      |
+| Add new code           | `insert_after_symbol` / `insert_before_symbol`   | Editing with line numbers |
+| Search patterns        | `search_for_pattern` with `relative_path` filter | Global grep               |
+
+**Workflow:**
+
+1. Use `get_symbols_overview` to understand file structure before diving in
+2. Use `find_symbol` with `depth=1` to see class methods without reading bodies
+3. Only request `include_body=True` when you need the implementation
+4. Use `find_referencing_symbols` before refactoring to find all callers
+5. Prefer `replace_symbol_body` for targeted edits over full-file rewrites
+
+**Name paths:** Symbols are identified by paths like `ClassName/method_name`. Use patterns like `Foo` (any symbol named Foo), `Foo/bar` (bar inside Foo), or `/Foo/bar` (exact path from file root).
+
 ## Commands
 
 ```bash
@@ -56,17 +83,20 @@ cargo run -p ledger-server --release -- --config config.toml
 ```
 
 **Crates:**
+
 - `ledger-types` — Core types, SHA-256/seahash, merkle tree, snafu errors
 - `ledger-storage` — redb wrapper, entity/relationship CRUD, dual indexes, state root computation
 - `ledger-raft` — openraft integration, log storage, gRPC services, transaction batching
 - `ledger-server` — Main binary, bootstrap, config loading
 
 **Key abstractions:**
+
 - `StorageEngine` (storage/engine.rs) — redb database wrapper with transaction helpers
 - `StateLayer` (storage/state.rs) — Applies blocks, computes bucket-based state roots
 - `LedgerServer` (raft/server.rs) — gRPC server combining all services with Raft
 
 **Data model:**
+
 - Namespace → isolated storage unit per organization
 - Vault → relationship store within namespace, maintains its own blockchain
 - Entity → key-value data with TTL and versioning
@@ -76,6 +106,7 @@ cargo run -p ledger-server --release -- --config config.toml
 ## Code Conventions
 
 **Lints (workspace-level):**
+
 - `unsafe_code = "deny"` — No unsafe
 - `unwrap_used = "deny"` — Use snafu `.context()` instead
 - `panic = "deny"` — No panics
@@ -97,16 +128,19 @@ cargo run -p ledger-server --release -- --config config.toml
 For documentation, comments, and markdown files:
 
 **Conciseness:**
+
 - "because" not "due to the fact that"
 - "to" not "in order to"
 - "now" not "at this point in time"
 - "if" not "in the event that"
 
 **No filler or weak modifiers:**
+
 - "can" not "has the ability to" / "is able to"
 - Remove: very, really, quite, extremely, basically, actually
 
 **Markdown:**
+
 - Headers: plain text, no bold, no numbering
 - Code blocks: always specify language
 - File naming: kebab-case

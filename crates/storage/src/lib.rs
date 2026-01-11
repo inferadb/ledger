@@ -25,7 +25,7 @@ pub use bucket::VaultCommitment;
 pub use engine::{ReadTxn, StorageEngine, WriteTxn};
 pub use entity::EntityStore;
 pub use indexes::IndexManager;
-pub use keys::{decode_storage_key, encode_storage_key, StorageKey};
+pub use keys::{StorageKey, decode_storage_key, encode_storage_key};
 pub use relationship::RelationshipStore;
 pub use shard::ShardManager;
 pub use snapshot::{Snapshot, SnapshotManager};

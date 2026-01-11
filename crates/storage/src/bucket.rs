@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use ledger_types::{bucket_id, sha256_concat, BucketHasher, Entity, Hash, EMPTY_HASH};
+use ledger_types::{BucketHasher, EMPTY_HASH, Entity, Hash, bucket_id, sha256_concat};
 
 /// Number of buckets per vault.
 pub const NUM_BUCKETS: usize = 256;

@@ -18,7 +18,11 @@ async fn test_single_node_self_election() {
         .wait_for_leader_timeout(Duration::from_secs(5))
         .await;
 
-    assert_eq!(leader_id, Some(1), "single node should elect itself as leader");
+    assert_eq!(
+        leader_id,
+        Some(1),
+        "single node should elect itself as leader"
+    );
 }
 
 /// Test that a three-node cluster elects a leader.
@@ -65,7 +69,8 @@ async fn test_term_agreement() {
     let first_term = terms[0];
     for (i, term) in terms.iter().enumerate() {
         assert_eq!(
-            *term, first_term,
+            *term,
+            first_term,
             "node {} term {} should match node 0 term {}",
             i + 1,
             term,

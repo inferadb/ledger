@@ -175,28 +175,45 @@ pub struct Transaction {
 pub enum Operation {
     /// Create a relationship tuple.
     CreateRelationship {
+        /// Resource identifier (e.g., "document:123").
         resource: String,
+        /// Relation name (e.g., "viewer", "editor").
         relation: String,
+        /// Subject identifier (e.g., "user:456").
         subject: String,
     },
     /// Delete a relationship tuple.
     DeleteRelationship {
+        /// Resource identifier.
         resource: String,
+        /// Relation name.
         relation: String,
+        /// Subject identifier.
         subject: String,
     },
     /// Set an entity value with optional condition and expiration.
     SetEntity {
+        /// Entity key.
         key: String,
+        /// Entity value (opaque bytes).
         value: Vec<u8>,
+        /// Optional write condition.
         condition: Option<SetCondition>,
         /// Unix timestamp for expiration (0 = never expires).
         expires_at: Option<u64>,
     },
     /// Delete an entity.
-    DeleteEntity { key: String },
+    DeleteEntity {
+        /// Entity key to delete.
+        key: String,
+    },
     /// Expire an entity (GC-initiated, distinct from DeleteEntity for audit).
-    ExpireEntity { key: String, expired_at: u64 },
+    ExpireEntity {
+        /// Entity key that expired.
+        key: String,
+        /// Unix timestamp when expiration occurred.
+        expired_at: u64,
+    },
 }
 
 /// Conditional write conditions per DESIGN.md lines 768-774.
@@ -254,7 +271,11 @@ pub struct Relationship {
 
 impl Relationship {
     /// Create a new relationship.
-    pub fn new(resource: impl Into<String>, relation: impl Into<String>, subject: impl Into<String>) -> Self {
+    pub fn new(
+        resource: impl Into<String>,
+        relation: impl Into<String>,
+        subject: impl Into<String>,
+    ) -> Self {
         Self {
             resource: resource.into(),
             relation: relation.into(),

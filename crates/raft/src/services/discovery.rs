@@ -55,9 +55,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             .nodes()
             .take(max_peers)
             .map(|(id, node)| PeerInfo {
-                node_id: Some(NodeId {
-                    id: id.to_string(),
-                }),
+                node_id: Some(NodeId { id: id.to_string() }),
                 addresses: vec![node.addr.clone()],
                 grpc_port: 5000, // Default port
                 last_seen: None, // TODO: Track last seen times
@@ -77,7 +75,9 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
         let req = request.into_inner();
 
         // Validate the peer info
-        let peer = req.peer.ok_or_else(|| Status::invalid_argument("Missing peer info"))?;
+        let peer = req
+            .peer
+            .ok_or_else(|| Status::invalid_argument("Missing peer info"))?;
 
         if peer.node_id.is_none() {
             return Err(Status::invalid_argument("Missing node_id"));
@@ -117,9 +117,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
         let nodes: Vec<NodeInfo> = membership
             .nodes()
             .map(|(id, node)| NodeInfo {
-                node_id: Some(NodeId {
-                    id: id.to_string(),
-                }),
+                node_id: Some(NodeId { id: id.to_string() }),
                 addresses: vec![node.addr.clone()],
                 grpc_port: 5000,
                 capabilities: Some(NodeCapabilities {

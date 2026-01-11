@@ -86,13 +86,15 @@ impl StorageEngine {
         txn.open_table(Tables::OBJ_INDEX).context(TableSnafu)?;
         txn.open_table(Tables::SUBJ_INDEX).context(TableSnafu)?;
         txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
-        txn.open_table(Tables::VAULT_BLOCK_INDEX).context(TableSnafu)?;
+        txn.open_table(Tables::VAULT_BLOCK_INDEX)
+            .context(TableSnafu)?;
         txn.open_table(Tables::RAFT_LOG).context(TableSnafu)?;
         txn.open_table(Tables::RAFT_STATE).context(TableSnafu)?;
         txn.open_table(Tables::VAULT_META).context(TableSnafu)?;
         txn.open_table(Tables::NAMESPACE_META).context(TableSnafu)?;
         txn.open_table(Tables::SEQUENCES).context(TableSnafu)?;
-        txn.open_table(Tables::CLIENT_SEQUENCES).context(TableSnafu)?;
+        txn.open_table(Tables::CLIENT_SEQUENCES)
+            .context(TableSnafu)?;
 
         txn.commit().context(CommitSnafu)?;
         Ok(())

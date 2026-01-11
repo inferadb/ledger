@@ -257,11 +257,13 @@ pub fn record_grpc_request(service: &str, method: &str, status: &str, latency_se
         "service" => service.to_string(),
         "method" => method.to_string(),
         "status" => status.to_string()
-    ).increment(1);
+    )
+    .increment(1);
     histogram!(GRPC_REQUEST_LATENCY,
         "service" => service.to_string(),
         "method" => method.to_string()
-    ).record(latency_secs);
+    )
+    .record(latency_secs);
 }
 
 // =============================================================================

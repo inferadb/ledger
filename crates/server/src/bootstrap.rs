@@ -12,12 +12,11 @@ use openraft::{BasicNode, Raft};
 use parking_lot::RwLock;
 use redb::Database;
 
-use ledger_raft::{GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig, RaftLogStore};
+use ledger_raft::{
+    AppliedStateAccessor, GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig,
+    RaftLogStore,
+};
 use ledger_storage::StateLayer;
-
-// Re-export for tests
-#[allow(unused_imports)]
-use ledger_raft::AppliedState;
 
 use crate::config::Config;
 
@@ -78,6 +77,9 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     let log_store = RaftLogStore::open(&log_path)
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?;
 
+    // Get accessor before log_store is consumed by Adaptor
+    let applied_state_accessor = log_store.accessor();
+
     // Create Raft network factory
     let network = GrpcRaftNetworkFactory::new();
 
@@ -117,6 +119,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     let server = LedgerServer::new(
         raft.clone(),
         state.clone(),
+        applied_state_accessor,
         config.listen_addr,
     );
 
@@ -179,6 +182,10 @@ mod tests {
         let config = Config::for_test(1, 50051, temp_dir.path().to_path_buf());
 
         let result = bootstrap_node(&config).await;
-        assert!(result.is_ok(), "bootstrap should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "bootstrap should succeed: {:?}",
+            result.err()
+        );
     }
 }

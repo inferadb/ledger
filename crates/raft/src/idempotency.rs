@@ -143,9 +143,7 @@ mod tests {
 
     fn make_result(block_height: u64) -> WriteSuccess {
         WriteSuccess {
-            tx_id: Some(TxId {
-                id: vec![0u8; 16],
-            }),
+            tx_id: Some(TxId { id: vec![0u8; 16] }),
             block_height,
             block_header: None,
             tx_proof: None,

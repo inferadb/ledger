@@ -13,10 +13,12 @@ use parking_lot::RwLock;
 use redb::Database;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{Hash, NamespaceId, ShardBlock, ShardId, VaultEntry, VaultHealth, VaultId, EMPTY_HASH};
+use ledger_types::{
+    EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultEntry, VaultHealth, VaultId,
+};
 
 use crate::block_archive::BlockArchive;
-use crate::bucket::{VaultCommitment, NUM_BUCKETS};
+use crate::bucket::{NUM_BUCKETS, VaultCommitment};
 use crate::snapshot::{Snapshot, SnapshotManager, SnapshotStateData, VaultSnapshotMeta};
 use crate::state::StateLayer;
 
@@ -32,12 +34,16 @@ pub enum ShardError {
     },
 
     #[snafu(display("Snapshot error: {source}"))]
-    Snapshot { source: crate::snapshot::SnapshotError },
+    Snapshot {
+        source: crate::snapshot::SnapshotError,
+    },
 
     #[snafu(display("Vault {vault_id} not found"))]
     VaultNotFound { vault_id: VaultId },
 
-    #[snafu(display("State root mismatch for vault {vault_id}: expected {expected:?}, computed {computed:?}"))]
+    #[snafu(display(
+        "State root mismatch for vault {vault_id}: expected {expected:?}, computed {computed:?}"
+    ))]
     StateRootMismatch {
         vault_id: VaultId,
         expected: Hash,
@@ -204,17 +210,22 @@ impl ShardManager {
             }
 
             // Compute and verify state root
-            let computed_root = self.state.compute_state_root(entry.vault_id).context(StateSnafu)?;
+            let computed_root = self
+                .state
+                .compute_state_root(entry.vault_id)
+                .context(StateSnafu)?;
 
             if computed_root != entry.state_root {
                 // Mark vault as diverged
-                let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
-                    namespace_id: entry.namespace_id,
-                    height: 0,
-                    state_root: EMPTY_HASH,
-                    previous_hash: ledger_types::ZERO_HASH,
-                    health: VaultHealth::Healthy,
-                });
+                let meta = vault_meta
+                    .entry(entry.vault_id)
+                    .or_insert_with(|| VaultMeta {
+                        namespace_id: entry.namespace_id,
+                        height: 0,
+                        state_root: EMPTY_HASH,
+                        previous_hash: ledger_types::ZERO_HASH,
+                        health: VaultHealth::Healthy,
+                    });
 
                 meta.health = VaultHealth::Diverged {
                     expected: entry.state_root,
@@ -230,13 +241,15 @@ impl ShardManager {
             }
 
             // Update vault metadata
-            let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
-                namespace_id: entry.namespace_id,
-                height: 0,
-                state_root: EMPTY_HASH,
-                previous_hash: ledger_types::ZERO_HASH,
-                health: VaultHealth::Healthy,
-            });
+            let meta = vault_meta
+                .entry(entry.vault_id)
+                .or_insert_with(|| VaultMeta {
+                    namespace_id: entry.namespace_id,
+                    height: 0,
+                    state_root: EMPTY_HASH,
+                    previous_hash: ledger_types::ZERO_HASH,
+                    health: VaultHealth::Healthy,
+                });
 
             meta.height = entry.vault_height;
             meta.state_root = entry.state_root;
@@ -278,12 +291,13 @@ impl ShardManager {
                     source: crate::state::StateError::Table { source: e },
                 })?;
 
-            let entities = crate::entity::EntityStore::list_in_vault(&table, vault_id, usize::MAX, 0)
-                .map_err(|e| ShardError::State {
-                    source: crate::state::StateError::Serialization {
-                        message: format!("{:?}", e),
-                    },
-                })?;
+            let entities =
+                crate::entity::EntityStore::list_in_vault(&table, vault_id, usize::MAX, 0)
+                    .map_err(|e| ShardError::State {
+                        source: crate::state::StateError::Serialization {
+                            message: format!("{:?}", e),
+                        },
+                    })?;
 
             vault_states.push(VaultSnapshotMeta::new(
                 vault_id,
@@ -298,8 +312,8 @@ impl ShardManager {
 
         let state_data = SnapshotStateData { vault_entities };
 
-        let snapshot =
-            Snapshot::new(self.shard_id, shard_height, vault_states, state_data).context(SnapshotSnafu)?;
+        let snapshot = Snapshot::new(self.shard_id, shard_height, vault_states, state_data)
+            .context(SnapshotSnafu)?;
 
         self.snapshots.save(&snapshot).context(SnapshotSnafu)
     }

@@ -9,8 +9,8 @@
 use std::fmt;
 use std::io::Cursor;
 
-use openraft::impls::OneshotResponder;
 use openraft::BasicNode;
+use openraft::impls::OneshotResponder;
 use serde::{Deserialize, Serialize};
 
 use ledger_types::{Hash, NamespaceId, Transaction, VaultId};

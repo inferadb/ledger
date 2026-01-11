@@ -69,8 +69,12 @@ Ledger is InferaDB's persistence layer — a blockchain database for authorizati
 
 ### Prerequisites
 
-- Rust 1.85+ (edition 2024)
-- Protocol Buffers compiler (`protoc`)
+- [mise](https://mise.jdx.dev/) for development tools (Rust, protoc, buf)
+
+```bash
+# Install mise (if not already installed)
+curl https://mise.run | sh
+```
 
 ### Build
 
@@ -79,6 +83,9 @@ Ledger is InferaDB's persistence layer — a blockchain database for authorizati
 git clone https://github.com/inferadb/ledger.git
 cd ledger
 
+# Install development tools (rust, protoc, buf)
+mise install
+
 # Build all crates
 cargo build --release
 
@@ -86,36 +93,48 @@ cargo build --release
 cargo test
 ```
 
-### Configuration
-
-Create a `config.toml`:
-
-```toml
-[node]
-id = "node-1"
-data_dir = "/var/lib/ledger"
-
-[grpc]
-listen_addr = "0.0.0.0:9000"
-
-[raft]
-listen_addr = "0.0.0.0:9001"
-peers = ["node-2:9001", "node-3:9001"]
-
-[storage]
-max_wal_size = "1GB"
-snapshot_interval = 10000  # blocks
-```
-
-### Run
+### Run a Single Node
 
 ```bash
-# Start a single node (development)
-cargo run --release -- --config config.toml
+# Create a config file from the example
+cp ledger.example.toml ledger.toml
 
-# Or run a 3-node cluster
-./scripts/start-cluster.sh
+# Edit as needed, then start
+cargo run --release -p ledger-server
+
+# Or start with environment variables (no config file needed)
+INFERADB__LEDGER__NODE_ID=1 \
+INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
+INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
+INFERADB__LEDGER__BOOTSTRAP=true \
+cargo run --release -p ledger-server
 ```
+
+### Run a 3-Node Cluster
+
+```bash
+./scripts/start-cluster.sh          # Start local development cluster
+./scripts/start-cluster.sh status   # Check status
+./scripts/start-cluster.sh stop     # Stop cluster
+./scripts/start-cluster.sh clean    # Stop and remove all data
+```
+
+### Configuration
+
+See [`ledger.example.toml`](ledger.example.toml) for all options. Key settings:
+
+```toml
+node_id = 1                           # Unique numeric node ID
+listen_addr = "0.0.0.0:50051"         # gRPC listen address
+data_dir = "/var/lib/ledger"          # Raft logs and state
+bootstrap = true                      # Set true for first node only
+
+[[peers]]                             # Other cluster members
+node_id = 2
+addr = "node-2:50051"
+```
+
+Environment variables override config file values using the `INFERADB__LEDGER__` prefix (e.g., `INFERADB__LEDGER__NODE_ID=1`).
 
 ## Crates
 

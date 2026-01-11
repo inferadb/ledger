@@ -140,10 +140,10 @@ OPTIONS:
     -V, --version          Print version information
 
 ENVIRONMENT VARIABLES:
-    LEDGER_NODE_ID         Node identifier (numeric)
-    LEDGER_LISTEN_ADDR     gRPC listen address (e.g., 0.0.0.0:50051)
-    LEDGER_DATA_DIR        Data directory path
-    LEDGER_BOOTSTRAP       Set to 'true' to bootstrap a new cluster
+    INFERADB__LEDGER__NODE_ID       Node identifier (numeric)
+    INFERADB__LEDGER__LISTEN_ADDR   gRPC listen address (e.g., 0.0.0.0:50051)
+    INFERADB__LEDGER__DATA_DIR      Data directory path
+    INFERADB__LEDGER__BOOTSTRAP     Set to 'true' to bootstrap a new cluster
 
 EXAMPLES:
     # Start with default configuration
@@ -153,7 +153,11 @@ EXAMPLES:
     ledger --config /etc/ledger/config.toml
 
     # Bootstrap a new single-node cluster
-    LEDGER_NODE_ID=1 LEDGER_LISTEN_ADDR=0.0.0.0:50051 LEDGER_BOOTSTRAP=true ledger
+    INFERADB__LEDGER__NODE_ID=1 \
+    INFERADB__LEDGER__LISTEN_ADDR=0.0.0.0:50051 \
+    INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
+    INFERADB__LEDGER__BOOTSTRAP=true \
+    ledger
 "#
     );
 }

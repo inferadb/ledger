@@ -1,0 +1,14 @@
+# Development tool versions managed by mise (https://mise.jdx.dev)
+#
+# Install mise: https://mise.jdx.dev/getting-started.html
+# Then run: mise install
+
+[tools]
+# Rust toolchain
+rust = "1.85"
+
+# Protocol Buffers compiler (required for building)
+protobuf = "29"
+
+# Buf CLI for proto linting and breaking change detection
+buf = "1"

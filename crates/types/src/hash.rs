@@ -94,7 +94,8 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
     offset += 8;
 
     // timestamp_nanos: u32 BE
-    buf[offset..offset + 4].copy_from_slice(&header.timestamp.timestamp_subsec_nanos().to_be_bytes());
+    buf[offset..offset + 4]
+        .copy_from_slice(&header.timestamp.timestamp_subsec_nanos().to_be_bytes());
     offset += 4;
 
     // proposer_len: u32 LE
@@ -123,21 +124,21 @@ pub fn tx_hash(tx: &Transaction) -> Hash {
     let mut hasher = Sha256::new();
 
     // id: 16 bytes
-    hasher.update(&tx.id);
+    hasher.update(tx.id);
 
     // client_id: length-prefixed
-    hasher.update(&(tx.client_id.len() as u32).to_le_bytes());
+    hasher.update((tx.client_id.len() as u32).to_le_bytes());
     hasher.update(tx.client_id.as_bytes());
 
     // sequence: u64 BE
-    hasher.update(&tx.sequence.to_be_bytes());
+    hasher.update(tx.sequence.to_be_bytes());
 
     // actor: length-prefixed
-    hasher.update(&(tx.actor.len() as u32).to_le_bytes());
+    hasher.update((tx.actor.len() as u32).to_le_bytes());
     hasher.update(tx.actor.as_bytes());
 
     // operations count: u32 LE
-    hasher.update(&(tx.operations.len() as u32).to_le_bytes());
+    hasher.update((tx.operations.len() as u32).to_le_bytes());
 
     // Each operation
     for op in &tx.operations {
@@ -268,7 +269,8 @@ impl BucketHasher {
         // key: variable
         self.hasher.update(&entity.key);
         // value_len: u32 LE
-        self.hasher.update(&(entity.value.len() as u32).to_le_bytes());
+        self.hasher
+            .update(&(entity.value.len() as u32).to_le_bytes());
         // value: variable
         self.hasher.update(&entity.value);
         // expires_at: u64 BE (0 = never)

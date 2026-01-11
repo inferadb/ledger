@@ -57,13 +57,20 @@ async fn test_single_node_write_read() {
     };
 
     let response = client.write(request).await;
-    assert!(response.is_ok(), "write should succeed: {:?}", response.err());
+    assert!(
+        response.is_ok(),
+        "write should succeed: {:?}",
+        response.err()
+    );
 
     let response = response.unwrap().into_inner();
     match response.result {
         Some(ledger_raft::proto::write_response::Result::Success(success)) => {
             assert!(success.tx_id.is_some(), "should have tx_id");
-            assert!(success.block_height > 0, "should have non-zero block height");
+            assert!(
+                success.block_height > 0,
+                "should have non-zero block height"
+            );
         }
         Some(ledger_raft::proto::write_response::Result::Error(err)) => {
             panic!("write failed: {:?}", err);
@@ -126,7 +133,10 @@ async fn test_write_idempotency() {
             Some(ledger_raft::proto::write_response::Result::Success(s2)),
         ) => {
             assert_eq!(s1.tx_id, s2.tx_id, "tx_id should match");
-            assert_eq!(s1.block_height, s2.block_height, "block_height should match");
+            assert_eq!(
+                s1.block_height, s2.block_height,
+                "block_height should match"
+            );
         }
         _ => panic!("both writes should succeed"),
     }
@@ -141,7 +151,10 @@ async fn test_three_node_cluster_formation() {
 
     // Wait for leader election
     let leader_id = cluster.wait_for_leader().await;
-    assert!(leader_id >= 1 && leader_id <= 3, "leader should be one of the nodes");
+    assert!(
+        leader_id >= 1 && leader_id <= 3,
+        "leader should be one of the nodes"
+    );
 
     // Should have exactly one leader
     let leaders: Vec<_> = cluster.nodes().iter().filter(|n| n.is_leader()).collect();

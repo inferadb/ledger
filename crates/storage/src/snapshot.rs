@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use snafu::{ResultExt, Snafu};
 use zstd::stream::{Decoder, Encoder};
 
-use ledger_types::{Entity, Hash, ShardId, VaultId, EMPTY_HASH};
+use ledger_types::{EMPTY_HASH, Entity, Hash, ShardId, VaultId};
 
-use crate::bucket::{VaultCommitment, NUM_BUCKETS};
+use crate::bucket::{NUM_BUCKETS, VaultCommitment};
 
 /// Snapshot file magic bytes.
 const SNAPSHOT_MAGIC: [u8; 4] = *b"LSNP";
@@ -284,9 +284,7 @@ pub fn snapshot_filename(shard_height: u64) -> String {
 
 /// Parse shard height from snapshot filename.
 pub fn parse_snapshot_filename(filename: &str) -> Option<u64> {
-    filename
-        .strip_suffix(".snap")
-        .and_then(|s| s.parse().ok())
+    filename.strip_suffix(".snap").and_then(|s| s.parse().ok())
 }
 
 /// Snapshot manager for a shard.
@@ -525,6 +523,9 @@ mod tests {
 
         // Should fail checksum validation
         let result = Snapshot::read_from_file(&path);
-        assert!(matches!(result, Err(SnapshotError::ChecksumMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(SnapshotError::ChecksumMismatch { .. })
+        ));
     }
 }

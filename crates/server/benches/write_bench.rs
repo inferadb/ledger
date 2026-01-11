@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
@@ -17,8 +17,7 @@ use ledger_types::Operation;
 
 /// Create a test state layer.
 fn create_state_layer(temp_dir: &TempDir) -> StateLayer {
-    let db = redb::Database::create(temp_dir.path().join("test.redb"))
-        .expect("create database");
+    let db = redb::Database::create(temp_dir.path().join("test.redb")).expect("create database");
     StateLayer::new(Arc::new(db))
 }
 
@@ -120,7 +119,9 @@ fn bench_state_root(c: &mut Criterion) {
                 expires_at: None,
                 condition: None,
             }];
-            state.apply_operations(vault_id, &operations, i as u64).expect("apply");
+            state
+                .apply_operations(vault_id, &operations, i as u64)
+                .expect("apply");
         }
 
         let state = Arc::new(RwLock::new(state));

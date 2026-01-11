@@ -12,7 +12,7 @@ mod cluster;
 mod keys;
 mod types;
 
-pub use cluster::{ClusterMembership, SystemRole, MAX_VOTERS};
+pub use cluster::{ClusterMembership, MAX_VOTERS, SystemRole};
 pub use keys::SystemKeys;
 pub use types::{
     EmailVerificationToken, NamespaceRegistry, NamespaceStatus, NodeInfo, NodeRole, User,

@@ -3,9 +3,9 @@
 //! Uses rs_merkle with SHA-256 for transaction merkle roots and proofs.
 
 use rs_merkle::algorithms::Sha256 as RsSha256;
-use rs_merkle::{MerkleProof as RsMerkleProof, MerkleTree as RsMerkleTree};
+use rs_merkle::MerkleTree as RsMerkleTree;
 
-use crate::hash::{sha256, Hash, EMPTY_HASH};
+use crate::hash::{EMPTY_HASH, Hash, sha256};
 
 /// Merkle tree using SHA-256.
 pub struct MerkleTree {
@@ -39,11 +39,7 @@ impl MerkleTree {
         }
 
         let proof = self.tree.proof(&[index]);
-        let proof_hashes: Vec<Hash> = proof
-            .proof_hashes()
-            .iter()
-            .map(|h| *h)
-            .collect();
+        let proof_hashes: Vec<Hash> = proof.proof_hashes().iter().map(|h| *h).collect();
 
         Some(MerkleProof {
             leaf_index: index,

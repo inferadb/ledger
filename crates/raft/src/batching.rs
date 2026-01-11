@@ -138,7 +138,10 @@ impl BatchWriterHandle {
     /// Submit a write to be batched.
     ///
     /// Returns a receiver that will receive the result when the write is committed.
-    pub fn submit(&self, request: LedgerRequest) -> oneshot::Receiver<Result<LedgerResponse, BatchError>> {
+    pub fn submit(
+        &self,
+        request: LedgerRequest,
+    ) -> oneshot::Receiver<Result<LedgerResponse, BatchError>> {
         let (tx, rx) = oneshot::channel();
 
         let write = PendingWrite {
@@ -170,7 +173,12 @@ impl BatchWriterHandle {
 /// Batch writer that coalesces writes.
 pub struct BatchWriter<F>
 where
-    F: Fn(Vec<LedgerRequest>) -> futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>> + Send + Sync + 'static,
+    F: Fn(
+            Vec<LedgerRequest>,
+        ) -> futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
+        + Send
+        + Sync
+        + 'static,
 {
     state: Arc<Mutex<BatchState>>,
     config: BatchConfig,
@@ -180,7 +188,12 @@ where
 
 impl<F> BatchWriter<F>
 where
-    F: Fn(Vec<LedgerRequest>) -> futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>> + Send + Sync + 'static,
+    F: Fn(
+            Vec<LedgerRequest>,
+        ) -> futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
+        + Send
+        + Sync
+        + 'static,
 {
     /// Create a new batch writer.
     pub fn new(config: BatchConfig, submit_fn: F) -> Self {
@@ -268,12 +281,18 @@ where
                     let _ = write.response_tx.send(Ok(response));
                 }
 
-                info!(batch_size, latency_ms = latency * 1000.0, "Batch flushed successfully");
+                info!(
+                    batch_size,
+                    latency_ms = latency * 1000.0,
+                    "Batch flushed successfully"
+                );
             }
             Err(e) => {
                 warn!(error = %e, batch_size, "Batch flush failed");
                 for write in batch {
-                    let _ = write.response_tx.send(Err(BatchError::RaftError(e.clone())));
+                    let _ = write
+                        .response_tx
+                        .send(Err(BatchError::RaftError(e.clone())));
                 }
             }
         }
@@ -315,7 +334,11 @@ mod tests {
             let count = call_count_clone.clone();
             Box::pin(async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
+                Ok(requests
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, _)| make_response(i as u64))
+                    .collect())
             })
         });
 
@@ -363,7 +386,11 @@ mod tests {
             let count = call_count_clone.clone();
             Box::pin(async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
+                Ok(requests
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, _)| make_response(i as u64))
+                    .collect())
             })
         });
 

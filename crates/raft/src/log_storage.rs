@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use openraft::storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot};
 use openraft::{
-    Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta,
-    StorageError, StoredMembership, Vote,
+    Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
+    StoredMembership, Vote,
 };
 use parking_lot::RwLock;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -28,9 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use ledger_types::{Hash, NamespaceId, VaultId};
 
-use crate::types::{
-    LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest,
-};
+use crate::types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest};
 
 // ============================================================================
 // Table Definitions
@@ -70,6 +68,36 @@ pub struct AppliedState {
     pub vault_heights: HashMap<(NamespaceId, VaultId), u64>,
     /// Vault health status.
     pub vault_health: HashMap<(NamespaceId, VaultId), VaultHealthStatus>,
+    /// Namespace registry (replicated via Raft).
+    pub namespaces: HashMap<NamespaceId, NamespaceMeta>,
+    /// Vault registry (replicated via Raft).
+    pub vaults: HashMap<(NamespaceId, VaultId), VaultMeta>,
+}
+
+/// Metadata for a namespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespaceMeta {
+    /// Namespace ID.
+    pub namespace_id: NamespaceId,
+    /// Human-readable name.
+    pub name: String,
+    /// Shard hosting this namespace (0 for default).
+    pub shard_id: u32,
+    /// Whether the namespace is deleted.
+    pub deleted: bool,
+}
+
+/// Metadata for a vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultMeta {
+    /// Namespace owning this vault.
+    pub namespace_id: NamespaceId,
+    /// Vault ID.
+    pub vault_id: VaultId,
+    /// Human-readable name (optional).
+    pub name: Option<String>,
+    /// Whether the vault is deleted.
+    pub deleted: bool,
 }
 
 /// Sequence counters for deterministic ID generation.
@@ -141,6 +169,94 @@ impl Default for VaultHealthStatus {
 // Raft Log Store
 // ============================================================================
 
+/// Shared accessor for applied state.
+///
+/// This allows services to read vault heights and health status
+/// without needing direct access to the Raft storage.
+#[derive(Clone)]
+pub struct AppliedStateAccessor {
+    state: Arc<RwLock<AppliedState>>,
+}
+
+impl AppliedStateAccessor {
+    /// Get the current height for a vault.
+    pub fn vault_height(&self, namespace_id: NamespaceId, vault_id: VaultId) -> u64 {
+        self.state
+            .read()
+            .vault_heights
+            .get(&(namespace_id, vault_id))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Get the health status for a vault.
+    pub fn vault_health(&self, namespace_id: NamespaceId, vault_id: VaultId) -> VaultHealthStatus {
+        self.state
+            .read()
+            .vault_health
+            .get(&(namespace_id, vault_id))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get all vault heights (for GetTip when no specific vault is requested).
+    pub fn all_vault_heights(&self) -> HashMap<(NamespaceId, VaultId), u64> {
+        self.state.read().vault_heights.clone()
+    }
+
+    /// Get namespace metadata by ID.
+    pub fn get_namespace(&self, namespace_id: NamespaceId) -> Option<NamespaceMeta> {
+        self.state
+            .read()
+            .namespaces
+            .get(&namespace_id)
+            .filter(|ns| !ns.deleted)
+            .cloned()
+    }
+
+    /// Get namespace metadata by name.
+    pub fn get_namespace_by_name(&self, name: &str) -> Option<NamespaceMeta> {
+        self.state
+            .read()
+            .namespaces
+            .values()
+            .find(|ns| !ns.deleted && ns.name == name)
+            .cloned()
+    }
+
+    /// List all active namespaces.
+    pub fn list_namespaces(&self) -> Vec<NamespaceMeta> {
+        self.state
+            .read()
+            .namespaces
+            .values()
+            .filter(|ns| !ns.deleted)
+            .cloned()
+            .collect()
+    }
+
+    /// Get vault metadata by ID.
+    pub fn get_vault(&self, namespace_id: NamespaceId, vault_id: VaultId) -> Option<VaultMeta> {
+        self.state
+            .read()
+            .vaults
+            .get(&(namespace_id, vault_id))
+            .filter(|v| !v.deleted)
+            .cloned()
+    }
+
+    /// List all active vaults in a namespace.
+    pub fn list_vaults(&self, namespace_id: NamespaceId) -> Vec<VaultMeta> {
+        self.state
+            .read()
+            .vaults
+            .values()
+            .filter(|v| v.namespace_id == namespace_id && !v.deleted)
+            .cloned()
+            .collect()
+    }
+}
+
 /// Combined Raft storage backed by redb.
 ///
 /// This implementation stores:
@@ -155,8 +271,8 @@ pub struct RaftLogStore {
     vote_cache: RwLock<Option<Vote<LedgerNodeId>>>,
     /// Cached last purged log ID.
     last_purged_cache: RwLock<Option<LogId<LedgerNodeId>>>,
-    /// Applied state (state machine).
-    applied_state: RwLock<AppliedState>,
+    /// Applied state (state machine) - shared with accessor.
+    applied_state: Arc<RwLock<AppliedState>>,
 }
 
 impl RaftLogStore {
@@ -167,8 +283,12 @@ impl RaftLogStore {
         // Ensure tables exist
         let write_txn = db.begin_write().map_err(|e| to_storage_error(&e))?;
         {
-            let _log_table = write_txn.open_table(LOG_TABLE).map_err(|e| to_storage_error(&e))?;
-            let _meta_table = write_txn.open_table(META_TABLE).map_err(|e| to_storage_error(&e))?;
+            let _log_table = write_txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
+            let _meta_table = write_txn
+                .open_table(META_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
         }
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
 
@@ -176,10 +296,10 @@ impl RaftLogStore {
             db: Arc::new(db),
             vote_cache: RwLock::new(None),
             last_purged_cache: RwLock::new(None),
-            applied_state: RwLock::new(AppliedState {
+            applied_state: Arc::new(RwLock::new(AppliedState {
                 sequences: SequenceCounters::new(),
                 ..Default::default()
-            }),
+            })),
         };
 
         // Load cached values
@@ -188,10 +308,22 @@ impl RaftLogStore {
         Ok(store)
     }
 
+    /// Get an accessor for reading applied state.
+    ///
+    /// This accessor can be cloned and passed to services that need to read
+    /// vault heights and health status.
+    pub fn accessor(&self) -> AppliedStateAccessor {
+        AppliedStateAccessor {
+            state: self.applied_state.clone(),
+        }
+    }
+
     /// Load metadata values into caches.
     fn load_caches(&self) -> Result<(), StorageError<LedgerNodeId>> {
         let read_txn = self.db.begin_read().map_err(|e| to_storage_error(&e))?;
-        let meta_table = read_txn.open_table(META_TABLE).map_err(|e| to_storage_error(&e))?;
+        let meta_table = read_txn
+            .open_table(META_TABLE)
+            .map_err(|e| to_storage_error(&e))?;
 
         // Load vote
         if let Some(vote_data) = meta_table.get(KEY_VOTE).map_err(|e| to_storage_error(&e))? {
@@ -201,14 +333,20 @@ impl RaftLogStore {
         }
 
         // Load last purged
-        if let Some(purged_data) = meta_table.get(KEY_LAST_PURGED).map_err(|e| to_storage_error(&e))? {
+        if let Some(purged_data) = meta_table
+            .get(KEY_LAST_PURGED)
+            .map_err(|e| to_storage_error(&e))?
+        {
             let purged: LogId<LedgerNodeId> =
                 bincode::deserialize(purged_data.value()).map_err(|e| to_serde_error(&e))?;
             *self.last_purged_cache.write() = Some(purged);
         }
 
         // Load applied state
-        if let Some(state_data) = meta_table.get(KEY_APPLIED_STATE).map_err(|e| to_storage_error(&e))? {
+        if let Some(state_data) = meta_table
+            .get(KEY_APPLIED_STATE)
+            .map_err(|e| to_storage_error(&e))?
+        {
             let state: AppliedState =
                 bincode::deserialize(state_data.value()).map_err(|e| to_serde_error(&e))?;
             *self.applied_state.write() = state;
@@ -218,9 +356,13 @@ impl RaftLogStore {
     }
 
     /// Get the last log entry.
-    fn get_last_entry(&self) -> Result<Option<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
+    fn get_last_entry(
+        &self,
+    ) -> Result<Option<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
         let read_txn = self.db.begin_read().map_err(|e| to_storage_error(&e))?;
-        let log_table = read_txn.open_table(LOG_TABLE).map_err(|e| to_storage_error(&e))?;
+        let log_table = read_txn
+            .open_table(LOG_TABLE)
+            .map_err(|e| to_storage_error(&e))?;
 
         if let Some((_, entry_data)) = log_table.last().map_err(|e| to_storage_error(&e))? {
             let entry: Entry<LedgerTypeConfig> =
@@ -260,37 +402,70 @@ impl RaftLogStore {
                 }
             }
 
-            LedgerRequest::CreateNamespace { name: _ } => {
+            LedgerRequest::CreateNamespace { name } => {
                 let namespace_id = state.sequences.next_namespace();
+                state.namespaces.insert(
+                    namespace_id,
+                    NamespaceMeta {
+                        namespace_id,
+                        name: name.clone(),
+                        shard_id: 0, // Default shard
+                        deleted: false,
+                    },
+                );
                 LedgerResponse::NamespaceCreated { namespace_id }
             }
 
-            LedgerRequest::CreateVault {
-                namespace_id,
-                name: _,
-            } => {
+            LedgerRequest::CreateVault { namespace_id, name } => {
                 let vault_id = state.sequences.next_vault();
                 let key = (*namespace_id, vault_id);
                 state.vault_heights.insert(key, 0);
                 state.vault_health.insert(key, VaultHealthStatus::Healthy);
+                state.vaults.insert(
+                    key,
+                    VaultMeta {
+                        namespace_id: *namespace_id,
+                        vault_id,
+                        name: name.clone(),
+                        deleted: false,
+                    },
+                );
                 LedgerResponse::VaultCreated { vault_id }
             }
 
-            LedgerRequest::DeleteNamespace { namespace_id: _ } => {
-                // TODO: Check if namespace has vaults, reject if so
-                // For now, just mark as deleted
-                LedgerResponse::NamespaceDeleted { success: true }
+            LedgerRequest::DeleteNamespace { namespace_id } => {
+                // Check if namespace has active vaults
+                let has_vaults = state
+                    .vaults
+                    .iter()
+                    .any(|((ns, _), v)| *ns == *namespace_id && !v.deleted);
+
+                if has_vaults {
+                    LedgerResponse::NamespaceDeleted { success: false }
+                } else if let Some(ns) = state.namespaces.get_mut(namespace_id) {
+                    ns.deleted = true;
+                    LedgerResponse::NamespaceDeleted { success: true }
+                } else {
+                    LedgerResponse::Error {
+                        message: format!("Namespace {} not found", namespace_id),
+                    }
+                }
             }
 
             LedgerRequest::DeleteVault {
                 namespace_id,
                 vault_id,
             } => {
-                // Remove vault from tracking
                 let key = (*namespace_id, *vault_id);
-                state.vault_heights.remove(&key);
-                state.vault_health.remove(&key);
-                LedgerResponse::VaultDeleted { success: true }
+                // Mark vault as deleted (keep heights for historical queries)
+                if let Some(vault) = state.vaults.get_mut(&key) {
+                    vault.deleted = true;
+                    LedgerResponse::VaultDeleted { success: true }
+                } else {
+                    LedgerResponse::Error {
+                        message: format!("Vault {}:{} not found", namespace_id, vault_id),
+                    }
+                }
             }
 
             LedgerRequest::System(system_request) => match system_request {
@@ -306,7 +481,12 @@ impl RaftLogStore {
     }
 
     /// Compute a simple block hash.
-    fn compute_block_hash(&self, namespace_id: NamespaceId, vault_id: VaultId, height: u64) -> Hash {
+    fn compute_block_hash(
+        &self,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
+        height: u64,
+    ) -> Hash {
         use ledger_types::sha256;
         let mut data = Vec::new();
         data.extend_from_slice(&namespace_id.to_le_bytes());
@@ -320,7 +500,9 @@ impl RaftLogStore {
         let state_data = bincode::serialize(state).map_err(|e| to_serde_error(&e))?;
         let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
         {
-            let mut meta_table = write_txn.open_table(META_TABLE).map_err(|e| to_storage_error(&e))?;
+            let mut meta_table = write_txn
+                .open_table(META_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
             meta_table
                 .insert(KEY_APPLIED_STATE, state_data.as_slice())
                 .map_err(|e| to_storage_error(&e))?;
@@ -340,7 +522,9 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
         range: RB,
     ) -> Result<Vec<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
         let read_txn = self.db.begin_read().map_err(|e| to_storage_error(&e))?;
-        let log_table = read_txn.open_table(LOG_TABLE).map_err(|e| to_storage_error(&e))?;
+        let log_table = read_txn
+            .open_table(LOG_TABLE)
+            .map_err(|e| to_storage_error(&e))?;
 
         let mut entries = Vec::new();
         for result in log_table.range(range).map_err(|e| to_storage_error(&e))? {
@@ -372,7 +556,11 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
-            self.state.last_applied.as_ref().map(|l| l.index).unwrap_or(0),
+            self.state
+                .last_applied
+                .as_ref()
+                .map(|l| l.index)
+                .unwrap_or(0),
             chrono::Utc::now().timestamp()
         );
 
@@ -396,7 +584,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     type LogReader = Self;
     type SnapshotBuilder = LedgerSnapshotBuilder;
 
-    async fn get_log_state(&mut self) -> Result<LogState<LedgerTypeConfig>, StorageError<LedgerNodeId>> {
+    async fn get_log_state(
+        &mut self,
+    ) -> Result<LogState<LedgerTypeConfig>, StorageError<LedgerNodeId>> {
         let last_purged = *self.last_purged_cache.read();
         let last_entry = self.get_last_entry()?;
         let last_log_id = last_entry.map(|e| e.log_id);
@@ -412,16 +602,21 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             db: Arc::clone(&self.db),
             vote_cache: RwLock::new(*self.vote_cache.read()),
             last_purged_cache: RwLock::new(*self.last_purged_cache.read()),
-            applied_state: RwLock::new(self.applied_state.read().clone()),
+            applied_state: Arc::clone(&self.applied_state),
         }
     }
 
-    async fn save_vote(&mut self, vote: &Vote<LedgerNodeId>) -> Result<(), StorageError<LedgerNodeId>> {
+    async fn save_vote(
+        &mut self,
+        vote: &Vote<LedgerNodeId>,
+    ) -> Result<(), StorageError<LedgerNodeId>> {
         let vote_data = bincode::serialize(vote).map_err(|e| to_serde_error(&e))?;
 
         let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
         {
-            let mut meta_table = write_txn.open_table(META_TABLE).map_err(|e| to_storage_error(&e))?;
+            let mut meta_table = write_txn
+                .open_table(META_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
             meta_table
                 .insert(KEY_VOTE, vote_data.as_slice())
                 .map_err(|e| to_storage_error(&e))?;
@@ -432,7 +627,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         Ok(())
     }
 
-    async fn read_vote(&mut self) -> Result<Option<Vote<LedgerNodeId>>, StorageError<LedgerNodeId>> {
+    async fn read_vote(
+        &mut self,
+    ) -> Result<Option<Vote<LedgerNodeId>>, StorageError<LedgerNodeId>> {
         Ok(*self.vote_cache.read())
     }
 
@@ -442,7 +639,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     {
         let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
         {
-            let mut log_table = write_txn.open_table(LOG_TABLE).map_err(|e| to_storage_error(&e))?;
+            let mut log_table = write_txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
 
             for entry in entries {
                 let index = entry.log_id.index;
@@ -463,7 +662,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     ) -> Result<(), StorageError<LedgerNodeId>> {
         let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
         {
-            let mut log_table = write_txn.open_table(LOG_TABLE).map_err(|e| to_storage_error(&e))?;
+            let mut log_table = write_txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
 
             // Delete logs from log_id.index onwards (inclusive)
             let keys_to_remove: Vec<u64> = log_table
@@ -488,8 +689,12 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     ) -> Result<(), StorageError<LedgerNodeId>> {
         let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
         {
-            let mut log_table = write_txn.open_table(LOG_TABLE).map_err(|e| to_storage_error(&e))?;
-            let mut meta_table = write_txn.open_table(META_TABLE).map_err(|e| to_storage_error(&e))?;
+            let mut log_table = write_txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
+            let mut meta_table = write_txn
+                .open_table(META_TABLE)
+                .map_err(|e| to_storage_error(&e))?;
 
             let keys_to_remove: Vec<u64> = log_table
                 .range(..=log_id.index)
@@ -540,7 +745,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 EntryPayload::Blank => LedgerResponse::Empty,
                 EntryPayload::Normal(request) => self.apply_request(request, &mut state),
                 EntryPayload::Membership(membership) => {
-                    state.membership = StoredMembership::new(Some(entry.log_id), membership.clone());
+                    state.membership =
+                        StoredMembership::new(Some(entry.log_id), membership.clone());
                     LedgerResponse::Empty
                 }
             };
@@ -574,7 +780,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<LedgerNodeId>> {
         let data = snapshot.into_inner();
-        let new_state: AppliedState = bincode::deserialize(&data).map_err(|e| to_serde_error(&e))?;
+        let new_state: AppliedState =
+            bincode::deserialize(&data).map_err(|e| to_serde_error(&e))?;
 
         *self.applied_state.write() = new_state.clone();
         self.save_applied_state(&new_state)?;
@@ -937,7 +1144,10 @@ mod tests {
 
         // Different inputs must produce different hashes
         let hash_c = store_a.compute_block_hash(1, 2, 4);
-        assert_ne!(hash_a, hash_c, "Different inputs should produce different hashes");
+        assert_ne!(
+            hash_a, hash_c,
+            "Different inputs should produce different hashes"
+        );
     }
 
     /// Verify vault height tracking is deterministic.
@@ -1059,7 +1269,10 @@ mod tests {
         }
 
         // Results must match
-        assert_eq!(results_a, results_b, "Interleaved operation results must match");
+        assert_eq!(
+            results_a, results_b,
+            "Interleaved operation results must match"
+        );
 
         // Vault 1: 3 writes, Vault 2: 2 writes
         assert_eq!(state_a.vault_heights.get(&(1, 1)), Some(&3));

@@ -6,7 +6,7 @@
 //!
 //! Key format: {vault_id:8BE}{bucket_id:1}{local_key:var}
 
-use ledger_types::{bucket_id, VaultId};
+use ledger_types::{VaultId, bucket_id};
 
 /// Decoded storage key components.
 #[derive(Debug, Clone, PartialEq, Eq)]

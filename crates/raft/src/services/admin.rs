@@ -8,6 +8,7 @@ use openraft::Raft;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
+use crate::log_storage::AppliedStateAccessor;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
     CheckIntegrityRequest, CheckIntegrityResponse, CreateNamespaceRequest, CreateNamespaceResponse,
@@ -28,12 +29,22 @@ pub struct AdminServiceImpl {
     /// The state layer.
     #[allow(dead_code)]
     state: Arc<RwLock<StateLayer>>,
+    /// Accessor for applied state (vault heights, health).
+    applied_state: AppliedStateAccessor,
 }
 
 impl AdminServiceImpl {
     /// Create a new admin service.
-    pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, state: Arc<RwLock<StateLayer>>) -> Self {
-        Self { raft, state }
+    pub fn new(
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+    ) -> Self {
+        Self {
+            raft,
+            state,
+            applied_state,
+        }
     }
 }
 
@@ -95,7 +106,9 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::NamespaceDeleted { success } => {
                 if success {
                     Ok(Response::new(DeleteNamespaceResponse {
-                        deleted_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                        deleted_at: Some(
+                            prost_types::Timestamp::from(std::time::SystemTime::now()),
+                        ),
                     }))
                 } else {
                     Err(Status::failed_precondition(
@@ -114,36 +127,56 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<GetNamespaceResponse>, Status> {
         let req = request.into_inner();
 
-        // Extract namespace ID from lookup oneof
-        let namespace_id = match req.lookup {
-            Some(crate::proto::get_namespace_request::Lookup::NamespaceId(n)) => n.id,
-            Some(crate::proto::get_namespace_request::Lookup::Name(_name)) => {
-                // TODO: Lookup by name from _system namespace
-                return Err(Status::unimplemented("Lookup by name not yet supported"));
+        // Extract namespace from lookup oneof (by ID or name)
+        let ns_meta = match req.lookup {
+            Some(crate::proto::get_namespace_request::Lookup::NamespaceId(n)) => {
+                self.applied_state.get_namespace(n.id)
+            }
+            Some(crate::proto::get_namespace_request::Lookup::Name(name)) => {
+                self.applied_state.get_namespace_by_name(&name)
             }
             None => return Err(Status::invalid_argument("Missing namespace lookup")),
         };
 
-        // TODO: Implement namespace lookup from _system namespace
-        // For now, return placeholder response
-        Ok(Response::new(GetNamespaceResponse {
-            namespace_id: Some(NamespaceId { id: namespace_id }),
-            name: format!("namespace_{}", namespace_id),
-            shard_id: Some(ShardId { id: 0 }),
-            member_nodes: vec![],
-            leader_hint: None,
-            config_version: 0,
-            status: crate::proto::NamespaceStatus::Active.into(),
-        }))
+        match ns_meta {
+            Some(ns) => Ok(Response::new(GetNamespaceResponse {
+                namespace_id: Some(NamespaceId {
+                    id: ns.namespace_id,
+                }),
+                name: ns.name,
+                shard_id: Some(ShardId { id: ns.shard_id }),
+                member_nodes: vec![],
+                leader_hint: None,
+                config_version: 0,
+                status: crate::proto::NamespaceStatus::Active.into(),
+            })),
+            None => Err(Status::not_found("Namespace not found")),
+        }
     }
 
     async fn list_namespaces(
         &self,
         _request: Request<ListNamespacesRequest>,
     ) -> Result<Response<ListNamespacesResponse>, Status> {
-        // TODO: Implement namespace listing from _system namespace
+        let namespaces = self
+            .applied_state
+            .list_namespaces()
+            .into_iter()
+            .map(|ns| crate::proto::GetNamespaceResponse {
+                namespace_id: Some(NamespaceId {
+                    id: ns.namespace_id,
+                }),
+                name: ns.name,
+                shard_id: Some(ShardId { id: ns.shard_id }),
+                member_nodes: vec![],
+                leader_hint: None,
+                config_version: 0,
+                status: crate::proto::NamespaceStatus::Active.into(),
+            })
+            .collect();
+
         Ok(Response::new(ListNamespacesResponse {
-            namespaces: vec![],
+            namespaces,
             next_page_token: None,
         }))
     }
@@ -220,7 +253,9 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::VaultDeleted { success } => {
                 if success {
                     Ok(Response::new(DeleteVaultResponse {
-                        deleted_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                        deleted_at: Some(
+                            prost_types::Timestamp::from(std::time::SystemTime::now()),
+                        ),
                     }))
                 } else {
                     Err(Status::internal("Failed to delete vault"))
@@ -249,25 +284,52 @@ impl AdminService for AdminServiceImpl {
             .map(|v| v.id)
             .ok_or_else(|| Status::invalid_argument("Missing vault_id"))?;
 
-        // TODO: Implement vault lookup from state layer
-        Ok(Response::new(GetVaultResponse {
-            namespace_id: Some(NamespaceId { id: namespace_id }),
-            vault_id: Some(VaultId { id: vault_id }),
-            height: 0, // TODO: Get from state
-            state_root: None,
-            nodes: vec![],
-            leader: None,
-            status: crate::proto::VaultStatus::Active.into(),
-            retention_policy: None,
-        }))
+        // Get vault metadata and height
+        let vault_meta = self.applied_state.get_vault(namespace_id, vault_id);
+        let height = self.applied_state.vault_height(namespace_id, vault_id);
+
+        match vault_meta {
+            Some(_vault) => Ok(Response::new(GetVaultResponse {
+                namespace_id: Some(NamespaceId { id: namespace_id }),
+                vault_id: Some(VaultId { id: vault_id }),
+                height,
+                state_root: None,
+                nodes: vec![],
+                leader: None,
+                status: crate::proto::VaultStatus::Active.into(),
+                retention_policy: None,
+            })),
+            None => Err(Status::not_found("Vault not found")),
+        }
     }
 
     async fn list_vaults(
         &self,
         _request: Request<ListVaultsRequest>,
     ) -> Result<Response<ListVaultsResponse>, Status> {
-        // TODO: Implement vault listing from state layer
-        Ok(Response::new(ListVaultsResponse { vaults: vec![] }))
+        // List all vaults across all namespaces
+        let vaults = self
+            .applied_state
+            .all_vault_heights()
+            .keys()
+            .filter_map(|(ns_id, vault_id)| {
+                self.applied_state.get_vault(*ns_id, *vault_id).map(|v| {
+                    let height = self.applied_state.vault_height(v.namespace_id, v.vault_id);
+                    crate::proto::GetVaultResponse {
+                        namespace_id: Some(NamespaceId { id: v.namespace_id }),
+                        vault_id: Some(VaultId { id: v.vault_id }),
+                        height,
+                        state_root: None,
+                        nodes: vec![],
+                        leader: None,
+                        status: crate::proto::VaultStatus::Active.into(),
+                        retention_policy: None,
+                    }
+                })
+            })
+            .collect();
+
+        Ok(Response::new(ListVaultsResponse { vaults }))
     }
 
     async fn create_snapshot(

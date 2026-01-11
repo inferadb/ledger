@@ -17,17 +17,18 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
+use crate::IdempotencyCache;
+use crate::log_storage::AppliedStateAccessor;
+use crate::proto::BlockAnnouncement;
 use crate::proto::admin_service_server::AdminServiceServer;
 use crate::proto::health_service_server::HealthServiceServer;
 use crate::proto::read_service_server::ReadServiceServer;
 use crate::proto::system_discovery_service_server::SystemDiscoveryServiceServer;
 use crate::proto::write_service_server::WriteServiceServer;
-use crate::proto::BlockAnnouncement;
 use crate::services::{
     AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, ReadServiceImpl, WriteServiceImpl,
 };
 use crate::types::LedgerTypeConfig;
-use crate::IdempotencyCache;
 
 use ledger_storage::StateLayer;
 
@@ -39,6 +40,8 @@ pub struct LedgerServer {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The shared state layer.
     state: Arc<RwLock<StateLayer>>,
+    /// Accessor for applied state (vault heights, health).
+    applied_state: AppliedStateAccessor,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Block announcement broadcast channel.
@@ -52,6 +55,7 @@ impl LedgerServer {
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
         addr: SocketAddr,
     ) -> Self {
         // Create broadcast channel for block announcements (capacity 1000)
@@ -60,6 +64,7 @@ impl LedgerServer {
         Self {
             raft,
             state,
+            applied_state,
             idempotency: Arc::new(IdempotencyCache::new()),
             block_announcements,
             addr,
@@ -83,24 +88,17 @@ impl LedgerServer {
         // Create service implementations
         let read_service = ReadServiceImpl::new(
             self.state.clone(),
+            self.applied_state.clone(),
             self.block_announcements.clone(),
         );
-        let write_service = WriteServiceImpl::new(
-            self.raft.clone(),
-            self.idempotency.clone(),
-        );
+        let write_service = WriteServiceImpl::new(self.raft.clone(), self.idempotency.clone());
         let admin_service = AdminServiceImpl::new(
             self.raft.clone(),
             self.state.clone(),
+            self.applied_state.clone(),
         );
-        let health_service = HealthServiceImpl::new(
-            self.raft.clone(),
-            self.state.clone(),
-        );
-        let discovery_service = DiscoveryServiceImpl::new(
-            self.raft.clone(),
-            self.state.clone(),
-        );
+        let health_service = HealthServiceImpl::new(self.raft.clone(), self.state.clone());
+        let discovery_service = DiscoveryServiceImpl::new(self.raft.clone(), self.state.clone());
 
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 

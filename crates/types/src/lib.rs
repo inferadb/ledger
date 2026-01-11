@@ -15,5 +15,5 @@ pub mod types;
 
 // Re-export commonly used types at crate root
 pub use error::{LedgerError, Result};
-pub use hash::{bucket_id, sha256, sha256_concat, BucketHasher, Hash, EMPTY_HASH, ZERO_HASH};
+pub use hash::{BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, sha256, sha256_concat};
 pub use types::*;

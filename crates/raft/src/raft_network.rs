@@ -133,8 +133,10 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         &mut self,
         rpc: VoteRequest<LedgerNodeId>,
         _option: RPCOption,
-    ) -> Result<VoteResponse<LedgerNodeId>, RPCError<LedgerNodeId, BasicNode, RaftError<LedgerNodeId>>>
-    {
+    ) -> Result<
+        VoteResponse<LedgerNodeId>,
+        RPCError<LedgerNodeId, BasicNode, RaftError<LedgerNodeId>>,
+    > {
         let mut client = self
             .network
             .get_client(self.target, &self.node)
@@ -239,7 +241,11 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         _option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<LedgerNodeId>,
-        RPCError<LedgerNodeId, BasicNode, RaftError<LedgerNodeId, openraft::error::InstallSnapshotError>>,
+        RPCError<
+            LedgerNodeId,
+            BasicNode,
+            RaftError<LedgerNodeId, openraft::error::InstallSnapshotError>,
+        >,
     > {
         let mut client = self
             .network

@@ -15,10 +15,11 @@ use redb::{Database, ReadableTable};
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{
-    bucket_id, Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, EMPTY_HASH,
+    EMPTY_HASH, Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus,
+    bucket_id,
 };
 
-use crate::bucket::{BucketRootBuilder, VaultCommitment, NUM_BUCKETS};
+use crate::bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment};
 use crate::entity::EntityStore;
 use crate::indexes::IndexManager;
 use crate::keys::{bucket_prefix, encode_storage_key};
@@ -71,7 +72,10 @@ impl StateLayer {
     }
 
     /// Get or create commitment tracking for a vault.
-    fn get_or_create_commitment(&self, vault_id: VaultId) -> dashmap::mapref::one::RefMut<'_, VaultId, VaultCommitment> {
+    fn get_or_create_commitment(
+        &self,
+        vault_id: VaultId,
+    ) -> dashmap::mapref::one::RefMut<'_, VaultId, VaultCommitment> {
         self.vault_commitments
             .entry(vault_id)
             .or_insert_with(VaultCommitment::new)
@@ -118,24 +122,16 @@ impl StateLayer {
                                 None => true,
                                 Some(SetCondition::MustNotExist) => existing.is_none(),
                                 Some(SetCondition::MustExist) => existing.is_some(),
-                                Some(SetCondition::VersionEquals(v)) => {
-                                    existing
-                                        .as_ref()
-                                        .and_then(|e| {
-                                            postcard::from_bytes::<Entity>(e.value()).ok()
-                                        })
-                                        .map(|e| e.version == *v)
-                                        .unwrap_or(false)
-                                }
-                                Some(SetCondition::ValueEquals(expected)) => {
-                                    existing
-                                        .as_ref()
-                                        .and_then(|e| {
-                                            postcard::from_bytes::<Entity>(e.value()).ok()
-                                        })
-                                        .map(|e| e.value == *expected)
-                                        .unwrap_or(false)
-                                }
+                                Some(SetCondition::VersionEquals(v)) => existing
+                                    .as_ref()
+                                    .and_then(|e| postcard::from_bytes::<Entity>(e.value()).ok())
+                                    .map(|e| e.version == *v)
+                                    .unwrap_or(false),
+                                Some(SetCondition::ValueEquals(expected)) => existing
+                                    .as_ref()
+                                    .and_then(|e| postcard::from_bytes::<Entity>(e.value()).ok())
+                                    .map(|e| e.value == *expected)
+                                    .unwrap_or(false),
                             };
                             (condition_met, is_update)
                         };
@@ -260,7 +256,9 @@ impl StateLayer {
                         let local_key = rel_key.as_bytes();
                         let storage_key = encode_storage_key(vault_id, local_key);
 
-                        let existed = relationships.remove(&storage_key[..]).context(StorageSnafu)?;
+                        let existed = relationships
+                            .remove(&storage_key[..])
+                            .context(StorageSnafu)?;
 
                         if existed.is_some() {
                             // Update indexes
@@ -310,11 +308,10 @@ impl StateLayer {
 
         match table.get(&storage_key[..]).context(StorageSnafu)? {
             Some(data) => {
-                let entity = postcard::from_bytes(data.value()).map_err(|e| {
-                    StateError::Serialization {
+                let entity =
+                    postcard::from_bytes(data.value()).map_err(|e| StateError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -374,7 +371,8 @@ impl StateLayer {
                     if key_bytes.len() < 9 {
                         break;
                     }
-                    let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+                    let key_vault_id =
+                        i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
                     if key_vault_id != vault_id {
                         break;
                     }
@@ -395,7 +393,10 @@ impl StateLayer {
                 let mut range_end = prefix;
                 range_end[8] = bucket + 1;
 
-                for result in table.range(&prefix[..]..&range_end[..]).context(StorageSnafu)? {
+                for result in table
+                    .range(&prefix[..]..&range_end[..])
+                    .context(StorageSnafu)?
+                {
                     let (_, value) = result.context(StorageSnafu)?;
                     let entity: Entity = postcard::from_bytes(value.value()).map_err(|e| {
                         StateError::Serialization {
@@ -417,11 +418,7 @@ impl StateLayer {
     /// Load bucket roots from stored vault metadata.
     ///
     /// Called during startup/recovery to restore commitment state.
-    pub fn load_vault_commitment(
-        &self,
-        vault_id: VaultId,
-        bucket_roots: [Hash; NUM_BUCKETS],
-    ) {
+    pub fn load_vault_commitment(&self, vault_id: VaultId, bucket_roots: [Hash; NUM_BUCKETS]) {
         self.vault_commitments
             .insert(vault_id, VaultCommitment::from_bucket_roots(bucket_roots));
     }
@@ -456,6 +453,126 @@ impl StateLayer {
         let table = txn.open_table(Tables::SUBJ_INDEX).context(TableSnafu)?;
 
         IndexManager::get_resources(&table, vault_id, subject)
+    }
+
+    /// List all entities in a vault with optional prefix filter.
+    ///
+    /// Returns up to `limit` entities. Use `start_after` for pagination.
+    pub fn list_entities(
+        &self,
+        vault_id: VaultId,
+        prefix: Option<&str>,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Entity>> {
+        let txn = self.db.begin_read().context(TransactionSnafu)?;
+        let table = txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
+
+        let mut entities = Vec::with_capacity(limit.min(1000));
+
+        // Build the range start key
+        let start_key = if let Some(after) = start_after {
+            // Start after this key
+            let mut k = encode_storage_key(vault_id, after.as_bytes());
+            // Add a byte to get past this key
+            k.push(0);
+            k
+        } else if let Some(p) = prefix {
+            encode_storage_key(vault_id, p.as_bytes())
+        } else {
+            encode_storage_key(vault_id, &[])
+        };
+
+        for result in table.range(&start_key[..]..).context(StorageSnafu)? {
+            if entities.len() >= limit {
+                break;
+            }
+
+            let (key, value) = result.context(StorageSnafu)?;
+            let key_bytes = key.value();
+
+            // Check we're still in the same vault (first 8 bytes)
+            if key_bytes.len() < 9 {
+                break;
+            }
+            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+            if key_vault_id != vault_id {
+                break;
+            }
+
+            // Check prefix match if specified
+            if let Some(p) = prefix {
+                // Skip bucket byte (index 8), entity key starts at index 9
+                let entity_key = &key_bytes[9..];
+                if !entity_key.starts_with(p.as_bytes()) {
+                    // If we've passed the prefix range, stop
+                    if entity_key > p.as_bytes() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            let entity: Entity =
+                postcard::from_bytes(value.value()).map_err(|e| StateError::Serialization {
+                    message: e.to_string(),
+                })?;
+
+            entities.push(entity);
+        }
+
+        Ok(entities)
+    }
+
+    /// List all relationships in a vault.
+    ///
+    /// Returns up to `limit` relationships. Use `start_after` for pagination.
+    pub fn list_relationships(
+        &self,
+        vault_id: VaultId,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Relationship>> {
+        let txn = self.db.begin_read().context(TransactionSnafu)?;
+        let table = txn.open_table(Tables::RELATIONSHIPS).context(TableSnafu)?;
+
+        let mut relationships = Vec::with_capacity(limit.min(1000));
+
+        // Build the range start key
+        let start_key = if let Some(after) = start_after {
+            let mut k = encode_storage_key(vault_id, after.as_bytes());
+            k.push(0);
+            k
+        } else {
+            encode_storage_key(vault_id, &[])
+        };
+
+        for result in table.range(&start_key[..]..).context(StorageSnafu)? {
+            if relationships.len() >= limit {
+                break;
+            }
+
+            let (key, value) = result.context(StorageSnafu)?;
+            let key_bytes = key.value();
+
+            // Check we're still in the same vault
+            if key_bytes.len() < 9 {
+                break;
+            }
+            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+            if key_vault_id != vault_id {
+                break;
+            }
+
+            let rel: Relationship =
+                postcard::from_bytes(value.value()).map_err(|e| StateError::Serialization {
+                    message: e.to_string(),
+                })?;
+
+            relationships.push(rel);
+        }
+
+        Ok(relationships)
     }
 }
 
@@ -532,14 +649,12 @@ mod tests {
         let vault_id = 1;
 
         // Set then delete
-        let ops = vec![
-            Operation::SetEntity {
-                key: "key".to_string(),
-                value: b"value".to_vec(),
-                condition: None,
-                expires_at: None,
-            },
-        ];
+        let ops = vec![Operation::SetEntity {
+            key: "key".to_string(),
+            value: b"value".to_vec(),
+            condition: None,
+            expires_at: None,
+        }];
         state.apply_operations(vault_id, &ops, 1).unwrap();
 
         let ops = vec![Operation::DeleteEntity {
@@ -570,9 +685,11 @@ mod tests {
         let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        assert!(state
-            .relationship_exists(vault_id, "doc:123", "viewer", "user:alice")
-            .unwrap());
+        assert!(
+            state
+                .relationship_exists(vault_id, "doc:123", "viewer", "user:alice")
+                .unwrap()
+        );
 
         // Create again should return AlreadyExists
         let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
@@ -601,9 +718,11 @@ mod tests {
         let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Deleted]);
 
-        assert!(!state
-            .relationship_exists(vault_id, "doc:123", "viewer", "user:alice")
-            .unwrap());
+        assert!(
+            !state
+                .relationship_exists(vault_id, "doc:123", "viewer", "user:alice")
+                .unwrap()
+        );
     }
 
     #[test]

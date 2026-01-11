@@ -35,9 +35,10 @@ pub mod proto {
 
 pub use batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle};
 pub use idempotency::IdempotencyCache;
-pub use log_storage::{AppliedState, RaftLogStore, SequenceCounters, VaultHealthStatus};
+pub use log_storage::{
+    AppliedState, AppliedStateAccessor, NamespaceMeta, RaftLogStore, SequenceCounters,
+    VaultHealthStatus, VaultMeta,
+};
 pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use server::LedgerServer;
-pub use types::{
-    LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest,
-};
+pub use types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest};

@@ -45,8 +45,7 @@ impl Tables {
     // =========================================================================
 
     /// Block storage: shard_height → serialized ShardBlock
-    pub const BLOCKS: TableDefinition<'static, u64, &'static [u8]> =
-        TableDefinition::new("blocks");
+    pub const BLOCKS: TableDefinition<'static, u64, &'static [u8]> = TableDefinition::new("blocks");
 
     /// Vault block index: (namespace_id, vault_id, vault_height) → shard_height
     /// Allows looking up the shard block containing a specific vault block

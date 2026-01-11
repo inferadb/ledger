@@ -242,7 +242,10 @@ mod tests {
     fn test_determine_role_below_max() {
         let cluster = ClusterMembership::new();
         // First 5 nodes should be Voters
-        assert_eq!(cluster.determine_role(&"node-1".to_string()), NodeRole::Voter);
+        assert_eq!(
+            cluster.determine_role(&"node-1".to_string()),
+            NodeRole::Voter
+        );
     }
 
     #[test]
@@ -255,7 +258,10 @@ mod tests {
 
         // 6th node should be Learner
         assert_eq!(cluster.voter_count(), 5);
-        assert_eq!(cluster.determine_role(&"node-5".to_string()), NodeRole::Learner);
+        assert_eq!(
+            cluster.determine_role(&"node-5".to_string()),
+            NodeRole::Learner
+        );
     }
 
     #[test]

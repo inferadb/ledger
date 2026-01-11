@@ -59,7 +59,12 @@ impl HealthService for HealthServiceImpl {
         }
         details.insert(
             "member_count".to_string(),
-            metrics.membership_config.membership().nodes().count().to_string(),
+            metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .count()
+                .to_string(),
         );
 
         // Determine health status based on Raft state

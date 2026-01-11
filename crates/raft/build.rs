@@ -15,10 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Don't emit docs for generated code
         .emit_rerun_if_changed(true)
         // Compile the proto file
-        .compile_protos(
-            &["../../proto/ledger/v1/ledger.proto"],
-            &["../../proto"],
-        )?;
+        .compile_protos(&["../../proto/ledger/v1/ledger.proto"], &["../../proto"])?;
 
     Ok(())
 }

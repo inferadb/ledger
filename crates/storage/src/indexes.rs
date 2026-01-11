@@ -6,7 +6,7 @@
 //!
 //! Per DESIGN.md: Indexes are NOT merkleized (no per-write amplification).
 
-use redb::{ReadableTable, ReadOnlyTable, Table};
+use redb::{ReadOnlyTable, ReadableTable, Table};
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::VaultId;
@@ -278,11 +278,7 @@ mod tests {
                 )
                 .expect("add");
                 IndexManager::add_to_obj_index(
-                    &mut table,
-                    vault_id,
-                    "doc:123",
-                    "viewer",
-                    "user:bob",
+                    &mut table, vault_id, "doc:123", "viewer", "user:bob",
                 )
                 .expect("add");
             }
