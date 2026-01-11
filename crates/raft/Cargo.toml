@@ -39,10 +39,18 @@ bincode.workspace = true
 # Error handling
 snafu.workspace = true
 
+# Crypto
+sha2.workspace = true
+
 # Utilities
 bytes.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+
+# Streaming
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
 
 [build-dependencies]
 tonic-build.workspace = true

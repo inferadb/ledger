@@ -31,6 +31,22 @@ This is a new product. Every change should be optimal from day one.
 
 **Either implement something fully and correctly, or don't implement it at all.**
 
+### No Aspirational Code
+Never produce incomplete, placeholder, or "aspirational" implementations.
+
+**Blocked patterns:**
+- Stub functions with `todo!()` or `unimplemented!()`
+- Placeholder comments like "// TODO: implement this"
+- Partial implementations that defer work to "later"
+- Skeleton code that outlines structure without logic
+- Functions that just return dummy values
+
+**Instead:**
+- Fully implement every function, method, and feature
+- If a feature is too large, break it into smaller complete pieces
+- Each piece of code must be production-ready when written
+- If you can't implement something fully, discuss scope first
+
 ## TDD Requirements
 Target: 90%+ coverage
 

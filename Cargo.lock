@@ -1164,6 +1164,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "futures",
  "ledger-storage",
  "ledger-types",
  "openraft",
@@ -1172,13 +1173,16 @@ dependencies = [
  "prost-types",
  "redb",
  "serde",
+ "sha2",
  "snafu",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tower 0.5.2",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2291,6 +2295,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

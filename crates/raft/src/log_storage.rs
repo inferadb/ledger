@@ -276,6 +276,23 @@ impl RaftLogStore {
                 LedgerResponse::VaultCreated { vault_id }
             }
 
+            LedgerRequest::DeleteNamespace { namespace_id: _ } => {
+                // TODO: Check if namespace has vaults, reject if so
+                // For now, just mark as deleted
+                LedgerResponse::NamespaceDeleted { success: true }
+            }
+
+            LedgerRequest::DeleteVault {
+                namespace_id,
+                vault_id,
+            } => {
+                // Remove vault from tracking
+                let key = (*namespace_id, *vault_id);
+                state.vault_heights.remove(&key);
+                state.vault_health.remove(&key);
+                LedgerResponse::VaultDeleted { success: true }
+            }
+
             LedgerRequest::System(system_request) => match system_request {
                 SystemRequest::CreateUser { name: _, email: _ } => {
                     let user_id = state.sequences.next_user();

@@ -85,6 +85,20 @@ pub enum LedgerRequest {
         name: Option<String>,
     },
 
+    /// Delete a namespace.
+    DeleteNamespace {
+        /// Namespace ID to delete.
+        namespace_id: NamespaceId,
+    },
+
+    /// Delete a vault.
+    DeleteVault {
+        /// Namespace containing the vault.
+        namespace_id: NamespaceId,
+        /// Vault ID to delete.
+        vault_id: VaultId,
+    },
+
     /// System operation (user management, node membership, etc.).
     System(SystemRequest),
 }
@@ -151,6 +165,18 @@ pub enum LedgerResponse {
         vault_id: VaultId,
     },
 
+    /// Namespace deleted.
+    NamespaceDeleted {
+        /// Whether the deletion was successful.
+        success: bool,
+    },
+
+    /// Vault deleted.
+    VaultDeleted {
+        /// Whether the deletion was successful.
+        success: bool,
+    },
+
     /// User created.
     UserCreated {
         /// Assigned user ID.
@@ -185,6 +211,12 @@ impl fmt::Display for LedgerResponse {
             }
             LedgerResponse::UserCreated { user_id } => {
                 write!(f, "UserCreated(id={})", user_id)
+            }
+            LedgerResponse::NamespaceDeleted { success } => {
+                write!(f, "NamespaceDeleted(success={})", success)
+            }
+            LedgerResponse::VaultDeleted { success } => {
+                write!(f, "VaultDeleted(success={})", success)
             }
             LedgerResponse::Error { message } => {
                 write!(f, "Error({})", message)

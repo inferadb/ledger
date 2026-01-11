@@ -927,3 +927,93 @@ message NamespaceRegistry {
   optional NodeId leader_hint = 4; // May be stale
   uint64 config_version = 5;
 }
+
+// =============================================================================
+// Raft Internal Service (inter-node communication)
+// =============================================================================
+
+// Internal Raft RPC service for consensus protocol.
+// Used for inter-node communication: vote, log replication, snapshots.
+service RaftService {
+  // Request vote from peer during leader election.
+  rpc Vote(RaftVoteRequest) returns (RaftVoteResponse);
+
+  // Replicate log entries to followers.
+  rpc AppendEntries(RaftAppendEntriesRequest) returns (RaftAppendEntriesResponse);
+
+  // Install snapshot on a follower that is too far behind.
+  rpc InstallSnapshot(RaftInstallSnapshotRequest) returns (RaftInstallSnapshotResponse);
+}
+
+// Raft vote (term + node_id + committed flag).
+message RaftVote {
+  uint64 term = 1;
+  uint64 node_id = 2;
+  bool committed = 3;
+}
+
+// Raft log entry identifier.
+message RaftLogId {
+  uint64 term = 1;
+  uint64 index = 2;
+}
+
+// Vote request during leader election.
+message RaftVoteRequest {
+  RaftVote vote = 1;
+  optional RaftLogId last_log_id = 2;
+}
+
+// Vote response.
+message RaftVoteResponse {
+  RaftVote vote = 1;
+  bool vote_granted = 2;
+  optional RaftLogId last_log_id = 3;
+}
+
+// Log replication request.
+message RaftAppendEntriesRequest {
+  RaftVote vote = 1;
+  optional RaftLogId prev_log_id = 2;
+  repeated bytes entries = 3; // Serialized log entries
+  optional RaftLogId leader_commit = 4;
+}
+
+// Log replication response.
+message RaftAppendEntriesResponse {
+  RaftVote vote = 1;
+  bool success = 2;
+  bool conflict = 3;
+}
+
+// Snapshot installation request.
+message RaftInstallSnapshotRequest {
+  RaftVote vote = 1;
+  RaftSnapshotMeta meta = 2;
+  uint64 offset = 3;
+  bytes data = 4;
+  bool done = 5;
+}
+
+// Snapshot installation response.
+message RaftInstallSnapshotResponse {
+  RaftVote vote = 1;
+}
+
+// Snapshot metadata.
+message RaftSnapshotMeta {
+  optional RaftLogId last_log_id = 1;
+  RaftMembership last_membership = 2;
+  string snapshot_id = 3;
+}
+
+// Raft cluster membership configuration.
+message RaftMembership {
+  repeated RaftMembershipConfig configs = 1;
+}
+
+// Single membership configuration (joint consensus may have multiple).
+message RaftMembershipConfig {
+  // Map of node_id -> address
+  map<uint64, string> members = 1;
+}
