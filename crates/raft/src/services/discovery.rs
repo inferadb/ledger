@@ -8,11 +8,12 @@ use openraft::Raft;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
+use crate::log_storage::AppliedStateAccessor;
 use crate::proto::system_discovery_service_server::SystemDiscoveryService;
 use crate::proto::{
     AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-    GetSystemStateRequest, GetSystemStateResponse, NamespaceRegistry, NodeCapabilities, NodeId,
-    NodeInfo, PeerInfo,
+    GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry,
+    NodeCapabilities, NodeId, NodeInfo, PeerInfo, ShardId,
 };
 use crate::types::LedgerTypeConfig;
 
@@ -25,12 +26,22 @@ pub struct DiscoveryServiceImpl {
     /// The state layer.
     #[allow(dead_code)]
     state: Arc<RwLock<StateLayer>>,
+    /// Accessor for applied state (namespace registry).
+    applied_state: AppliedStateAccessor,
 }
 
 impl DiscoveryServiceImpl {
     /// Create a new discovery service.
-    pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, state: Arc<RwLock<StateLayer>>) -> Self {
-        Self { raft, state }
+    pub fn new(
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+    ) -> Self {
+        Self {
+            raft,
+            state,
+            applied_state,
+        }
     }
 }
 
@@ -128,8 +139,26 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             })
             .collect();
 
-        // TODO: Build namespace registry from _system namespace
-        let namespaces: Vec<NamespaceRegistry> = vec![];
+        // Build namespace registry from applied state
+        let member_nodes: Vec<NodeId> = membership
+            .nodes()
+            .map(|(id, _)| NodeId { id: id.to_string() })
+            .collect();
+
+        let leader_hint = metrics.current_leader.map(|id| NodeId { id: id.to_string() });
+
+        let namespaces: Vec<NamespaceRegistry> = self
+            .applied_state
+            .list_namespaces()
+            .into_iter()
+            .map(|ns| NamespaceRegistry {
+                namespace_id: Some(NamespaceId { id: ns.namespace_id }),
+                shard_id: Some(ShardId { id: ns.shard_id }),
+                members: member_nodes.clone(),
+                leader_hint: leader_hint.clone(),
+                config_version: current_version,
+            })
+            .collect();
 
         Ok(Response::new(GetSystemStateResponse {
             version: current_version,

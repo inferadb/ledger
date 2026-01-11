@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::IdempotencyCache;
 use crate::metrics;
+use crate::proof::{self, ProofError};
 use crate::proto::write_service_server::WriteService;
 use crate::proto::{
     BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
@@ -19,19 +20,40 @@ use crate::proto::{
 };
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
+use ledger_storage::BlockArchive;
+
 /// Write service implementation.
 pub struct WriteServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
+    /// Block archive for proof generation (optional).
+    block_archive: Option<Arc<BlockArchive>>,
 }
 
 #[allow(clippy::result_large_err)]
 impl WriteServiceImpl {
     /// Create a new write service.
     pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, idempotency: Arc<IdempotencyCache>) -> Self {
-        Self { raft, idempotency }
+        Self {
+            raft,
+            idempotency,
+            block_archive: None,
+        }
+    }
+
+    /// Create a write service with block archive access for proof generation.
+    pub fn with_block_archive(
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        idempotency: Arc<IdempotencyCache>,
+        block_archive: Arc<BlockArchive>,
+    ) -> Self {
+        Self {
+            raft,
+            idempotency,
+            block_archive: Some(block_archive),
+        }
     }
 
     /// Convert a proto SetCondition to internal SetCondition.
@@ -87,6 +109,40 @@ impl WriteServiceImpl {
                 key: ee.key.clone(),
                 expired_at: ee.expired_at,
             }),
+        }
+    }
+
+    /// Generate block header and transaction proof for a committed write.
+    ///
+    /// Returns (block_header, tx_proof) if successful, (None, None) on error.
+    /// Errors are logged with context for debugging.
+    fn generate_write_proof(
+        &self,
+        namespace_id: i64,
+        vault_id: i64,
+        vault_height: u64,
+    ) -> (Option<crate::proto::BlockHeader>, Option<crate::proto::MerkleProof>) {
+        let Some(archive) = &self.block_archive else {
+            debug!("Block archive not available for proof generation");
+            return (None, None);
+        };
+
+        // Use the proof module's SNAFU-based implementation
+        match proof::generate_write_proof(archive, namespace_id, vault_id, vault_height, 0) {
+            Ok(write_proof) => (Some(write_proof.block_header), Some(write_proof.tx_proof)),
+            Err(e) => {
+                // Log with appropriate severity based on error type
+                match &e {
+                    ProofError::BlockNotFound { .. } | ProofError::NoTransactions => {
+                        // These may be timing issues (block not yet written to archive)
+                        debug!(error = %e, "Proof generation skipped");
+                    }
+                    _ => {
+                        warn!(error = %e, "Proof generation failed");
+                    }
+                }
+                (None, None)
+            }
         }
     }
 
@@ -205,13 +261,20 @@ impl WriteService for WriteServiceImpl {
                 block_height,
                 block_hash: _,
             } => {
+                // Generate proof and block header if requested
+                let (block_header, tx_proof) = if req.include_tx_proof {
+                    self.generate_write_proof(namespace_id, vault_id.unwrap_or(0), block_height)
+                } else {
+                    (None, None)
+                };
+
                 let success = WriteSuccess {
                     tx_id: Some(TxId {
                         id: Uuid::new_v4().as_bytes().to_vec(),
                     }),
                     block_height,
-                    block_header: None, // TODO: Include if include_tx_proof is set
-                    tx_proof: None,
+                    block_header,
+                    tx_proof,
                 };
 
                 // Cache the result for idempotency

@@ -8,6 +8,7 @@ use openraft::Raft;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
+use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus};
 use crate::proto::health_service_server::HealthService;
 use crate::proto::{HealthCheckRequest, HealthCheckResponse, HealthStatus};
 use crate::types::LedgerTypeConfig;
@@ -19,14 +20,23 @@ pub struct HealthServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
-    #[allow(dead_code)]
     state: Arc<RwLock<StateLayer>>,
+    /// Accessor for applied state (vault heights, health).
+    applied_state: AppliedStateAccessor,
 }
 
 impl HealthServiceImpl {
     /// Create a new health service.
-    pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, state: Arc<RwLock<StateLayer>>) -> Self {
-        Self { raft, state }
+    pub fn new(
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+    ) -> Self {
+        Self {
+            raft,
+            state,
+            applied_state,
+        }
     }
 }
 
@@ -39,12 +49,72 @@ impl HealthService for HealthServiceImpl {
         let req = request.into_inner();
 
         // If a vault_id is specified, check vault health
-        if let Some(_vault_id) = req.vault_id {
-            // TODO: Check specific vault health from state layer
+        if let Some(vault_id_proto) = req.vault_id {
+            let vault_id = vault_id_proto.id;
+            // Note: namespace_id not in HealthCheckRequest, assume default (0)
+            // In production, extend proto to include namespace_id
+            let namespace_id = 0;
+
+            let mut details = std::collections::HashMap::new();
+
+            // Get vault height
+            let height = self.applied_state.vault_height(namespace_id, vault_id);
+            details.insert("block_height".to_string(), height.to_string());
+
+            // Get vault health status
+            let health_status = self.applied_state.vault_health(namespace_id, vault_id);
+            let (status, message) = match &health_status {
+                VaultHealthStatus::Healthy => {
+                    details.insert("health_status".to_string(), "healthy".to_string());
+                    (HealthStatus::Healthy, "Vault is healthy")
+                }
+                VaultHealthStatus::Diverged {
+                    expected,
+                    computed,
+                    at_height,
+                } => {
+                    details.insert("health_status".to_string(), "diverged".to_string());
+                    details.insert("diverged_at_height".to_string(), at_height.to_string());
+                    details.insert(
+                        "expected_root".to_string(),
+                        format!("{:x?}", &expected[..8]),
+                    );
+                    details.insert(
+                        "computed_root".to_string(),
+                        format!("{:x?}", &computed[..8]),
+                    );
+                    (HealthStatus::Unavailable, "Vault has diverged state")
+                }
+            };
+
+            // Get vault metadata (last write timestamp)
+            if let Some(vault_meta) = self.applied_state.get_vault(namespace_id, vault_id) {
+                if vault_meta.last_write_timestamp > 0 {
+                    details.insert(
+                        "last_write_timestamp".to_string(),
+                        vault_meta.last_write_timestamp.to_string(),
+                    );
+                }
+                if let Some(name) = &vault_meta.name {
+                    details.insert("vault_name".to_string(), name.clone());
+                }
+            }
+
+            // Get entity count from state layer
+            let state = self.state.read();
+            if let Ok(entities) = state.list_entities(vault_id, None, None, 1) {
+                // We fetch 1 to check if any exist, actual count needs full scan
+                // For now, indicate whether vault has entities
+                details.insert(
+                    "has_entities".to_string(),
+                    (!entities.is_empty()).to_string(),
+                );
+            }
+
             return Ok(Response::new(HealthCheckResponse {
-                status: HealthStatus::Healthy.into(),
-                message: "Vault is healthy".to_string(),
-                details: std::collections::HashMap::new(),
+                status: status.into(),
+                message: message.to_string(),
+                details,
             }));
         }
 

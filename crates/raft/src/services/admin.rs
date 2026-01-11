@@ -1,36 +1,42 @@
 //! Admin service implementation.
 //!
-//! Handles namespace and vault management, snapshots, and integrity checks.
+//! Handles namespace and vault management, cluster membership, snapshots, and integrity checks.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use openraft::Raft;
+use openraft::{BasicNode, Raft};
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
 use crate::log_storage::AppliedStateAccessor;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
-    CheckIntegrityRequest, CheckIntegrityResponse, CreateNamespaceRequest, CreateNamespaceResponse,
-    CreateSnapshotRequest, CreateSnapshotResponse, CreateVaultRequest, CreateVaultResponse,
-    DeleteNamespaceRequest, DeleteNamespaceResponse, DeleteVaultRequest, DeleteVaultResponse,
-    GetNamespaceRequest, GetNamespaceResponse, GetVaultRequest, GetVaultResponse,
-    ListNamespacesRequest, ListNamespacesResponse, ListVaultsRequest, ListVaultsResponse,
-    NamespaceId, ShardId, VaultId,
+    BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember, ClusterMemberRole,
+    CreateNamespaceRequest, CreateNamespaceResponse, CreateSnapshotRequest,
+    CreateSnapshotResponse, CreateVaultRequest, CreateVaultResponse, DeleteNamespaceRequest,
+    DeleteNamespaceResponse, DeleteVaultRequest, DeleteVaultResponse, GetClusterInfoRequest,
+    GetClusterInfoResponse, GetNamespaceRequest, GetNamespaceResponse, GetVaultRequest,
+    GetVaultResponse, Hash, IntegrityIssue, JoinClusterRequest, JoinClusterResponse,
+    LeaveClusterRequest, LeaveClusterResponse, ListNamespacesRequest, ListNamespacesResponse,
+    ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, ShardId, VaultId,
 };
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
-use ledger_storage::StateLayer;
+use ledger_storage::{BlockArchive, StateLayer, StorageEngine};
+use ledger_types::{VaultEntry, ZERO_HASH};
+use sha2::{Digest, Sha256};
 
 /// Admin service implementation.
 pub struct AdminServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
-    #[allow(dead_code)]
     state: Arc<RwLock<StateLayer>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
+    /// Block archive for integrity verification.
+    block_archive: Option<Arc<BlockArchive>>,
 }
 
 impl AdminServiceImpl {
@@ -44,6 +50,22 @@ impl AdminServiceImpl {
             raft,
             state,
             applied_state,
+            block_archive: None,
+        }
+    }
+
+    /// Create with block archive for integrity verification.
+    pub fn with_block_archive(
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+        block_archive: Arc<BlockArchive>,
+    ) -> Self {
+        Self {
+            raft,
+            state,
+            applied_state,
+            block_archive: Some(block_archive),
         }
     }
 }
@@ -203,9 +225,44 @@ impl AdminService for AdminServiceImpl {
 
         match result.data {
             LedgerResponse::VaultCreated { vault_id } => {
+                // Get Raft metrics for leader_id and term
+                let metrics = self.raft.metrics().borrow().clone();
+                let leader_id = metrics.current_leader.unwrap_or(metrics.id);
+
+                // Compute empty state root for genesis block
+                let state = self.state.read();
+                let state_root = state
+                    .compute_state_root(vault_id)
+                    .unwrap_or(ZERO_HASH);
+
+                // Build genesis block header (height 0)
+                let genesis = BlockHeader {
+                    height: 0,
+                    namespace_id: Some(NamespaceId { id: namespace_id }),
+                    vault_id: Some(VaultId { id: vault_id }),
+                    previous_hash: Some(Hash {
+                        value: ZERO_HASH.to_vec(),
+                    }),
+                    tx_merkle_root: Some(Hash {
+                        value: ZERO_HASH.to_vec(), // Empty transaction list
+                    }),
+                    state_root: Some(Hash {
+                        value: state_root.to_vec(),
+                    }),
+                    timestamp: Some(prost_types::Timestamp {
+                        seconds: chrono::Utc::now().timestamp(),
+                        nanos: 0,
+                    }),
+                    leader_id: Some(NodeId {
+                        id: leader_id.to_string(),
+                    }),
+                    term: metrics.current_term,
+                    committed_index: result.log_id.index,
+                };
+
                 Ok(Response::new(CreateVaultResponse {
                     vault_id: Some(VaultId { id: vault_id }),
-                    genesis: None, // TODO: Include genesis block header
+                    genesis: Some(genesis),
                 }))
             }
             LedgerResponse::Error { message } => Err(Status::internal(message)),
@@ -349,12 +406,406 @@ impl AdminService for AdminServiceImpl {
 
     async fn check_integrity(
         &self,
-        _request: Request<CheckIntegrityRequest>,
+        request: Request<CheckIntegrityRequest>,
     ) -> Result<Response<CheckIntegrityResponse>, Status> {
-        // TODO: Implement integrity check
+        let req = request.into_inner();
+        let mut issues = Vec::new();
+
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id);
+
+        // Get all vault heights to check
+        let vault_heights: Vec<(i64, i64, u64)> = if let (Some(ns), Some(v)) = (namespace_id, vault_id)
+        {
+            // Specific vault
+            let height = self.applied_state.vault_height(ns, v);
+            if height > 0 {
+                vec![(ns, v, height)]
+            } else {
+                vec![]
+            }
+        } else {
+            // All vaults
+            self.applied_state
+                .all_vault_heights()
+                .into_iter()
+                .map(|((ns, v), h)| (ns, v, h))
+                .collect()
+        };
+
+        if vault_heights.is_empty() {
+            return Ok(Response::new(CheckIntegrityResponse {
+                healthy: true,
+                issues: vec![],
+            }));
+        }
+
+        if req.full_check {
+            // Full check: Replay blocks and verify state roots
+            let archive = match &self.block_archive {
+                Some(a) => a,
+                None => {
+                    return Err(Status::unavailable(
+                        "Block archive not configured for full integrity check",
+                    ))
+                }
+            };
+
+            for (ns_id, v_id, expected_height) in &vault_heights {
+                // Create temporary state for replay verification
+                let temp_engine = match StorageEngine::open_in_memory() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        issues.push(IntegrityIssue {
+                            block_height: 0,
+                            issue_type: "internal_error".to_string(),
+                            description: format!("Failed to create temp state: {:?}", e),
+                        });
+                        continue;
+                    }
+                };
+                let temp_state = StateLayer::new(temp_engine.db());
+
+                let mut last_vault_hash: Option<[u8; 32]> = None;
+
+                // Replay all blocks for this vault
+                for height in 1..=*expected_height {
+                    let shard_height = match archive.find_shard_height(*ns_id, *v_id, height) {
+                        Ok(Some(h)) => h,
+                        Ok(None) => {
+                            issues.push(IntegrityIssue {
+                                block_height: height,
+                                issue_type: "missing_block".to_string(),
+                                description: format!(
+                                    "Block not found in archive: ns={}, vault={}, height={}",
+                                    ns_id, v_id, height
+                                ),
+                            });
+                            continue;
+                        }
+                        Err(e) => {
+                            issues.push(IntegrityIssue {
+                                block_height: height,
+                                issue_type: "archive_error".to_string(),
+                                description: format!("Index lookup failed: {:?}", e),
+                            });
+                            continue;
+                        }
+                    };
+
+                    let shard_block = match archive.read_block(shard_height) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            issues.push(IntegrityIssue {
+                                block_height: height,
+                                issue_type: "read_error".to_string(),
+                                description: format!("Block read failed: {:?}", e),
+                            });
+                            continue;
+                        }
+                    };
+
+                    // Find the vault entry in this shard block
+                    let vault_entry = shard_block.vault_entries.iter().find(|e| {
+                        e.namespace_id == *ns_id && e.vault_id == *v_id && e.vault_height == height
+                    });
+
+                    let entry = match vault_entry {
+                        Some(e) => e,
+                        None => {
+                            issues.push(IntegrityIssue {
+                                block_height: height,
+                                issue_type: "missing_entry".to_string(),
+                                description: format!(
+                                    "Vault entry not found in shard block: ns={}, vault={}",
+                                    ns_id, v_id
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+
+                    // Verify chain continuity (previous_vault_hash)
+                    if let Some(expected_prev) = last_vault_hash {
+                        if entry.previous_vault_hash != expected_prev {
+                            issues.push(IntegrityIssue {
+                                block_height: height,
+                                issue_type: "chain_break".to_string(),
+                                description: format!(
+                                    "Previous hash mismatch at height {}: expected {:x?}, got {:x?}",
+                                    height,
+                                    &expected_prev[..8],
+                                    &entry.previous_vault_hash[..8]
+                                ),
+                            });
+                        }
+                    }
+
+                    // Apply transactions to temp state
+                    for tx in &entry.transactions {
+                        if let Err(e) = temp_state.apply_operations(*v_id, &tx.operations, height) {
+                            issues.push(IntegrityIssue {
+                                block_height: height,
+                                issue_type: "apply_error".to_string(),
+                                description: format!("Transaction apply failed: {:?}", e),
+                            });
+                        }
+                    }
+
+                    // Compute and verify state root at this height
+                    match temp_state.compute_state_root(*v_id) {
+                        Ok(computed_root) => {
+                            if computed_root != entry.state_root {
+                                issues.push(IntegrityIssue {
+                                    block_height: height,
+                                    issue_type: "state_divergence".to_string(),
+                                    description: format!(
+                                        "State root mismatch: computed {:x?}, stored {:x?}",
+                                        &computed_root[..8],
+                                        &entry.state_root[..8]
+                                    ),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            issues.push(IntegrityIssue {
+                                block_height: height,
+                                issue_type: "compute_error".to_string(),
+                                description: format!("State root computation failed: {:?}", e),
+                            });
+                        }
+                    }
+
+                    // Track hash for next iteration's chain verification
+                    // Compute vault block hash from entry
+                    last_vault_hash = Some(compute_vault_block_hash(entry));
+                }
+
+                // Compare final replayed state root against current state
+                let current_state = self.state.read();
+                if let Ok(current_root) = current_state.compute_state_root(*v_id) {
+                    if let Ok(replayed_root) = temp_state.compute_state_root(*v_id) {
+                        if current_root != replayed_root {
+                            issues.push(IntegrityIssue {
+                                block_height: *expected_height,
+                                issue_type: "final_state_mismatch".to_string(),
+                                description: format!(
+                                    "Final state root mismatch for vault {}: current {:x?}, replayed {:x?}",
+                                    v_id,
+                                    &current_root[..8],
+                                    &replayed_root[..8]
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            // Quick check: Verify state roots can be computed without errors
+            let state = self.state.read();
+
+            for (_ns_id, v_id, height) in &vault_heights {
+                match state.compute_state_root(*v_id) {
+                    Ok(_root) => {
+                        // State root computed successfully - state is internally consistent
+                    }
+                    Err(e) => {
+                        issues.push(IntegrityIssue {
+                            block_height: *height,
+                            issue_type: "state_error".to_string(),
+                            description: format!(
+                                "Failed to compute state root for vault {}: {:?}",
+                                v_id, e
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(Response::new(CheckIntegrityResponse {
-            healthy: true,
-            issues: vec![],
+            healthy: issues.is_empty(),
+            issues,
         }))
     }
+
+    // =========================================================================
+    // Cluster Membership
+    // =========================================================================
+
+    async fn join_cluster(
+        &self,
+        request: Request<JoinClusterRequest>,
+    ) -> Result<Response<JoinClusterResponse>, Status> {
+        let req = request.into_inner();
+
+        // Get current metrics to check if we're the leader
+        let metrics = self.raft.metrics().borrow().clone();
+        let current_leader = metrics.current_leader;
+
+        // If we're not the leader, return the leader info for redirect
+        if current_leader != Some(metrics.id) {
+            // Get leader address from membership
+            let leader_addr = current_leader
+                .and_then(|leader_id| {
+                    metrics
+                        .membership_config
+                        .membership()
+                        .nodes()
+                        .find(|(id, _)| **id == leader_id)
+                        .map(|(_, node)| node.addr.clone())
+                })
+                .unwrap_or_default();
+
+            return Ok(Response::new(JoinClusterResponse {
+                success: false,
+                message: "Not the leader, redirect to leader".to_string(),
+                leader_id: current_leader.unwrap_or(0),
+                leader_address: leader_addr,
+            }));
+        }
+
+        // We are the leader - add the new node as a learner first
+        let node = BasicNode {
+            addr: req.address.clone(),
+        };
+
+        // Step 1: Add as learner (blocking=true to wait for replication to start)
+        match self.raft.add_learner(req.node_id, node, true).await {
+            Ok(_) => {
+                tracing::info!(node_id = req.node_id, "Added node as learner");
+            }
+            Err(e) => {
+                return Ok(Response::new(JoinClusterResponse {
+                    success: false,
+                    message: format!("Failed to add learner: {}", e),
+                    leader_id: metrics.id,
+                    leader_address: String::new(),
+                }));
+            }
+        }
+
+        // Step 2: Promote to voter by changing membership
+        // Get current voters and add the new node
+        let current_membership = metrics.membership_config.membership();
+        let mut new_voters: BTreeSet<u64> = current_membership.voter_ids().collect();
+        new_voters.insert(req.node_id);
+
+        match self.raft.change_membership(new_voters, false).await {
+            Ok(_) => {
+                tracing::info!(node_id = req.node_id, "Promoted node to voter");
+                Ok(Response::new(JoinClusterResponse {
+                    success: true,
+                    message: "Node joined cluster successfully".to_string(),
+                    leader_id: metrics.id,
+                    leader_address: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(JoinClusterResponse {
+                success: false,
+                message: format!("Failed to promote to voter: {}", e),
+                leader_id: metrics.id,
+                leader_address: String::new(),
+            })),
+        }
+    }
+
+    async fn leave_cluster(
+        &self,
+        request: Request<LeaveClusterRequest>,
+    ) -> Result<Response<LeaveClusterResponse>, Status> {
+        let req = request.into_inner();
+
+        // Get current metrics
+        let metrics = self.raft.metrics().borrow().clone();
+        let current_leader = metrics.current_leader;
+
+        // Only the leader can change membership
+        if current_leader != Some(metrics.id) {
+            return Ok(Response::new(LeaveClusterResponse {
+                success: false,
+                message: "Not the leader, cannot process leave request".to_string(),
+            }));
+        }
+
+        // Remove the node from voters
+        let current_membership = metrics.membership_config.membership();
+        let new_voters: BTreeSet<u64> = current_membership
+            .voter_ids()
+            .filter(|id| *id != req.node_id)
+            .collect();
+
+        // Prevent removing the last voter
+        if new_voters.is_empty() {
+            return Ok(Response::new(LeaveClusterResponse {
+                success: false,
+                message: "Cannot remove the last voter from cluster".to_string(),
+            }));
+        }
+
+        match self.raft.change_membership(new_voters, false).await {
+            Ok(_) => {
+                tracing::info!(node_id = req.node_id, "Removed node from cluster");
+                Ok(Response::new(LeaveClusterResponse {
+                    success: true,
+                    message: "Node left cluster successfully".to_string(),
+                }))
+            }
+            Err(e) => Ok(Response::new(LeaveClusterResponse {
+                success: false,
+                message: format!("Failed to remove node: {}", e),
+            })),
+        }
+    }
+
+    async fn get_cluster_info(
+        &self,
+        _request: Request<GetClusterInfoRequest>,
+    ) -> Result<Response<GetClusterInfoResponse>, Status> {
+        let metrics = self.raft.metrics().borrow().clone();
+        let membership = metrics.membership_config.membership();
+        let current_leader = metrics.current_leader;
+
+        // Build member list from membership config
+        let mut members = Vec::new();
+
+        // Add voters
+        for (node_id, node) in membership.nodes() {
+            let is_voter = membership.voter_ids().any(|id| id == *node_id);
+            members.push(ClusterMember {
+                node_id: *node_id,
+                address: node.addr.clone(),
+                role: if is_voter {
+                    ClusterMemberRole::Voter.into()
+                } else {
+                    ClusterMemberRole::Learner.into()
+                },
+                is_leader: current_leader == Some(*node_id),
+            });
+        }
+
+        Ok(Response::new(GetClusterInfoResponse {
+            members,
+            leader_id: current_leader.unwrap_or(0),
+            term: metrics.vote.leader_id().term,
+        }))
+    }
+}
+
+/// Compute the hash of a vault block entry for chain verification.
+///
+/// The vault block hash commits to all content: height, previous hash,
+/// transactions (via tx_merkle_root), and state root.
+fn compute_vault_block_hash(entry: &VaultEntry) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+
+    // Hash the vault block header fields
+    hasher.update(entry.namespace_id.to_le_bytes());
+    hasher.update(entry.vault_id.to_le_bytes());
+    hasher.update(entry.vault_height.to_le_bytes());
+    hasher.update(&entry.previous_vault_hash);
+    hasher.update(&entry.tx_merkle_root);
+    hasher.update(&entry.state_root);
+
+    hasher.finalize().into()
 }

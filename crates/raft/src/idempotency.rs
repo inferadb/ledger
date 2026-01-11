@@ -129,6 +129,18 @@ impl IdempotencyCache {
     pub fn is_empty(&self) -> bool {
         self.cache.is_empty()
     }
+
+    /// Get the last committed sequence for a client.
+    ///
+    /// Returns the highest sequence number that has been committed for this client,
+    /// or 0 if no commits have been cached (either never written or cache expired).
+    pub fn get_last_sequence(&self, client_id: &str) -> u64 {
+        self.cache
+            .get(client_id)
+            .filter(|entry| entry.inserted_at.elapsed() < ENTRY_TTL)
+            .map(|entry| entry.sequence)
+            .unwrap_or(0)
+    }
 }
 
 impl Default for IdempotencyCache {

@@ -35,6 +35,7 @@ parking_lot.workspace = true
 # Serialization
 serde.workspace = true
 bincode.workspace = true
+postcard.workspace = true
 
 # Error handling
 snafu.workspace = true

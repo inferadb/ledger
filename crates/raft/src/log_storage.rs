@@ -26,9 +26,14 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{Hash, NamespaceId, VaultId};
+use ledger_types::{
+    Hash, NamespaceId, ShardBlock, VaultEntry, VaultId, compute_tx_merkle_root,
+};
 
 use crate::types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest};
+
+// Re-export storage types used in this module
+use ledger_storage::{BlockArchive, StateLayer};
 
 // ============================================================================
 // Table Definitions
@@ -72,6 +77,28 @@ pub struct AppliedState {
     pub namespaces: HashMap<NamespaceId, NamespaceMeta>,
     /// Vault registry (replicated via Raft).
     pub vaults: HashMap<(NamespaceId, VaultId), VaultMeta>,
+    /// Previous vault block hashes (for chaining).
+    pub previous_vault_hashes: HashMap<(NamespaceId, VaultId), Hash>,
+    /// Current shard height for block creation.
+    #[serde(default)]
+    pub shard_height: u64,
+    /// Previous shard hash for chain continuity.
+    #[serde(default)]
+    pub previous_shard_hash: Hash,
+}
+
+/// Combined snapshot containing both metadata and entity state.
+///
+/// This is the complete snapshot format that includes:
+/// - AppliedState: Raft state machine metadata (vault heights, membership, etc.)
+/// - vault_entities: Actual entity data per vault for StateLayer restoration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CombinedSnapshot {
+    /// Raft state machine metadata.
+    pub applied_state: AppliedState,
+    /// Entity data per vault for StateLayer restoration.
+    /// Key: vault_id, Value: list of entities
+    pub vault_entities: HashMap<VaultId, Vec<ledger_types::Entity>>,
 }
 
 /// Metadata for a namespace.
@@ -98,6 +125,9 @@ pub struct VaultMeta {
     pub name: Option<String>,
     /// Whether the vault is deleted.
     pub deleted: bool,
+    /// Timestamp of last write (Unix seconds).
+    #[serde(default)]
+    pub last_write_timestamp: u64,
 }
 
 /// Sequence counters for deterministic ID generation.
@@ -259,6 +289,10 @@ impl AppliedStateAccessor {
 /// - Vote state (term + voted_for) in metadata
 /// - Committed log ID for recovery
 /// - Applied state (state machine) in metadata
+///
+/// Additionally, it integrates with:
+/// - StateLayer for entity/relationship storage and state root computation
+/// - BlockArchive for permanent block storage
 pub struct RaftLogStore {
     /// redb database handle.
     db: Arc<Database>,
@@ -268,11 +302,26 @@ pub struct RaftLogStore {
     last_purged_cache: RwLock<Option<LogId<LedgerNodeId>>>,
     /// Applied state (state machine) - shared with accessor.
     applied_state: Arc<RwLock<AppliedState>>,
+    /// State layer for entity/relationship storage (shared with read service).
+    state_layer: Option<Arc<RwLock<StateLayer>>>,
+    /// Block archive for permanent block storage.
+    block_archive: Option<Arc<BlockArchive>>,
+    /// Shard ID for this Raft group.
+    shard_id: i32,
+    /// Node ID for block metadata.
+    node_id: String,
+    /// Current shard height (for block creation).
+    shard_height: RwLock<u64>,
+    /// Previous shard hash (for chaining).
+    previous_shard_hash: RwLock<Hash>,
 }
 
 #[allow(clippy::result_large_err)]
 impl RaftLogStore {
     /// Open or create a new log store at the given path.
+    ///
+    /// This creates a basic log store without StateLayer or BlockArchive integration.
+    /// Use `with_state_layer` and `with_block_archive` to add those capabilities.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError<LedgerNodeId>> {
         let db = Database::create(path.as_ref()).map_err(|e| to_storage_error(&e))?;
 
@@ -296,12 +345,52 @@ impl RaftLogStore {
                 sequences: SequenceCounters::new(),
                 ..Default::default()
             })),
+            state_layer: None,
+            block_archive: None,
+            shard_id: 0,
+            node_id: String::new(),
+            shard_height: RwLock::new(0),
+            previous_shard_hash: RwLock::new(ledger_types::ZERO_HASH),
         };
 
         // Load cached values
         store.load_caches()?;
 
         Ok(store)
+    }
+
+    /// Configure the state layer for transaction application.
+    pub fn with_state_layer(mut self, state_layer: Arc<RwLock<StateLayer>>) -> Self {
+        self.state_layer = Some(state_layer);
+        self
+    }
+
+    /// Configure the block archive for permanent block storage.
+    pub fn with_block_archive(mut self, block_archive: Arc<BlockArchive>) -> Self {
+        self.block_archive = Some(block_archive);
+        self
+    }
+
+    /// Configure shard metadata.
+    pub fn with_shard_config(mut self, shard_id: i32, node_id: String) -> Self {
+        self.shard_id = shard_id;
+        self.node_id = node_id;
+        self
+    }
+
+    /// Get the current shard height.
+    pub fn current_shard_height(&self) -> u64 {
+        *self.shard_height.read()
+    }
+
+    /// Get a reference to the state layer (if configured).
+    pub fn state_layer(&self) -> Option<&Arc<RwLock<StateLayer>>> {
+        self.state_layer.as_ref()
+    }
+
+    /// Get a reference to the block archive (if configured).
+    pub fn block_archive(&self) -> Option<&Arc<BlockArchive>> {
+        self.block_archive.as_ref()
     }
 
     /// Get an accessor for reading applied state.
@@ -369,33 +458,116 @@ impl RaftLogStore {
         }
     }
 
-    /// Apply a single request and return the response.
-    fn apply_request(&self, request: &LedgerRequest, state: &mut AppliedState) -> LedgerResponse {
+    /// Apply a single request and return the response plus optional vault entry.
+    ///
+    /// For Write requests, this also returns a VaultEntry that should be included
+    /// in the ShardBlock. The caller is responsible for collecting these entries
+    /// and creating the ShardBlock.
+    fn apply_request(
+        &self,
+        request: &LedgerRequest,
+        state: &mut AppliedState,
+    ) -> (LedgerResponse, Option<VaultEntry>) {
         match request {
             LedgerRequest::Write {
                 namespace_id,
                 vault_id,
-                transactions: _,
+                transactions,
             } => {
                 let key = (*namespace_id, *vault_id);
                 if let Some(VaultHealthStatus::Diverged { .. }) = state.vault_health.get(&key) {
-                    return LedgerResponse::Error {
-                        message: format!(
-                            "Vault {}:{} is diverged and not accepting writes",
-                            namespace_id, vault_id
-                        ),
-                    };
+                    return (
+                        LedgerResponse::Error {
+                            message: format!(
+                                "Vault {}:{} is diverged and not accepting writes",
+                                namespace_id, vault_id
+                            ),
+                        },
+                        None,
+                    );
                 }
 
                 let current_height = state.vault_heights.get(&key).copied().unwrap_or(0);
                 let new_height = current_height + 1;
-                let block_hash = self.compute_block_hash(*namespace_id, *vault_id, new_height);
+
+                // Get previous vault hash (ZERO_HASH for genesis)
+                let previous_vault_hash = state
+                    .previous_vault_hashes
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(ledger_types::ZERO_HASH);
+
+                // Apply transactions to state layer if configured
+                let state_root = if let Some(state_layer_lock) = &self.state_layer {
+                    // Collect all operations from all transactions
+                    let all_ops: Vec<_> = transactions
+                        .iter()
+                        .flat_map(|tx| tx.operations.clone())
+                        .collect();
+
+                    // Acquire write lock and apply operations
+                    let state_layer = state_layer_lock.write();
+                    if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
+                        return (
+                            LedgerResponse::Error {
+                                message: format!("Failed to apply operations: {}", e),
+                            },
+                            None,
+                        );
+                    }
+
+                    // Compute state root
+                    match state_layer.compute_state_root(*vault_id) {
+                        Ok(root) => root,
+                        Err(e) => {
+                            return (
+                                LedgerResponse::Error {
+                                    message: format!("Failed to compute state root: {}", e),
+                                },
+                                None,
+                            );
+                        }
+                    }
+                } else {
+                    // No state layer configured, use placeholder
+                    ledger_types::EMPTY_HASH
+                };
+
+                // Compute tx merkle root
+                let tx_merkle_root = compute_tx_merkle_root(transactions);
+
+                // Update vault height in applied state
                 state.vault_heights.insert(key, new_height);
 
-                LedgerResponse::Write {
-                    block_height: new_height,
-                    block_hash,
+                // Update last write timestamp from latest transaction (deterministic)
+                if let Some(last_tx) = transactions.last() {
+                    if let Some(vault_meta) = state.vaults.get_mut(&key) {
+                        vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
+                    }
                 }
+
+                // Build VaultEntry for ShardBlock
+                let vault_entry = VaultEntry {
+                    namespace_id: *namespace_id,
+                    vault_id: *vault_id,
+                    vault_height: new_height,
+                    previous_vault_hash,
+                    transactions: transactions.clone(),
+                    tx_merkle_root,
+                    state_root,
+                };
+
+                // Compute block hash from vault entry (for response)
+                // We temporarily build a BlockHeader to compute the hash
+                let block_hash = self.compute_vault_block_hash(&vault_entry);
+
+                (
+                    LedgerResponse::Write {
+                        block_height: new_height,
+                        block_hash,
+                    },
+                    Some(vault_entry),
+                )
             }
 
             LedgerRequest::CreateNamespace { name } => {
@@ -409,7 +581,7 @@ impl RaftLogStore {
                         deleted: false,
                     },
                 );
-                LedgerResponse::NamespaceCreated { namespace_id }
+                (LedgerResponse::NamespaceCreated { namespace_id }, None)
             }
 
             LedgerRequest::CreateVault { namespace_id, name } => {
@@ -424,9 +596,10 @@ impl RaftLogStore {
                         vault_id,
                         name: name.clone(),
                         deleted: false,
+                        last_write_timestamp: 0, // No writes yet
                     },
                 );
-                LedgerResponse::VaultCreated { vault_id }
+                (LedgerResponse::VaultCreated { vault_id }, None)
             }
 
             LedgerRequest::DeleteNamespace { namespace_id } => {
@@ -436,7 +609,7 @@ impl RaftLogStore {
                     .iter()
                     .any(|((ns, _), v)| *ns == *namespace_id && !v.deleted);
 
-                if has_vaults {
+                let response = if has_vaults {
                     LedgerResponse::NamespaceDeleted { success: false }
                 } else if let Some(ns) = state.namespaces.get_mut(namespace_id) {
                     ns.deleted = true;
@@ -445,7 +618,8 @@ impl RaftLogStore {
                     LedgerResponse::Error {
                         message: format!("Namespace {} not found", namespace_id),
                     }
-                }
+                };
+                (response, None)
             }
 
             LedgerRequest::DeleteVault {
@@ -454,29 +628,43 @@ impl RaftLogStore {
             } => {
                 let key = (*namespace_id, *vault_id);
                 // Mark vault as deleted (keep heights for historical queries)
-                if let Some(vault) = state.vaults.get_mut(&key) {
+                let response = if let Some(vault) = state.vaults.get_mut(&key) {
                     vault.deleted = true;
                     LedgerResponse::VaultDeleted { success: true }
                 } else {
                     LedgerResponse::Error {
                         message: format!("Vault {}:{} not found", namespace_id, vault_id),
                     }
-                }
+                };
+                (response, None)
             }
 
-            LedgerRequest::System(system_request) => match system_request {
-                SystemRequest::CreateUser { name: _, email: _ } => {
-                    let user_id = state.sequences.next_user();
-                    LedgerResponse::UserCreated { user_id }
-                }
-                SystemRequest::AddNode { .. }
-                | SystemRequest::RemoveNode { .. }
-                | SystemRequest::UpdateNamespaceRouting { .. } => LedgerResponse::Empty,
-            },
+            LedgerRequest::System(system_request) => {
+                let response = match system_request {
+                    SystemRequest::CreateUser { name: _, email: _ } => {
+                        let user_id = state.sequences.next_user();
+                        LedgerResponse::UserCreated { user_id }
+                    }
+                    SystemRequest::AddNode { .. }
+                    | SystemRequest::RemoveNode { .. }
+                    | SystemRequest::UpdateNamespaceRouting { .. } => LedgerResponse::Empty,
+                };
+                (response, None)
+            }
         }
     }
 
-    /// Compute a simple block hash.
+    /// Compute a deterministic hash for a vault entry.
+    ///
+    /// Uses only the cryptographic commitments from the entry, not runtime
+    /// metadata like timestamp or proposer. This ensures all Raft nodes
+    /// compute the same hash for the same log entry.
+    fn compute_vault_block_hash(&self, entry: &VaultEntry) -> Hash {
+        ledger_types::vault_entry_hash(entry)
+    }
+
+    /// Compute a simple block hash (used in tests).
+    #[allow(dead_code)]
     fn compute_block_hash(
         &self,
         namespace_id: NamespaceId,
@@ -599,6 +787,12 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             vote_cache: RwLock::new(*self.vote_cache.read()),
             last_purged_cache: RwLock::new(*self.last_purged_cache.read()),
             applied_state: Arc::clone(&self.applied_state),
+            state_layer: self.state_layer.clone(),
+            block_archive: self.block_archive.clone(),
+            shard_id: self.shard_id,
+            node_id: self.node_id.clone(),
+            shard_height: RwLock::new(*self.shard_height.read()),
+            previous_shard_hash: RwLock::new(*self.previous_shard_hash.read()),
         }
     }
 
@@ -732,22 +926,85 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         entries: &[Entry<LedgerTypeConfig>],
     ) -> Result<Vec<LedgerResponse>, StorageError<LedgerNodeId>> {
         let mut responses = Vec::new();
+        let mut vault_entries = Vec::new();
         let mut state = self.applied_state.write();
+
+        // Get the committed_index from the last entry (for ShardBlock metadata)
+        let committed_index = entries.last().map(|e| e.log_id.index).unwrap_or(0);
+        // Term is stored in the leader_id
+        let term = entries
+            .last()
+            .map(|e| e.log_id.leader_id.get_term())
+            .unwrap_or(0);
 
         for entry in entries {
             state.last_applied = Some(entry.log_id);
 
-            let response = match &entry.payload {
-                EntryPayload::Blank => LedgerResponse::Empty,
+            let (response, vault_entry) = match &entry.payload {
+                EntryPayload::Blank => (LedgerResponse::Empty, None),
                 EntryPayload::Normal(request) => self.apply_request(request, &mut state),
                 EntryPayload::Membership(membership) => {
                     state.membership =
                         StoredMembership::new(Some(entry.log_id), membership.clone());
-                    LedgerResponse::Empty
+                    (LedgerResponse::Empty, None)
                 }
             };
 
             responses.push(response);
+
+            // Collect vault entries for ShardBlock creation
+            if let Some(entry) = vault_entry {
+                vault_entries.push(entry);
+            }
+        }
+
+        // Create and store ShardBlock if we have vault entries
+        if !vault_entries.is_empty() {
+            let timestamp = chrono::Utc::now();
+            let new_shard_height = *self.shard_height.read() + 1;
+            let previous_shard_hash = *self.previous_shard_hash.read();
+
+            let shard_block = ShardBlock {
+                shard_id: self.shard_id,
+                shard_height: new_shard_height,
+                previous_shard_hash,
+                vault_entries: vault_entries.clone(),
+                timestamp,
+                leader_id: self.node_id.clone(),
+                term,
+                committed_index,
+            };
+
+            // Store in block archive if configured
+            if let Some(archive) = &self.block_archive {
+                if let Err(e) = archive.append_block(&shard_block) {
+                    tracing::error!("Failed to store block: {}", e);
+                    // Continue - block storage failure is logged but doesn't fail the operation
+                }
+            }
+
+            // Update previous vault hashes for each entry
+            for entry in &vault_entries {
+                let vault_block = shard_block.extract_vault_block(entry.namespace_id, entry.vault_id);
+                if let Some(vb) = vault_block {
+                    let block_hash = ledger_types::hash::block_hash(&vb.header);
+                    state.previous_vault_hashes.insert(
+                        (entry.namespace_id, entry.vault_id),
+                        block_hash,
+                    );
+                }
+            }
+
+            // Update shard chain tracking
+            let shard_hash = ledger_types::sha256(
+                &postcard::to_allocvec(&shard_block).unwrap_or_default(),
+            );
+            *self.shard_height.write() = new_shard_height;
+            *self.previous_shard_hash.write() = shard_hash;
+
+            // Also update AppliedState for snapshot persistence
+            state.shard_height = new_shard_height;
+            state.previous_shard_hash = shard_hash;
         }
 
         // Persist state
@@ -776,11 +1033,51 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<LedgerNodeId>> {
         let data = snapshot.into_inner();
-        let new_state: AppliedState =
+
+        // Try to deserialize as CombinedSnapshot first (new format)
+        let combined: CombinedSnapshot =
             bincode::deserialize(&data).map_err(|e| to_serde_error(&e))?;
 
-        *self.applied_state.write() = new_state.clone();
-        self.save_applied_state(&new_state)?;
+        // Restore AppliedState
+        *self.applied_state.write() = combined.applied_state.clone();
+        self.save_applied_state(&combined.applied_state)?;
+
+        // Restore shard chain tracking from snapshot
+        *self.shard_height.write() = combined.applied_state.shard_height;
+        *self.previous_shard_hash.write() = combined.applied_state.previous_shard_hash;
+
+        // Restore StateLayer entities if StateLayer is configured
+        if let Some(state_layer) = &self.state_layer {
+            let state = state_layer.write();
+            for (vault_id, entities) in &combined.vault_entities {
+                for entity in entities {
+                    // Convert entity to SetEntity operation
+                    let ops = vec![ledger_types::Operation::SetEntity {
+                        key: String::from_utf8_lossy(&entity.key).to_string(),
+                        value: entity.value.clone(),
+                        condition: None, // No condition for snapshot restore
+                        expires_at: if entity.expires_at == 0 {
+                            None
+                        } else {
+                            Some(entity.expires_at)
+                        },
+                    }];
+                    // Apply at the entity's version height
+                    if let Err(e) = state.apply_operations(*vault_id, &ops, entity.version) {
+                        tracing::warn!(
+                            vault_id,
+                            key = %String::from_utf8_lossy(&entity.key),
+                            error = %e,
+                            "Failed to restore entity from snapshot"
+                        );
+                    }
+                }
+            }
+            tracing::info!(
+                vault_count = combined.vault_entities.len(),
+                "Restored StateLayer from snapshot"
+            );
+        }
 
         Ok(())
     }
@@ -794,7 +1091,49 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             return Ok(None);
         }
 
-        let data = bincode::serialize(&*state).map_err(|e| to_serde_error(&e))?;
+        // Collect entities from StateLayer if configured
+        let vault_entities = if let Some(state_layer) = &self.state_layer {
+            let sl = state_layer.read();
+            let mut entities_map = HashMap::new();
+
+            // Get entities for each known vault
+            for &(namespace_id, vault_id) in state.vault_heights.keys() {
+                // List all entities in this vault (up to 10000 per vault for snapshot)
+                match sl.list_entities(vault_id, None, None, 10000) {
+                    Ok(entities) => {
+                        if !entities.is_empty() {
+                            entities_map.insert(vault_id, entities);
+                            tracing::debug!(
+                                namespace_id,
+                                vault_id,
+                                count = entities_map.get(&vault_id).map(|e| e.len()).unwrap_or(0),
+                                "Collected entities for snapshot"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            namespace_id,
+                            vault_id,
+                            error = %e,
+                            "Failed to list entities for snapshot"
+                        );
+                    }
+                }
+            }
+
+            entities_map
+        } else {
+            HashMap::new()
+        };
+
+        // Create combined snapshot
+        let combined = CombinedSnapshot {
+            applied_state: state.clone(),
+            vault_entities,
+        };
+
+        let data = bincode::serialize(&combined).map_err(|e| to_serde_error(&e))?;
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
@@ -902,7 +1241,7 @@ mod tests {
             name: "test-ns".to_string(),
         };
 
-        let response = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
             LedgerResponse::NamespaceCreated { namespace_id } => {
@@ -925,7 +1264,7 @@ mod tests {
             name: Some("test-vault".to_string()),
         };
 
-        let response = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
             LedgerResponse::VaultCreated { vault_id } => {
@@ -960,7 +1299,7 @@ mod tests {
             transactions: vec![],
         };
 
-        let response = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
@@ -1047,7 +1386,8 @@ mod tests {
         let mut state_a = store_a.applied_state.write();
         let mut results_a = Vec::new();
         for request in &requests {
-            results_a.push(store_a.apply_request(request, &mut state_a));
+            let (response, _) = store_a.apply_request(request, &mut state_a);
+            results_a.push(response);
         }
         drop(state_a);
 
@@ -1055,7 +1395,8 @@ mod tests {
         let mut state_b = store_b.applied_state.write();
         let mut results_b = Vec::new();
         for request in &requests {
-            results_b.push(store_b.apply_request(request, &mut state_b));
+            let (response, _) = store_b.apply_request(request, &mut state_b);
+            results_b.push(response);
         }
         drop(state_b);
 
@@ -1266,8 +1607,10 @@ mod tests {
         let mut results_b = Vec::new();
 
         for req in &interleaved {
-            results_a.push(store_a.apply_request(req, &mut state_a));
-            results_b.push(store_b.apply_request(req, &mut state_b));
+            let (response_a, _) = store_a.apply_request(req, &mut state_a);
+            let (response_b, _) = store_b.apply_request(req, &mut state_b);
+            results_a.push(response_a);
+            results_b.push(response_b);
         }
 
         // Results must match

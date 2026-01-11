@@ -20,7 +20,7 @@ mod state;
 pub mod system;
 mod tables;
 
-pub use block_archive::BlockArchive;
+pub use block_archive::{BlockArchive, BlockArchiveError};
 pub use bucket::VaultCommitment;
 pub use engine::{ReadTxn, StorageEngine, WriteTxn};
 pub use entity::EntityStore;

@@ -1379,6 +1379,7 @@ dependencies = [
  "metrics",
  "openraft",
  "parking_lot",
+ "postcard",
  "prost",
  "prost-types",
  "redb",

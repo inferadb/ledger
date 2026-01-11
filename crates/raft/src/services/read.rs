@@ -25,8 +25,9 @@ use crate::proto::{
     WatchBlocksRequest,
 };
 
-use ledger_storage::StateLayer;
+use ledger_storage::{BlockArchive, StateLayer, StorageEngine};
 
+use crate::IdempotencyCache;
 use crate::log_storage::AppliedStateAccessor;
 
 /// Read service implementation.
@@ -35,8 +36,12 @@ pub struct ReadServiceImpl {
     state: Arc<RwLock<StateLayer>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
+    /// Block archive for retrieving stored blocks.
+    block_archive: Option<Arc<BlockArchive>>,
     /// Block announcement broadcast channel.
     block_announcements: broadcast::Sender<BlockAnnouncement>,
+    /// Idempotency cache for client state tracking.
+    idempotency: Option<Arc<IdempotencyCache>>,
 }
 
 impl ReadServiceImpl {
@@ -49,8 +54,150 @@ impl ReadServiceImpl {
         Self {
             state,
             applied_state,
+            block_archive: None,
             block_announcements,
+            idempotency: None,
         }
+    }
+
+    /// Create a read service with block archive access.
+    pub fn with_block_archive(
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+        block_archive: Arc<BlockArchive>,
+        block_announcements: broadcast::Sender<BlockAnnouncement>,
+    ) -> Self {
+        Self {
+            state,
+            applied_state,
+            block_archive: Some(block_archive),
+            block_announcements,
+            idempotency: None,
+        }
+    }
+
+    /// Create a read service with full configuration.
+    pub fn with_idempotency(
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+        block_archive: Option<Arc<BlockArchive>>,
+        block_announcements: broadcast::Sender<BlockAnnouncement>,
+        idempotency: Arc<IdempotencyCache>,
+    ) -> Self {
+        Self {
+            state,
+            applied_state,
+            block_archive,
+            block_announcements,
+            idempotency: Some(idempotency),
+        }
+    }
+
+    /// Fetch block header from archive for a given vault height.
+    ///
+    /// Returns None if the block is not found or archive is not available.
+    fn get_block_header(
+        &self,
+        archive: &BlockArchive,
+        namespace_id: i64,
+        vault_id: i64,
+        vault_height: u64,
+    ) -> Option<crate::proto::BlockHeader> {
+        // Height 0 means no blocks yet
+        if vault_height == 0 {
+            return None;
+        }
+
+        // Find the shard height containing this vault block
+        let shard_height = archive
+            .find_shard_height(namespace_id, vault_id, vault_height)
+            .ok()
+            .flatten()?;
+
+        // Read the shard block
+        let shard_block = archive.read_block(shard_height).ok()?;
+
+        // Find the vault entry
+        let entry = shard_block
+            .vault_entries
+            .iter()
+            .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)?;
+
+        // Build proto block header
+        Some(crate::proto::BlockHeader {
+            height: entry.vault_height,
+            namespace_id: Some(crate::proto::NamespaceId {
+                id: entry.namespace_id,
+            }),
+            vault_id: Some(crate::proto::VaultId { id: entry.vault_id }),
+            previous_hash: Some(crate::proto::Hash {
+                value: entry.previous_vault_hash.to_vec(),
+            }),
+            tx_merkle_root: Some(crate::proto::Hash {
+                value: entry.tx_merkle_root.to_vec(),
+            }),
+            state_root: Some(crate::proto::Hash {
+                value: entry.state_root.to_vec(),
+            }),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: shard_block.timestamp.timestamp(),
+                nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
+            }),
+            leader_id: Some(crate::proto::NodeId {
+                id: shard_block.leader_id.clone(),
+            }),
+            term: shard_block.term,
+            committed_index: shard_block.committed_index,
+        })
+    }
+
+    /// Get block_hash and state_root for a vault at a given height.
+    ///
+    /// Returns (block_hash, state_root) or (None, None) if not found.
+    fn get_tip_hashes(
+        &self,
+        archive: &BlockArchive,
+        namespace_id: i64,
+        vault_id: i64,
+        vault_height: u64,
+    ) -> (Option<crate::proto::Hash>, Option<crate::proto::Hash>) {
+        // Find the shard height containing this vault block
+        let shard_height = match archive
+            .find_shard_height(namespace_id, vault_id, vault_height)
+            .ok()
+            .flatten()
+        {
+            Some(h) => h,
+            None => return (None, None),
+        };
+
+        // Read the shard block
+        let shard_block = match archive.read_block(shard_height) {
+            Ok(block) => block,
+            Err(_) => return (None, None),
+        };
+
+        // Find the vault entry
+        let entry = match shard_block
+            .vault_entries
+            .iter()
+            .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)
+        {
+            Some(e) => e,
+            None => return (None, None),
+        };
+
+        // Compute block hash from vault entry
+        let block_hash = ledger_types::vault_entry_hash(entry);
+
+        (
+            Some(crate::proto::Hash {
+                value: block_hash.to_vec(),
+            }),
+            Some(crate::proto::Hash {
+                value: entry.state_root.to_vec(),
+            }),
+        )
     }
 }
 
@@ -109,8 +256,9 @@ impl ReadService for ReadServiceImpl {
         let start = Instant::now();
         let req = request.into_inner();
 
-        // Extract vault ID
-        let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
+        // Extract IDs
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
 
         // Record span fields
         tracing::Span::current().record("vault_id", vault_id);
@@ -119,14 +267,28 @@ impl ReadService for ReadServiceImpl {
         // Read from state layer
         let state = self.state.read();
         let entity = state
-            .get_entity(vault_id as i64, req.key.as_bytes())
+            .get_entity(vault_id, req.key.as_bytes())
             .map_err(|e| {
                 warn!(error = %e, "Verified read failed");
                 metrics::record_verified_read(false, start.elapsed().as_secs_f64());
                 Status::internal(format!("Storage error: {}", e))
             })?;
+        drop(state);
 
-        // TODO: Generate real merkle proof
+        // Get current block height for this vault
+        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+
+        // Fetch block header from archive if available
+        let block_header = if let Some(archive) = &self.block_archive {
+            self.get_block_header(archive, namespace_id, vault_id, block_height)
+        } else {
+            None
+        };
+
+        // Note: State verification uses bucket-based hashing (not sparse Merkle tree),
+        // so we can't generate individual key inclusion proofs. The state_root in the
+        // block header commits to the entire vault state. Clients must trust the
+        // state_root or reconstruct the full bucket hash to verify.
         let merkle_proof = crate::proto::MerkleProof {
             leaf_hash: None,
             siblings: vec![],
@@ -141,16 +303,10 @@ impl ReadService for ReadServiceImpl {
         );
         metrics::record_verified_read(true, latency);
 
-        // Get current block height for this vault
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let block_height = self
-            .applied_state
-            .vault_height(namespace_id, vault_id as i64);
-
         Ok(Response::new(VerifiedReadResponse {
             value: entity.map(|e| e.value),
             block_height,
-            block_header: None, // TODO: Include block header from block archive
+            block_header,
             merkle_proof: Some(merkle_proof),
             chain_proof: None,
         }))
@@ -160,6 +316,7 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<HistoricalReadRequest>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
+        let start = Instant::now();
         let req = request.into_inner();
 
         // Historical read requires at_height
@@ -169,19 +326,104 @@ impl ReadService for ReadServiceImpl {
             ));
         }
 
-        // Extract vault ID
-        let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
+        // Extract IDs
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
 
-        // TODO: Implement historical reads - for now, just read current state
-        let state = self.state.read();
-        let entity = state
-            .get_entity(vault_id as i64, req.key.as_bytes())
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+        // Get block archive - required for historical reads
+        let archive = match &self.block_archive {
+            Some(a) => a,
+            None => {
+                return Err(Status::unavailable(
+                    "Block archive not configured for historical reads",
+                ))
+            }
+        };
+
+        // Check that requested height doesn't exceed current tip
+        let tip_height = self.applied_state.vault_height(namespace_id, vault_id);
+        if req.at_height > tip_height {
+            return Err(Status::invalid_argument(format!(
+                "Requested height {} exceeds current tip {}",
+                req.at_height, tip_height
+            )));
+        }
+
+        // Create in-memory state layer for replay
+        let temp_engine = StorageEngine::open_in_memory()
+            .map_err(|e| Status::internal(format!("Failed to create temporary state: {}", e)))?;
+        let temp_state = StateLayer::new(temp_engine.db());
+
+        // Track block timestamp for expiration check
+        let mut block_timestamp = chrono::Utc::now();
+
+        // Replay blocks from height 1 to at_height
+        for height in 1..=req.at_height {
+            // Find shard height for this vault block
+            let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
+                Ok(Some(h)) => h,
+                Ok(None) => continue, // Block might not exist at this height (sparse)
+                Err(e) => {
+                    return Err(Status::internal(format!("Index lookup failed: {:?}", e)))
+                }
+            };
+
+            // Read the shard block
+            let shard_block = archive
+                .read_block(shard_height)
+                .map_err(|e| Status::internal(format!("Block read failed: {:?}", e)))?;
+
+            // Find the vault entry
+            let vault_entry = shard_block.vault_entries.iter().find(|e| {
+                e.namespace_id == namespace_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
+            });
+
+            if let Some(entry) = vault_entry {
+                // Apply all transactions in this block
+                for tx in &entry.transactions {
+                    temp_state
+                        .apply_operations(vault_id, &tx.operations, height)
+                        .map_err(|e| Status::internal(format!("Apply failed: {:?}", e)))?;
+                }
+
+                // Track block timestamp at the target height for expiration check
+                if height == req.at_height {
+                    block_timestamp = shard_block.timestamp;
+                }
+            }
+        }
+
+        // Read entity from reconstructed state
+        let entity = temp_state
+            .get_entity(vault_id, req.key.as_bytes())
+            .map_err(|e| Status::internal(format!("Read failed: {:?}", e)))?;
+
+        // Check expiration using block timestamp (not current time)
+        // This is critical for deterministic historical state reconstruction
+        let block_ts = block_timestamp.timestamp() as u64;
+        let entity = entity.filter(|e| {
+            // expires_at == 0 means never expires
+            e.expires_at == 0 || e.expires_at > block_ts
+        });
+
+        // Get block header for proof
+        let block_header = self.get_block_header(archive, namespace_id, vault_id, req.at_height);
+
+        let latency = start.elapsed().as_secs_f64();
+        let found = entity.is_some();
+        debug!(
+            found,
+            height = req.at_height,
+            latency_ms = latency * 1000.0,
+            "Historical read completed"
+        );
 
         Ok(Response::new(HistoricalReadResponse {
             value: entity.map(|e| e.value),
             block_height: req.at_height,
-            block_header: None,
+            block_header,
             merkle_proof: None,
             chain_proof: None,
         }))
@@ -243,24 +485,108 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetBlockRequest>,
     ) -> Result<Response<GetBlockResponse>, Status> {
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        // TODO: Implement block retrieval from block archive
-        // For now, return empty response
-        Ok(Response::new(GetBlockResponse { block: None }))
+        // Get block archive, return empty if not configured
+        let archive = match &self.block_archive {
+            Some(a) => a,
+            None => return Ok(Response::new(GetBlockResponse { block: None })),
+        };
+
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let height = req.height;
+
+        // Find the shard height containing this vault block
+        let shard_height = archive
+            .find_shard_height(namespace_id, vault_id, height)
+            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+        let shard_height = match shard_height {
+            Some(h) => h,
+            None => return Ok(Response::new(GetBlockResponse { block: None })),
+        };
+
+        // Read the shard block
+        let shard_block = archive
+            .read_block(shard_height)
+            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+        // Find the vault entry in the shard block
+        let vault_entry = shard_block
+            .vault_entries
+            .iter()
+            .find(|e| {
+                e.namespace_id == namespace_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
+            });
+
+        let block = vault_entry.map(|entry| {
+            vault_entry_to_proto_block(entry, &shard_block)
+        });
+
+        Ok(Response::new(GetBlockResponse { block }))
     }
 
     async fn get_block_range(
         &self,
         request: Request<GetBlockRangeRequest>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        // TODO: Implement block range retrieval from block archive
-        Ok(Response::new(GetBlockRangeResponse {
-            blocks: vec![],
-            current_tip: 0,
-        }))
+        // Get block archive, return empty if not configured
+        let archive = match &self.block_archive {
+            Some(a) => a,
+            None => {
+                return Ok(Response::new(GetBlockRangeResponse {
+                    blocks: vec![],
+                    current_tip: 0,
+                }))
+            }
+        };
+
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let start_height = req.start_height;
+        let end_height = req.end_height;
+
+        // Limit range to 1000 blocks
+        let max_range = 1000u64;
+        let end_height = end_height.min(start_height.saturating_add(max_range - 1));
+
+        let mut blocks = Vec::new();
+
+        // Iterate through the height range
+        for height in start_height..=end_height {
+            // Find the shard height for this vault block
+            let shard_height = match archive
+                .find_shard_height(namespace_id, vault_id, height)
+                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
+            {
+                Some(h) => h,
+                None => continue, // Block not found, skip
+            };
+
+            // Read the shard block
+            let shard_block = archive
+                .read_block(shard_height)
+                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+            // Find the vault entry
+            if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
+                e.namespace_id == namespace_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
+            }) {
+                blocks.push(vault_entry_to_proto_block(entry, &shard_block));
+            }
+        }
+
+        // Get current tip for this vault
+        let current_tip = self.applied_state.vault_height(namespace_id, vault_id);
+
+        Ok(Response::new(GetBlockRangeResponse { blocks, current_tip }))
     }
 
     async fn get_tip(
@@ -295,11 +621,19 @@ impl ReadService for ReadServiceImpl {
                 .unwrap_or(0)
         };
 
-        // TODO: Include block_hash and state_root from block archive
+        // Get block_hash and state_root from archive if available and a specific vault is requested
+        let (block_hash, state_root) = if let (Some(archive), true) =
+            (&self.block_archive, vault_id != 0 && height > 0)
+        {
+            self.get_tip_hashes(archive, namespace_id, vault_id, height)
+        } else {
+            (None, None)
+        };
+
         Ok(Response::new(GetTipResponse {
             height,
-            block_hash: None,
-            state_root: None,
+            block_hash,
+            state_root,
         }))
     }
 
@@ -307,11 +641,26 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetClientStateRequest>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        // TODO: Look up client state from _system namespace
+        // Get client ID from request
+        let client_id = req
+            .client_id
+            .as_ref()
+            .map(|c| c.id.as_str())
+            .unwrap_or("");
+
+        // Query the idempotency cache for last committed sequence
+        // Note: This is in-memory with 5-minute TTL. For persistent client state,
+        // we would need to store in the state layer at _system/clients/{client_id}.
+        let last_committed_sequence = self
+            .idempotency
+            .as_ref()
+            .map(|cache| cache.get_last_sequence(client_id))
+            .unwrap_or(0);
+
         Ok(Response::new(GetClientStateResponse {
-            last_committed_sequence: 0,
+            last_committed_sequence,
         }))
     }
 
@@ -546,5 +895,151 @@ impl ReadService for ReadServiceImpl {
             next_page_token,
             block_height,
         }))
+    }
+}
+
+/// Convert a VaultEntry from storage to a proto Block.
+fn vault_entry_to_proto_block(
+    entry: &ledger_types::VaultEntry,
+    shard_block: &ledger_types::ShardBlock,
+) -> crate::proto::Block {
+    use prost_types::Timestamp;
+
+    // Convert VaultEntry transactions to proto transactions
+    let transactions = entry
+        .transactions
+        .iter()
+        .map(|tx| crate::proto::Transaction {
+            id: Some(crate::proto::TxId {
+                id: tx.id.to_vec(),
+            }),
+            client_id: Some(crate::proto::ClientId {
+                id: tx.client_id.clone(),
+            }),
+            sequence: tx.sequence,
+            operations: tx
+                .operations
+                .iter()
+                .map(|op| operation_to_proto(op))
+                .collect(),
+            timestamp: Some(Timestamp {
+                seconds: tx.timestamp.timestamp(),
+                nanos: tx.timestamp.timestamp_subsec_nanos() as i32,
+            }),
+            actor: tx.actor.clone(),
+        })
+        .collect();
+
+    // Build block header
+    let header = crate::proto::BlockHeader {
+        height: entry.vault_height,
+        namespace_id: Some(crate::proto::NamespaceId {
+            id: entry.namespace_id,
+        }),
+        vault_id: Some(crate::proto::VaultId {
+            id: entry.vault_id,
+        }),
+        previous_hash: Some(crate::proto::Hash {
+            value: entry.previous_vault_hash.to_vec(),
+        }),
+        tx_merkle_root: Some(crate::proto::Hash {
+            value: entry.tx_merkle_root.to_vec(),
+        }),
+        state_root: Some(crate::proto::Hash {
+            value: entry.state_root.to_vec(),
+        }),
+        timestamp: Some(Timestamp {
+            seconds: shard_block.timestamp.timestamp(),
+            nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
+        }),
+        leader_id: Some(crate::proto::NodeId {
+            id: shard_block.leader_id.clone(),
+        }),
+        term: shard_block.term,
+        committed_index: shard_block.committed_index,
+    };
+
+    crate::proto::Block {
+        header: Some(header),
+        transactions,
+    }
+}
+
+/// Convert a ledger_types Operation to proto Operation.
+fn operation_to_proto(op: &ledger_types::Operation) -> crate::proto::Operation {
+    use crate::proto::operation::Op;
+    use ledger_types::Operation as LedgerOp;
+
+    match op {
+        LedgerOp::CreateRelationship {
+            resource,
+            relation,
+            subject,
+        } => crate::proto::Operation {
+            op: Some(Op::CreateRelationship(crate::proto::CreateRelationship {
+                resource: resource.clone(),
+                relation: relation.clone(),
+                subject: subject.clone(),
+            })),
+        },
+        LedgerOp::DeleteRelationship {
+            resource,
+            relation,
+            subject,
+        } => crate::proto::Operation {
+            op: Some(Op::DeleteRelationship(crate::proto::DeleteRelationship {
+                resource: resource.clone(),
+                relation: relation.clone(),
+                subject: subject.clone(),
+            })),
+        },
+        LedgerOp::SetEntity {
+            key,
+            value,
+            condition,
+            expires_at,
+        } => {
+            let condition_proto = condition.as_ref().map(condition_to_proto);
+
+            crate::proto::Operation {
+                op: Some(Op::SetEntity(crate::proto::SetEntity {
+                    key: key.clone(),
+                    value: value.clone(),
+                    condition: condition_proto,
+                    expires_at: *expires_at, // Already Option<u64>
+                })),
+            }
+        }
+        LedgerOp::DeleteEntity { key } => crate::proto::Operation {
+            op: Some(Op::DeleteEntity(crate::proto::DeleteEntity {
+                key: key.clone(),
+            })),
+        },
+        LedgerOp::ExpireEntity { key, expired_at } => crate::proto::Operation {
+            op: Some(Op::ExpireEntity(crate::proto::ExpireEntity {
+                key: key.clone(),
+                expired_at: *expired_at,
+            })),
+        },
+    }
+}
+
+/// Convert a ledger_types SetCondition to proto SetCondition.
+fn condition_to_proto(c: &ledger_types::SetCondition) -> crate::proto::SetCondition {
+    use crate::proto::set_condition::Condition;
+
+    let condition = match c {
+        ledger_types::SetCondition::MustNotExist => Condition::NotExists(true),
+        ledger_types::SetCondition::MustExist => {
+            // Proto doesn't have must_exist, use not_exists=false as a workaround
+            // or version=0 to indicate "must exist" semantics
+            Condition::NotExists(false)
+        }
+        ledger_types::SetCondition::VersionEquals(v) => Condition::Version(*v),
+        ledger_types::SetCondition::ValueEquals(bytes) => Condition::ValueEquals(bytes.clone()),
+    };
+
+    crate::proto::SetCondition {
+        condition: Some(condition),
     }
 }

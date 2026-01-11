@@ -305,6 +305,80 @@ pub fn bucket_id(key: &[u8]) -> u8 {
     (seahash::hash(key) % 256) as u8
 }
 
+/// Compute the Merkle root of a list of transactions.
+///
+/// Per DESIGN.md: binary merkle tree where each leaf is SHA-256(tx).
+/// Returns EMPTY_HASH for an empty transaction list.
+pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
+    if transactions.is_empty() {
+        return EMPTY_HASH;
+    }
+
+    let leaves: Vec<Hash> = transactions.iter().map(tx_hash).collect();
+    merkle_root(&leaves)
+}
+
+/// Compute a binary Merkle root from a list of hashes.
+///
+/// Uses Bitcoin-style padding: if odd number of nodes, duplicate the last one.
+fn merkle_root(hashes: &[Hash]) -> Hash {
+    debug_assert!(!hashes.is_empty(), "merkle_root called with empty hashes");
+
+    if hashes.len() == 1 {
+        return hashes[0];
+    }
+
+    // Pad to even length by duplicating last hash
+    let mut level = hashes.to_vec();
+    if level.len() % 2 == 1 {
+        level.push(*level.last().expect("non-empty checked above"));
+    }
+
+    // Compute parent level: each pair becomes SHA-256(left || right)
+    let parents: Vec<Hash> = level
+        .chunks(2)
+        .map(|pair| sha256_concat(&[pair[0], pair[1]]))
+        .collect();
+
+    merkle_root(&parents)
+}
+
+/// Compute a deterministic hash for a vault entry's cryptographic commitments.
+///
+/// This hash is used to identify a vault entry across all Raft nodes.
+/// It uses only deterministic fields that are identical on all nodes:
+/// - namespace_id
+/// - vault_id
+/// - vault_height
+/// - previous_vault_hash
+/// - tx_merkle_root
+/// - state_root
+///
+/// Notably, it EXCLUDES timestamp and proposer which are non-deterministic.
+pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
+    let mut hasher = Sha256::new();
+
+    // namespace_id: i32 as LE
+    hasher.update(entry.namespace_id.to_le_bytes());
+
+    // vault_id: i64 as LE
+    hasher.update(entry.vault_id.to_le_bytes());
+
+    // vault_height: u64 as BE (matching block_hash style)
+    hasher.update(entry.vault_height.to_be_bytes());
+
+    // previous_vault_hash: 32 bytes
+    hasher.update(entry.previous_vault_hash);
+
+    // tx_merkle_root: 32 bytes
+    hasher.update(entry.tx_merkle_root);
+
+    // state_root: 32 bytes
+    hasher.update(entry.state_root);
+
+    hasher.finalize().into()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -411,6 +485,112 @@ mod tests {
         let hash1 = block_hash(&header);
         let hash2 = block_hash(&header);
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_tx_merkle_root_empty() {
+        let root = compute_tx_merkle_root(&[]);
+        assert_eq!(root, EMPTY_HASH);
+    }
+
+    #[test]
+    fn test_tx_merkle_root_single() {
+        let tx = Transaction {
+            id: [0u8; 16],
+            client_id: "client1".to_string(),
+            sequence: 1,
+            actor: "user1".to_string(),
+            operations: vec![],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let root = compute_tx_merkle_root(&[tx.clone()]);
+        // Single tx: root equals the tx hash directly
+        assert_eq!(root, tx_hash(&tx));
+    }
+
+    #[test]
+    fn test_tx_merkle_root_two() {
+        let tx1 = Transaction {
+            id: [1u8; 16],
+            client_id: "client1".to_string(),
+            sequence: 1,
+            actor: "user1".to_string(),
+            operations: vec![],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+        let tx2 = Transaction {
+            id: [2u8; 16],
+            client_id: "client1".to_string(),
+            sequence: 2,
+            actor: "user1".to_string(),
+            operations: vec![],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let root = compute_tx_merkle_root(&[tx1.clone(), tx2.clone()]);
+        // Two txs: root = SHA-256(tx1_hash || tx2_hash)
+        let expected = sha256_concat(&[tx_hash(&tx1), tx_hash(&tx2)]);
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn test_tx_merkle_root_three_pads() {
+        // Three txs should pad to 4 by duplicating the last one
+        let tx1 = Transaction {
+            id: [1u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+        let tx2 = Transaction {
+            id: [2u8; 16],
+            client_id: "c".to_string(),
+            sequence: 2,
+            actor: "a".to_string(),
+            operations: vec![],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+        let tx3 = Transaction {
+            id: [3u8; 16],
+            client_id: "c".to_string(),
+            sequence: 3,
+            actor: "a".to_string(),
+            operations: vec![],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let root = compute_tx_merkle_root(&[tx1.clone(), tx2.clone(), tx3.clone()]);
+
+        // Level 0: [h1, h2, h3, h3] (padded)
+        // Level 1: [SHA(h1||h2), SHA(h3||h3)]
+        // Level 2: SHA(level1[0] || level1[1])
+        let h1 = tx_hash(&tx1);
+        let h2 = tx_hash(&tx2);
+        let h3 = tx_hash(&tx3);
+        let l1_0 = sha256_concat(&[h1, h2]);
+        let l1_1 = sha256_concat(&[h3, h3]);
+        let expected = sha256_concat(&[l1_0, l1_1]);
+
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn test_tx_merkle_root_deterministic() {
+        let tx = Transaction {
+            id: [42u8; 16],
+            client_id: "test".to_string(),
+            sequence: 100,
+            actor: "actor".to_string(),
+            operations: vec![],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let root1 = compute_tx_merkle_root(&[tx.clone()]);
+        let root2 = compute_tx_merkle_root(&[tx]);
+        assert_eq!(root1, root2);
     }
 }
 

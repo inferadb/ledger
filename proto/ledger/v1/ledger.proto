@@ -653,6 +653,21 @@ service AdminService {
   rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
 
   // ==========================================================================
+  // Cluster Membership
+  // ==========================================================================
+
+  // Request to join an existing cluster. Called by a new node contacting a peer.
+  // The receiving node forwards to the leader, which adds the node as a learner,
+  // waits for it to catch up, then promotes to voter.
+  rpc JoinCluster(JoinClusterRequest) returns (JoinClusterResponse);
+
+  // Gracefully leave the cluster. Node is removed from Raft membership.
+  rpc LeaveCluster(LeaveClusterRequest) returns (LeaveClusterResponse);
+
+  // Get current cluster membership information.
+  rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
+
+  // ==========================================================================
   // Maintenance Operations
   // ==========================================================================
 
@@ -824,6 +839,57 @@ message IntegrityIssue {
   uint64 block_height = 1;
   string issue_type = 2; // "chain_break", "state_divergence", etc.
   string description = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Cluster Membership Messages
+// -----------------------------------------------------------------------------
+
+// Request to join an existing cluster.
+// The node provides its ID and address so the leader can add it to Raft.
+message JoinClusterRequest {
+  uint64 node_id = 1; // Numeric node ID for Raft
+  string address = 2; // gRPC address (e.g., "10.0.0.5:50051")
+}
+
+message JoinClusterResponse {
+  bool success = 1;
+  string message = 2; // Error details if !success
+  uint64 leader_id = 3; // Current leader (for redirect if needed)
+  string leader_address = 4; // Leader's gRPC address
+}
+
+// Request to gracefully leave the cluster.
+message LeaveClusterRequest {
+  uint64 node_id = 1; // Node requesting to leave
+}
+
+message LeaveClusterResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Get current cluster membership.
+message GetClusterInfoRequest {}
+
+message GetClusterInfoResponse {
+  repeated ClusterMember members = 1;
+  uint64 leader_id = 2;
+  uint64 term = 3; // Current Raft term
+}
+
+// A member of the Raft cluster.
+message ClusterMember {
+  uint64 node_id = 1;
+  string address = 2;
+  ClusterMemberRole role = 3;
+  bool is_leader = 4;
+}
+
+enum ClusterMemberRole {
+  CLUSTER_MEMBER_ROLE_UNSPECIFIED = 0;
+  CLUSTER_MEMBER_ROLE_VOTER = 1; // Full voting member
+  CLUSTER_MEMBER_ROLE_LEARNER = 2; // Receiving logs but can't vote
 }
 
 // =============================================================================

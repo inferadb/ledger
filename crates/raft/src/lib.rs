@@ -21,9 +21,11 @@ pub mod batching;
 mod idempotency;
 mod log_storage;
 pub mod metrics;
+pub mod proof;
 mod raft_network;
 mod server;
 pub mod services;
+mod ttl_gc;
 mod types;
 
 /// Generated protobuf types and service traits.
@@ -41,4 +43,5 @@ pub use log_storage::{
 };
 pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use server::LedgerServer;
+pub use ttl_gc::TtlGarbageCollector;
 pub use types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest};
