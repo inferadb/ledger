@@ -1,0 +1,37 @@
+[package]
+name = "ledger-types"
+description = "Core types, errors, and cryptographic primitives for InferaDB Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Crypto
+sha2.workspace = true
+seahash.workspace = true
+rs_merkle.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+
+# Serialization
+serde.workspace = true
+bincode.workspace = true
+
+# Error handling
+snafu.workspace = true
+
+# Utilities
+bytes.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+humantime.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

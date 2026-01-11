@@ -1,0 +1,42 @@
+[package]
+name = "ledger-server"
+description = "Server binary for InferaDB Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ledger"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+ledger-types.workspace = true
+ledger-storage.workspace = true
+ledger-raft.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# gRPC
+tonic.workspace = true
+
+# Configuration
+config.workspace = true
+toml.workspace = true
+
+# Error handling
+snafu.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

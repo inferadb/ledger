@@ -1,0 +1,54 @@
+[package]
+name = "ledger-raft"
+description = "Raft consensus and gRPC services for InferaDB Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal
+ledger-types.workspace = true
+ledger-storage.workspace = true
+
+# Raft consensus
+openraft.workspace = true
+
+# Storage (for raft log)
+redb.workspace = true
+
+# gRPC
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tower.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Concurrency
+dashmap.workspace = true
+parking_lot.workspace = true
+
+# Serialization
+serde.workspace = true
+bincode.workspace = true
+
+# Error handling
+snafu.workspace = true
+
+# Utilities
+bytes.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

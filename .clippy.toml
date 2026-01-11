@@ -1,0 +1,21 @@
+# Clippy configuration for ledger
+# Maximum cognitive complexity for functions
+cognitive-complexity-threshold = 25
+
+# Maximum lines in a function body
+too-many-lines-threshold = 150
+
+# Maximum arguments for a function
+too-many-arguments-threshold = 8
+
+# Type complexity threshold
+type-complexity-threshold = 300
+
+# Allow common names
+allowed-idents-below-min-chars = ["id", "tx", "db", "ok", "kv"]
+
+# Disallow unwrap in state machine code (critical for Raft determinism)
+disallowed-methods = [
+    { path = "core::option::Option::unwrap", reason = "Use .context() or .ok_or() with snafu for proper error handling" },
+    { path = "core::result::Result::unwrap", reason = "Use ? operator or .context() for proper error handling" },
+]

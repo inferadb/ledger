@@ -1,0 +1,17 @@
+# Rust 2024 edition formatting
+edition = "2024"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
+remove_nested_parens = true
+format_strings = false
+format_macro_matchers = false
+format_macro_bodies = true
+comment_width = 100
+wrap_comments = false
+normalize_comments = false
+normalize_doc_attributes = false
