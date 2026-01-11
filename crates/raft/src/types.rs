@@ -193,25 +193,6 @@ impl fmt::Display for LedgerResponse {
     }
 }
 
-// ============================================================================
-// Log Entry Types
-// ============================================================================
-
-/// Entry in the Raft log.
-///
-/// This wraps the LedgerRequest with metadata needed for replication.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerEntry {
-    /// The request data.
-    pub request: LedgerRequest,
-}
-
-impl From<LedgerRequest> for LedgerEntry {
-    fn from(request: LedgerRequest) -> Self {
-        Self { request }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
