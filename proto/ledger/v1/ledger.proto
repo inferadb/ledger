@@ -156,18 +156,18 @@ message Operation {
 message CreateRelationship {
   string resource = 1; // Format: "type:id" (max 512 chars total)
   string relation = 2; // Relation name (max 64 chars, e.g., "viewer", "editor")
-  string subject = 3;  // Format: "type:id" or "type:id#relation" (max 512 chars)
+  string subject = 3; // Format: "type:id" or "type:id#relation" (max 512 chars)
 }
 
 message DeleteRelationship {
   string resource = 1; // Format: "type:id" (max 512 chars total)
   string relation = 2; // Relation name (max 64 chars)
-  string subject = 3;  // Format: "type:id" or "type:id#relation" (max 512 chars)
+  string subject = 3; // Format: "type:id" or "type:id#relation" (max 512 chars)
 }
 
 message SetEntity {
-  string key = 1;   // Entity key (max 1024 bytes, UTF-8)
-  bytes value = 2;  // Entity value (max 1MB)
+  string key = 1; // Entity key (max 1024 bytes, UTF-8)
+  bytes value = 2; // Entity value (max 1MB)
   optional uint64 expires_at = 3; // Unix epoch seconds; 0 or omit = never expires
   optional SetCondition condition = 4; // Optional conditional write (CAS)
 }
@@ -187,23 +187,23 @@ message DeleteEntity {
 
 // GC-initiated entity removal (distinct from user deletion for audit trail)
 message ExpireEntity {
-  string key = 1;         // Entity key (max 1024 bytes, UTF-8)
-  uint64 expired_at = 2;  // When the entity's TTL was reached (Unix epoch seconds)
+  string key = 1; // Entity key (max 1024 bytes, UTF-8)
+  uint64 expired_at = 2; // When the entity's TTL was reached (Unix epoch seconds)
 }
 
 // Relationship tuple (used in query results)
 message Relationship {
   string resource = 1; // Format: "type:id" (max 512 chars)
   string relation = 2; // Relation name (max 64 chars)
-  string subject = 3;  // Format: "type:id" or "type:id#relation" (max 512 chars)
+  string subject = 3; // Format: "type:id" or "type:id#relation" (max 512 chars)
 }
 
 // Entity (used in query results)
 message Entity {
-  string key = 1;               // Entity key (max 1024 bytes, UTF-8)
-  bytes value = 2;              // Entity value (max 1MB)
+  string key = 1; // Entity key (max 1024 bytes, UTF-8)
+  bytes value = 2; // Entity value (max 1MB)
   optional uint64 expires_at = 3; // Unix epoch seconds; 0 = never expires
-  uint64 version = 4;           // Block height when last modified (for conditional writes)
+  uint64 version = 4; // Block height when last modified (for conditional writes)
 }
 
 // =============================================================================
@@ -216,18 +216,56 @@ enum Direction {
   DIRECTION_RIGHT = 2;
 }
 
+// Read consistency levels for read operations.
+// Trade-off between consistency and performance/availability.
+enum ReadConsistency {
+  READ_CONSISTENCY_UNSPECIFIED = 0; // Server default (typically EVENTUAL)
+  READ_CONSISTENCY_EVENTUAL = 1; // Read from any replica (fastest, may be stale)
+  READ_CONSISTENCY_LINEARIZABLE = 2; // Read from leader (strong consistency, higher latency)
+}
+
+// Merkle inclusion proof for transaction in block.
+// Verification: recompute root from leaf_hash up through siblings.
+// The leaf_hash is SHA-256(canonical_tx_encoding) - see DESIGN.md "Transaction Hash".
 message MerkleProof {
-  Hash leaf_hash = 1;
-  repeated MerkleSibling siblings = 2;
+  Hash leaf_hash = 1; // SHA-256 of transaction (not included separately)
+  repeated MerkleSibling siblings = 2; // Siblings from leaf to root (bottom-up order)
 }
 
 message MerkleSibling {
   Hash hash = 1;
-  Direction direction = 2;
+  Direction direction = 2; // Where sibling sits: LEFT means hash(sibling || current)
 }
 
+// Chain proof linking a trusted height to a response height.
+// Used to verify that block at response_height descends from trusted_height.
+//
+// Ordering: headers[0].height == trusted_height + 1, ascending to response_height.
+// The trusted header itself is NOT included (client already has it).
+// Verification: chain previous_hash links and verify final header matches response.
+//
+// Example: trusted_height=100, response_height=103
+//   headers = [BlockHeader(101), BlockHeader(102), BlockHeader(103)]
+//   Verify: headers[0].previous_hash == sha256(trusted_header)
+//           headers[1].previous_hash == sha256(headers[0])
+//           headers[2].previous_hash == sha256(headers[1])
 message ChainProof {
-  repeated BlockHeader headers = 1;
+  repeated BlockHeader headers = 1; // Ascending height order, excludes trusted header
+}
+
+// State proof for entity existence verification.
+// Unlike transaction proofs (O(log n) Merkle path), state proofs require
+// bucket contents because state uses bucket-based hashing for O(1) writes.
+message StateProof {
+  bytes key = 1; // Entity key
+  bytes value = 2; // Entity value
+  uint64 expires_at = 3; // TTL (0 = never)
+  uint64 version = 4; // Block height when last modified
+  uint32 bucket_id = 5; // Bucket assignment (seahash(key) % 256)
+  Hash bucket_root = 6; // Computed bucket root
+  repeated Hash other_bucket_roots = 7; // 255 other bucket roots (index skips bucket_id)
+  uint64 block_height = 8; // Block height this proof is valid for
+  Hash state_root = 9; // Expected state_root (for verification)
 }
 
 // =============================================================================
@@ -235,13 +273,17 @@ message ChainProof {
 // =============================================================================
 
 service ReadService {
-  // Read a value from the state tree
+  // Read a value from the state tree (unverified, fastest)
   rpc Read(ReadRequest) returns (ReadResponse);
 
-  // Read with merkle proof for verification
+  // Read with merkle proof for client-side verification.
+  // Supports both current and historical reads via optional at_height.
+  // Use include_chain_proof=true to verify against a trusted checkpoint.
   rpc VerifiedRead(VerifiedReadRequest) returns (VerifiedReadResponse);
 
-  // Read state at a specific block height
+  // Read state at a specific block height with proof.
+  // Similar to VerifiedRead with at_height, but at_height is required.
+  // Supports chain proofs for verification against trusted checkpoints.
   rpc HistoricalRead(HistoricalReadRequest) returns (HistoricalReadResponse);
 
   // Stream block announcements as they're committed (lightweight notifications)
@@ -271,8 +313,9 @@ service ReadService {
 
 message ReadRequest {
   NamespaceId namespace_id = 1;
-  VaultId vault_id = 2; // Optional: omit for namespace-level entity reads
+  optional VaultId vault_id = 2; // Omit for namespace-level entity reads
   string key = 3;
+  ReadConsistency consistency = 4; // Default: EVENTUAL (any replica)
 }
 
 message ReadResponse {
@@ -280,12 +323,19 @@ message ReadResponse {
   uint64 block_height = 2;
 }
 
+// Verified read: retrieve state with cryptographic proofs for client-side verification.
+// Always returns: block_header + merkle_proof (required for verification).
+// Use case: Clients that verify state locally, don't trust the server.
+//
+// For historical reads WITHOUT proofs (audits, debugging), use HistoricalRead
+// with include_proof=false to avoid proof generation overhead.
 message VerifiedReadRequest {
   NamespaceId namespace_id = 1;
-  VaultId vault_id = 2;
+  optional VaultId vault_id = 2; // Omit for namespace-level entity reads
   string key = 3;
-  bool include_chain_proof = 4;
-  optional uint64 trusted_height = 5; // Chain proof starts from here
+  optional uint64 at_height = 4; // Read at specific height (0 or omit = current)
+  bool include_chain_proof = 5; // Also include chain proof to trusted_height
+  optional uint64 trusted_height = 6; // Chain proof starts from this checkpoint
 }
 
 message VerifiedReadResponse {
@@ -296,18 +346,30 @@ message VerifiedReadResponse {
   optional ChainProof chain_proof = 5;
 }
 
+// Historical read: retrieve state at a specific past block height.
+// Use case: Audits, compliance queries, debugging past state.
+// Performance: Requires snapshot reconstruction (5-20ms hot, 100ms-10s cold).
+//
+// For verified historical reads with proofs, prefer VerifiedRead(at_height) which
+// is optimized for the verification use case. HistoricalRead is for unverified
+// archival queries where proof generation would add unnecessary overhead.
 message HistoricalReadRequest {
   NamespaceId namespace_id = 1;
-  VaultId vault_id = 2;
+  optional VaultId vault_id = 2; // Omit for namespace-level entity reads
   string key = 3;
-  uint64 at_height = 4;
+  uint64 at_height = 4; // Required: block height to read from
+  bool include_proof = 5; // Include block_header + merkle_proof (default: false)
+  bool include_chain_proof = 6; // Also include chain proof (requires include_proof=true)
+  optional uint64 trusted_height = 7; // Chain proof starts from this checkpoint
 }
 
 message HistoricalReadResponse {
-  optional bytes value = 1;
-  uint64 block_height = 2;
-  BlockHeader block_header = 3;
-  MerkleProof merkle_proof = 4;
+  optional bytes value = 1; // None if key didn't exist at at_height
+  uint64 block_height = 2; // Echoes at_height for confirmation
+  // Proofs (present only if include_proof=true):
+  optional BlockHeader block_header = 3;
+  optional MerkleProof merkle_proof = 4;
+  optional ChainProof chain_proof = 5; // Present if include_chain_proof was true
 }
 
 message WatchBlocksRequest {
@@ -341,12 +403,12 @@ message GetBlockRangeRequest {
   NamespaceId namespace_id = 1;
   VaultId vault_id = 2;
   uint64 start_height = 3; // First block to return (inclusive)
-  uint64 end_height = 4;   // Last block to return (inclusive), max range: 1000 blocks
+  uint64 end_height = 4; // Last block to return (inclusive), max range: 1000 blocks
 }
 
 message GetBlockRangeResponse {
   repeated Block blocks = 1; // Ordered by height ascending
-  uint64 current_tip = 2;    // Current chain tip (for client to know if more syncing needed)
+  uint64 current_tip = 2; // Current chain tip (for client to know if more syncing needed)
 }
 
 message GetTipRequest {
@@ -381,6 +443,7 @@ message ListRelationshipsRequest {
   // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
   // Encodes position and query context for consistent pagination across requests.
   string page_token = 8;
+  ReadConsistency consistency = 9; // Default: EVENTUAL (any replica)
 }
 
 message ListRelationshipsResponse {
@@ -397,6 +460,7 @@ message ListResourcesRequest {
   uint32 limit = 5; // Max results (0 = default limit)
   // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
   string page_token = 6;
+  ReadConsistency consistency = 7; // Default: EVENTUAL (any replica)
 }
 
 message ListResourcesResponse {
@@ -413,6 +477,7 @@ message ListEntitiesRequest {
   uint32 limit = 5; // Max results (0 = default limit)
   // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
   string page_token = 6;
+  ReadConsistency consistency = 7; // Default: EVENTUAL (any replica)
 }
 
 message ListEntitiesResponse {
@@ -441,6 +506,7 @@ message WriteRequest {
   ClientId client_id = 3;
   uint64 sequence = 4;
   repeated Operation operations = 5;
+  bool include_tx_proof = 6; // Request block_header + tx_proof in response for verification
 }
 
 message WriteResponse {
@@ -453,26 +519,50 @@ message WriteResponse {
 message WriteSuccess {
   TxId tx_id = 1;
   uint64 block_height = 2;
-  optional MerkleProof tx_proof = 3; // Proof tx is in block
+  // For client-side verification (both present or both absent):
+  optional BlockHeader block_header = 3; // Contains tx_merkle_root for proof verification
+  optional MerkleProof tx_proof = 4; // Proof tx is in block (verify against block_header.tx_merkle_root)
 }
 
 // Detailed error for conditional write failures.
 // Provides enough context for clients to retry with correct values.
 message WriteError {
   WriteErrorCode code = 1;
-  string key = 2;                     // Which key's condition failed
+  string key = 2; // Which key's condition failed (CAS errors)
   optional uint64 current_version = 3; // Actual version (for version mismatch)
-  optional bytes current_value = 4;   // Actual value (for value_equals mismatch, if small)
-  string message = 5;                 // Human-readable error description
+  optional bytes current_value = 4; // Actual value (for value_equals mismatch, if small)
+  string message = 5; // Human-readable error description
+
+  // Sequence error recovery fields (populated for ALREADY_COMMITTED and SEQUENCE_GAP)
+  optional TxId committed_tx_id = 6; // For ALREADY_COMMITTED: original tx_id
+  optional uint64 committed_block_height = 7; // For ALREADY_COMMITTED: original block_height
+  optional uint64 last_committed_sequence = 8; // For SEQUENCE_GAP: server's last seen sequence
 }
 
 enum WriteErrorCode {
   WRITE_ERROR_CODE_UNSPECIFIED = 0;
-  WRITE_ERROR_CODE_KEY_EXISTS = 1;       // not_exists condition failed: key already exists
-  WRITE_ERROR_CODE_KEY_NOT_FOUND = 2;    // version/value_equals condition: key doesn't exist
+  WRITE_ERROR_CODE_KEY_EXISTS = 1; // not_exists condition failed: key already exists
+  WRITE_ERROR_CODE_KEY_NOT_FOUND = 2; // version/value_equals condition: key doesn't exist
   WRITE_ERROR_CODE_VERSION_MISMATCH = 3; // version condition: block height differs
-  WRITE_ERROR_CODE_VALUE_MISMATCH = 4;   // value_equals condition: value differs
-  WRITE_ERROR_CODE_SEQUENCE_ERROR = 5;   // client sequence gap or duplicate
+  WRITE_ERROR_CODE_VALUE_MISMATCH = 4; // value_equals condition: value differs
+
+  // Sequence errors (split for client recovery)
+  WRITE_ERROR_CODE_ALREADY_COMMITTED = 5; // Duplicate: sequence already committed
+  // Recovery: use committed_tx_id, committed_block_height
+  WRITE_ERROR_CODE_SEQUENCE_GAP = 6; // Gap: sequence > last_committed + 1
+  // Recovery: use last_committed_sequence, call GetClientState
+}
+
+// Error codes for read operations.
+// Used in gRPC status details for structured error handling.
+enum ReadErrorCode {
+  READ_ERROR_CODE_UNSPECIFIED = 0;
+
+  // Requested height is outside retention window (pruned from storage).
+  // Recovery: Use a more recent height, or re-sync from current tip.
+  // Pagination: If height becomes unavailable mid-pagination, restart
+  // query at current tip with fresh page_token.
+  READ_ERROR_CODE_HEIGHT_UNAVAILABLE = 1;
 }
 
 // Batch write with all-or-nothing atomicity.
@@ -483,13 +573,29 @@ enum WriteErrorCode {
 // - If ANY write's condition fails (e.g., CAS mismatch), the ENTIRE batch fails
 // - On failure, no writes are applied—the vault state is unchanged
 //
+// Idempotency: Uses BATCH-LEVEL client_id/sequence (not per-write).
+// The entire batch is the idempotency unit—retry with same (client_id, sequence)
+// returns the original result. Per-write client_id/sequence in writes[] are IGNORED.
+//
 // Use cases:
 // - Multi-key transactions requiring atomic commit
 // - Ordered operations where later writes depend on earlier writes' effects
 message BatchWriteRequest {
   NamespaceId namespace_id = 1;
-  optional VaultId vault_id = 2; // Default for writes; omit for namespace-level entities
-  repeated WriteRequest writes = 3; // Inherits namespace_id/vault_id if not set per-write
+  optional VaultId vault_id = 2; // All writes must target same scope
+  ClientId client_id = 3; // Batch-level idempotency (per-write client_id ignored)
+  uint64 sequence = 4; // Batch-level sequence (per-write sequence ignored)
+  repeated BatchWriteOperation operations = 5; // Operations in this batch
+  bool include_tx_proofs = 6; // Request block_header + tx_proofs in response for verification
+}
+
+// Logical grouping of operations within a BatchWriteRequest.
+// Purpose: Allows expressing ordered operation groups within an atomic batch.
+// Processing: Groups are processed in array order (operations[0], then operations[1], etc.)
+//             All groups share the batch's namespace_id, vault_id, client_id, and sequence.
+// Atomicity: The ENTIRE batch is atomic—if any operation fails, no changes are applied.
+message BatchWriteOperation {
+  repeated Operation operations = 1; // Operations in this group
 }
 
 // Response for batch write.
@@ -502,8 +608,11 @@ message BatchWriteResponse {
 }
 
 message BatchWriteSuccess {
-  repeated TxId tx_ids = 1;  // Transaction IDs, same order as BatchWriteRequest.writes
-  uint64 block_height = 2;   // Shared by all writes (single block commit)
+  TxId tx_id = 1; // Single transaction ID for entire batch
+  uint64 block_height = 2; // Block containing this transaction
+  // For client-side verification (optional):
+  optional BlockHeader block_header = 3; // Contains tx_merkle_root for proof verification
+  optional MerkleProof tx_proof = 4; // Proof this tx is in block
 }
 
 // =============================================================================
@@ -511,6 +620,26 @@ message BatchWriteSuccess {
 // =============================================================================
 
 service AdminService {
+  // ==========================================================================
+  // Namespace Management
+  // ==========================================================================
+
+  // Create a new namespace. NamespaceId is leader-assigned from _meta:seq:namespace.
+  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+
+  // Delete a namespace (marks for garbage collection, fails if vaults exist)
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+
+  // Get namespace info including shard assignment
+  rpc GetNamespace(GetNamespaceRequest) returns (GetNamespaceResponse);
+
+  // List all namespaces (paginated)
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+
+  // ==========================================================================
+  // Vault Management
+  // ==========================================================================
+
   // Create a new vault
   rpc CreateVault(CreateVaultRequest) returns (CreateVaultResponse);
 
@@ -523,6 +652,10 @@ service AdminService {
   // List all vaults on this node
   rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
 
+  // ==========================================================================
+  // Maintenance Operations
+  // ==========================================================================
+
   // Trigger snapshot
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
 
@@ -530,12 +663,75 @@ service AdminService {
   rpc CheckIntegrity(CheckIntegrityRequest) returns (CheckIntegrityResponse);
 }
 
+// -----------------------------------------------------------------------------
+// Namespace Messages
+// -----------------------------------------------------------------------------
+
+// Create a new namespace. NamespaceId is leader-assigned from _meta:seq:namespace.
+// The namespace is assigned to the shard with lowest load.
+message CreateNamespaceRequest {
+  string name = 1; // Human-readable name (e.g., "acme_corp")
+}
+
+message CreateNamespaceResponse {
+  NamespaceId namespace_id = 1;
+  ShardId shard_id = 2; // Assigned shard
+}
+
+message DeleteNamespaceRequest {
+  NamespaceId namespace_id = 1;
+}
+
+message DeleteNamespaceResponse {
+  google.protobuf.Timestamp deleted_at = 1;
+}
+
+message GetNamespaceRequest {
+  // Lookup by ID or name (exactly one must be set)
+  oneof lookup {
+    NamespaceId namespace_id = 1;
+    string name = 2;
+  }
+}
+
+// Namespace registry info (routing metadata from _system)
+message GetNamespaceResponse {
+  NamespaceId namespace_id = 1;
+  string name = 2;
+  ShardId shard_id = 3; // Which shard hosts this namespace
+  repeated NodeId member_nodes = 4; // Nodes in the shard
+  optional NodeId leader_hint = 5; // May be stale
+  uint64 config_version = 6;
+  NamespaceStatus status = 7;
+}
+
+enum NamespaceStatus {
+  NAMESPACE_STATUS_UNSPECIFIED = 0;
+  NAMESPACE_STATUS_ACTIVE = 1;
+  NAMESPACE_STATUS_DELETED = 2;
+}
+
+message ListNamespacesRequest {
+  optional bytes page_token = 1;
+  uint32 page_size = 2; // Default: 100, Max: 1000
+}
+
+message ListNamespacesResponse {
+  repeated GetNamespaceResponse namespaces = 1;
+  optional bytes next_page_token = 2; // Absent if no more pages
+}
+
+// -----------------------------------------------------------------------------
+// Vault Messages
+// -----------------------------------------------------------------------------
+
+// Create a new vault. VaultId is leader-assigned from _meta:seq:vault
+// and returned in CreateVaultResponse.
 message CreateVaultRequest {
   NamespaceId namespace_id = 1;
-  VaultId vault_id = 2;
-  uint32 replication_factor = 3;
-  repeated NodeId initial_nodes = 4;
-  optional BlockRetentionPolicy retention_policy = 5; // Default: FULL
+  uint32 replication_factor = 2;
+  repeated NodeId initial_nodes = 3;
+  optional BlockRetentionPolicy retention_policy = 4; // Default: FULL
 }
 
 // Block retention modes for storage/compliance trade-off.

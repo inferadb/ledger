@@ -231,18 +231,6 @@ Ledger operates under strict **determinism requirements** for Raft consensus—a
 | `NodeId`      | string   | Admin         | Configuration (hostname or UUID)                     |
 | `ShardId`     | uint32   | Admin         | Sequential at shard creation                         |
 
-**Why sequential IDs over Snowflake:**
-
-Snowflake IDs embed timestamp and worker ID, making them non-deterministic across nodes. Sequential IDs are simpler and fully Ledger-controlled:
-
-| Property      | Sequential (Ledger)   | Snowflake (External)     |
-| ------------- | --------------------- | ------------------------ |
-| Deterministic | ✅ Leader-assigned    | ❌ Requires coordination |
-| Dependencies  | None (self-contained) | External service         |
-| Compactness   | 8 bytes               | 8 bytes                  |
-| Sortable      | By creation order     | By time                  |
-| Complexity    | Counter increment     | Worker ID + heartbeat    |
-
 **Sequence counter storage:**
 
 Sequence counters are stored in `_system` namespace as entities:
@@ -532,8 +520,8 @@ Storage keys encode vault isolation and bucket assignment for efficient range qu
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  vault_id   │  bucket_id  │         local_key              │
-│  (8 bytes)  │  (1 byte)   │         (N bytes)              │
+│  vault_id   │  bucket_id  │         local_key               │
+│  (8 bytes)  │  (1 byte)   │         (N bytes)               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -610,7 +598,8 @@ impl ShardState {
         sha256_concat(&commitment.bucket_roots)
     }
 
-    /// Hash all keys in a specific vault's bucket via range query
+    /// Hash all keys in a specific vault's bucket via range query.
+    /// See "Cryptographic Hash Specifications" for normative encoding.
     fn hash_vault_bucket(&self, vault_id: VaultId, bucket_id: u8) -> Hash {
         // Construct range: [vault_id][bucket_id][0x00...] to [vault_id][bucket_id][0xFF...]
         let mut start = [0u8; 9];
@@ -636,12 +625,14 @@ impl ShardState {
         };
 
         for result in range {
-            let (key, value) = result.unwrap();
-            // Hash key-value pair in deterministic order
+            let (key, entry) = result.unwrap();
+            // Hash full entry in deterministic order (see State Tree Leaf Hash spec)
             hasher.update(&(key.value().len() as u32).to_le_bytes());
             hasher.update(key.value());
-            hasher.update(&(value.value().len() as u32).to_le_bytes());
-            hasher.update(value.value());
+            hasher.update(&(entry.value.len() as u32).to_le_bytes());
+            hasher.update(&entry.value);
+            hasher.update(&entry.expires_at.to_be_bytes());  // u64, 0 = never
+            hasher.update(&entry.version.to_be_bytes());     // u64, block height
         }
 
         hasher.finalize().into()
@@ -689,6 +680,250 @@ State root computation must be identical on all nodes:
 4. Resolution: Follower rebuilds state from snapshot + log replay, or is removed from Raft group
 
 Divergence indicates a bug or corruption, not a consensus failure. The committing quorum is authoritative.
+
+### Cryptographic Hash Specifications
+
+This section provides normative, language-independent specifications for all cryptographic hashes. Multi-SDK verification requires identical computation across implementations.
+
+**Hash algorithm**: SHA-256 for all cryptographic commitments. Outputs are 32 bytes, represented as `Hash` type.
+
+#### Block Hash
+
+The block hash commits to the header only (not transaction bodies). This enables header-only verification and efficient syncing.
+
+```
+block_hash = SHA-256(
+    height              || # u64, big-endian (8 bytes)
+    namespace_id        || # i64, big-endian (8 bytes)
+    vault_id            || # i64, big-endian (8 bytes)
+    previous_hash       || # 32 bytes (zero-hash for genesis)
+    tx_merkle_root      || # 32 bytes
+    state_root          || # 32 bytes
+    timestamp_secs      || # i64, big-endian (8 bytes) - Unix epoch seconds
+    timestamp_nanos     || # u32, big-endian (4 bytes) - nanosecond offset
+    term                || # u64, big-endian (8 bytes)
+    committed_index        # u64, big-endian (8 bytes)
+)
+# Total: 148 bytes fixed-size input
+```
+
+**Genesis block**: `previous_hash` is 32 zero bytes (`0x00...00`).
+
+**Rationale**: Fixed-size encoding avoids length ambiguity. Big-endian ensures consistent byte order across platforms.
+
+#### Transaction Hash
+
+Transactions are hashed using a canonical binary encoding independent of protobuf wire format.
+
+```
+tx_hash = SHA-256(
+    tx_id               || # 16 bytes (UUID)
+    client_id_len       || # u32, little-endian
+    client_id           || # UTF-8 bytes
+    sequence            || # u64, big-endian
+    actor_len           || # u32, little-endian
+    actor               || # UTF-8 bytes
+    timestamp_secs      || # i64, big-endian
+    timestamp_nanos     || # u32, big-endian
+    op_count            || # u32, big-endian
+    operations             # Concatenated operation hashes (32 bytes each)
+)
+```
+
+**Operation hash** (for each operation in transaction):
+
+```
+op_hash = SHA-256(op_type || op_data)
+
+# op_type: single byte
+#   0x01 = SetEntity
+#   0x02 = DeleteEntity
+#   0x03 = ExpireEntity
+#   0x04 = CreateRelationship
+#   0x05 = DeleteRelationship
+
+# op_data varies by type:
+
+SetEntity:
+    key_len (u32 LE) || key || value_len (u32 LE) || value ||
+    expires_at (u64 BE, 0 = never) || condition_type (u8) || condition_data
+
+DeleteEntity:
+    key_len (u32 LE) || key
+
+ExpireEntity:
+    key_len (u32 LE) || key || expired_at (u64 BE)
+
+CreateRelationship:
+    resource_len (u32 LE) || resource ||
+    relation_len (u32 LE) || relation ||
+    subject_len (u32 LE) || subject
+
+DeleteRelationship:
+    resource_len (u32 LE) || resource ||
+    relation_len (u32 LE) || relation ||
+    subject_len (u32 LE) || subject
+```
+
+**Condition types** for SetEntity:
+
+- `0x00` = None
+- `0x01` = MustNotExist
+- `0x02` = MustExist
+- `0x03` = VersionEquals (followed by u64 BE version)
+- `0x04` = ValueEquals (followed by u32 LE length + bytes)
+
+#### Transaction Merkle Tree
+
+The `tx_merkle_root` is a binary Merkle tree over transaction hashes.
+
+```
+tx_merkle_root = merkle_root([tx_hash_0, tx_hash_1, ..., tx_hash_n])
+```
+
+**Tree construction** (standard binary Merkle tree):
+
+1. Leaves are transaction hashes in block order
+2. If odd number of nodes at a level, duplicate the last node
+3. Parent = SHA-256(left_child || right_child)
+4. Continue until single root
+
+```
+Example: 3 transactions [A, B, C]
+
+Level 0 (leaves):  A    B    C    C'   (C duplicated)
+                    \  /      \  /
+Level 1:           AB          CC
+                     \        /
+Level 2 (root):      tx_merkle_root
+```
+
+**Empty block**: `tx_merkle_root` = SHA-256 of empty input (`SHA-256("")`).
+
+#### State Tree Leaf Hash
+
+Each key-value pair in a bucket contributes to the bucket root:
+
+```
+leaf_contribution = (
+    key_len (u32 LE)    ||  # 4 bytes
+    key                 ||  # Variable
+    value_len (u32 LE)  ||  # 4 bytes
+    value               ||  # Variable
+    expires_at (u64 BE) ||  # 8 bytes (0 = never)
+    version (u64 BE)        # 8 bytes (block height of last modification)
+)
+```
+
+**Bucket root** = Incremental hash of all leaf contributions in lexicographic key order:
+
+```rust
+fn compute_bucket_root(entries: &[(Key, Value, ExpiresAt, Version)]) -> Hash {
+    let mut hasher = Sha256::new();
+    for (key, value, expires_at, version) in entries.iter().sorted_by_key(|e| &e.0) {
+        hasher.update(&(key.len() as u32).to_le_bytes());
+        hasher.update(key);
+        hasher.update(&(value.len() as u32).to_le_bytes());
+        hasher.update(value);
+        hasher.update(&expires_at.to_be_bytes());
+        hasher.update(&version.to_be_bytes());
+    }
+    hasher.finalize().into()
+}
+```
+
+**Empty bucket**: SHA-256 of empty input.
+
+**State root** = SHA-256 of concatenated bucket roots (256 × 32 bytes = 8192 bytes):
+
+```
+state_root = SHA-256(bucket_root[0] || bucket_root[1] || ... || bucket_root[255])
+```
+
+#### Merkle Proof Semantics
+
+Merkle proofs for transaction inclusion use the `Direction` enum to specify sibling position:
+
+```protobuf
+enum Direction {
+  DIRECTION_LEFT = 1;   // Sibling is on the LEFT
+  DIRECTION_RIGHT = 2;  // Sibling is on the RIGHT
+}
+```
+
+**Verification algorithm**:
+
+```rust
+fn verify_merkle_proof(leaf_hash: Hash, siblings: &[(Hash, Direction)], root: Hash) -> bool {
+    let mut current = leaf_hash;
+    for (sibling, direction) in siblings {
+        current = match direction {
+            Direction::Left  => sha256(sibling || current),  // Sibling LEFT of current
+            Direction::Right => sha256(current || sibling),  // Sibling RIGHT of current
+        };
+    }
+    current == root
+}
+```
+
+**Direction semantics**: `Direction::Left` means the sibling hash is concatenated BEFORE the current hash. `Direction::Right` means the sibling is concatenated AFTER.
+
+#### State Proof Structure
+
+State proofs differ from transaction proofs because state uses bucket-based hashing, not a full Merkle tree.
+
+**For entity existence proof**:
+
+```
+StateProof {
+    key: bytes,
+    value: bytes,
+    expires_at: u64,
+    version: u64,
+    bucket_id: u8,
+    bucket_root: Hash,           // Computed from bucket contents
+    other_bucket_roots: [Hash; 255],  // All other bucket roots
+}
+```
+
+**Verification**:
+
+1. Verify `seahash(key) % 256 == bucket_id`
+2. Verify `bucket_root` matches by hashing all bucket contents (requires full bucket)
+3. Verify `state_root == SHA-256(bucket_roots[0..256])` with provided roots
+
+**Trade-off**: State proofs require the full bucket contents (not O(log n) like Merkle trees). This is acceptable because:
+
+- Buckets are small (~4K entries each for 1M total keys)
+- State proofs are rare (verification usually done via trusted headers)
+- Transaction inclusion proofs remain O(log n)
+
+#### Verification Scope
+
+Not all operations are cryptographically verifiable. The design explicitly trades range/completeness proofs for O(1) write performance.
+
+| Operation               | Verifiable | Proof Type              | Notes                                      |
+| ----------------------- | ---------- | ----------------------- | ------------------------------------------ |
+| Point read (single key) | ✓          | StateProof              | Full bucket verification                   |
+| Historical point read   | ✓          | StateProof + ChainProof | Proofs optional (`include_proof`); requires height within retention |
+| Transaction inclusion   | ✓          | MerkleProof             | O(log n) proof against tx_merkle_root      |
+| Write committed         | ✓          | BlockHeader + TxProof   | Self-verifiable with optional proofs       |
+| List relationships      | ✗          | None                    | No range proofs; trust server completeness |
+| List entities           | ✗          | None                    | No range proofs; trust server completeness |
+| List resources          | ✗          | None                    | No range proofs; trust server completeness |
+| Pagination completeness | ✗          | None                    | Cannot prove no results were omitted       |
+
+**Design rationale**: Authorization workloads prioritize fast permission checks over cryptographic completeness proofs. Vault owners who require verifiable list operations must:
+
+1. Maintain their own state by subscribing to `WatchBlocks` and replaying transactions, or
+2. Use point reads with known keys, which are fully verifiable
+
+**Consistency levels**: Read operations support `ReadConsistency`:
+
+- `EVENTUAL`: Read from any replica (default, fastest, may return stale data)
+- `LINEARIZABLE`: Read from leader (strong consistency, higher latency)
+
+List operations with `LINEARIZABLE` consistency ensure the result reflects all committed writes, but still cannot prove completeness.
 
 ### Multi-Vault Failure Isolation
 
@@ -978,10 +1213,12 @@ sequenceDiagram
 Read options:
 
 - Fast read: Just return value, no proof (default for permission checks)
-- Verified read: Return value + merkle proof + block header
-- Historical read: Read state at specific block height (see [Historical Reads](#historical-reads))
+- Verified read: Return value + merkle proof + block header (always includes proofs)
+- Historical read: Read state at specific block height, proofs optional (see [Historical Reads](#historical-reads))
 - List relationships: Query with optional filters (resource, relation, subject)
 - List resources: Get all resources matching a type prefix
+
+**VerifiedRead vs HistoricalRead**: Use `VerifiedRead(at_height)` when you need proofs for client-side verification. Use `HistoricalRead(include_proof=false)` for archival queries (audits, debugging) where proof generation adds unnecessary overhead.
 
 #### Query Operations
 
@@ -1133,6 +1370,16 @@ impl Node {
 
 Historical reads return state as it existed at a specific block height. Since the state tree stores only current state, historical reads require snapshot-based reconstruction.
 
+**API options:**
+
+| RPC                               | Proofs      | Use Case                                    |
+| --------------------------------- | ----------- | ------------------------------------------- |
+| `VerifiedRead(at_height=H)`       | Always      | Client-side verification of historical data |
+| `HistoricalRead(include_proof=T)` | If T=true   | Archival queries with optional verification |
+| `HistoricalRead(include_proof=F)` | None        | Audits, debugging, compliance (fastest)     |
+
+For archival queries where proof generation adds latency (5-20ms hot, 100ms-10s cold), use `HistoricalRead(include_proof=false)`.
+
 **Architecture:**
 
 ```mermaid
@@ -1217,6 +1464,64 @@ async fn historical_read(vault_id: VaultId, key: &str, at_height: u64) -> Option
 
 - Stores `(key, block_height, value)` tuples for high-frequency audit targets
 - Opt-in per vault (storage overhead ~10x for indexed keys)
+
+#### Height Unavailability
+
+A requested height becomes unavailable when:
+
+1. **Pruned**: Block is outside retention window (Compacted mode only)
+2. **Not yet committed**: Height > current tip
+3. **Snapshot gap**: No snapshot exists before height and genesis is pruned
+
+**Error handling:**
+
+| Condition     | Error                    | gRPC Status           | Recovery                                     |
+| ------------- | ------------------------ | --------------------- | -------------------------------------------- |
+| Height > tip  | `at_height` out of range | `INVALID_ARGUMENT`    | Use `GetTip()` to find current height        |
+| Height pruned | `HEIGHT_UNAVAILABLE`     | `FAILED_PRECONDITION` | Use more recent height or re-sync from tip   |
+| Snapshot gap  | `HEIGHT_UNAVAILABLE`     | `FAILED_PRECONDITION` | Contact operator; may need archive retrieval |
+
+**Pagination recovery:**
+
+When a paginated query's `at_height` becomes unavailable mid-pagination:
+
+```rust
+// Client pattern: paginated historical query with recovery
+async fn list_all_entities(vault: VaultId, at_height: u64) -> Result<Vec<Entity>> {
+    let mut results = Vec::new();
+    let mut page_token = None;
+
+    loop {
+        match client.list_entities(vault, at_height, page_token).await {
+            Ok(resp) => {
+                results.extend(resp.entities);
+                if resp.next_page_token.is_empty() {
+                    return Ok(results);
+                }
+                page_token = Some(resp.next_page_token);
+            }
+            Err(e) if e.code() == Code::FailedPrecondition => {
+                // Height became unavailable mid-pagination
+                // Options:
+                // 1. Restart at current tip (may have different data)
+                // 2. Fail and notify user
+                // 3. Use cached partial results (application-specific)
+                return Err(HeightUnavailableError::MidPagination {
+                    original_height: at_height,
+                    partial_results: results,
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+```
+
+**Operator guidance:**
+
+- Configure retention window > expected pagination duration
+- Default: 10,000 blocks (~8 hours at 3s/block) provides ample margin
+- For long-running queries, clients should use `WatchBlocks` to maintain local state
 
 ### Vault Lifecycle
 
@@ -1423,9 +1728,9 @@ impl VaultEntry {
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────────┐
-│                              ShardBlock (on disk)                                  │
+│                              ShardBlock (on disk)                                 │
 ├───────────────────────────────────────────────────────────────────────────────────┤
-│  shard_id │ shard_height │ previous_shard_hash │ term │ timestamp                  │
+│  shard_id │ shard_height │ previous_shard_hash │ term │ timestamp                 │
 ├───────────────────────────────────────────────────────────────────────────────────┤
 │  VaultEntry[0]: ns_acme/prod   │ height=100 │ txs... │ tx_merkle │ state          │
 │  VaultEntry[1]: ns_acme/dev    │ height=50  │ txs... │ tx_merkle │ state          │
@@ -1985,7 +2290,7 @@ New Node Startup:
   7. Node persists peer list locally (survives restarts)
 
 Namespace Assignment:
-  1. Control creates namespace via create_namespace(namespace_id)
+  1. Control creates namespace via CreateNamespace(name) → returns leader-assigned NamespaceId
   2. _system assigns namespace to shard with lowest load
   3. Shard leader initializes namespace state
   4. Shard leader updates _system with NamespaceRegistry
@@ -2518,10 +2823,10 @@ impl BlockArchive {
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ Block 0: [length: u32][ShardBlock bytes...]         │
-│ Block 1: [length: u32][ShardBlock bytes...]         │
+│ Block 0: [length: u32][ShardBlock bytes...]          │
+│ Block 1: [length: u32][ShardBlock bytes...]          │
 │ ...                                                  │
-│ Block 9999: [length: u32][ShardBlock bytes...]      │
+│ Block 9999: [length: u32][ShardBlock bytes...]       │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -2529,7 +2834,7 @@ impl BlockArchive {
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ Entry 0: [vault_id: u64][height: u64][offset: u64]  │
+│ Entry 0: [vault_id: u64][height: u64][offset: u64]   │
 │ Entry 1: ...                                         │
 └──────────────────────────────────────────────────────┘
 ```
@@ -3292,6 +3597,36 @@ match write_response.result {
 }
 ```
 
+#### Error Handling Boundary
+
+Ledger uses a two-tier error strategy:
+
+| Layer               | Mechanism                    | When Used                                   |
+| ------------------- | ---------------------------- | ------------------------------------------- |
+| **Transport/Auth**  | gRPC status codes            | Network, auth, validation, availability     |
+| **Domain-specific** | `WriteError`/`ReadErrorCode` | Conditional write failures, sequence errors |
+
+**gRPC status codes** (transport and authorization):
+
+| Status                | Meaning                            | Examples                           |
+| --------------------- | ---------------------------------- | ---------------------------------- |
+| `UNAUTHENTICATED`     | Missing or invalid credentials     | Bad API key, expired session       |
+| `PERMISSION_DENIED`   | Valid auth but insufficient access | Write to read-only vault           |
+| `INVALID_ARGUMENT`    | Malformed request                  | Invalid key format, bad page_token |
+| `NOT_FOUND`           | Resource doesn't exist             | Unknown namespace_id, vault_id     |
+| `UNAVAILABLE`         | Temporary failure                  | Leader election, node down         |
+| `RESOURCE_EXHAUSTED`  | Rate limit or quota                | Too many requests                  |
+| `FAILED_PRECONDITION` | Operation precondition failed      | Height unavailable (pruned)        |
+
+**Response-level errors** (domain-specific):
+
+| Error Type      | Codes                                                                                   | Purpose                   |
+| --------------- | --------------------------------------------------------------------------------------- | ------------------------- |
+| `WriteError`    | `KEY_EXISTS`, `VERSION_MISMATCH`, `VALUE_MISMATCH`, `ALREADY_COMMITTED`, `SEQUENCE_GAP` | CAS failures, idempotency |
+| `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                    | Historical read failures  |
+
+**Rationale**: gRPC status codes handle failures before the request reaches domain logic. Response-level errors convey actionable domain state (current version, committed tx_id) that clients need for intelligent retry.
+
 **Version tracking**: Each entity stores version (block height when last modified) embedded in the value for single-read latency:
 
 ```rust
@@ -3341,6 +3676,41 @@ Version enables conditional writes for optimistic concurrency control.
 | **Ordering**          | Writes applied in array order (`writes[0]` before `writes[1]`)    |
 | **Single block**      | All writes committed in same block (shared `block_height`)        |
 | **Failure isolation** | On failure, no writes applied—vault state unchanged               |
+
+#### Batch Sequencing Rules
+
+Batches use batch-level idempotency, not per-write sequencing:
+
+| Constraint    | Requirement                                                          |
+| ------------- | -------------------------------------------------------------------- |
+| **Client ID** | Single `client_id` per batch (set at batch level, not per-write)     |
+| **Sequence**  | Batch has single sequence number (all writes share it)               |
+| **Scope**     | All writes must target same scope (all with vault_id OR all without) |
+
+**Sequencing behavior:**
+
+```
+batch.sequence == last_committed_seq + 1  // Valid batch
+batch.sequence <= last_committed_seq      // ALREADY_COMMITTED (duplicate)
+batch.sequence > last_committed_seq + 1   // SEQUENCE_GAP
+
+On success:
+  last_committed_seq = batch.sequence     // Single increment per batch
+
+On failure (CAS, sequence error):
+  last_committed_seq unchanged            // No sequence consumed
+```
+
+**Rationale**: Per-write sequencing within a batch creates ambiguity (which sequence failed?) and complexity (multiple client_ids with interleaved sequences). A single batch sequence treats the batch as an indivisible unit for idempotency—retry the entire batch with the same sequence.
+
+**Why not per-write sequences?**
+
+| Approach             | Pros                                             | Cons                                                 |
+| -------------------- | ------------------------------------------------ | ---------------------------------------------------- |
+| Batch-level (chosen) | Simple, clear retry semantics, matches atomicity | Multiple ops = single idempotency key                |
+| Per-write            | Fine-grained tracking                            | Complex failure handling, ambiguous on partial retry |
+
+Clients needing per-operation idempotency should use separate `WriteRequest` calls.
 
 **Use cases**:
 
@@ -3461,7 +3831,9 @@ The leader maintains persistent sequence state per client (not a time-based wind
 ```rust
 struct ClientState {
     last_committed_seq: u64,
-    // Bounded LRU cache for response replay
+    last_committed_tx_id: TxId,           // For ALREADY_COMMITTED recovery
+    last_committed_block_height: u64,     // For ALREADY_COMMITTED recovery
+    // Bounded LRU cache for full response replay
     recent_responses: LruCache<u64, WriteResponse>,  // max 1000 entries
 }
 ```
@@ -3474,6 +3846,24 @@ struct ClientState {
 | `seq == last_committed_seq + 1` | Process transaction                           | Expected next                          |
 | `seq > last_committed_seq + 1`  | Reject with `SEQUENCE_GAP`                    | Gap indicates client bug or lost state |
 
+**Duplicate handling (`seq <= last_committed_seq`):**
+
+1. If response is in LRU cache → return cached `WriteSuccess` (identical to original)
+2. If response is evicted → return `WriteError` with:
+   - `code = ALREADY_COMMITTED`
+   - `committed_tx_id` = from durable `ClientState.last_committed_tx_id`
+   - `committed_block_height` = from durable `ClientState.last_committed_block_height`
+
+Note: The server durably stores the last committed transaction's identity (not just the sequence number), enabling recovery even after LRU eviction. Storage cost is O(clients), not O(transactions).
+
+**Gap handling (`seq > last_committed_seq + 1`):**
+
+Return `WriteError` with:
+
+- `code = SEQUENCE_GAP`
+- `last_committed_sequence` = server's last committed sequence for this client
+- Client should call `GetClientState` to recover, then resume from `last_committed_sequence + 1`
+
 **Why no time-based window:**
 
 - Window expiry creates double-write risk (client crashes, restarts after window, retries)
@@ -3482,13 +3872,13 @@ struct ClientState {
 
 ### Retry Behavior
 
-| Scenario             | Client Action                           | Server Response                                    |
-| -------------------- | --------------------------------------- | -------------------------------------------------- |
-| Network timeout      | Retry with same `(client_id, sequence)` | Idempotent: cached response or `ALREADY_COMMITTED` |
-| `SEQUENCE_GAP` error | Client must recover sequence state      | Reject until sequence corrected                    |
-| Success              | Increment sequence for next write       | N/A                                                |
+| Scenario             | Client Action                           | Server Response                                                             |
+| -------------------- | --------------------------------------- | --------------------------------------------------------------------------- |
+| Network timeout      | Retry with same `(client_id, sequence)` | Idempotent: cached `WriteSuccess` or `ALREADY_COMMITTED` with recovery data |
+| `SEQUENCE_GAP` error | Call `GetClientState`, resume sequence  | Reject until client uses correct next sequence                              |
+| Success              | Increment sequence for next write       | N/A                                                                         |
 
-**Exactly-once semantics**: Retrying any previously-committed sequence returns the cached result indefinitely (within LRU bounds) or `ALREADY_COMMITTED` status.
+**Exactly-once semantics**: Retrying any previously-committed sequence returns the cached result (if in LRU) or `ALREADY_COMMITTED` with `committed_tx_id` and `committed_block_height` (if evicted). Either way, the client can proceed knowing the write succeeded.
 
 ### Sequence Number Rules
 
@@ -3722,8 +4112,8 @@ Creating a new organization with its first owner requires writes to both `_syste
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    Create Organization Saga                             │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  Step 1: Create user in _system (if not exists)                        │
-│          user:123 → {name: "Alice", email: "alice@acme.com"}           │
+│  Step 1: Create user in _system (if not exists)                         │
+│          user:123 → {name: "Alice", email: "alice@acme.com"}            │
 │          Status: PENDING_ORG                                            │
 │                                                                         │
 │  Step 2: Create namespace ns_org_456                                    │
@@ -3792,11 +4182,11 @@ Deleting a user requires removing memberships from all organizations they belong
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    Delete User Saga                                     │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  Step 1: Mark user as DELETING in _system                              │
+│  Step 1: Mark user as DELETING in _system                               │
 │          user:123.status → DELETING                                     │
 │          (User can no longer authenticate)                              │
 │                                                                         │
-│  Step 2: For each org in user.orgs (background, parallel):             │
+│  Step 2: For each org in user.orgs (background, parallel):              │
 │          ns_org_456: delete member:123                                  │
 │          ns_org_789: delete member:123                                  │
 │          (Eventual consistency - may take seconds to minutes)           │
@@ -3819,7 +4209,7 @@ Deleting a team requires removing all team memberships and team permissions.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    Delete Team Saga                                      │
+│                    Delete Team Saga                                     │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  All operations in single namespace - ATOMIC via BatchWrite             │
 │                                                                         │
@@ -3870,10 +4260,10 @@ When Engine issues an access token for a vault, the issuance is recorded in the 
 │  3. Control writes to vault chain:                                      │
 │     vault:prod:token:abc123 → {                                         │
 │       user_id: 123,                                                     │
-│       issued_at: "2024-01-15T10:30:00Z",                               │
-│       expires_at: "2024-01-15T11:30:00Z",                              │
+│       issued_at: "2024-01-15T10:30:00Z",                                │
+│       expires_at: "2024-01-15T11:30:00Z",                               │
 │       scopes: ["read", "write"],                                        │
-│       request_context: {ip: "10.0.0.1", user_agent: "..."}             │
+│       request_context: {ip: "10.0.0.1", user_agent: "..."}              │
 │     }                                                                   │
 │                                                                         │
 │  4. Control returns signed token to Engine                              │
@@ -4288,13 +4678,14 @@ fn verify_consistency(history: &[Operation]) -> Result<(), ConsistencyViolation>
 ```
 
 **Fault scenarios**:
-| Fault | Tool | Verification |
-|-------|------|--------------|
-| Network partition | turmoil | Leader election, no split-brain |
-| Node crash | SIGKILL | Failover < 500ms |
-| Network delay | toxiproxy | Timeout handling |
-| Disk full | mock | Graceful degradation |
-| Bit flip | inject | Merkle detection |
+
+| Fault             | Tool      | Verification                    |
+| ----------------- | --------- | ------------------------------- |
+| Network partition | turmoil   | Leader election, no split-brain |
+| Node crash        | SIGKILL   | Failover < 500ms                |
+| Network delay     | toxiproxy | Timeout handling                |
+| Disk full         | mock      | Graceful degradation            |
+| Bit flip          | inject    | Merkle detection                |
 
 ### Phase 4: Deterministic Simulation
 
