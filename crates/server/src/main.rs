@@ -20,8 +20,10 @@ mod config;
 mod shutdown;
 
 use std::env;
+use std::net::SocketAddr;
 
 use config::{Config, ConfigError};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::EnvFilter;
 
 /// Server error type.
@@ -66,6 +68,11 @@ async fn main() -> Result<(), ServerError> {
         bootstrap = config.bootstrap,
         "Starting InferaDB Ledger"
     );
+
+    // Initialize Prometheus metrics exporter if configured
+    if let Some(metrics_addr) = config.metrics_addr {
+        init_metrics_exporter(metrics_addr)?;
+    }
 
     // Bootstrap node (creates Raft, storage, server)
     let node = bootstrap::bootstrap_node(&config)
@@ -142,6 +149,7 @@ OPTIONS:
 ENVIRONMENT VARIABLES:
     INFERADB__LEDGER__NODE_ID       Node identifier (numeric)
     INFERADB__LEDGER__LISTEN_ADDR   gRPC listen address (e.g., 0.0.0.0:50051)
+    INFERADB__LEDGER__METRICS_ADDR  Prometheus metrics address (e.g., 0.0.0.0:9090)
     INFERADB__LEDGER__DATA_DIR      Data directory path
     INFERADB__LEDGER__BOOTSTRAP     Set to 'true' to bootstrap a new cluster
 
@@ -155,11 +163,29 @@ EXAMPLES:
     # Bootstrap a new single-node cluster
     INFERADB__LEDGER__NODE_ID=1 \
     INFERADB__LEDGER__LISTEN_ADDR=0.0.0.0:50051 \
+    INFERADB__LEDGER__METRICS_ADDR=0.0.0.0:9090 \
     INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
     INFERADB__LEDGER__BOOTSTRAP=true \
     ledger
 "#
     );
+}
+
+/// Initialize the Prometheus metrics exporter.
+///
+/// Starts an HTTP server that exposes metrics at `/metrics`.
+fn init_metrics_exporter(addr: SocketAddr) -> Result<(), ServerError> {
+    let builder = PrometheusBuilder::new().with_http_listener(addr);
+
+    builder.install().map_err(|e| {
+        ServerError::Server(Box::new(std::io::Error::other(format!(
+            "Failed to install Prometheus exporter: {}",
+            e
+        ))))
+    })?;
+
+    tracing::info!(metrics_addr = %addr, "Prometheus metrics exporter started");
+    Ok(())
 }
 
 impl Clone for shutdown::ShutdownCoordinator {

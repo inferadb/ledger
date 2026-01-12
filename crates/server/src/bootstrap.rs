@@ -144,6 +144,10 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         applied_state_accessor.clone(),
         Some(block_archive),
         config.listen_addr,
+    )
+    .with_rate_limit(
+        config.rate_limit.max_concurrent,
+        config.rate_limit.timeout_secs,
     );
 
     // Start TTL garbage collector as background task

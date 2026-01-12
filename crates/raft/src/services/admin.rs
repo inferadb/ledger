@@ -1197,6 +1197,109 @@ impl AdminService for AdminServiceImpl {
             }))
         }
     }
+
+    /// Simulate vault divergence for testing.
+    ///
+    /// This forces a vault into the `Diverged` state without actual state corruption.
+    /// Only available for testing purposes. The vault can be recovered using
+    /// `RecoverVault` with `force=true`.
+    async fn simulate_divergence(
+        &self,
+        request: Request<crate::proto::SimulateDivergenceRequest>,
+    ) -> Result<Response<crate::proto::SimulateDivergenceResponse>, Status> {
+        let req = request.into_inner();
+
+        let namespace_id = req
+            .namespace_id
+            .as_ref()
+            .map(|n| n.id)
+            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+
+        let vault_id = req
+            .vault_id
+            .as_ref()
+            .map(|v| v.id)
+            .ok_or_else(|| Status::invalid_argument("Missing vault_id"))?;
+
+        // Extract fake state roots for the simulated divergence
+        let expected_root: [u8; 32] = req
+            .expected_state_root
+            .as_ref()
+            .map(|h| {
+                h.value
+                    .as_slice()
+                    .try_into()
+                    .unwrap_or([0u8; 32])
+            })
+            .unwrap_or([1u8; 32]); // Default to non-zero for visibility
+
+        let computed_root: [u8; 32] = req
+            .computed_state_root
+            .as_ref()
+            .map(|h| {
+                h.value
+                    .as_slice()
+                    .try_into()
+                    .unwrap_or([0u8; 32])
+            })
+            .unwrap_or([2u8; 32]); // Different from expected
+
+        let at_height = if req.at_height > 0 {
+            req.at_height
+        } else {
+            // Get current vault height if not specified
+            self.applied_state.vault_height(namespace_id, vault_id).max(1)
+        };
+
+        tracing::warn!(
+            namespace_id,
+            vault_id,
+            at_height,
+            "Simulating vault divergence for testing"
+        );
+
+        // Update vault health to Diverged via Raft
+        let health_request = LedgerRequest::UpdateVaultHealth {
+            namespace_id,
+            vault_id,
+            healthy: false,
+            expected_root: Some(expected_root),
+            computed_root: Some(computed_root),
+            diverged_at_height: Some(at_height),
+        };
+
+        match self.raft.client_write(health_request).await {
+            Ok(_) => {
+                tracing::info!(
+                    namespace_id,
+                    vault_id,
+                    "Vault marked as diverged for testing"
+                );
+
+                Ok(Response::new(crate::proto::SimulateDivergenceResponse {
+                    success: true,
+                    message: format!(
+                        "Vault {}:{} marked as diverged at height {}",
+                        namespace_id, vault_id, at_height
+                    ),
+                    health_status: VaultHealthProto::Diverged.into(),
+                }))
+            }
+            Err(e) => {
+                tracing::error!(
+                    namespace_id,
+                    vault_id,
+                    error = %e,
+                    "Failed to simulate divergence"
+                );
+
+                Err(Status::internal(format!(
+                    "Failed to update vault health: {}",
+                    e
+                )))
+            }
+        }
+    }
 }
 
 /// Compute the hash of a vault block entry for chain verification.

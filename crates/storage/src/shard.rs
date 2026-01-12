@@ -13,11 +13,16 @@ use parking_lot::RwLock;
 use redb::Database;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultHealth, VaultId};
+use ledger_types::{
+    EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultHealth, VaultId, ZERO_HASH,
+    compute_chain_commitment,
+};
 
 use crate::block_archive::BlockArchive;
 use crate::bucket::NUM_BUCKETS;
-use crate::snapshot::{Snapshot, SnapshotManager, SnapshotStateData, VaultSnapshotMeta};
+use crate::snapshot::{
+    Snapshot, SnapshotChainParams, SnapshotManager, SnapshotStateData, VaultSnapshotMeta,
+};
 use crate::state::StateLayer;
 
 /// Shard manager error types.
@@ -51,6 +56,14 @@ pub enum ShardError {
 
 /// Result type for shard operations.
 pub type Result<T> = std::result::Result<T, ShardError>;
+
+/// Compute the hash of a snapshot header for chain linking.
+///
+/// Used to link snapshots together in a verifiable chain.
+fn compute_snapshot_header_hash(header: &crate::snapshot::SnapshotHeader) -> Hash {
+    let bytes = postcard::to_allocvec(header).unwrap_or_default();
+    ledger_types::sha256(&bytes)
+}
 
 /// Per-vault metadata tracked by the shard.
 #[derive(Debug, Clone)]
@@ -89,6 +102,8 @@ pub struct ShardManager {
     vault_meta: RwLock<HashMap<VaultId, VaultMeta>>,
     /// Current shard height.
     shard_height: RwLock<u64>,
+    /// Genesis block hash (computed from first block, cached for efficiency).
+    genesis_hash: RwLock<Option<Hash>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -108,6 +123,7 @@ impl ShardManager {
             snapshots: SnapshotManager::new(snapshot_dir, max_snapshots),
             vault_meta: RwLock::new(HashMap::new()),
             shard_height: RwLock::new(0),
+            genesis_hash: RwLock::new(None),
         }
     }
 
@@ -311,10 +327,86 @@ impl ShardManager {
 
         let state_data = SnapshotStateData { vault_entities };
 
-        let snapshot = Snapshot::new(self.shard_id, shard_height, vault_states, state_data)
-            .context(SnapshotSnafu)?;
+        // Compute chain commitment for snapshot verification
+        let chain_params = self.compute_chain_params(shard_height)?;
+
+        let snapshot = Snapshot::new(
+            self.shard_id,
+            shard_height,
+            vault_states,
+            state_data,
+            chain_params,
+        )
+        .context(SnapshotSnafu)?;
 
         self.snapshots.save(&snapshot).context(SnapshotSnafu)
+    }
+
+    /// Compute chain parameters for a new snapshot.
+    ///
+    /// This computes the ChainCommitment covering all blocks since the previous
+    /// snapshot, linking the new snapshot into the verification chain.
+    fn compute_chain_params(&self, shard_height: u64) -> Result<SnapshotChainParams> {
+        // Get genesis hash (cached for efficiency)
+        let genesis_hash = self.get_or_compute_genesis_hash()?;
+
+        // Find previous snapshot
+        let existing_snapshots = self.snapshots.list_snapshots().context(SnapshotSnafu)?;
+        let (previous_snapshot_height, previous_snapshot_hash, from_height) =
+            if let Some(&prev_height) = existing_snapshots.last() {
+                // Load previous snapshot to get its header hash
+                let prev_snapshot = self.snapshots.load(prev_height).context(SnapshotSnafu)?;
+                let prev_hash = compute_snapshot_header_hash(&prev_snapshot.header);
+                (Some(prev_height), Some(prev_hash), prev_height + 1)
+            } else {
+                // First snapshot - start from block 1
+                (None, None, 1)
+            };
+
+        // Load block headers from (from_height..=shard_height)
+        let blocks = self
+            .blocks
+            .read_range(from_height, shard_height)
+            .context(BlockArchiveSnafu)?;
+
+        let headers: Vec<_> = blocks.iter().map(|b| b.to_shard_header()).collect();
+
+        // Compute chain commitment
+        let chain_commitment = compute_chain_commitment(&headers, from_height, shard_height);
+
+        Ok(SnapshotChainParams {
+            genesis_hash,
+            previous_snapshot_height,
+            previous_snapshot_hash,
+            chain_commitment,
+        })
+    }
+
+    /// Get or compute the genesis hash for this shard.
+    ///
+    /// The genesis hash is the block hash of the first block (height 1).
+    /// It's cached after first computation for efficiency.
+    fn get_or_compute_genesis_hash(&self) -> Result<Hash> {
+        // Check cache first
+        if let Some(hash) = *self.genesis_hash.read() {
+            return Ok(hash);
+        }
+
+        // Compute from first block
+        let genesis = match self.blocks.read_block(1) {
+            Ok(block) => {
+                let header = block.to_shard_header();
+                ledger_types::hash::block_hash(&header)
+            }
+            Err(_) => {
+                // No blocks yet - use ZERO_HASH as placeholder
+                ZERO_HASH
+            }
+        };
+
+        // Cache the result
+        *self.genesis_hash.write() = Some(genesis);
+        Ok(genesis)
     }
 
     /// Restore from a snapshot.

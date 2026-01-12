@@ -95,9 +95,11 @@ impl TestCluster {
         let config = ledger_server::config::Config {
             node_id,
             listen_addr: addr,
+            metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
             peers: vec![], // Empty! Single-node cluster can immediately elect self as leader
             batching: ledger_server::config::BatchConfig::default(),
+            rate_limit: ledger_server::config::RateLimitConfig::default(),
             bootstrap: true,
         };
 
@@ -159,9 +161,11 @@ impl TestCluster {
             let config = ledger_server::config::Config {
                 node_id,
                 listen_addr: addr,
+                metrics_addr: None,
                 data_dir: temp_dir.path().to_path_buf(),
                 peers,
                 batching: ledger_server::config::BatchConfig::default(),
+                rate_limit: ledger_server::config::RateLimitConfig::default(),
                 bootstrap: false, // Non-bootstrap nodes join dynamically
             };
 
@@ -182,12 +186,16 @@ impl TestCluster {
             // The leader's add_learner call will try to replicate to this node
             tokio::time::sleep(Duration::from_millis(200)).await;
 
-            // Join the cluster via the leader's AdminService with retry
+            // Join the cluster via the leader's AdminService with retry.
+            // We use more attempts with exponential backoff since membership changes
+            // are serialized in OpenRaft and may take time if a previous change is
+            // still in progress.
             let endpoint = format!("http://{}", leader_addr);
             let mut join_success = false;
             let mut last_error = String::new();
+            let max_attempts = 10;
 
-            for attempt in 0..5 {
+            for attempt in 0..max_attempts {
                 let mut client = match AdminServiceClient::connect(endpoint.clone()).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -209,24 +217,29 @@ impl TestCluster {
                             join_success = true;
                             break;
                         } else {
-                            last_error = resp.message;
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            last_error = resp.message.clone();
+                            // If membership change in progress, wait longer
+                            let backoff = if resp.message.contains("membership")
+                                || resp.message.contains("Timeout")
+                            {
+                                Duration::from_millis(500 * (attempt + 1) as u64)
+                            } else {
+                                Duration::from_millis(100 * (attempt + 1) as u64)
+                            };
+                            tokio::time::sleep(backoff).await;
                         }
                     }
                     Err(e) => {
                         last_error = format!("join RPC failed: {}", e);
-                        if attempt < 4 {
-                            tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64))
-                                .await;
-                        }
+                        tokio::time::sleep(Duration::from_millis(200 * (attempt + 1) as u64)).await;
                     }
                 }
             }
 
             if !join_success {
                 panic!(
-                    "Node {} failed to join cluster after 5 attempts: {}",
-                    node_id, last_error
+                    "Node {} failed to join cluster after {} attempts: {}",
+                    node_id, max_attempts, last_error
                 );
             }
 
@@ -256,8 +269,23 @@ impl TestCluster {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
 
-            // Additional stabilization time
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            // CRITICAL: Wait for the LEADER's membership to exit joint consensus.
+            // OpenRaft serializes membership changes - we cannot add the next node
+            // until the current change is fully committed on the leader.
+            // A joint config has len() > 1, uniform config has len() == 1.
+            let stabilize_start = tokio::time::Instant::now();
+            let stabilize_timeout = Duration::from_secs(10);
+            while stabilize_start.elapsed() < stabilize_timeout {
+                let leader_metrics = leader_raft.metrics().borrow().clone();
+                let leader_membership = leader_metrics.membership_config.membership();
+                let joint_config = leader_membership.get_joint_config();
+
+                // Exit when leader shows single (uniform) config - change is complete
+                if joint_config.len() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
 
         // Wait for cluster to fully stabilize
@@ -352,4 +380,28 @@ pub async fn create_read_client(
 > {
     let endpoint = format!("http://{}", addr);
     ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint).await
+}
+
+/// Helper to create a health client for a node.
+#[allow(dead_code)]
+pub async fn create_health_client(
+    addr: SocketAddr,
+) -> Result<
+    ledger_raft::proto::health_service_client::HealthServiceClient<tonic::transport::Channel>,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    ledger_raft::proto::health_service_client::HealthServiceClient::connect(endpoint).await
+}
+
+/// Helper to create an admin client for a node.
+#[allow(dead_code)]
+pub async fn create_admin_client(
+    addr: SocketAddr,
+) -> Result<
+    ledger_raft::proto::admin_service_client::AdminServiceClient<tonic::transport::Channel>,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    ledger_raft::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
 }

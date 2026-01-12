@@ -25,10 +25,10 @@ use crate::proto::{
     WatchBlocksRequest,
 };
 
-use ledger_storage::{BlockArchive, StateLayer, StorageEngine};
+use ledger_storage::{BlockArchive, SnapshotManager, StateLayer, StorageEngine};
 
 use crate::IdempotencyCache;
-use crate::log_storage::AppliedStateAccessor;
+use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus};
 
 /// Read service implementation.
 pub struct ReadServiceImpl {
@@ -38,6 +38,8 @@ pub struct ReadServiceImpl {
     applied_state: AppliedStateAccessor,
     /// Block archive for retrieving stored blocks.
     block_archive: Option<Arc<BlockArchive>>,
+    /// Snapshot manager for historical reads optimization.
+    snapshot_manager: Option<Arc<SnapshotManager>>,
     /// Block announcement broadcast channel.
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Idempotency cache for client state tracking.
@@ -55,6 +57,7 @@ impl ReadServiceImpl {
             state,
             applied_state,
             block_archive: None,
+            snapshot_manager: None,
             block_announcements,
             idempotency: None,
         }
@@ -71,6 +74,25 @@ impl ReadServiceImpl {
             state,
             applied_state,
             block_archive: Some(block_archive),
+            snapshot_manager: None,
+            block_announcements,
+            idempotency: None,
+        }
+    }
+
+    /// Create a read service with block archive and snapshot manager.
+    pub fn with_snapshots(
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+        block_archive: Arc<BlockArchive>,
+        snapshot_manager: Arc<SnapshotManager>,
+        block_announcements: broadcast::Sender<BlockAnnouncement>,
+    ) -> Self {
+        Self {
+            state,
+            applied_state,
+            block_archive: Some(block_archive),
+            snapshot_manager: Some(snapshot_manager),
             block_announcements,
             idempotency: None,
         }
@@ -88,8 +110,28 @@ impl ReadServiceImpl {
             state,
             applied_state,
             block_archive,
+            snapshot_manager: None,
             block_announcements,
             idempotency: Some(idempotency),
+        }
+    }
+
+    /// Create a read service with full configuration including snapshots.
+    pub fn with_full_config(
+        state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
+        block_archive: Option<Arc<BlockArchive>>,
+        snapshot_manager: Option<Arc<SnapshotManager>>,
+        block_announcements: broadcast::Sender<BlockAnnouncement>,
+        idempotency: Option<Arc<IdempotencyCache>>,
+    ) -> Self {
+        Self {
+            state,
+            applied_state,
+            block_archive,
+            snapshot_manager,
+            block_announcements,
+            idempotency,
         }
     }
 
@@ -200,6 +242,88 @@ impl ReadServiceImpl {
         )
     }
 
+    /// Find and load the nearest snapshot for historical read optimization.
+    ///
+    /// Returns (start_height, snapshot_loaded):
+    /// - If a suitable snapshot is found and loaded, returns (snapshot_vault_height + 1, true)
+    /// - If no snapshot available or loading fails, returns (1, false)
+    ///
+    /// The snapshot state is loaded into temp_state for the specified vault.
+    fn load_nearest_snapshot_for_historical_read(
+        &self,
+        vault_id: i64,
+        target_height: u64,
+        temp_state: &StateLayer,
+    ) -> (u64, bool) {
+        let snapshot_manager = match &self.snapshot_manager {
+            Some(sm) => sm,
+            None => return (1, false),
+        };
+
+        // List available snapshots
+        let snapshots = match snapshot_manager.list_snapshots() {
+            Ok(s) => s,
+            Err(_) => return (1, false),
+        };
+
+        // Find the largest snapshot height where the vault's height is <= target
+        for &shard_height in snapshots.iter().rev() {
+            let snapshot = match snapshot_manager.load(shard_height) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            // Find the vault's height in this snapshot
+            if let Some(vault_meta) = snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id) {
+                if vault_meta.vault_height <= target_height {
+                    // This snapshot is usable - load its entities into temp_state
+                    if let Some(entities) = snapshot.state.vault_entities.get(&vault_id) {
+                        // Convert entities to SetEntity operations for replay
+                        let operations: Vec<ledger_types::Operation> = entities
+                            .iter()
+                            .map(|entity| {
+                                // Entity.key is Vec<u8>, convert to String for Operation
+                                let key = String::from_utf8_lossy(&entity.key).into_owned();
+                                ledger_types::Operation::SetEntity {
+                                    key,
+                                    value: entity.value.clone(),
+                                    condition: None, // No condition for snapshot restore
+                                    expires_at: if entity.expires_at == 0 {
+                                        None
+                                    } else {
+                                        Some(entity.expires_at)
+                                    },
+                                }
+                            })
+                            .collect();
+
+                        // Apply all entities at the snapshot height
+                        if !operations.is_empty() {
+                            if let Err(e) = temp_state.apply_operations(
+                                vault_id,
+                                &operations,
+                                vault_meta.vault_height,
+                            ) {
+                                debug!("Failed to restore entities from snapshot: {:?}", e);
+                                return (1, false);
+                            }
+                        }
+                    }
+
+                    debug!(
+                        shard_height,
+                        vault_height = vault_meta.vault_height,
+                        "Loaded snapshot for historical read"
+                    );
+                    return (vault_meta.vault_height + 1, true);
+                }
+            }
+        }
+
+        // No suitable snapshot found
+        (1, false)
+    }
+
     /// Build a ChainProof linking blocks from trusted_height+1 to response_height.
     ///
     /// The ChainProof allows clients to verify that the response_height block
@@ -244,12 +368,28 @@ impl ReadService for ReadServiceImpl {
         let start = Instant::now();
         let req = request.into_inner();
 
-        // Extract vault ID (0 for namespace-level reads)
+        // Extract IDs
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
 
         // Record span fields
         tracing::Span::current().record("vault_id", vault_id);
         tracing::Span::current().record("key", &req.key);
+
+        // Check vault health - diverged vaults cannot be read
+        let health = self.applied_state.vault_health(namespace_id, vault_id as i64);
+        if let VaultHealthStatus::Diverged { at_height, .. } = &health {
+            warn!(
+                namespace_id,
+                vault_id,
+                at_height,
+                "Read rejected: vault has diverged"
+            );
+            return Err(Status::unavailable(format!(
+                "Vault {}:{} has diverged at height {}",
+                namespace_id, vault_id, at_height
+            )));
+        }
 
         // Read from state layer
         let state = self.state.read();
@@ -296,6 +436,22 @@ impl ReadService for ReadServiceImpl {
         // Record span fields
         tracing::Span::current().record("vault_id", vault_id);
         tracing::Span::current().record("key", &req.key);
+
+        // Check vault health - diverged vaults cannot be read
+        let health = self.applied_state.vault_health(namespace_id, vault_id);
+        if let VaultHealthStatus::Diverged { at_height, .. } = &health {
+            warn!(
+                namespace_id,
+                vault_id,
+                at_height,
+                "Verified read rejected: vault has diverged"
+            );
+            metrics::record_verified_read(false, start.elapsed().as_secs_f64());
+            return Err(Status::unavailable(format!(
+                "Vault {}:{} has diverged at height {}",
+                namespace_id, vault_id, at_height
+            )));
+        }
 
         // Read from state layer
         let state = self.state.read();
@@ -408,8 +564,19 @@ impl ReadService for ReadServiceImpl {
         // Track block timestamp for expiration check
         let mut block_timestamp = chrono::Utc::now();
 
-        // Replay blocks from height 1 to at_height
-        for height in 1..=req.at_height {
+        // Find the optimal starting point (snapshot or height 1)
+        let (start_height, snapshot_loaded) =
+            self.load_nearest_snapshot_for_historical_read(vault_id, req.at_height, &temp_state);
+
+        debug!(
+            start_height,
+            snapshot_loaded,
+            target_height = req.at_height,
+            "Historical read replay starting"
+        );
+
+        // Replay blocks from start_height to at_height
+        for height in start_height..=req.at_height {
             // Find shard height for this vault block
             let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
                 Ok(Some(h)) => h,

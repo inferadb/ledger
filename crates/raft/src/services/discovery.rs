@@ -1,8 +1,12 @@
 //! System discovery service implementation.
 //!
 //! Provides peer discovery and system state information for cluster coordination.
+//!
+//! Per DESIGN.md, peer addresses must be private/WireGuard IPs. Public IPs are
+//! rejected to ensure cluster traffic stays within the private network.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,6 +25,139 @@ use crate::proto::{
 use crate::types::LedgerTypeConfig;
 
 use ledger_storage::StateLayer;
+
+// =============================================================================
+// IP Address Validation
+// =============================================================================
+
+/// Check if an IPv4 address is a private/internal address.
+///
+/// Private ranges per RFC 1918:
+/// - 10.0.0.0/8 (Class A)
+/// - 172.16.0.0/12 (Class B)
+/// - 192.168.0.0/16 (Class C)
+///
+/// Also allows:
+/// - 127.0.0.0/8 (loopback, for testing)
+/// - 169.254.0.0/16 (link-local)
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+
+    // 10.0.0.0/8
+    if octets[0] == 10 {
+        return true;
+    }
+
+    // 172.16.0.0/12 (172.16.x.x - 172.31.x.x)
+    if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+        return true;
+    }
+
+    // 192.168.0.0/16
+    if octets[0] == 192 && octets[1] == 168 {
+        return true;
+    }
+
+    // 127.0.0.0/8 (loopback)
+    if octets[0] == 127 {
+        return true;
+    }
+
+    // 169.254.0.0/16 (link-local)
+    if octets[0] == 169 && octets[1] == 254 {
+        return true;
+    }
+
+    false
+}
+
+/// Check if an IPv6 address is a private/internal address.
+///
+/// Private ranges:
+/// - fd00::/8 (Unique Local Addresses - typical for WireGuard)
+/// - fe80::/10 (Link-Local)
+/// - ::1 (loopback)
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    // Loopback
+    if ip.is_loopback() {
+        return true;
+    }
+
+    let segments = ip.segments();
+
+    // fd00::/8 (Unique Local - WireGuard typically uses this)
+    if (segments[0] >> 8) == 0xfd {
+        return true;
+    }
+
+    // fc00::/7 (broader ULA range)
+    if (segments[0] >> 9) == 0x7e {
+        return true;
+    }
+
+    // fe80::/10 (Link-Local)
+    if (segments[0] >> 6) == 0x3fa {
+        return true;
+    }
+
+    // Check using std methods if available
+    // fe80::/10 via manual check
+    if segments[0] & 0xffc0 == 0xfe80 {
+        return true;
+    }
+
+    false
+}
+
+/// Validate that an IP address string is a private/WireGuard address.
+///
+/// Returns Ok(()) if valid, Err with reason if invalid.
+fn validate_private_ip(addr: &str) -> Result<(), String> {
+    // Parse as IP address (strips any port)
+    let ip: IpAddr = addr
+        .parse()
+        .map_err(|_| format!("Invalid IP address: {}", addr))?;
+
+    match ip {
+        IpAddr::V4(ipv4) => {
+            if is_private_ipv4(ipv4) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Public IPv4 address not allowed: {}. Use private ranges (10.x, 172.16-31.x, 192.168.x)",
+                    addr
+                ))
+            }
+        }
+        IpAddr::V6(ipv6) => {
+            if is_private_ipv6(ipv6) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Public IPv6 address not allowed: {}. Use fd00::/8 (WireGuard) or fe80::/10 (link-local)",
+                    addr
+                ))
+            }
+        }
+    }
+}
+
+/// Validate all addresses in a peer announcement.
+///
+/// All addresses must be private/WireGuard IPs.
+fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
+    if addresses.is_empty() {
+        return Err(Status::invalid_argument("Peer must have at least one address"));
+    }
+
+    for addr in addresses {
+        if let Err(reason) = validate_private_ip(addr) {
+            return Err(Status::invalid_argument(reason));
+        }
+    }
+
+    Ok(())
+}
 
 /// Tracks when peers were last seen for health monitoring.
 #[derive(Debug, Default)]
@@ -150,18 +287,29 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("Missing node_id"))?;
 
+        // Validate gRPC port
+        if peer.grpc_port == 0 || peer.grpc_port > 65535 {
+            return Err(Status::invalid_argument(format!(
+                "Invalid gRPC port: {}. Must be 1-65535",
+                peer.grpc_port
+            )));
+        }
+
+        // Validate addresses are private/WireGuard IPs (per DESIGN.md)
+        validate_peer_addresses(&peer.addresses)?;
+
         // Record that we've seen this peer
         {
             let mut tracker = self.peer_tracker.write();
             tracker.record_seen(&node_id.id);
         }
 
-        // TODO: In a full implementation, this would:
-        // 1. Validate the peer's addresses are WireGuard IPs
-        // 2. Add the peer to the local peer cache
-        // 3. Propagate to other nodes if needed
-
-        tracing::info!("Peer announced: {:?}", peer);
+        tracing::info!(
+            node_id = %node_id.id,
+            addresses = ?peer.addresses,
+            grpc_port = peer.grpc_port,
+            "Peer announced"
+        );
 
         Ok(Response::new(AnnouncePeerResponse { accepted: true }))
     }
@@ -326,5 +474,142 @@ mod tests {
             ts.seconds,
             now
         );
+    }
+
+    // =========================================================================
+    // IP Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_private_ipv4_class_a() {
+        // 10.0.0.0/8
+        assert!(is_private_ipv4("10.0.0.1".parse().unwrap()));
+        assert!(is_private_ipv4("10.255.255.255".parse().unwrap()));
+        assert!(is_private_ipv4("10.0.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_private_ipv4_class_b() {
+        // 172.16.0.0/12 (172.16.x.x - 172.31.x.x)
+        assert!(is_private_ipv4("172.16.0.1".parse().unwrap()));
+        assert!(is_private_ipv4("172.31.255.255".parse().unwrap()));
+        assert!(is_private_ipv4("172.20.1.1".parse().unwrap()));
+
+        // Outside range
+        assert!(!is_private_ipv4("172.15.0.1".parse().unwrap()));
+        assert!(!is_private_ipv4("172.32.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_private_ipv4_class_c() {
+        // 192.168.0.0/16
+        assert!(is_private_ipv4("192.168.0.1".parse().unwrap()));
+        assert!(is_private_ipv4("192.168.255.255".parse().unwrap()));
+        assert!(is_private_ipv4("192.168.1.100".parse().unwrap()));
+
+        // Outside range
+        assert!(!is_private_ipv4("192.167.1.1".parse().unwrap()));
+        assert!(!is_private_ipv4("192.169.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_private_ipv4_loopback() {
+        // 127.0.0.0/8
+        assert!(is_private_ipv4("127.0.0.1".parse().unwrap()));
+        assert!(is_private_ipv4("127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_private_ipv4_link_local() {
+        // 169.254.0.0/16
+        assert!(is_private_ipv4("169.254.0.1".parse().unwrap()));
+        assert!(is_private_ipv4("169.254.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_public_ipv4_rejected() {
+        // Public IPs should not be private
+        assert!(!is_private_ipv4("8.8.8.8".parse().unwrap())); // Google DNS
+        assert!(!is_private_ipv4("1.1.1.1".parse().unwrap())); // Cloudflare
+        assert!(!is_private_ipv4("142.250.72.14".parse().unwrap())); // Google
+        assert!(!is_private_ipv4("13.107.42.14".parse().unwrap())); // Microsoft
+    }
+
+    #[test]
+    fn test_private_ipv6_loopback() {
+        assert!(is_private_ipv6("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_private_ipv6_ula_wireguard() {
+        // fd00::/8 - Unique Local Addresses (WireGuard typical)
+        assert!(is_private_ipv6("fd00::1".parse().unwrap()));
+        assert!(is_private_ipv6("fd12:3456:789a::1".parse().unwrap()));
+        assert!(is_private_ipv6("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_private_ipv6_link_local() {
+        // fe80::/10
+        assert!(is_private_ipv6("fe80::1".parse().unwrap()));
+        assert!(is_private_ipv6("fe80::1234:5678:abcd:ef01".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_public_ipv6_rejected() {
+        // Public IPv6 should not be private
+        assert!(!is_private_ipv6("2001:4860:4860::8888".parse().unwrap())); // Google DNS
+        assert!(!is_private_ipv6("2606:4700:4700::1111".parse().unwrap())); // Cloudflare
+    }
+
+    #[test]
+    fn test_validate_private_ip_accepts_valid() {
+        // IPv4 private
+        assert!(validate_private_ip("10.0.0.1").is_ok());
+        assert!(validate_private_ip("192.168.1.1").is_ok());
+        assert!(validate_private_ip("172.16.0.1").is_ok());
+
+        // IPv6 private
+        assert!(validate_private_ip("fd00::1").is_ok());
+        assert!(validate_private_ip("::1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_private_ip_rejects_public() {
+        // Public IPv4
+        let result = validate_private_ip("8.8.8.8");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Public IPv4"));
+
+        // Public IPv6
+        let result = validate_private_ip("2001:4860:4860::8888");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Public IPv6"));
+    }
+
+    #[test]
+    fn test_validate_private_ip_rejects_invalid() {
+        let result = validate_private_ip("not-an-ip");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid IP address"));
+    }
+
+    #[test]
+    fn test_validate_peer_addresses_empty() {
+        let result = validate_peer_addresses(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_peer_addresses_valid() {
+        let addrs = vec!["10.0.0.1".to_string(), "fd00::1".to_string()];
+        assert!(validate_peer_addresses(&addrs).is_ok());
+    }
+
+    #[test]
+    fn test_validate_peer_addresses_mixed_rejects() {
+        // One valid, one public - should reject
+        let addrs = vec!["10.0.0.1".to_string(), "8.8.8.8".to_string()];
+        assert!(validate_peer_addresses(&addrs).is_err());
     }
 }

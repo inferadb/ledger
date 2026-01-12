@@ -19,6 +19,7 @@ mod snapshot;
 mod state;
 pub mod system;
 mod tables;
+mod tiered_storage;
 
 pub use block_archive::{BlockArchive, BlockArchiveError};
 pub use bucket::VaultCommitment;
@@ -31,3 +32,7 @@ pub use shard::ShardManager;
 pub use snapshot::{Snapshot, SnapshotManager};
 pub use state::StateLayer;
 pub use tables::Tables;
+pub use tiered_storage::{
+    LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredConfig,
+    TieredSnapshotManager, TieredStorageError,
+};

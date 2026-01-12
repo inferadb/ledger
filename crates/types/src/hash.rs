@@ -381,6 +381,55 @@ pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
     hasher.finalize().into()
 }
 
+/// Compute a ChainCommitment for a range of blocks.
+///
+/// Per DESIGN.md §4.4: Proves snapshot's lineage without requiring full block replay.
+/// - `accumulated_header_hash`: Sequential hash chain of all block headers
+/// - `state_root_accumulator`: Merkle root of all state roots in range
+///
+/// # Arguments
+/// * `headers` - Block headers in order (first header must be at `from_height`)
+/// * `from_height` - Start height (inclusive)
+/// * `to_height` - End height (inclusive)
+///
+/// # Returns
+/// A ChainCommitment covering the specified range.
+pub fn compute_chain_commitment(
+    headers: &[BlockHeader],
+    from_height: u64,
+    to_height: u64,
+) -> crate::types::ChainCommitment {
+    if headers.is_empty() {
+        return crate::types::ChainCommitment {
+            accumulated_header_hash: EMPTY_HASH,
+            state_root_accumulator: EMPTY_HASH,
+            from_height,
+            to_height,
+        };
+    }
+
+    // accumulated_header_hash: Sequential hash chain (not merkle tree)
+    // Ensures header ordering is preserved and any tampering invalidates chain
+    let mut header_acc = ZERO_HASH;
+    for header in headers {
+        // hash_chain = SHA-256(previous_acc || block_hash(header))
+        let header_hash = block_hash(header);
+        header_acc = sha256_concat(&[header_acc, header_hash]);
+    }
+
+    // state_root_accumulator: Merkle root of state_roots
+    // Enables O(log n) proofs that a specific state_root was in the range
+    let state_roots: Vec<Hash> = headers.iter().map(|h| h.state_root).collect();
+    let state_acc = crate::merkle::merkle_root(&state_roots);
+
+    crate::types::ChainCommitment {
+        accumulated_header_hash: header_acc,
+        state_root_accumulator: state_acc,
+        from_height,
+        to_height,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -593,6 +642,91 @@ mod tests {
         let root1 = compute_tx_merkle_root(std::slice::from_ref(&tx));
         let root2 = compute_tx_merkle_root(std::slice::from_ref(&tx));
         assert_eq!(root1, root2);
+    }
+
+    #[test]
+    fn test_chain_commitment_empty() {
+        let commitment = compute_chain_commitment(&[], 0, 0);
+        assert_eq!(commitment.accumulated_header_hash, EMPTY_HASH);
+        assert_eq!(commitment.state_root_accumulator, EMPTY_HASH);
+        assert_eq!(commitment.from_height, 0);
+        assert_eq!(commitment.to_height, 0);
+    }
+
+    #[test]
+    fn test_chain_commitment_single_block() {
+        let header = BlockHeader {
+            height: 1,
+            previous_hash: ZERO_HASH,
+            tx_merkle_root: [1u8; 32],
+            state_root: [2u8; 32],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+            proposer: "node-1".to_string(),
+        };
+
+        let commitment = compute_chain_commitment(&[header.clone()], 1, 1);
+
+        // accumulated_header_hash = SHA-256(ZERO_HASH || block_hash(header))
+        let header_hash = block_hash(&header);
+        let expected_acc = sha256_concat(&[ZERO_HASH, header_hash]);
+        assert_eq!(commitment.accumulated_header_hash, expected_acc);
+
+        // state_root_accumulator = single state root (merkle of 1 = root itself)
+        assert_eq!(commitment.state_root_accumulator, header.state_root);
+
+        assert_eq!(commitment.from_height, 1);
+        assert_eq!(commitment.to_height, 1);
+    }
+
+    #[test]
+    fn test_chain_commitment_multiple_blocks() {
+        let headers: Vec<BlockHeader> = (1..=3)
+            .map(|i| BlockHeader {
+                height: i,
+                previous_hash: [i as u8; 32],
+                tx_merkle_root: [(i + 10) as u8; 32],
+                state_root: [(i + 20) as u8; 32],
+                timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+                proposer: format!("node-{}", i),
+            })
+            .collect();
+
+        let commitment = compute_chain_commitment(&headers, 1, 3);
+
+        // Verify sequential accumulation
+        let mut acc = ZERO_HASH;
+        for h in &headers {
+            acc = sha256_concat(&[acc, block_hash(h)]);
+        }
+        assert_eq!(commitment.accumulated_header_hash, acc);
+
+        // Verify merkle root of state roots
+        let state_roots: Vec<_> = headers.iter().map(|h| h.state_root).collect();
+        let expected_merkle = crate::merkle::merkle_root(&state_roots);
+        assert_eq!(commitment.state_root_accumulator, expected_merkle);
+
+        assert_eq!(commitment.from_height, 1);
+        assert_eq!(commitment.to_height, 3);
+    }
+
+    #[test]
+    fn test_chain_commitment_deterministic() {
+        let headers: Vec<BlockHeader> = (1..=5)
+            .map(|i| BlockHeader {
+                height: i,
+                previous_hash: [i as u8; 32],
+                tx_merkle_root: [(i + 10) as u8; 32],
+                state_root: [(i + 20) as u8; 32],
+                timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+                proposer: "node".to_string(),
+            })
+            .collect();
+
+        let c1 = compute_chain_commitment(&headers, 1, 5);
+        let c2 = compute_chain_commitment(&headers, 1, 5);
+
+        assert_eq!(c1.accumulated_header_hash, c2.accumulated_header_hash);
+        assert_eq!(c1.state_root_accumulator, c2.state_root_accumulator);
     }
 }
 

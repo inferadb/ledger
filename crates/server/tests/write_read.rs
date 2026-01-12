@@ -193,6 +193,103 @@ async fn test_three_node_cluster_formation() {
     assert_eq!(followers.len(), 2, "should have two followers");
 }
 
+/// Test that writes create blocks that can be retrieved via GetBlock.
+///
+/// DESIGN.md §3.2.1: State root is computed after applying transactions.
+/// DESIGN.md §7.1: GetBlock returns stored block with header and transactions.
+#[tokio::test]
+async fn test_write_creates_retrievable_block() {
+    let cluster = TestCluster::new(1).await;
+    let _leader_id = cluster.wait_for_leader().await;
+
+    let leader = cluster.leader().expect("should have leader");
+
+    // Create write and read clients
+    let mut write_client = common::create_write_client(leader.addr)
+        .await
+        .expect("connect to leader");
+    let mut read_client = common::create_read_client(leader.addr)
+        .await
+        .expect("connect to leader for reads");
+
+    // Submit a write
+    let request = ledger_raft::proto::WriteRequest {
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: "block-test".to_string(),
+        }),
+        sequence: 1,
+        namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
+        vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
+        operations: vec![ledger_raft::proto::Operation {
+            op: Some(ledger_raft::proto::operation::Op::SetEntity(
+                ledger_raft::proto::SetEntity {
+                    key: "block-key".to_string(),
+                    value: b"block-value".to_vec(),
+                    expires_at: None,
+                    condition: None,
+                },
+            )),
+        }],
+        include_tx_proof: false,
+    };
+
+    let response = write_client
+        .write(request)
+        .await
+        .expect("write should succeed")
+        .into_inner();
+
+    let block_height = match response.result {
+        Some(ledger_raft::proto::write_response::Result::Success(s)) => s.block_height,
+        _ => panic!("write should succeed"),
+    };
+
+    assert!(block_height > 0, "block_height should be > 0");
+
+    // Retrieve the block via GetBlock
+    let get_block_request = ledger_raft::proto::GetBlockRequest {
+        namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
+        vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
+        height: block_height,
+    };
+
+    let block_response = read_client
+        .get_block(get_block_request)
+        .await
+        .expect("get_block should succeed")
+        .into_inner();
+
+    let block = block_response.block.expect("should have block");
+    let header = block.header.expect("block should have header");
+
+    // Verify block header
+    assert_eq!(header.height, block_height, "block height should match");
+    assert!(
+        header.state_root.is_some(),
+        "block should have state_root"
+    );
+    assert!(
+        header.tx_merkle_root.is_some(),
+        "block should have tx_merkle_root"
+    );
+    assert!(
+        header.previous_hash.is_some(),
+        "block should have previous_hash"
+    );
+
+    // Verify state_root is non-zero (we applied operations, so state changed)
+    let state_root = header.state_root.unwrap();
+    assert!(
+        !state_root.value.iter().all(|&b| b == 0),
+        "state_root should not be all zeros after write"
+    );
+
+    // Verify block contains the transaction
+    assert_eq!(block.transactions.len(), 1, "block should have 1 transaction");
+    let tx = &block.transactions[0];
+    assert_eq!(tx.operations.len(), 1, "transaction should have 1 operation");
+}
+
 /// Test write to leader replicates to followers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_write_replication() {

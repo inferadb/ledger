@@ -681,6 +681,11 @@ service AdminService {
   // This clears the vault's state, replays transactions from block archive,
   // and verifies state roots match. Only works on diverged vaults unless force=true.
   rpc RecoverVault(RecoverVaultRequest) returns (RecoverVaultResponse);
+
+  // Simulate vault divergence for testing.
+  // Forces a vault into the Diverged state without actual state corruption.
+  // Only available when the server is built with the "test-utils" feature.
+  rpc SimulateDivergence(SimulateDivergenceRequest) returns (SimulateDivergenceResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -864,6 +869,26 @@ message RecoverVaultResponse {
   uint64 final_height = 4;
   // Final state root after recovery (should match expected).
   Hash final_state_root = 5;
+}
+
+// Request to simulate vault divergence for testing.
+// This forces a vault into the Diverged state without actual corruption.
+message SimulateDivergenceRequest {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  // Expected state root (fake value for simulation).
+  Hash expected_state_root = 3;
+  // Computed state root (fake value for simulation).
+  Hash computed_state_root = 4;
+  // Height at which "divergence" occurred.
+  uint64 at_height = 5;
+}
+
+message SimulateDivergenceResponse {
+  bool success = 1;
+  string message = 2;
+  // Vault health status after simulation (should be DIVERGED).
+  VaultHealthProto health_status = 3;
 }
 
 // Vault health status (mirrors internal VaultHealthStatus enum).

@@ -572,22 +572,26 @@ impl StateLayer {
         start_after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Entity>> {
+        use crate::keys::vault_prefix;
+
         let txn = self.db.begin_read().context(TransactionSnafu)?;
         let table = txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
 
         let mut entities = Vec::with_capacity(limit.min(1000));
 
-        // Build the range start key
-        let start_key = if let Some(after) = start_after {
-            // Start after this key
+        // Build the range start key.
+        // Note: Keys are ordered by (vault_id, bucket_id, local_key), where bucket_id
+        // is a hash of the local key. This means keys with the same prefix can be
+        // scattered across different buckets. For prefix scans, we must start from
+        // the beginning of the vault and filter by prefix in the loop.
+        let start_key: Vec<u8> = if let Some(after) = start_after {
+            // Pagination: start after this specific key
             let mut k = encode_storage_key(vault_id, after.as_bytes());
-            // Add a byte to get past this key
-            k.push(0);
+            k.push(0); // Advance past the exact key
             k
-        } else if let Some(p) = prefix {
-            encode_storage_key(vault_id, p.as_bytes())
         } else {
-            encode_storage_key(vault_id, &[])
+            // For prefix scans or full vault scans, start from the vault prefix
+            vault_prefix(vault_id).to_vec()
         };
 
         for result in table.range(&start_key[..]..).context(StorageSnafu)? {
@@ -612,10 +616,7 @@ impl StateLayer {
                 // Skip bucket byte (index 8), entity key starts at index 9
                 let entity_key = &key_bytes[9..];
                 if !entity_key.starts_with(p.as_bytes()) {
-                    // If we've passed the prefix range, stop
-                    if entity_key > p.as_bytes() {
-                        break;
-                    }
+                    // Keys are scattered by bucket, so we can't early-exit
                     continue;
                 }
             }

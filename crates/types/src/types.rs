@@ -117,7 +117,62 @@ pub struct VaultEntry {
     pub state_root: Hash,
 }
 
+/// Accumulated cryptographic commitment for a range of blocks.
+///
+/// Per DESIGN.md §4.4: Proves snapshot's lineage without requiring full block replay.
+/// Enables verification continuity even after transaction body compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ChainCommitment {
+    /// Sequential hash chain of all block headers in range.
+    /// Ensures header ordering is preserved and any tampering invalidates chain.
+    pub accumulated_header_hash: Hash,
+
+    /// Merkle root of state_roots in range.
+    /// Enables O(log n) proofs that a specific state_root was in the range.
+    pub state_root_accumulator: Hash,
+
+    /// Start height of this commitment (inclusive).
+    /// 0 for genesis, or previous_snapshot_height + 1.
+    pub from_height: u64,
+
+    /// End height of this commitment (inclusive).
+    /// This is the snapshot's block height.
+    pub to_height: u64,
+}
+
 impl ShardBlock {
+    /// Convert this ShardBlock to a shard-level BlockHeader for chain commitment computation.
+    ///
+    /// The shard-level BlockHeader uses:
+    /// - `height` = shard_height
+    /// - `previous_hash` = previous_shard_hash
+    /// - `tx_merkle_root` = merkle root of all vault entry tx_merkle_roots
+    /// - `state_root` = merkle root of all vault entry state_roots
+    /// - `timestamp` = block timestamp
+    /// - `proposer` = leader_id
+    ///
+    /// This enables computing ChainCommitment over the shard chain for snapshot verification.
+    pub fn to_shard_header(&self) -> BlockHeader {
+        use crate::merkle::merkle_root;
+
+        let (tx_merkle_root, state_root) = if self.vault_entries.is_empty() {
+            (crate::EMPTY_HASH, crate::EMPTY_HASH)
+        } else {
+            let tx_roots: Vec<_> = self.vault_entries.iter().map(|e| e.tx_merkle_root).collect();
+            let state_roots: Vec<_> = self.vault_entries.iter().map(|e| e.state_root).collect();
+            (merkle_root(&tx_roots), merkle_root(&state_roots))
+        };
+
+        BlockHeader {
+            height: self.shard_height,
+            previous_hash: self.previous_shard_hash,
+            tx_merkle_root,
+            state_root,
+            timestamp: self.timestamp,
+            proposer: self.leader_id.clone(),
+        }
+    }
+
     /// Extract a standalone VaultBlock for client verification.
     ///
     /// Clients verify per-vault chains and never see ShardBlock directly.

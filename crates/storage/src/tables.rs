@@ -87,6 +87,15 @@ impl Tables {
     /// For idempotency checking
     pub const CLIENT_SEQUENCES: TableDefinition<'static, &'static str, &'static [u8]> =
         TableDefinition::new("client_sequences");
+
+    // =========================================================================
+    // Block Compaction Tables
+    // =========================================================================
+
+    /// Compaction metadata: key → u64
+    /// Keys: "compacted_before" (height below which blocks are compacted)
+    pub const COMPACTION_META: TableDefinition<'static, &'static str, u64> =
+        TableDefinition::new("compaction_meta");
 }
 
 #[cfg(test)]
@@ -111,6 +120,7 @@ mod tests {
             Tables::NAMESPACE_META.name(),
             Tables::SEQUENCES.name(),
             Tables::CLIENT_SEQUENCES.name(),
+            Tables::COMPACTION_META.name(),
         ];
 
         let mut sorted = names.to_vec();

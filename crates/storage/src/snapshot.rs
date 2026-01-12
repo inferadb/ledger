@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use snafu::{ResultExt, Snafu};
 use zstd::stream::{Decoder, Encoder};
 
-use ledger_types::{Entity, Hash, ShardId, VaultId};
+use ledger_types::{ChainCommitment, Entity, Hash, ShardId, VaultId};
 
 use crate::bucket::NUM_BUCKETS;
 
@@ -22,7 +22,8 @@ use crate::bucket::NUM_BUCKETS;
 const SNAPSHOT_MAGIC: [u8; 4] = *b"LSNP";
 
 /// Current snapshot format version.
-const SNAPSHOT_VERSION: u32 = 1;
+/// v2: Added chain verification linkage (genesis_hash, previous_snapshot, chain_commitment)
+const SNAPSHOT_VERSION: u32 = 2;
 
 /// Snapshot error types.
 #[derive(Debug, Snafu)]
@@ -99,6 +100,9 @@ impl VaultSnapshotMeta {
 }
 
 /// Snapshot header.
+///
+/// Per DESIGN.md §4.4: Snapshots include chain verification linkage to enable
+/// verification after block compaction.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotHeader {
     /// Magic bytes for validation.
@@ -113,6 +117,21 @@ pub struct SnapshotHeader {
     pub vault_states: Vec<VaultSnapshotMeta>,
     /// SHA-256 checksum of compressed state data.
     pub checksum: Hash,
+
+    // Chain verification linkage (per DESIGN.md §4.4)
+
+    /// Hash of the genesis block for this shard.
+    /// Links the snapshot back to the shard's origin.
+    pub genesis_hash: Hash,
+    /// Height of the previous snapshot in the chain.
+    /// None for the first snapshot.
+    pub previous_snapshot_height: Option<u64>,
+    /// Hash of the previous snapshot's header.
+    /// None for the first snapshot. Enables snapshot chain integrity verification.
+    pub previous_snapshot_hash: Option<Hash>,
+    /// Accumulated cryptographic commitment for blocks since previous snapshot.
+    /// Proves state evolution without requiring full block replay.
+    pub chain_commitment: ChainCommitment,
 }
 
 /// Snapshot state data (serialized and compressed).
@@ -131,13 +150,41 @@ pub struct Snapshot {
     pub state: SnapshotStateData,
 }
 
+/// Parameters for creating a snapshot with chain verification.
+#[derive(Debug, Clone)]
+pub struct SnapshotChainParams {
+    /// Hash of the genesis block for this shard.
+    pub genesis_hash: Hash,
+    /// Height of the previous snapshot (if any).
+    pub previous_snapshot_height: Option<u64>,
+    /// Hash of the previous snapshot's header (if any).
+    pub previous_snapshot_hash: Option<Hash>,
+    /// Chain commitment covering blocks since previous snapshot.
+    pub chain_commitment: ChainCommitment,
+}
+
+impl Default for SnapshotChainParams {
+    fn default() -> Self {
+        Self {
+            genesis_hash: ledger_types::ZERO_HASH,
+            previous_snapshot_height: None,
+            previous_snapshot_hash: None,
+            chain_commitment: ChainCommitment::default(),
+        }
+    }
+}
+
 impl Snapshot {
-    /// Create a new snapshot.
+    /// Create a new snapshot with chain verification linkage.
+    ///
+    /// Per DESIGN.md §4.4, snapshots should include chain verification data
+    /// to enable verification after block compaction.
     pub fn new(
         shard_id: ShardId,
         shard_height: u64,
         vault_states: Vec<VaultSnapshotMeta>,
         state: SnapshotStateData,
+        chain_params: SnapshotChainParams,
     ) -> Result<Self> {
         // Compute checksum of state data
         let state_bytes =
@@ -153,9 +200,32 @@ impl Snapshot {
             shard_height,
             vault_states,
             checksum,
+            genesis_hash: chain_params.genesis_hash,
+            previous_snapshot_height: chain_params.previous_snapshot_height,
+            previous_snapshot_hash: chain_params.previous_snapshot_hash,
+            chain_commitment: chain_params.chain_commitment,
         };
 
         Ok(Self { header, state })
+    }
+
+    /// Create a simple snapshot without chain verification (for testing).
+    ///
+    /// In production, prefer `new()` with proper chain parameters.
+    #[cfg(test)]
+    pub fn new_simple(
+        shard_id: ShardId,
+        shard_height: u64,
+        vault_states: Vec<VaultSnapshotMeta>,
+        state: SnapshotStateData,
+    ) -> Result<Self> {
+        Self::new(
+            shard_id,
+            shard_height,
+            vault_states,
+            state,
+            SnapshotChainParams::default(),
+        )
     }
 
     /// Get the shard height of this snapshot.
@@ -304,6 +374,11 @@ impl SnapshotManager {
         }
     }
 
+    /// Get the snapshot directory path.
+    pub fn snapshot_dir(&self) -> &Path {
+        &self.snapshot_dir
+    }
+
     /// Ensure the snapshot directory exists.
     pub fn init(&self) -> Result<()> {
         fs::create_dir_all(&self.snapshot_dir).context(IoSnafu)?;
@@ -431,7 +506,7 @@ mod tests {
 
         let state = SnapshotStateData { vault_entities };
 
-        Snapshot::new(1, 1000, vault_states, state).expect("create snapshot")
+        Snapshot::new_simple(1, 1000, vault_states, state).expect("create snapshot")
     }
 
     #[test]
@@ -470,7 +545,7 @@ mod tests {
                 key_count: 0,
             }];
 
-            let snapshot = Snapshot::new(
+            let snapshot = Snapshot::new_simple(
                 1,
                 height,
                 vault_states,
@@ -532,5 +607,65 @@ mod tests {
             result,
             Err(SnapshotError::ChecksumMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn test_snapshot_with_chain_verification() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("chain_verified.snap");
+
+        let vault_states = vec![VaultSnapshotMeta {
+            vault_id: 1,
+            vault_height: 100,
+            state_root: [42u8; 32],
+            bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+            key_count: 5,
+        }];
+
+        let state = SnapshotStateData {
+            vault_entities: HashMap::new(),
+        };
+
+        // Create chain params with actual values
+        let chain_params = SnapshotChainParams {
+            genesis_hash: [1u8; 32],
+            previous_snapshot_height: Some(500),
+            previous_snapshot_hash: Some([2u8; 32]),
+            chain_commitment: ChainCommitment {
+                accumulated_header_hash: [3u8; 32],
+                state_root_accumulator: [4u8; 32],
+                from_height: 501,
+                to_height: 1000,
+            },
+        };
+
+        let snapshot = Snapshot::new(1, 1000, vault_states, state, chain_params)
+            .expect("create snapshot");
+
+        // Verify chain fields before write
+        assert_eq!(snapshot.header.genesis_hash, [1u8; 32]);
+        assert_eq!(snapshot.header.previous_snapshot_height, Some(500));
+        assert_eq!(snapshot.header.previous_snapshot_hash, Some([2u8; 32]));
+        assert_eq!(snapshot.header.chain_commitment.from_height, 501);
+        assert_eq!(snapshot.header.chain_commitment.to_height, 1000);
+
+        // Write and read back
+        snapshot.write_to_file(&path).expect("write snapshot");
+        let loaded = Snapshot::read_from_file(&path).expect("read snapshot");
+
+        // Verify chain fields after read
+        assert_eq!(loaded.header.genesis_hash, [1u8; 32]);
+        assert_eq!(loaded.header.previous_snapshot_height, Some(500));
+        assert_eq!(loaded.header.previous_snapshot_hash, Some([2u8; 32]));
+        assert_eq!(
+            loaded.header.chain_commitment.accumulated_header_hash,
+            [3u8; 32]
+        );
+        assert_eq!(
+            loaded.header.chain_commitment.state_root_accumulator,
+            [4u8; 32]
+        );
+        assert_eq!(loaded.header.chain_commitment.from_height, 501);
+        assert_eq!(loaded.header.chain_commitment.to_height, 1000);
     }
 }

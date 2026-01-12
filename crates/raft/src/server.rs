@@ -52,6 +52,13 @@ pub struct LedgerServer {
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Server address.
     addr: SocketAddr,
+    /// Rate limit: requests per second (reserved for future use).
+    #[allow(dead_code)]
+    requests_per_second: u64,
+    /// Max concurrent requests per connection.
+    max_concurrent: usize,
+    /// Request timeout in seconds.
+    timeout_secs: u64,
 }
 
 impl LedgerServer {
@@ -84,21 +91,44 @@ impl LedgerServer {
             block_archive,
             block_announcements,
             addr,
+            // Default rate limiting values
+            requests_per_second: 1000,
+            max_concurrent: 100,
+            timeout_secs: 30,
         }
+    }
+
+    /// Configure request limits for this server.
+    ///
+    /// - `max_concurrent`: Max concurrent requests per connection
+    /// - `timeout_secs`: Request timeout in seconds
+    pub fn with_rate_limit(mut self, max_concurrent: usize, timeout_secs: u64) -> Self {
+        self.max_concurrent = max_concurrent;
+        self.timeout_secs = timeout_secs;
+        self
     }
 
     /// Start the gRPC server.
     ///
     /// This method blocks until the server is shut down.
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
+        tracing::info!(
+            max_concurrent = self.max_concurrent,
+            timeout_secs = self.timeout_secs,
+            "Configuring request limits"
+        );
+
         // Configure backpressure with tower layers
+        // Note: RateLimitLayer is not used because it doesn't implement Clone,
+        // which tonic's serve() requires. The concurrency_limit + load_shed
+        // combination provides effective backpressure protection.
         let layer = ServiceBuilder::new()
             // Limit concurrent requests per connection
-            .concurrency_limit(100)
+            .concurrency_limit(self.max_concurrent)
             // Reject new requests when overloaded (returns 503)
             .load_shed()
             // Set timeout for requests
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(self.timeout_secs))
             .into_inner();
 
         // Create service implementations

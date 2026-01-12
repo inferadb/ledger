@@ -94,6 +94,8 @@ impl StorageEngine {
         txn.open_table(Tables::SEQUENCES).context(TableSnafu)?;
         txn.open_table(Tables::CLIENT_SEQUENCES)
             .context(TableSnafu)?;
+        txn.open_table(Tables::COMPACTION_META)
+            .context(TableSnafu)?;
 
         txn.commit().context(CommitSnafu)?;
         Ok(())

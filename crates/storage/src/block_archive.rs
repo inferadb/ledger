@@ -5,6 +5,18 @@
 //! - Append-only within segments
 //! - Index files for fast block lookup
 //! - Headers are never truncated; transactions are configurable
+//!
+//! ## Block Compaction
+//!
+//! In compacted mode, transaction bodies are removed while preserving:
+//! - Block headers (height, previous_hash, tx_merkle_root, state_root)
+//! - Vault metadata (namespace_id, vault_id, vault_height)
+//! - Cryptographic commitments (all hashes preserved for verification)
+//!
+//! This allows verification via:
+//! - Chain integrity (header hash links)
+//! - Transaction inclusion (if client provides tx body + merkle proof)
+//! - Snapshot-based state reconstruction
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -19,6 +31,9 @@ use snafu::{ResultExt, Snafu};
 use ledger_types::{NamespaceId, ShardBlock, VaultId};
 
 use crate::tables::Tables;
+
+/// Key for compaction watermark in COMPACTION_META table.
+const COMPACTION_WATERMARK_KEY: &str = "compacted_before";
 
 /// Blocks per segment file.
 const SEGMENT_SIZE: u64 = 10_000;
@@ -78,6 +93,23 @@ pub enum BlockArchiveError {
 
 /// Result type for block archive operations.
 pub type Result<T> = std::result::Result<T, BlockArchiveError>;
+
+/// Statistics about block compaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionStats {
+    /// Current compaction watermark (blocks below this are compacted).
+    pub watermark: Option<u64>,
+    /// Minimum block height in archive.
+    pub min_height: Option<u64>,
+    /// Maximum block height in archive.
+    pub max_height: Option<u64>,
+    /// Total number of blocks.
+    pub total_blocks: u64,
+    /// Number of compacted blocks (transaction bodies removed).
+    pub compacted_blocks: u64,
+    /// Number of blocks with full transaction bodies.
+    pub uncompacted_blocks: u64,
+}
 
 /// Index entry for a block within a segment.
 #[derive(Debug, Clone, Copy)]
@@ -335,6 +367,165 @@ impl BlockArchive {
         Ok(blocks)
     }
 
+    // =========================================================================
+    // Block Compaction
+    // =========================================================================
+
+    /// Get the current compaction watermark.
+    ///
+    /// All blocks with height < watermark have been compacted (transaction bodies removed).
+    pub fn compaction_watermark(&self) -> Result<Option<u64>> {
+        let txn = self.db.begin_read().context(TransactionSnafu)?;
+        let table = txn
+            .open_table(Tables::COMPACTION_META)
+            .context(TableSnafu)?;
+
+        match table.get(COMPACTION_WATERMARK_KEY).context(StorageSnafu)? {
+            Some(height) => Ok(Some(height.value())),
+            None => Ok(None),
+        }
+    }
+
+    /// Check if a block at the given height has been compacted.
+    pub fn is_compacted(&self, height: u64) -> Result<bool> {
+        match self.compaction_watermark()? {
+            Some(watermark) => Ok(height < watermark),
+            None => Ok(false),
+        }
+    }
+
+    /// Compact all blocks before the given height.
+    ///
+    /// Per DESIGN.md §4.4: After compaction, transaction bodies are removed but:
+    /// - Block headers are preserved (state_root, tx_merkle_root, previous_hash)
+    /// - Vault metadata is preserved (namespace_id, vault_id, vault_height)
+    /// - Chain verification remains possible via ChainCommitment
+    ///
+    /// # Arguments
+    /// * `before_height` - Compact all blocks with height < before_height
+    ///
+    /// # Returns
+    /// The number of blocks that were compacted.
+    pub fn compact_before(&self, before_height: u64) -> Result<u64> {
+        // Get current watermark to avoid re-compacting
+        let current_watermark = self.compaction_watermark()?.unwrap_or(0);
+        if before_height <= current_watermark {
+            // Nothing new to compact
+            return Ok(0);
+        }
+
+        let mut compacted_count = 0u64;
+
+        // Read blocks that need compaction
+        let txn = self.db.begin_read().context(TransactionSnafu)?;
+        let table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
+
+        let mut blocks_to_compact = Vec::new();
+
+        for result in table.range(current_watermark..before_height).context(StorageSnafu)? {
+            let (key, data) = result.context(StorageSnafu)?;
+            let height = key.value();
+
+            // Deserialize the block
+            let mut block: ShardBlock =
+                postcard::from_bytes(data.value()).map_err(|e| BlockArchiveError::Serialization {
+                    message: e.to_string(),
+                })?;
+
+            // Check if it needs compaction (has non-empty transactions)
+            let needs_compaction = block
+                .vault_entries
+                .iter()
+                .any(|e| !e.transactions.is_empty());
+
+            if needs_compaction {
+                // Remove transaction bodies from each vault entry
+                for entry in &mut block.vault_entries {
+                    entry.transactions.clear();
+                }
+
+                blocks_to_compact.push((height, block));
+            }
+        }
+
+        // Drop read transaction
+        drop(table);
+        drop(txn);
+
+        // Write compacted blocks back
+        if !blocks_to_compact.is_empty() {
+            let txn = self.db.begin_write().context(TransactionSnafu)?;
+
+            {
+                let mut blocks_table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
+
+                for (height, block) in &blocks_to_compact {
+                    let encoded = postcard::to_allocvec(block)
+                        .map_err(|e| BlockArchiveError::Serialization {
+                            message: e.to_string(),
+                        })?;
+
+                    blocks_table
+                        .insert(*height, &encoded[..])
+                        .context(StorageSnafu)?;
+                }
+
+                compacted_count = blocks_to_compact.len() as u64;
+            }
+
+            // Update watermark
+            {
+                let mut meta_table = txn
+                    .open_table(Tables::COMPACTION_META)
+                    .context(TableSnafu)?;
+                meta_table
+                    .insert(COMPACTION_WATERMARK_KEY, before_height)
+                    .context(StorageSnafu)?;
+            }
+
+            txn.commit().context(CommitSnafu)?;
+        } else {
+            // No blocks needed compaction, but still update watermark
+            let txn = self.db.begin_write().context(TransactionSnafu)?;
+            {
+                let mut meta_table = txn
+                    .open_table(Tables::COMPACTION_META)
+                    .context(TableSnafu)?;
+                meta_table
+                    .insert(COMPACTION_WATERMARK_KEY, before_height)
+                    .context(StorageSnafu)?;
+            }
+            txn.commit().context(CommitSnafu)?;
+        }
+
+        Ok(compacted_count)
+    }
+
+    /// Get compaction statistics.
+    pub fn compaction_stats(&self) -> Result<CompactionStats> {
+        let watermark = self.compaction_watermark()?;
+        let range = self.height_range()?;
+
+        let (min_height, max_height, total_blocks) = match range {
+            Some((min, max)) => (Some(min), Some(max), max.saturating_sub(min) + 1),
+            None => (None, None, 0),
+        };
+
+        let compacted_count = match (watermark, min_height) {
+            (Some(w), Some(min)) if w > min => w - min,
+            _ => 0,
+        };
+
+        Ok(CompactionStats {
+            watermark,
+            min_height,
+            max_height,
+            total_blocks,
+            compacted_blocks: compacted_count,
+            uncompacted_blocks: total_blocks.saturating_sub(compacted_count),
+        })
+    }
+
     /// Get segment file path.
     ///
     /// # Panics
@@ -505,5 +696,205 @@ mod tests {
 
         assert_eq!(h1, Some(100));
         assert_eq!(h2, Some(100));
+    }
+
+    // =========================================================================
+    // Compaction Tests
+    // =========================================================================
+
+    fn create_block_with_transactions(shard_height: u64, tx_count: usize) -> ShardBlock {
+        use ledger_types::{Operation, Transaction};
+
+        let transactions: Vec<Transaction> = (0..tx_count)
+            .map(|i| Transaction {
+                id: [i as u8; 16],
+                client_id: format!("client-{}", i),
+                sequence: i as u64,
+                actor: "actor".to_string(),
+                operations: vec![Operation::SetEntity {
+                    key: format!("key-{}", i),
+                    value: format!("value-{}", i).into_bytes(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                timestamp: Utc::now(),
+            })
+            .collect();
+
+        ShardBlock {
+            shard_id: 1,
+            shard_height,
+            previous_shard_hash: [shard_height as u8; 32],
+            vault_entries: vec![VaultEntry {
+                namespace_id: 1,
+                vault_id: 1,
+                vault_height: shard_height,
+                previous_vault_hash: [(shard_height.saturating_sub(1)) as u8; 32],
+                transactions,
+                tx_merkle_root: [100u8; 32],
+                state_root: [shard_height as u8; 32],
+            }],
+            timestamp: Utc::now(),
+            leader_id: "node-1".to_string(),
+            term: 1,
+            committed_index: shard_height,
+        }
+    }
+
+    #[test]
+    fn test_compaction_watermark_initially_none() {
+        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let archive = BlockArchive::new(engine.db());
+
+        assert!(archive.compaction_watermark().expect("get watermark").is_none());
+        assert!(!archive.is_compacted(100).expect("is_compacted"));
+    }
+
+    #[test]
+    fn test_compact_removes_transaction_bodies() {
+        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let archive = BlockArchive::new(engine.db());
+
+        // Add blocks with transactions
+        for height in [100, 101, 102, 103, 104] {
+            let block = create_block_with_transactions(height, 3);
+            archive.append_block(&block).expect("append block");
+        }
+
+        // Verify transactions exist before compaction
+        let block = archive.read_block(100).expect("read block");
+        assert_eq!(block.vault_entries[0].transactions.len(), 3);
+
+        // Compact blocks below height 103
+        let compacted = archive.compact_before(103).expect("compact");
+        assert_eq!(compacted, 3); // blocks 100, 101, 102
+
+        // Verify watermark is set
+        assert_eq!(archive.compaction_watermark().expect("watermark"), Some(103));
+
+        // Verify compacted blocks have empty transactions
+        for height in [100, 101, 102] {
+            let block = archive.read_block(height).expect("read block");
+            assert!(
+                block.vault_entries[0].transactions.is_empty(),
+                "Block {} should have empty transactions",
+                height
+            );
+            // But headers are preserved
+            assert_eq!(block.vault_entries[0].tx_merkle_root, [100u8; 32]);
+            assert_eq!(block.vault_entries[0].state_root, [height as u8; 32]);
+        }
+
+        // Verify uncompacted blocks still have transactions
+        for height in [103, 104] {
+            let block = archive.read_block(height).expect("read block");
+            assert_eq!(
+                block.vault_entries[0].transactions.len(),
+                3,
+                "Block {} should still have transactions",
+                height
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_compacted() {
+        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let archive = BlockArchive::new(engine.db());
+
+        // Add blocks
+        for height in [100, 101, 102] {
+            let block = create_block_with_transactions(height, 2);
+            archive.append_block(&block).expect("append block");
+        }
+
+        // Before compaction
+        assert!(!archive.is_compacted(100).expect("is_compacted"));
+        assert!(!archive.is_compacted(101).expect("is_compacted"));
+
+        // Compact
+        archive.compact_before(101).expect("compact");
+
+        // After compaction
+        assert!(archive.is_compacted(100).expect("is_compacted")); // < 101
+        assert!(!archive.is_compacted(101).expect("is_compacted")); // >= 101
+        assert!(!archive.is_compacted(102).expect("is_compacted")); // >= 101
+    }
+
+    #[test]
+    fn test_compaction_stats() {
+        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let archive = BlockArchive::new(engine.db());
+
+        // Initial stats
+        let stats = archive.compaction_stats().expect("stats");
+        assert!(stats.watermark.is_none());
+        assert_eq!(stats.total_blocks, 0);
+
+        // Add blocks
+        for height in [100, 101, 102, 103, 104] {
+            let block = create_block_with_transactions(height, 1);
+            archive.append_block(&block).expect("append block");
+        }
+
+        // Stats before compaction
+        let stats = archive.compaction_stats().expect("stats");
+        assert_eq!(stats.total_blocks, 5);
+        assert_eq!(stats.compacted_blocks, 0);
+        assert_eq!(stats.uncompacted_blocks, 5);
+
+        // Compact
+        archive.compact_before(103).expect("compact");
+
+        // Stats after compaction
+        let stats = archive.compaction_stats().expect("stats");
+        assert_eq!(stats.watermark, Some(103));
+        assert_eq!(stats.min_height, Some(100));
+        assert_eq!(stats.max_height, Some(104));
+        assert_eq!(stats.total_blocks, 5);
+        assert_eq!(stats.compacted_blocks, 3); // 100, 101, 102
+        assert_eq!(stats.uncompacted_blocks, 2); // 103, 104
+    }
+
+    #[test]
+    fn test_compact_is_idempotent() {
+        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let archive = BlockArchive::new(engine.db());
+
+        for height in [100, 101, 102] {
+            let block = create_block_with_transactions(height, 2);
+            archive.append_block(&block).expect("append block");
+        }
+
+        // First compaction
+        let count1 = archive.compact_before(102).expect("compact");
+        assert_eq!(count1, 2); // 100, 101
+
+        // Second compaction with same watermark
+        let count2 = archive.compact_before(102).expect("compact");
+        assert_eq!(count2, 0); // No new blocks to compact
+
+        // Watermark unchanged
+        assert_eq!(archive.compaction_watermark().expect("watermark"), Some(102));
+    }
+
+    #[test]
+    fn test_compact_preserves_vault_index() {
+        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let archive = BlockArchive::new(engine.db());
+
+        // Add block with transactions
+        let block = create_block_with_transactions(100, 3);
+        archive.append_block(&block).expect("append block");
+
+        // Compact
+        archive.compact_before(101).expect("compact");
+
+        // Index should still work
+        let shard_height = archive
+            .find_shard_height(1, 1, 100)
+            .expect("find")
+            .expect("should exist");
+        assert_eq!(shard_height, 100);
     }
 }

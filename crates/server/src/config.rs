@@ -14,6 +14,10 @@ pub struct Config {
     pub node_id: u64,
     /// Address to listen on for gRPC.
     pub listen_addr: SocketAddr,
+    /// Address to expose Prometheus metrics (e.g., "0.0.0.0:9090").
+    /// If not set, metrics endpoint is disabled.
+    #[serde(default)]
+    pub metrics_addr: Option<SocketAddr>,
     /// Data directory for Raft logs and snapshots.
     pub data_dir: PathBuf,
     /// Peer nodes in the cluster.
@@ -23,6 +27,9 @@ pub struct Config {
     #[serde(default)]
     #[allow(dead_code)]
     pub batching: BatchConfig,
+    /// Rate limiting configuration.
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
     /// Whether this node should bootstrap a new cluster.
     #[serde(default)]
     pub bootstrap: bool,
@@ -47,6 +54,44 @@ pub struct BatchConfig {
     /// Maximum time to wait for a batch to fill (milliseconds).
     #[serde(default = "default_max_batch_delay_ms")]
     pub max_batch_delay_ms: u64,
+}
+
+/// Rate limiting configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// Maximum requests per second per connection.
+    /// Reserved for future use - not currently implemented due to tonic Clone requirements.
+    #[serde(default = "default_requests_per_second")]
+    #[allow(dead_code)]
+    pub requests_per_second: u64,
+    /// Maximum concurrent requests per connection.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Request timeout in seconds.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_second: default_requests_per_second(),
+            max_concurrent: default_max_concurrent(),
+            timeout_secs: default_timeout_secs(),
+        }
+    }
+}
+
+fn default_requests_per_second() -> u64 {
+    1000 // 1000 requests per second by default
+}
+
+fn default_max_concurrent() -> usize {
+    100 // Max 100 concurrent requests per connection
+}
+
+fn default_timeout_secs() -> u64 {
+    30 // 30 second timeout
 }
 
 impl Default for BatchConfig {
@@ -108,9 +153,11 @@ impl Config {
         Self {
             node_id,
             listen_addr: format!("127.0.0.1:{}", port).parse().unwrap(),
+            metrics_addr: None,
             data_dir,
             peers: vec![],
             batching: BatchConfig::default(),
+            rate_limit: RateLimitConfig::default(),
             bootstrap: true,
         }
     }
