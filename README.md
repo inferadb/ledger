@@ -71,11 +71,6 @@ Ledger is InferaDB's persistence layer — a blockchain database for authorizati
 
 - [mise](https://mise.jdx.dev/) for development tools (Rust, protoc, buf)
 
-```bash
-# Install mise (if not already installed)
-curl https://mise.run | sh
-```
-
 ### Build
 
 ```bash
@@ -84,7 +79,7 @@ git clone https://github.com/inferadb/ledger.git
 cd ledger
 
 # Install development tools (rust, protoc, buf)
-mise install
+mise trust && mise install
 
 # Build all crates
 cargo build --release

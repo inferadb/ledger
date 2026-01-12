@@ -22,11 +22,13 @@ mod block_compaction;
 mod idempotency;
 mod log_storage;
 pub mod metrics;
+mod orphan_cleanup;
 pub mod peer_maintenance;
 pub mod peer_tracker;
 pub mod proof;
 mod raft_network;
 mod rate_limit;
+mod saga_orchestrator;
 mod server;
 pub mod services;
 mod ttl_gc;
@@ -46,10 +48,12 @@ pub use log_storage::{
     AppliedState, AppliedStateAccessor, NamespaceMeta, RaftLogStore, SequenceCounters,
     VaultHealthStatus, VaultMeta,
 };
+pub use orphan_cleanup::OrphanCleanupJob;
 pub use peer_maintenance::PeerMaintenance;
 pub use peer_tracker::{PeerTracker, PeerTrackerConfig};
 pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use rate_limit::{NamespaceRateLimiter, RateLimitExceeded};
+pub use saga_orchestrator::SagaOrchestrator;
 pub use server::LedgerServer;
 pub use ttl_gc::TtlGarbageCollector;
 pub use types::{
