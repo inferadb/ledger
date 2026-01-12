@@ -84,6 +84,10 @@ proptest = "1.4"
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
 
+# Object Storage (S3, GCS, Azure, local)
+object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+async-trait = "0.1"
+
 # Network simulation testing
 turmoil = "0.7"
 hyper = "1"

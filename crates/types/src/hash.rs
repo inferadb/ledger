@@ -664,7 +664,7 @@ mod tests {
             proposer: "node-1".to_string(),
         };
 
-        let commitment = compute_chain_commitment(&[header.clone()], 1, 1);
+        let commitment = compute_chain_commitment(std::slice::from_ref(&header), 1, 1);
 
         // accumulated_header_hash = SHA-256(ZERO_HASH || block_hash(header))
         let header_hash = block_hash(&header);

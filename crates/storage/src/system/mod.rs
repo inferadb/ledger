@@ -15,7 +15,7 @@ mod types;
 
 pub use cluster::{ClusterMembership, MAX_VOTERS, SystemRole};
 pub use keys::SystemKeys;
-pub use service::{SystemError, SystemNamespaceService, SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID};
+pub use service::{SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, SystemError, SystemNamespaceService};
 pub use types::{
     EmailVerificationToken, NamespaceRegistry, NamespaceStatus, NodeInfo, NodeRole, User,
     UserEmail, UserStatus,

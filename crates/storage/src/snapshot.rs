@@ -119,7 +119,6 @@ pub struct SnapshotHeader {
     pub checksum: Hash,
 
     // Chain verification linkage (per DESIGN.md §4.4)
-
     /// Hash of the genesis block for this shard.
     /// Links the snapshot back to the shard's origin.
     pub genesis_hash: Hash,
@@ -639,8 +638,8 @@ mod tests {
             },
         };
 
-        let snapshot = Snapshot::new(1, 1000, vault_states, state, chain_params)
-            .expect("create snapshot");
+        let snapshot =
+            Snapshot::new(1, 1000, vault_states, state, chain_params).expect("create snapshot");
 
         // Verify chain fields before write
         assert_eq!(snapshot.header.genesis_hash, [1u8; 32]);

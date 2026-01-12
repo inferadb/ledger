@@ -274,7 +274,12 @@ impl ReadServiceImpl {
             };
 
             // Find the vault's height in this snapshot
-            if let Some(vault_meta) = snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id) {
+            if let Some(vault_meta) = snapshot
+                .header
+                .vault_states
+                .iter()
+                .find(|v| v.vault_id == vault_id)
+            {
                 if vault_meta.vault_height <= target_height {
                     // This snapshot is usable - load its entities into temp_state
                     if let Some(entities) = snapshot.state.vault_entities.get(&vault_id) {
@@ -377,13 +382,13 @@ impl ReadService for ReadServiceImpl {
         tracing::Span::current().record("key", &req.key);
 
         // Check vault health - diverged vaults cannot be read
-        let health = self.applied_state.vault_health(namespace_id, vault_id as i64);
+        let health = self
+            .applied_state
+            .vault_health(namespace_id, vault_id as i64);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             warn!(
                 namespace_id,
-                vault_id,
-                at_height,
-                "Read rejected: vault has diverged"
+                vault_id, at_height, "Read rejected: vault has diverged"
             );
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
@@ -442,9 +447,7 @@ impl ReadService for ReadServiceImpl {
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             warn!(
                 namespace_id,
-                vault_id,
-                at_height,
-                "Verified read rejected: vault has diverged"
+                vault_id, at_height, "Verified read rejected: vault has diverged"
             );
             metrics::record_verified_read(false, start.elapsed().as_secs_f64());
             return Err(Status::unavailable(format!(

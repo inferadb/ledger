@@ -2,19 +2,26 @@
 //!
 //! Per DESIGN.md §4.4:
 //! - Hot: Last N snapshots on local SSD (fast access)
-//! - Warm: Older snapshots on object storage (S3)
+//! - Warm: Older snapshots on object storage (S3/GCS/Azure)
 //! - Cold: Archive snapshots (Glacier, optional)
 //!
 //! This module provides:
 //! - Storage backend trait for abstracting local/remote storage
+//! - Real object storage backend using `object_store` crate
 //! - Tiered manager that moves snapshots between tiers
 //! - Transparent loading from any tier
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use bytes::Bytes;
+use futures::TryStreamExt;
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, PutPayload};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
+use url::Url;
 
 use crate::snapshot::{Snapshot, SnapshotError, SnapshotManager, snapshot_filename};
 
@@ -126,10 +133,7 @@ impl StorageBackend for LocalBackend {
     }
 
     fn delete(&self, height: u64) -> Result<()> {
-        let path = self
-            .manager
-            .snapshot_dir()
-            .join(snapshot_filename(height));
+        let path = self.manager.snapshot_dir().join(snapshot_filename(height));
         if path.exists() {
             std::fs::remove_file(&path).context(IoSnafu)?;
         }
@@ -141,37 +145,261 @@ impl StorageBackend for LocalBackend {
     }
 }
 
-/// Object storage backend stub (Warm tier).
+/// Object storage backend using `object_store` crate (Warm tier).
 ///
-/// This is a placeholder for S3/compatible object storage.
-/// The actual implementation would use the AWS SDK or similar.
+/// Supports S3, GCS, Azure Blob Storage, and local filesystem via URL schemes:
+/// - `s3://bucket/prefix` - Amazon S3 (or compatible: MinIO, Wasabi, etc.)
+/// - `gs://bucket/prefix` - Google Cloud Storage
+/// - `az://container/prefix` - Azure Blob Storage
+/// - `file:///path/to/dir` - Local filesystem (for testing/development)
+///
+/// Credentials are read from environment variables:
+/// - S3: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+/// - GCS: GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SERVICE_ACCOUNT
+/// - Azure: AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_ACCOUNT_KEY
 pub struct ObjectStorageBackend {
-    /// Bucket name or path.
-    #[allow(dead_code)]
-    bucket: String,
-    /// Prefix for snapshot objects.
-    #[allow(dead_code)]
-    prefix: String,
-    /// Simulated storage for testing.
+    /// The underlying object store implementation.
+    store: Arc<dyn ObjectStore>,
+    /// Prefix path for all snapshot objects.
+    prefix: ObjectPath,
+    /// Tokio runtime handle for running async operations.
+    runtime: tokio::runtime::Handle,
+    /// Simulated storage for testing (only used in test mode).
     #[cfg(test)]
-    test_storage: std::sync::Arc<RwLock<HashMap<u64, Vec<u8>>>>,
+    test_storage: Arc<RwLock<HashMap<u64, Vec<u8>>>>,
+    /// Flag indicating if this is a test-only backend.
+    #[cfg(test)]
+    is_test_backend: bool,
 }
 
 impl ObjectStorageBackend {
-    /// Create a new object storage backend.
-    pub fn new(bucket: String, prefix: String) -> Self {
-        Self {
-            bucket,
+    /// Create a new object storage backend from a URL.
+    ///
+    /// # Supported URLs
+    ///
+    /// - `s3://bucket-name/prefix/path`
+    /// - `gs://bucket-name/prefix/path`
+    /// - `az://container-name/prefix/path`
+    /// - `file:///local/path/to/dir`
+    ///
+    /// # Environment Variables
+    ///
+    /// S3 (also works with MinIO, Wasabi, etc.):
+    /// - `AWS_ACCESS_KEY_ID` - Access key
+    /// - `AWS_SECRET_ACCESS_KEY` - Secret key
+    /// - `AWS_REGION` - Region (default: us-east-1)
+    /// - `AWS_ENDPOINT` - Custom endpoint for S3-compatible services
+    ///
+    /// GCS:
+    /// - `GOOGLE_APPLICATION_CREDENTIALS` - Path to service account JSON
+    ///
+    /// Azure:
+    /// - `AZURE_STORAGE_ACCOUNT_NAME` - Storage account name
+    /// - `AZURE_STORAGE_ACCOUNT_KEY` - Storage account key
+    pub fn new(url: &str) -> Result<Self> {
+        let parsed = Url::parse(url).map_err(|e| TieredStorageError::ObjectStorage {
+            message: format!("Invalid URL '{}': {}", url, e),
+        })?;
+
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+            TieredStorageError::ObjectStorage {
+                message: "No tokio runtime available - ObjectStorageBackend requires async runtime"
+                    .to_string(),
+            }
+        })?;
+
+        let (store, prefix) = Self::create_store_from_url(&parsed)?;
+
+        Ok(Self {
+            store,
             prefix,
+            runtime,
             #[cfg(test)]
-            test_storage: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            test_storage: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            is_test_backend: false,
+        })
+    }
+
+    /// Create a test-only in-memory backend (for unit tests).
+    #[cfg(test)]
+    #[allow(clippy::expect_used)] // Acceptable in test code - panic on failure is fine
+    pub fn new_test(bucket: String, prefix: String) -> Self {
+        // Create an in-memory store for testing
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+
+        Self {
+            store,
+            prefix: ObjectPath::from(format!("{}/{}", bucket, prefix)),
+            runtime: tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
+                // Create a minimal runtime for tests
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("create test runtime")
+                    .handle()
+                    .clone()
+            }),
+            test_storage: Arc::new(RwLock::new(HashMap::new())),
+            is_test_backend: true,
         }
     }
 
-    /// Object key for a snapshot.
-    #[allow(dead_code)]
-    fn object_key(&self, height: u64) -> String {
-        format!("{}/{}", self.prefix, snapshot_filename(height))
+    /// Create object store from parsed URL.
+    fn create_store_from_url(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
+        let scheme = url.scheme();
+
+        match scheme {
+            "s3" => Self::create_s3_store(url),
+            "gs" => Self::create_gcs_store(url),
+            "az" | "azure" => Self::create_azure_store(url),
+            "file" => Self::create_local_store(url),
+            _ => Err(TieredStorageError::ObjectStorage {
+                message: format!(
+                    "Unsupported URL scheme '{}'. Supported: s3, gs, az, file",
+                    scheme
+                ),
+            }),
+        }
+    }
+
+    /// Create S3 object store.
+    fn create_s3_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
+        let bucket = url
+            .host_str()
+            .ok_or_else(|| TieredStorageError::ObjectStorage {
+                message: "S3 URL must include bucket name as host".to_string(),
+            })?;
+
+        let prefix = url.path().trim_start_matches('/');
+
+        // Build S3 store with environment credentials
+        let mut builder = object_store::aws::AmazonS3Builder::new()
+            .with_bucket_name(bucket)
+            .with_region(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()));
+
+        // Add credentials from environment
+        if let Ok(key_id) = std::env::var("AWS_ACCESS_KEY_ID") {
+            builder = builder.with_access_key_id(key_id);
+        }
+        if let Ok(secret) = std::env::var("AWS_SECRET_ACCESS_KEY") {
+            builder = builder.with_secret_access_key(secret);
+        }
+
+        // Support custom endpoint for MinIO/Wasabi/etc.
+        if let Ok(endpoint) = std::env::var("AWS_ENDPOINT") {
+            builder = builder
+                .with_endpoint(endpoint)
+                .with_virtual_hosted_style_request(false);
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| TieredStorageError::ObjectStorage {
+                message: format!("Failed to create S3 store: {}", e),
+            })?;
+
+        Ok((Arc::new(store), ObjectPath::from(prefix)))
+    }
+
+    /// Create GCS object store.
+    fn create_gcs_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
+        let bucket = url
+            .host_str()
+            .ok_or_else(|| TieredStorageError::ObjectStorage {
+                message: "GCS URL must include bucket name as host".to_string(),
+            })?;
+
+        let prefix = url.path().trim_start_matches('/');
+
+        let mut builder =
+            object_store::gcp::GoogleCloudStorageBuilder::new().with_bucket_name(bucket);
+
+        // Add service account from environment
+        if let Ok(creds_path) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+            builder = builder.with_service_account_path(creds_path);
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| TieredStorageError::ObjectStorage {
+                message: format!("Failed to create GCS store: {}", e),
+            })?;
+
+        Ok((Arc::new(store), ObjectPath::from(prefix)))
+    }
+
+    /// Create Azure Blob object store.
+    fn create_azure_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
+        let container = url
+            .host_str()
+            .ok_or_else(|| TieredStorageError::ObjectStorage {
+                message: "Azure URL must include container name as host".to_string(),
+            })?;
+
+        let prefix = url.path().trim_start_matches('/');
+
+        let account = std::env::var("AZURE_STORAGE_ACCOUNT_NAME").map_err(|_| {
+            TieredStorageError::ObjectStorage {
+                message: "AZURE_STORAGE_ACCOUNT_NAME environment variable not set".to_string(),
+            }
+        })?;
+
+        let mut builder = object_store::azure::MicrosoftAzureBuilder::new()
+            .with_account(account)
+            .with_container_name(container);
+
+        if let Ok(key) = std::env::var("AZURE_STORAGE_ACCOUNT_KEY") {
+            builder = builder.with_access_key(key);
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| TieredStorageError::ObjectStorage {
+                message: format!("Failed to create Azure store: {}", e),
+            })?;
+
+        Ok((Arc::new(store), ObjectPath::from(prefix)))
+    }
+
+    /// Create local filesystem object store.
+    fn create_local_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
+        let path = url.path();
+
+        // Create directory if it doesn't exist
+        std::fs::create_dir_all(path).map_err(|e| TieredStorageError::ObjectStorage {
+            message: format!("Failed to create local storage directory '{}': {}", path, e),
+        })?;
+
+        let store = object_store::local::LocalFileSystem::new_with_prefix(path).map_err(|e| {
+            TieredStorageError::ObjectStorage {
+                message: format!("Failed to create local file store: {}", e),
+            }
+        })?;
+
+        Ok((Arc::new(store), ObjectPath::from("")))
+    }
+
+    /// Object path for a snapshot.
+    fn object_path(&self, height: u64) -> ObjectPath {
+        let filename = snapshot_filename(height);
+        if self.prefix.as_ref().is_empty() {
+            ObjectPath::from(filename)
+        } else {
+            ObjectPath::from(format!("{}/{}", self.prefix, filename))
+        }
+    }
+
+    /// Run an async operation synchronously using the tokio runtime.
+    ///
+    /// Uses `block_in_place` to allow blocking within async contexts (like tests),
+    /// which requires a multi-threaded tokio runtime.
+    fn block_on<F, T>(&self, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        // Use block_in_place to allow nesting within async contexts
+        tokio::task::block_in_place(|| self.runtime.block_on(future))
     }
 }
 
@@ -182,30 +410,30 @@ impl StorageBackend for ObjectStorageBackend {
 
     fn exists(&self, height: u64) -> Result<bool> {
         #[cfg(test)]
-        {
+        if self.is_test_backend {
             return Ok(self.test_storage.read().contains_key(&height));
         }
 
-        #[cfg(not(test))]
-        {
-            // In production, this would call S3 HeadObject
-            // For now, return false (not implemented)
-            let _ = height;
-            Ok(false)
+        let path = self.object_path(height);
+        let result = self.block_on(async { self.store.head(&path).await });
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(TieredStorageError::ObjectStorage {
+                message: format!("Failed to check object existence: {}", e),
+            }),
         }
     }
 
     fn store(&self, snapshot: &Snapshot) -> Result<()> {
         #[cfg(test)]
-        {
-            // For testing, serialize to memory via a temp file
-            let temp_dir = tempfile::TempDir::new().map_err(|e| TieredStorageError::Io {
-                source: e,
-            })?;
+        if self.is_test_backend {
+            // For testing, serialize to bytes
+            let temp_dir =
+                tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
             let temp_path = temp_dir.path().join("temp.snap");
-            snapshot
-                .write_to_file(&temp_path)
-                .context(SnapshotSnafu)?;
+            snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
             let buf = std::fs::read(&temp_path).context(IoSnafu)?;
             self.test_storage
                 .write()
@@ -213,75 +441,139 @@ impl StorageBackend for ObjectStorageBackend {
             return Ok(());
         }
 
-        #[cfg(not(test))]
-        {
-            // In production, this would upload to S3
-            let _ = snapshot;
-            Err(TieredStorageError::ObjectStorage {
-                message: "Object storage upload not implemented".to_string(),
-            })
-        }
+        // Serialize snapshot to bytes
+        let temp_dir =
+            tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
+        let temp_path = temp_dir.path().join("temp.snap");
+        snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
+        let data = std::fs::read(&temp_path).context(IoSnafu)?;
+
+        let path = self.object_path(snapshot.shard_height());
+        let payload = PutPayload::from(Bytes::from(data));
+
+        self.block_on(async { self.store.put(&path, payload).await })
+            .map_err(|e| TieredStorageError::ObjectStorage {
+                message: format!("Failed to upload snapshot: {}", e),
+            })?;
+
+        Ok(())
     }
 
     fn load(&self, height: u64) -> Result<Snapshot> {
         #[cfg(test)]
-        {
+        if self.is_test_backend {
             let guard = self.test_storage.read();
-            let data = guard.get(&height).ok_or(TieredStorageError::SnapshotNotFound { height })?;
+            let data = guard
+                .get(&height)
+                .ok_or(TieredStorageError::SnapshotNotFound { height })?;
 
-            // Write to temp file and read back as Snapshot
-            let temp_dir = tempfile::TempDir::new().map_err(|e| TieredStorageError::Io {
-                source: e,
-            })?;
+            let temp_dir =
+                tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
             let temp_path = temp_dir.path().join("temp.snap");
             std::fs::write(&temp_path, data).context(IoSnafu)?;
             return Snapshot::read_from_file(&temp_path).context(SnapshotSnafu);
         }
 
-        #[cfg(not(test))]
-        {
-            // In production, this would download from S3
-            let _ = height;
-            Err(TieredStorageError::ObjectStorage {
-                message: "Object storage download not implemented".to_string(),
-            })
-        }
+        let path = self.object_path(height);
+
+        let get_result = self
+            .block_on(async { self.store.get(&path).await })
+            .map_err(|e| match e {
+                object_store::Error::NotFound { .. } => {
+                    TieredStorageError::SnapshotNotFound { height }
+                }
+                _ => TieredStorageError::ObjectStorage {
+                    message: format!("Failed to download snapshot: {}", e),
+                },
+            })?;
+
+        let data = self
+            .block_on(async { get_result.bytes().await })
+            .map_err(|e| TieredStorageError::ObjectStorage {
+                message: format!("Failed to read snapshot bytes: {}", e),
+            })?;
+
+        // Write to temp file and parse
+        let temp_dir =
+            tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
+        let temp_path = temp_dir.path().join("temp.snap");
+        std::fs::write(&temp_path, &data).context(IoSnafu)?;
+
+        Snapshot::read_from_file(&temp_path).context(SnapshotSnafu)
     }
 
     fn delete(&self, height: u64) -> Result<()> {
         #[cfg(test)]
-        {
+        if self.is_test_backend {
             self.test_storage.write().remove(&height);
             return Ok(());
         }
 
-        #[cfg(not(test))]
-        {
-            // In production, this would call S3 DeleteObject
-            let _ = height;
-            Err(TieredStorageError::ObjectStorage {
-                message: "Object storage delete not implemented".to_string(),
-            })
-        }
+        let path = self.object_path(height);
+
+        self.block_on(async { self.store.delete(&path).await })
+            .map_err(|e| TieredStorageError::ObjectStorage {
+                message: format!("Failed to delete snapshot: {}", e),
+            })?;
+
+        Ok(())
     }
 
     fn list(&self) -> Result<Vec<u64>> {
         #[cfg(test)]
-        {
+        if self.is_test_backend {
             let guard = self.test_storage.read();
             let mut heights: Vec<u64> = guard.keys().copied().collect();
             heights.sort_unstable();
             return Ok(heights);
         }
 
-        #[cfg(not(test))]
-        {
-            // In production, this would call S3 ListObjects
-            Err(TieredStorageError::ObjectStorage {
-                message: "Object storage list not implemented".to_string(),
-            })
+        let prefix = if self.prefix.as_ref().is_empty() {
+            None
+        } else {
+            Some(&self.prefix)
+        };
+
+        let result = self.block_on(async {
+            let stream = self.store.list(prefix);
+            stream.try_collect::<Vec<_>>().await
+        });
+
+        let objects = result.map_err(|e| TieredStorageError::ObjectStorage {
+            message: format!("Failed to list snapshots: {}", e),
+        })?;
+
+        // Parse heights from filenames (snapshot_NNNN.snap)
+        let mut heights = Vec::new();
+        for meta in objects {
+            let filename = meta.location.filename().unwrap_or("");
+            if let Some(height) = parse_snapshot_height(filename) {
+                heights.push(height);
+            }
         }
+
+        heights.sort_unstable();
+        Ok(heights)
     }
+}
+
+/// Parse snapshot height from filename.
+///
+/// Expected format: `000000100.snap` -> 100
+fn parse_snapshot_height(filename: &str) -> Option<u64> {
+    // Expected format is 9 digits followed by .snap (e.g., "000000100.snap")
+    if !filename.ends_with(".snap") {
+        return None;
+    }
+
+    let height_str = filename.strip_suffix(".snap")?;
+
+    // Should be all digits
+    if !height_str.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    height_str.parse().ok()
 }
 
 /// Snapshot location tracking.
@@ -630,7 +922,7 @@ mod tests {
     fn test_tiered_manager_with_warm() {
         let temp = TempDir::new().expect("create temp dir");
         let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
-        let warm = Box::new(ObjectStorageBackend::new(
+        let warm: Box<dyn StorageBackend> = Box::new(ObjectStorageBackend::new_test(
             "test-bucket".to_string(),
             "snapshots".to_string(),
         ));
@@ -689,5 +981,102 @@ mod tests {
             result,
             Err(TieredStorageError::SnapshotNotFound { height: 999 })
         ));
+    }
+
+    /// Test the real ObjectStorageBackend with local filesystem.
+    ///
+    /// This test validates the actual integration with `object_store` crate,
+    /// using `file://` URLs which work identically to S3/GCS/Azure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_object_storage_backend_local_fs() {
+        let temp = TempDir::new().expect("create temp dir");
+        let storage_path = temp.path().join("object_storage");
+
+        // Create backend using file:// URL (works like S3/GCS/Azure)
+        let url = format!("file://{}", storage_path.display());
+        let backend = ObjectStorageBackend::new(&url).expect("create backend");
+
+        assert_eq!(backend.tier(), StorageTier::Warm);
+
+        // Initially empty
+        assert!(!backend.exists(100).unwrap());
+        assert!(backend.list().unwrap().is_empty());
+
+        // Store a snapshot
+        let snapshot = create_test_snapshot(100);
+        backend.store(&snapshot).unwrap();
+
+        // Now exists
+        assert!(backend.exists(100).unwrap());
+        assert_eq!(backend.list().unwrap(), vec![100]);
+
+        // Load it back
+        let loaded = backend.load(100).unwrap();
+        assert_eq!(loaded.shard_height(), 100);
+
+        // Store more snapshots
+        for height in [200, 300, 400] {
+            let snapshot = create_test_snapshot(height);
+            backend.store(&snapshot).unwrap();
+        }
+
+        // List all
+        let heights = backend.list().unwrap();
+        assert_eq!(heights, vec![100, 200, 300, 400]);
+
+        // Delete one
+        backend.delete(200).unwrap();
+        assert!(!backend.exists(200).unwrap());
+
+        let heights = backend.list().unwrap();
+        assert_eq!(heights, vec![100, 300, 400]);
+    }
+
+    /// Test tiered manager with real object storage backend (local filesystem).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_tiered_manager_with_real_object_storage() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+
+        let storage_path = temp.path().join("warm");
+        let url = format!("file://{}", storage_path.display());
+        let warm: Box<dyn StorageBackend> =
+            Box::new(ObjectStorageBackend::new(&url).expect("create warm backend"));
+
+        let config = TieredConfig {
+            hot_count: 2,
+            ..Default::default()
+        };
+
+        let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
+
+        // Store 4 snapshots
+        for height in [100, 200, 300, 400] {
+            let snapshot = create_test_snapshot(height);
+            manager.store(&snapshot).unwrap();
+        }
+
+        // All in hot tier initially
+        let all = manager.list_all().unwrap();
+        assert_eq!(all.len(), 4);
+        assert!(all.iter().all(|l| l.tier == StorageTier::Hot));
+
+        // Demote oldest to warm
+        let demoted = manager.demote_to_warm().unwrap();
+        assert_eq!(demoted, 2);
+
+        // Verify tier locations
+        assert_eq!(manager.get_tier(100).unwrap(), Some(StorageTier::Warm));
+        assert_eq!(manager.get_tier(200).unwrap(), Some(StorageTier::Warm));
+        assert_eq!(manager.get_tier(300).unwrap(), Some(StorageTier::Hot));
+        assert_eq!(manager.get_tier(400).unwrap(), Some(StorageTier::Hot));
+
+        // Can load from warm (actual object storage, not test mock)
+        let loaded = manager.load(100).unwrap();
+        assert_eq!(loaded.shard_height(), 100);
+
+        // Find snapshot for height
+        assert_eq!(manager.find_snapshot_for(150).unwrap(), Some(100));
+        assert_eq!(manager.find_snapshot_for(350).unwrap(), Some(300));
     }
 }

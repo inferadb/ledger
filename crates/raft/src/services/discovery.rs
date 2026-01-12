@@ -145,9 +145,12 @@ fn validate_private_ip(addr: &str) -> Result<(), String> {
 /// Validate all addresses in a peer announcement.
 ///
 /// All addresses must be private/WireGuard IPs.
+#[allow(clippy::result_large_err)] // tonic::Status is external, can't box it
 fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
     if addresses.is_empty() {
-        return Err(Status::invalid_argument("Peer must have at least one address"));
+        return Err(Status::invalid_argument(
+            "Peer must have at least one address",
+        ));
     }
 
     for addr in addresses {
@@ -545,14 +548,18 @@ mod tests {
         // fd00::/8 - Unique Local Addresses (WireGuard typical)
         assert!(is_private_ipv6("fd00::1".parse().unwrap()));
         assert!(is_private_ipv6("fd12:3456:789a::1".parse().unwrap()));
-        assert!(is_private_ipv6("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
+        assert!(is_private_ipv6(
+            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_private_ipv6_link_local() {
         // fe80::/10
         assert!(is_private_ipv6("fe80::1".parse().unwrap()));
-        assert!(is_private_ipv6("fe80::1234:5678:abcd:ef01".parse().unwrap()));
+        assert!(is_private_ipv6(
+            "fe80::1234:5678:abcd:ef01".parse().unwrap()
+        ));
     }
 
     #[test]

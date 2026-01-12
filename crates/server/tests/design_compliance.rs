@@ -16,6 +16,7 @@ mod common;
 use std::time::Duration;
 
 use common::TestCluster;
+use serial_test::serial;
 
 // =============================================================================
 // Multi-Vault Failure Isolation Tests
@@ -26,6 +27,7 @@ use common::TestCluster;
 ///
 /// This test verifies that when one vault's state root diverges (perhaps due to
 /// a bug or corruption), other vaults continue to operate normally.
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_divergence_does_not_affect_other_vaults() {
     let cluster = TestCluster::new(3).await;
@@ -57,7 +59,10 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
         include_tx_proof: false,
     };
 
-    let response1 = write_client.write(request1).await.expect("write to vault 1");
+    let response1 = write_client
+        .write(request1)
+        .await
+        .expect("write to vault 1");
     match response1.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Success(_)) => {}
         _ => panic!("write to vault 1 should succeed"),
@@ -84,7 +89,10 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
         include_tx_proof: false,
     };
 
-    let response2 = write_client.write(request2).await.expect("write to vault 2");
+    let response2 = write_client
+        .write(request2)
+        .await
+        .expect("write to vault 2");
     match response2.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Success(_)) => {}
         _ => panic!("write to vault 2 should succeed"),
@@ -114,7 +122,10 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
         .simulate_divergence(divergence_request)
         .await
         .expect("simulate divergence should succeed");
-    assert!(sim_response.into_inner().success, "divergence simulation should succeed");
+    assert!(
+        sim_response.into_inner().success,
+        "divergence simulation should succeed"
+    );
 
     // Wait for the health status update to propagate
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -174,7 +185,10 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
         include_tx_proof: false,
     };
 
-    let response3 = write_client.write(request3).await.expect("write to vault 2 after divergence");
+    let response3 = write_client
+        .write(request3)
+        .await
+        .expect("write to vault 2 after divergence");
     match response3.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Success(_)) => {}
         _ => panic!("write to vault 2 should still succeed after vault 1 divergence"),
@@ -185,6 +199,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 ///
 /// When a vault's computed state root doesn't match the expected root,
 /// the vault should be marked as diverged and return UNAVAILABLE.
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_diverged_vault_returns_unavailable() {
     let cluster = TestCluster::new(3).await;
@@ -245,7 +260,10 @@ async fn test_diverged_vault_returns_unavailable() {
         .simulate_divergence(divergence_request)
         .await
         .expect("simulate divergence should succeed");
-    assert!(sim_response.into_inner().success, "divergence simulation should succeed");
+    assert!(
+        sim_response.into_inner().success,
+        "divergence simulation should succeed"
+    );
 
     // Wait for the health status update to propagate
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -326,6 +344,7 @@ async fn test_state_root_consistency_after_restart() {
 ///
 /// When a follower applies log entries, it must verify that its computed
 /// state root matches the state root included in the log entry from the leader.
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_follower_state_root_verification() {
     let cluster = TestCluster::new(3).await;
@@ -403,6 +422,7 @@ async fn test_follower_state_root_verification() {
 /// Implementation needs:
 /// - TestCluster.stop_node(node_id) to trigger failover
 /// - Leader election wait with timeout
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires leader failover triggering capability"]
 async fn test_sequence_survives_leader_failover() {

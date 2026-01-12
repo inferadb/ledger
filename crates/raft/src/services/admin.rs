@@ -1225,30 +1225,22 @@ impl AdminService for AdminServiceImpl {
         let expected_root: [u8; 32] = req
             .expected_state_root
             .as_ref()
-            .map(|h| {
-                h.value
-                    .as_slice()
-                    .try_into()
-                    .unwrap_or([0u8; 32])
-            })
+            .map(|h| h.value.as_slice().try_into().unwrap_or([0u8; 32]))
             .unwrap_or([1u8; 32]); // Default to non-zero for visibility
 
         let computed_root: [u8; 32] = req
             .computed_state_root
             .as_ref()
-            .map(|h| {
-                h.value
-                    .as_slice()
-                    .try_into()
-                    .unwrap_or([0u8; 32])
-            })
+            .map(|h| h.value.as_slice().try_into().unwrap_or([0u8; 32]))
             .unwrap_or([2u8; 32]); // Different from expected
 
         let at_height = if req.at_height > 0 {
             req.at_height
         } else {
             // Get current vault height if not specified
-            self.applied_state.vault_height(namespace_id, vault_id).max(1)
+            self.applied_state
+                .vault_height(namespace_id, vault_id)
+                .max(1)
         };
 
         tracing::warn!(

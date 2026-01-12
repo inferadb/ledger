@@ -32,7 +32,8 @@ pub enum SystemError {
     #[snafu(display("State layer error: {source}"))]
     State {
         /// The underlying state layer error.
-        source: StateError,
+        #[snafu(source(from(StateError, Box::new)))]
+        source: Box<StateError>,
     },
 
     /// Serialization or deserialization failed.
@@ -89,7 +90,11 @@ impl SystemNamespaceService {
                 value_str.parse::<i64>().unwrap_or(start_value)
             }
             Ok(None) => start_value,
-            Err(e) => return Err(SystemError::State { source: e }),
+            Err(e) => {
+                return Err(SystemError::State {
+                    source: Box::new(e),
+                });
+            }
         };
 
         // We need to drop the read lock before acquiring write lock
@@ -156,14 +161,17 @@ impl SystemNamespaceService {
 
         match state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
-                let node: NodeInfo =
-                    postcard::from_bytes(&entity.value).map_err(|e| SystemError::Serialization {
+                let node: NodeInfo = postcard::from_bytes(&entity.value).map_err(|e| {
+                    SystemError::Serialization {
                         message: e.to_string(),
-                    })?;
+                    }
+                })?;
                 Ok(Some(node))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(SystemError::State { source: e }),
+            Err(e) => Err(SystemError::State {
+                source: Box::new(e),
+            }),
         }
     }
 
@@ -247,13 +255,17 @@ impl SystemNamespaceService {
         match state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
                 let registry: NamespaceRegistry =
-                    postcard::from_bytes(&entity.value).map_err(|e| SystemError::Serialization {
-                        message: e.to_string(),
+                    postcard::from_bytes(&entity.value).map_err(|e| {
+                        SystemError::Serialization {
+                            message: e.to_string(),
+                        }
                     })?;
                 Ok(Some(registry))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(SystemError::State { source: e }),
+            Err(e) => Err(SystemError::State {
+                source: Box::new(e),
+            }),
         }
     }
 
@@ -269,7 +281,11 @@ impl SystemNamespaceService {
                 id_str.parse::<NamespaceId>().ok()
             }
             Ok(None) => None,
-            Err(e) => return Err(SystemError::State { source: e }),
+            Err(e) => {
+                return Err(SystemError::State {
+                    source: Box::new(e),
+                });
+            }
         };
 
         // Drop read lock before getting the namespace
@@ -311,11 +327,11 @@ impl SystemNamespaceService {
         status: NamespaceStatus,
     ) -> Result<()> {
         // Get existing registry
-        let mut registry = self
-            .get_namespace(namespace_id)?
-            .ok_or_else(|| SystemError::NotFound {
-                entity: format!("namespace:{}", namespace_id),
-            })?;
+        let mut registry =
+            self.get_namespace(namespace_id)?
+                .ok_or_else(|| SystemError::NotFound {
+                    entity: format!("namespace:{}", namespace_id),
+                })?;
 
         // Update status
         registry.status = status;
@@ -342,11 +358,11 @@ impl SystemNamespaceService {
         shard_id: ShardId,
         member_nodes: Vec<NodeId>,
     ) -> Result<()> {
-        let mut registry = self
-            .get_namespace(namespace_id)?
-            .ok_or_else(|| SystemError::NotFound {
-                entity: format!("namespace:{}", namespace_id),
-            })?;
+        let mut registry =
+            self.get_namespace(namespace_id)?
+                .ok_or_else(|| SystemError::NotFound {
+                    entity: format!("namespace:{}", namespace_id),
+                })?;
 
         registry.shard_id = shard_id;
         registry.member_nodes = member_nodes;

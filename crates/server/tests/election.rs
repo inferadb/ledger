@@ -15,8 +15,10 @@ mod common;
 use std::time::Duration;
 
 use common::TestCluster;
+use serial_test::serial;
 
 /// Test that a single-node cluster immediately elects itself as leader.
+#[serial]
 #[tokio::test]
 async fn test_single_node_self_election() {
     let cluster = TestCluster::new(1).await;

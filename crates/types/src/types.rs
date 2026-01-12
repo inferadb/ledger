@@ -158,7 +158,11 @@ impl ShardBlock {
         let (tx_merkle_root, state_root) = if self.vault_entries.is_empty() {
             (crate::EMPTY_HASH, crate::EMPTY_HASH)
         } else {
-            let tx_roots: Vec<_> = self.vault_entries.iter().map(|e| e.tx_merkle_root).collect();
+            let tx_roots: Vec<_> = self
+                .vault_entries
+                .iter()
+                .map(|e| e.tx_merkle_root)
+                .collect();
             let state_roots: Vec<_> = self.vault_entries.iter().map(|e| e.state_root).collect();
             (merkle_root(&tx_roots), merkle_root(&state_roots))
         };

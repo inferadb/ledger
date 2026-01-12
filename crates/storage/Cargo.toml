@@ -45,8 +45,16 @@ tracing.workspace = true
 # Async (for snapshot operations)
 tokio.workspace = true
 
-[dev-dependencies]
+# Temporary files (for snapshot serialization to object storage)
 tempfile.workspace = true
+
+# Object storage (S3, GCS, Azure, local)
+object_store.workspace = true
+async-trait.workspace = true
+url = "2.5"
+futures.workspace = true
+
+[dev-dependencies]
 proptest.workspace = true
 rand.workspace = true
 

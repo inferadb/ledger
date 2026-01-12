@@ -15,8 +15,10 @@ mod common;
 use std::time::Duration;
 
 use common::TestCluster;
+use serial_test::serial;
 
 /// Test single-node cluster bootstrap and leader election.
+#[serial]
 #[tokio::test]
 async fn test_single_node_bootstrap() {
     let cluster = TestCluster::new(1).await;
@@ -31,6 +33,7 @@ async fn test_single_node_bootstrap() {
 }
 
 /// Test single-node write and read cycle.
+#[serial]
 #[tokio::test]
 async fn test_single_node_write_read() {
     let cluster = TestCluster::new(1).await;
@@ -90,6 +93,7 @@ async fn test_single_node_write_read() {
 }
 
 /// Test write idempotency - same client_id + sequence should return cached result.
+#[serial]
 #[tokio::test]
 async fn test_write_idempotency() {
     let cluster = TestCluster::new(1).await;
@@ -197,6 +201,7 @@ async fn test_three_node_cluster_formation() {
 ///
 /// DESIGN.md §3.2.1: State root is computed after applying transactions.
 /// DESIGN.md §7.1: GetBlock returns stored block with header and transactions.
+#[serial]
 #[tokio::test]
 async fn test_write_creates_retrievable_block() {
     let cluster = TestCluster::new(1).await;
@@ -264,10 +269,7 @@ async fn test_write_creates_retrievable_block() {
 
     // Verify block header
     assert_eq!(header.height, block_height, "block height should match");
-    assert!(
-        header.state_root.is_some(),
-        "block should have state_root"
-    );
+    assert!(header.state_root.is_some(), "block should have state_root");
     assert!(
         header.tx_merkle_root.is_some(),
         "block should have tx_merkle_root"
@@ -285,9 +287,17 @@ async fn test_write_creates_retrievable_block() {
     );
 
     // Verify block contains the transaction
-    assert_eq!(block.transactions.len(), 1, "block should have 1 transaction");
+    assert_eq!(
+        block.transactions.len(),
+        1,
+        "block should have 1 transaction"
+    );
     let tx = &block.transactions[0];
-    assert_eq!(tx.operations.len(), 1, "transaction should have 1 operation");
+    assert_eq!(
+        tx.operations.len(),
+        1,
+        "transaction should have 1 operation"
+    );
 }
 
 /// Test write to leader replicates to followers.

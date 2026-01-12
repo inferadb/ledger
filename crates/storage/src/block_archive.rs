@@ -422,15 +422,19 @@ impl BlockArchive {
 
         let mut blocks_to_compact = Vec::new();
 
-        for result in table.range(current_watermark..before_height).context(StorageSnafu)? {
+        for result in table
+            .range(current_watermark..before_height)
+            .context(StorageSnafu)?
+        {
             let (key, data) = result.context(StorageSnafu)?;
             let height = key.value();
 
             // Deserialize the block
-            let mut block: ShardBlock =
-                postcard::from_bytes(data.value()).map_err(|e| BlockArchiveError::Serialization {
+            let mut block: ShardBlock = postcard::from_bytes(data.value()).map_err(|e| {
+                BlockArchiveError::Serialization {
                     message: e.to_string(),
-                })?;
+                }
+            })?;
 
             // Check if it needs compaction (has non-empty transactions)
             let needs_compaction = block
@@ -460,10 +464,11 @@ impl BlockArchive {
                 let mut blocks_table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
 
                 for (height, block) in &blocks_to_compact {
-                    let encoded = postcard::to_allocvec(block)
-                        .map_err(|e| BlockArchiveError::Serialization {
+                    let encoded = postcard::to_allocvec(block).map_err(|e| {
+                        BlockArchiveError::Serialization {
                             message: e.to_string(),
-                        })?;
+                        }
+                    })?;
 
                     blocks_table
                         .insert(*height, &encoded[..])
@@ -746,7 +751,12 @@ mod tests {
         let engine = StorageEngine::open_in_memory().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
-        assert!(archive.compaction_watermark().expect("get watermark").is_none());
+        assert!(
+            archive
+                .compaction_watermark()
+                .expect("get watermark")
+                .is_none()
+        );
         assert!(!archive.is_compacted(100).expect("is_compacted"));
     }
 
@@ -770,7 +780,10 @@ mod tests {
         assert_eq!(compacted, 3); // blocks 100, 101, 102
 
         // Verify watermark is set
-        assert_eq!(archive.compaction_watermark().expect("watermark"), Some(103));
+        assert_eq!(
+            archive.compaction_watermark().expect("watermark"),
+            Some(103)
+        );
 
         // Verify compacted blocks have empty transactions
         for height in [100, 101, 102] {
@@ -875,7 +888,10 @@ mod tests {
         assert_eq!(count2, 0); // No new blocks to compact
 
         // Watermark unchanged
-        assert_eq!(archive.compaction_watermark().expect("watermark"), Some(102));
+        assert_eq!(
+            archive.compaction_watermark().expect("watermark"),
+            Some(102)
+        );
     }
 
     #[test]
