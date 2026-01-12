@@ -10,7 +10,7 @@ use std::sync::Arc;
 use snafu::{ResultExt, Snafu};
 
 use ledger_storage::BlockArchive;
-use ledger_types::hash::{tx_hash, Hash};
+use ledger_types::hash::{Hash, tx_hash};
 use ledger_types::merkle::{MerkleProof as InternalMerkleProof, MerkleTree};
 use ledger_types::{NamespaceId, Transaction, VaultId};
 
@@ -22,6 +22,7 @@ use crate::proto::{self, Direction, MerkleSibling};
 
 /// Errors that can occur during proof generation.
 #[derive(Debug, Snafu)]
+#[allow(clippy::large_enum_variant)] // Variants contain BlockArchiveError which is 64+ bytes
 pub enum ProofError {
     /// Block archive is not available.
     #[snafu(display("block archive not configured"))]
@@ -32,36 +33,47 @@ pub enum ProofError {
         "block not found: namespace={namespace_id}, vault={vault_id}, height={vault_height}"
     ))]
     BlockNotFound {
+        /// The namespace ID that was not found.
         namespace_id: NamespaceId,
+        /// The vault ID that was not found.
         vault_id: VaultId,
+        /// The vault height that was not found.
         vault_height: u64,
     },
 
     /// Failed to query the block archive index.
     #[snafu(display("failed to find shard height: {source}"))]
     FindShardHeight {
+        /// The underlying block archive error.
         source: ledger_storage::BlockArchiveError,
     },
 
     /// Failed to read block from archive.
     #[snafu(display("failed to read block at shard height {shard_height}: {source}"))]
     ReadBlock {
+        /// The shard height that failed to read.
         shard_height: u64,
+        /// The underlying block archive error.
         source: ledger_storage::BlockArchiveError,
     },
 
     /// Vault entry not found in the block.
-    #[snafu(display(
-        "vault entry not in block: namespace={namespace_id}, vault={vault_id}"
-    ))]
+    #[snafu(display("vault entry not in block: namespace={namespace_id}, vault={vault_id}"))]
     VaultEntryNotFound {
+        /// The namespace ID that was searched for.
         namespace_id: NamespaceId,
+        /// The vault ID that was searched for.
         vault_id: VaultId,
     },
 
     /// Transaction index out of bounds.
     #[snafu(display("transaction index {index} out of bounds (block has {count} transactions)"))]
-    TxIndexOutOfBounds { index: usize, count: usize },
+    TxIndexOutOfBounds {
+        /// The requested transaction index.
+        index: usize,
+        /// The total number of transactions in the block.
+        count: usize,
+    },
 
     /// No transactions in the block.
     #[snafu(display("block contains no transactions"))]
@@ -87,6 +99,7 @@ pub struct WriteProof {
 ///
 /// This is the main entry point for proof generation after a write commits.
 /// It fetches the block, extracts the vault entry, and generates proofs.
+#[allow(clippy::result_large_err)] // ProofError contains BlockArchiveError (160+ bytes)
 pub fn generate_write_proof(
     archive: &Arc<BlockArchive>,
     namespace_id: NamespaceId,
@@ -158,8 +171,8 @@ pub fn generate_write_proof(
     };
 
     // Generate transaction proof
-    let tx_proof = generate_tx_proof(&entry.transactions, tx_index)
-        .ok_or(ProofError::TxIndexOutOfBounds {
+    let tx_proof =
+        generate_tx_proof(&entry.transactions, tx_index).ok_or(ProofError::TxIndexOutOfBounds {
             index: tx_index,
             count: entry.transactions.len(),
         })?;
@@ -245,7 +258,7 @@ pub fn generate_tx_proof_by_id(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use chrono::Utc;

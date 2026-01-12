@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 61bdafe970a905e114c4b829a9b2627d71705d094de79fd90f768b7ad37694c9 # shrinks to operations = [SetEntity { key: "a", value: [], condition: None, expires_at: None }, SetEntity { key: "a", value: [], condition: None, expires_at: None }]

@@ -121,7 +121,10 @@ impl WriteServiceImpl {
         namespace_id: i64,
         vault_id: i64,
         vault_height: u64,
-    ) -> (Option<crate::proto::BlockHeader>, Option<crate::proto::MerkleProof>) {
+    ) -> (
+        Option<crate::proto::BlockHeader>,
+        Option<crate::proto::MerkleProof>,
+    ) {
         let Some(archive) = &self.block_archive else {
             debug!("Block archive not available for proof generation");
             return (None, None);
@@ -415,13 +418,20 @@ impl WriteService for WriteServiceImpl {
                 block_height,
                 block_hash: _,
             } => {
+                // Generate proof and block header if requested
+                let (block_header, tx_proof) = if req.include_tx_proofs {
+                    self.generate_write_proof(namespace_id, vault_id.unwrap_or(0), block_height)
+                } else {
+                    (None, None)
+                };
+
                 let success = WriteSuccess {
                     tx_id: Some(TxId {
                         id: Uuid::new_v4().as_bytes().to_vec(),
                     }),
                     block_height,
-                    block_header: None,
-                    tx_proof: None,
+                    block_header,
+                    tx_proof,
                 };
 
                 // Cache the result for idempotency

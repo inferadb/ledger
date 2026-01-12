@@ -22,11 +22,13 @@ use crate::log_storage::AppliedStateAccessor;
 use crate::proto::BlockAnnouncement;
 use crate::proto::admin_service_server::AdminServiceServer;
 use crate::proto::health_service_server::HealthServiceServer;
+use crate::proto::raft_service_server::RaftServiceServer;
 use crate::proto::read_service_server::ReadServiceServer;
 use crate::proto::system_discovery_service_server::SystemDiscoveryServiceServer;
 use crate::proto::write_service_server::WriteServiceServer;
 use crate::services::{
-    AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, ReadServiceImpl, WriteServiceImpl,
+    AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl, ReadServiceImpl,
+    WriteServiceImpl,
 };
 use crate::types::LedgerTypeConfig;
 
@@ -139,6 +141,9 @@ impl LedgerServer {
             self.applied_state.clone(),
         );
 
+        // RaftService handles inter-node Raft RPCs (Vote, AppendEntries, InstallSnapshot)
+        let raft_service = RaftServiceImpl::new(self.raft.clone());
+
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 
         Server::builder()
@@ -148,6 +153,7 @@ impl LedgerServer {
             .add_service(AdminServiceServer::new(admin_service))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
+            .add_service(RaftServiceServer::new(raft_service))
             .serve(self.addr)
             .await?;
 

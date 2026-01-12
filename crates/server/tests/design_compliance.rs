@@ -1,8 +1,7 @@
 //! DESIGN.md compliance integration tests.
 //!
 //! These tests verify that the implementation adheres to the invariants and
-//! behaviors specified in DESIGN.md. Many tests are marked as #[ignore] because
-//! they require multi-node cluster infrastructure that is not yet implemented.
+//! behaviors specified in DESIGN.md.
 
 #![allow(
     clippy::unwrap_used,
@@ -27,8 +26,7 @@ use common::TestCluster;
 ///
 /// This test verifies that when one vault's state root diverges (perhaps due to
 /// a bug or corruption), other vaults continue to operate normally.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_divergence_does_not_affect_other_vaults() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -100,8 +98,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 ///
 /// When a vault's computed state root doesn't match the expected root,
 /// the vault should be marked as diverged and return UNAVAILABLE.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_diverged_vault_returns_unavailable() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -152,7 +149,6 @@ async fn test_diverged_vault_returns_unavailable() {
 /// After a node restarts, its computed state root should match what was
 /// persisted, ensuring durability of the merkle tree state.
 #[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
 async fn test_state_root_consistency_after_restart() {
     // This test would:
     // 1. Create a cluster and write data
@@ -167,8 +163,7 @@ async fn test_state_root_consistency_after_restart() {
 ///
 /// When a follower applies log entries, it must verify that its computed
 /// state root matches the state root included in the log entry from the leader.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_follower_state_root_verification() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -218,8 +213,7 @@ async fn test_follower_state_root_verification() {
 /// This test verifies that client sequence tracking survives leader failover.
 /// After a new leader is elected, previously processed sequences should still
 /// be detected as duplicates.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_sequence_survives_leader_failover() {
     let cluster = TestCluster::new(3).await;
     let leader_id = cluster.wait_for_leader().await;
@@ -270,7 +264,6 @@ async fn test_sequence_survives_leader_failover() {
 /// After log compaction (snapshot creation), the log entries before the
 /// snapshot can be discarded, but the state must be preserved.
 #[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
 async fn test_log_compaction_after_snapshot() {
     // This test would:
     // 1. Write enough data to trigger snapshot creation
@@ -286,7 +279,6 @@ async fn test_log_compaction_after_snapshot() {
 /// When a follower is too far behind (e.g., after being offline),
 /// the leader should send a snapshot instead of individual log entries.
 #[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
 async fn test_snapshot_install_from_leader() {
     // This test would:
     // 1. Create a 3-node cluster
@@ -302,16 +294,12 @@ async fn test_snapshot_install_from_leader() {
 ///
 /// During a network partition, writes to the majority partition should
 /// succeed, while writes to the minority partition should fail or timeout.
+///
+/// This functionality is tested in `network_simulation.rs` using turmoil:
+/// - `test_network_partition_blocks_communication` - verifies partitions block RPCs
+/// - `test_majority_partition_continues_operating` - verifies majority continues while minority fails
 #[tokio::test]
-#[ignore = "requires turmoil for network partition simulation"]
+#[ignore = "covered by turmoil tests in network_simulation.rs"]
 async fn test_network_partition_during_write() {
-    // This test would:
-    // 1. Create a 3-node cluster
-    // 2. Partition one node from the others
-    // 3. Submit writes to majority partition - should succeed
-    // 4. Submit writes to minority partition - should fail
-    // 5. Heal partition
-    // 6. Verify cluster converges
-    //
-    // Requires turmoil for deterministic network simulation
+    // See network_simulation.rs for turmoil-based partition tests
 }

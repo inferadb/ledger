@@ -99,6 +99,22 @@ pub enum LedgerRequest {
         vault_id: VaultId,
     },
 
+    /// Update vault health status (used during recovery).
+    UpdateVaultHealth {
+        /// Namespace containing the vault.
+        namespace_id: NamespaceId,
+        /// Vault ID to update.
+        vault_id: VaultId,
+        /// New health status.
+        healthy: bool,
+        /// If diverged, the expected state root.
+        expected_root: Option<Hash>,
+        /// If diverged, the computed state root.
+        computed_root: Option<Hash>,
+        /// If diverged, the height at which divergence was detected.
+        diverged_at_height: Option<u64>,
+    },
+
     /// System operation (user management, node membership, etc.).
     System(SystemRequest),
 }
@@ -178,6 +194,12 @@ pub enum LedgerResponse {
         success: bool,
     },
 
+    /// Vault health updated.
+    VaultHealthUpdated {
+        /// Whether the update was successful.
+        success: bool,
+    },
+
     /// User created.
     UserCreated {
         /// Assigned user ID.
@@ -212,6 +234,9 @@ impl fmt::Display for LedgerResponse {
             }
             LedgerResponse::VaultDeleted { success } => {
                 write!(f, "VaultDeleted(success={})", success)
+            }
+            LedgerResponse::VaultHealthUpdated { success } => {
+                write!(f, "VaultHealthUpdated(success={})", success)
             }
             LedgerResponse::Error { message } => {
                 write!(f, "Error({})", message)

@@ -62,6 +62,13 @@ rand.workspace = true
 futures.workspace = true
 criterion.workspace = true
 
+# Network simulation testing
+turmoil.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+async-stream.workspace = true
+tower.workspace = true
+
 [[bench]]
 name = "write_bench"
 harness = false

@@ -26,26 +26,54 @@ const SEGMENT_SIZE: u64 = 10_000;
 /// Block archive error types.
 #[derive(Debug, Snafu)]
 pub enum BlockArchiveError {
+    /// IO error during file operations.
     #[snafu(display("IO error: {source}"))]
-    Io { source: std::io::Error },
+    Io {
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
 
+    /// Block not found at the requested height.
     #[snafu(display("Block not found at height {height}"))]
-    BlockNotFound { height: u64 },
+    BlockNotFound {
+        /// The height that was not found.
+        height: u64,
+    },
 
+    /// Serialization or deserialization error.
     #[snafu(display("Serialization error: {message}"))]
-    Serialization { message: String },
+    Serialization {
+        /// Error message describing the serialization failure.
+        message: String,
+    },
 
+    /// Storage engine error from redb.
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: redb::StorageError },
+    Storage {
+        /// The underlying storage error.
+        source: redb::StorageError,
+    },
 
+    /// Table access error from redb.
     #[snafu(display("Table error: {source}"))]
-    Table { source: redb::TableError },
+    Table {
+        /// The underlying table error.
+        source: redb::TableError,
+    },
 
+    /// Transaction error from redb.
     #[snafu(display("Transaction error: {source}"))]
-    Transaction { source: redb::TransactionError },
+    Transaction {
+        /// The underlying transaction error.
+        source: redb::TransactionError,
+    },
 
+    /// Commit error from redb.
     #[snafu(display("Commit error: {source}"))]
-    Commit { source: redb::CommitError },
+    Commit {
+        /// The underlying commit error.
+        source: redb::CommitError,
+    },
 }
 
 /// Result type for block archive operations.

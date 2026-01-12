@@ -19,6 +19,8 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 use ledger_raft::LedgerTypeConfig;
+use ledger_raft::proto::JoinClusterRequest;
+use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_storage::StateLayer;
 
 /// A test node in a cluster.
@@ -74,7 +76,8 @@ pub struct TestCluster {
 impl TestCluster {
     /// Create a new test cluster with the given number of nodes.
     ///
-    /// The first node bootstraps the cluster, and other nodes join.
+    /// The first node bootstraps the cluster, and other nodes join via
+    /// the AdminService's join_cluster RPC.
     /// All nodes use ephemeral ports on localhost.
     pub async fn new(size: usize) -> Self {
         assert!(size >= 1, "cluster must have at least 1 node");
@@ -82,34 +85,76 @@ impl TestCluster {
         let base_port = 50100 + (rand::random::<u16>() % 1000);
         let mut nodes = Vec::with_capacity(size);
 
-        // Create all node configs first so we know peer addresses
-        let configs: Vec<_> = (0..size)
-            .map(|i| {
-                let node_id = (i + 1) as u64;
-                let port = base_port + i as u16;
-                let temp_dir = tempfile::tempdir().expect("create temp dir");
-                let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-                (node_id, port, addr, temp_dir)
-            })
-            .collect();
+        // Step 1: Start the bootstrap node as a SINGLE-NODE cluster (no peers)
+        // This allows it to immediately become leader, then we dynamically add nodes
+        let node_id = 1u64;
+        let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
 
-        // Build peer list for each node
-        let all_peers: Vec<_> = configs
-            .iter()
-            .map(|(id, _, addr, _)| ledger_server::config::PeerConfig {
-                node_id: *id,
-                addr: addr.to_string(),
-            })
-            .collect();
+        // Bootstrap node has NO PEERS - starts as single-node cluster
+        let config = ledger_server::config::Config {
+            node_id,
+            listen_addr: addr,
+            data_dir: temp_dir.path().to_path_buf(),
+            peers: vec![], // Empty! Single-node cluster can immediately elect self as leader
+            batching: ledger_server::config::BatchConfig::default(),
+            bootstrap: true,
+        };
 
-        // Start each node
-        for (i, (node_id, _port, addr, temp_dir)) in configs.into_iter().enumerate() {
-            // Build config with peers (excluding self)
-            let peers: Vec<_> = all_peers
-                .iter()
-                .filter(|p| p.node_id != node_id)
-                .cloned()
-                .collect();
+        let bootstrapped = ledger_server::bootstrap::bootstrap_node(&config)
+            .await
+            .expect("bootstrap node");
+
+        let server = bootstrapped.server;
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::error!("server error: {}", e);
+            }
+        });
+
+        let leader_raft = bootstrapped.raft.clone();
+        let leader_addr = addr;
+        nodes.push(TestNode {
+            id: node_id,
+            addr,
+            raft: bootstrapped.raft,
+            state: bootstrapped.state,
+            _temp_dir: temp_dir,
+            _server_handle: server_handle,
+        });
+
+        // Wait for the bootstrap node to become leader
+        let start = tokio::time::Instant::now();
+        let timeout_duration = Duration::from_secs(5);
+        while start.elapsed() < timeout_duration {
+            let metrics = leader_raft.metrics().borrow().clone();
+            if metrics.current_leader == Some(node_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Verify leader election succeeded
+        {
+            let metrics = leader_raft.metrics().borrow().clone();
+            if metrics.current_leader != Some(node_id) {
+                panic!("Bootstrap node failed to become leader within timeout");
+            }
+        }
+
+        // Step 2: Start remaining nodes and have them join the cluster dynamically
+        for i in 1..size {
+            let node_id = (i + 1) as u64;
+            let port = base_port + i as u16;
+            let temp_dir = tempfile::tempdir().expect("create temp dir");
+            let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+
+            // Non-bootstrap nodes: peers list is just for networking, not initial membership
+            // The leader peer is all we need to be able to connect for join RPC
+            let peers = vec![ledger_server::config::PeerConfig {
+                node_id: 1, // leader
+                addr: leader_addr.to_string(),
+            }];
 
             let config = ledger_server::config::Config {
                 node_id,
@@ -117,10 +162,10 @@ impl TestCluster {
                 data_dir: temp_dir.path().to_path_buf(),
                 peers,
                 batching: ledger_server::config::BatchConfig::default(),
-                bootstrap: i == 0, // Only first node bootstraps
+                bootstrap: false, // Non-bootstrap nodes join dynamically
             };
 
-            // Bootstrap the node
+            // Create the node (doesn't join cluster yet)
             let bootstrapped = ledger_server::bootstrap::bootstrap_node(&config)
                 .await
                 .expect("bootstrap node");
@@ -133,6 +178,59 @@ impl TestCluster {
                 }
             });
 
+            // Give server time to start accepting Raft replication connections
+            // The leader's add_learner call will try to replicate to this node
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Join the cluster via the leader's AdminService with retry
+            let endpoint = format!("http://{}", leader_addr);
+            let mut join_success = false;
+            let mut last_error = String::new();
+
+            for attempt in 0..5 {
+                let mut client = match AdminServiceClient::connect(endpoint.clone()).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        last_error = format!("connect failed: {}", e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+
+                let join_request = JoinClusterRequest {
+                    node_id,
+                    address: addr.to_string(),
+                };
+
+                match client.join_cluster(join_request).await {
+                    Ok(response) => {
+                        let resp = response.into_inner();
+                        if resp.success {
+                            join_success = true;
+                            break;
+                        } else {
+                            last_error = resp.message;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                    Err(e) => {
+                        last_error = format!("join RPC failed: {}", e);
+                        if attempt < 4 {
+                            tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64))
+                                .await;
+                        }
+                    }
+                }
+            }
+
+            if !join_success {
+                panic!(
+                    "Node {} failed to join cluster after 5 attempts: {}",
+                    node_id, last_error
+                );
+            }
+
+            let new_raft = bootstrapped.raft.clone();
             nodes.push(TestNode {
                 id: node_id,
                 addr,
@@ -141,10 +239,29 @@ impl TestCluster {
                 _temp_dir: temp_dir,
                 _server_handle: server_handle,
             });
+
+            // Wait for the new node to see itself as a voter and sync with the cluster
+            // This is critical to ensure the membership change is fully committed
+            // before we try to add another node
+            let sync_start = tokio::time::Instant::now();
+            let sync_timeout = Duration::from_secs(30);
+            while sync_start.elapsed() < sync_timeout {
+                let metrics = new_raft.metrics().borrow().clone();
+                let membership = metrics.membership_config.membership();
+                let is_voter = membership.voter_ids().any(|id| id == node_id);
+
+                if is_voter && metrics.current_leader.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            // Additional stabilization time
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        // Give servers time to start accepting connections
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait for cluster to fully stabilize
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         Self { nodes }
     }

@@ -79,9 +79,16 @@ humantime = "2.1"
 tempfile = "3.14"
 rand = "0.8"
 futures = "0.3"
+proptest = "1.4"
 
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
+
+# Network simulation testing
+turmoil = "0.7"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+async-stream = "0.3"
 
 # Internal crates
 ledger-types = { path = "crates/types" }

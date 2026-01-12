@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 use ledger_storage::StateLayer;
 use ledger_types::{Operation, Transaction, VaultId};
 
+use crate::log_storage::AppliedStateAccessor;
 use crate::types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig};
 
 /// Default interval between GC cycles.
@@ -43,6 +44,8 @@ pub struct TtlGarbageCollector {
     node_id: LedgerNodeId,
     /// The shared state layer.
     state: Arc<RwLock<StateLayer>>,
+    /// Accessor for applied state (vault registry).
+    applied_state: AppliedStateAccessor,
     /// GC interval.
     interval: Duration,
     /// Maximum entities per cycle.
@@ -55,11 +58,13 @@ impl TtlGarbageCollector {
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
         state: Arc<RwLock<StateLayer>>,
+        applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
             raft,
             node_id,
             state,
+            applied_state,
             interval: GC_INTERVAL,
             max_batch_size: MAX_BATCH_SIZE,
         }
@@ -169,24 +174,24 @@ impl TtlGarbageCollector {
 
         debug!("Starting GC cycle");
 
-        // TODO: Get list of active vaults from system metadata.
-        // For now, we scan vault IDs 0-99 as a simple heuristic.
-        // In production, this should query the _system namespace for
-        // all active vaults or maintain a registry.
-        for vault_id in 0..100 {
+        // Get all active vaults from the applied state registry
+        let vault_heights = self.applied_state.all_vault_heights();
+
+        for ((namespace_id, vault_id), _height) in vault_heights {
             let expired = self.find_expired_entities(vault_id);
             if expired.is_empty() {
                 continue;
             }
 
-            debug!(vault_id, count = expired.len(), "Found expired entities");
-
-            // namespace_id is typically derived from vault metadata
-            // For now, assume namespace 0 for the default vault
-            let namespace_id = 0;
+            debug!(
+                namespace_id,
+                vault_id,
+                count = expired.len(),
+                "Found expired entities"
+            );
 
             if let Err(e) = self.expire_entities(namespace_id, vault_id, expired).await {
-                warn!(vault_id, error = %e, "GC cycle failed");
+                warn!(namespace_id, vault_id, error = %e, "GC cycle failed");
             }
         }
     }

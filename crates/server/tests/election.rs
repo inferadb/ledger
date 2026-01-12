@@ -34,8 +34,7 @@ async fn test_single_node_self_election() {
 }
 
 /// Test that a three-node cluster elects a leader.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_leader_election() {
     let cluster = TestCluster::new(3).await;
 
@@ -62,8 +61,7 @@ async fn test_three_node_leader_election() {
 }
 
 /// Test that all nodes eventually agree on the same term.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_term_agreement() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -88,8 +86,7 @@ async fn test_term_agreement() {
 }
 
 /// Test that leader has higher or equal term than followers.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_leader_term_dominance() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;

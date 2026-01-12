@@ -199,6 +199,39 @@ impl ReadServiceImpl {
             }),
         )
     }
+
+    /// Build a ChainProof linking blocks from trusted_height+1 to response_height.
+    ///
+    /// The ChainProof allows clients to verify that the response_height block
+    /// is part of the canonical chain descending from their trusted_height.
+    ///
+    /// Returns None if:
+    /// - Block archive is not available
+    /// - trusted_height >= response_height (nothing to prove)
+    /// - Any block in the range is not found
+    fn build_chain_proof(
+        &self,
+        archive: &BlockArchive,
+        namespace_id: i64,
+        vault_id: i64,
+        trusted_height: u64,
+        response_height: u64,
+    ) -> Option<crate::proto::ChainProof> {
+        // Nothing to prove if trusted is at or past response
+        if trusted_height >= response_height {
+            return Some(crate::proto::ChainProof { headers: vec![] });
+        }
+
+        // Collect headers from trusted_height+1 to response_height
+        let mut headers = Vec::with_capacity((response_height - trusted_height) as usize);
+
+        for height in (trusted_height + 1)..=response_height {
+            let header = self.get_block_header(archive, namespace_id, vault_id, height)?;
+            headers.push(header);
+        }
+
+        Some(crate::proto::ChainProof { headers })
+    }
 }
 
 #[tonic::async_trait]
@@ -294,6 +327,24 @@ impl ReadService for ReadServiceImpl {
             siblings: vec![],
         };
 
+        // Build chain proof if requested
+        let chain_proof = if req.include_chain_proof {
+            if let Some(archive) = &self.block_archive {
+                let trusted_height = req.trusted_height.unwrap_or(0);
+                self.build_chain_proof(
+                    archive,
+                    namespace_id,
+                    vault_id,
+                    trusted_height,
+                    block_height,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let latency = start.elapsed().as_secs_f64();
         let found = entity.is_some();
         debug!(
@@ -308,7 +359,7 @@ impl ReadService for ReadServiceImpl {
             block_height,
             block_header,
             merkle_proof: Some(merkle_proof),
-            chain_proof: None,
+            chain_proof,
         }))
     }
 
@@ -336,7 +387,7 @@ impl ReadService for ReadServiceImpl {
             None => {
                 return Err(Status::unavailable(
                     "Block archive not configured for historical reads",
-                ))
+                ));
             }
         };
 
@@ -363,9 +414,7 @@ impl ReadService for ReadServiceImpl {
             let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => continue, // Block might not exist at this height (sparse)
-                Err(e) => {
-                    return Err(Status::internal(format!("Index lookup failed: {:?}", e)))
-                }
+                Err(e) => return Err(Status::internal(format!("Index lookup failed: {:?}", e))),
             };
 
             // Read the shard block
@@ -375,9 +424,7 @@ impl ReadService for ReadServiceImpl {
 
             // Find the vault entry
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
@@ -408,8 +455,26 @@ impl ReadService for ReadServiceImpl {
             e.expires_at == 0 || e.expires_at > block_ts
         });
 
-        // Get block header for proof
-        let block_header = self.get_block_header(archive, namespace_id, vault_id, req.at_height);
+        // Get block header for proof (if include_proof is set)
+        let block_header = if req.include_proof {
+            self.get_block_header(archive, namespace_id, vault_id, req.at_height)
+        } else {
+            None
+        };
+
+        // Build chain proof if requested (requires include_proof to be useful)
+        let chain_proof = if req.include_chain_proof && req.include_proof {
+            let trusted_height = req.trusted_height.unwrap_or(0);
+            self.build_chain_proof(
+                archive,
+                namespace_id,
+                vault_id,
+                trusted_height,
+                req.at_height,
+            )
+        } else {
+            None
+        };
 
         let latency = start.elapsed().as_secs_f64();
         let found = entity.is_some();
@@ -425,7 +490,7 @@ impl ReadService for ReadServiceImpl {
             block_height: req.at_height,
             block_header,
             merkle_proof: None,
-            chain_proof: None,
+            chain_proof,
         }))
     }
 
@@ -513,18 +578,11 @@ impl ReadService for ReadServiceImpl {
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
         // Find the vault entry in the shard block
-        let vault_entry = shard_block
-            .vault_entries
-            .iter()
-            .find(|e| {
-                e.namespace_id == namespace_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
-            });
-
-        let block = vault_entry.map(|entry| {
-            vault_entry_to_proto_block(entry, &shard_block)
+        let vault_entry = shard_block.vault_entries.iter().find(|e| {
+            e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
         });
+
+        let block = vault_entry.map(|entry| vault_entry_to_proto_block(entry, &shard_block));
 
         Ok(Response::new(GetBlockResponse { block }))
     }
@@ -542,7 +600,7 @@ impl ReadService for ReadServiceImpl {
                 return Ok(Response::new(GetBlockRangeResponse {
                     blocks: vec![],
                     current_tip: 0,
-                }))
+                }));
             }
         };
 
@@ -575,9 +633,7 @@ impl ReadService for ReadServiceImpl {
 
             // Find the vault entry
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
             }) {
                 blocks.push(vault_entry_to_proto_block(entry, &shard_block));
             }
@@ -586,7 +642,10 @@ impl ReadService for ReadServiceImpl {
         // Get current tip for this vault
         let current_tip = self.applied_state.vault_height(namespace_id, vault_id);
 
-        Ok(Response::new(GetBlockRangeResponse { blocks, current_tip }))
+        Ok(Response::new(GetBlockRangeResponse {
+            blocks,
+            current_tip,
+        }))
     }
 
     async fn get_tip(
@@ -622,13 +681,12 @@ impl ReadService for ReadServiceImpl {
         };
 
         // Get block_hash and state_root from archive if available and a specific vault is requested
-        let (block_hash, state_root) = if let (Some(archive), true) =
-            (&self.block_archive, vault_id != 0 && height > 0)
-        {
-            self.get_tip_hashes(archive, namespace_id, vault_id, height)
-        } else {
-            (None, None)
-        };
+        let (block_hash, state_root) =
+            if let (Some(archive), true) = (&self.block_archive, vault_id != 0 && height > 0) {
+                self.get_tip_hashes(archive, namespace_id, vault_id, height)
+            } else {
+                (None, None)
+            };
 
         Ok(Response::new(GetTipResponse {
             height,
@@ -644,11 +702,7 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Get client ID from request
-        let client_id = req
-            .client_id
-            .as_ref()
-            .map(|c| c.id.as_str())
-            .unwrap_or("");
+        let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
         // Query the idempotency cache for last committed sequence
         // Note: This is in-memory with 5-minute TTL. For persistent client state,
@@ -910,18 +964,12 @@ fn vault_entry_to_proto_block(
         .transactions
         .iter()
         .map(|tx| crate::proto::Transaction {
-            id: Some(crate::proto::TxId {
-                id: tx.id.to_vec(),
-            }),
+            id: Some(crate::proto::TxId { id: tx.id.to_vec() }),
             client_id: Some(crate::proto::ClientId {
                 id: tx.client_id.clone(),
             }),
             sequence: tx.sequence,
-            operations: tx
-                .operations
-                .iter()
-                .map(|op| operation_to_proto(op))
-                .collect(),
+            operations: tx.operations.iter().map(operation_to_proto).collect(),
             timestamp: Some(Timestamp {
                 seconds: tx.timestamp.timestamp(),
                 nanos: tx.timestamp.timestamp_subsec_nanos() as i32,
@@ -936,9 +984,7 @@ fn vault_entry_to_proto_block(
         namespace_id: Some(crate::proto::NamespaceId {
             id: entry.namespace_id,
         }),
-        vault_id: Some(crate::proto::VaultId {
-            id: entry.vault_id,
-        }),
+        vault_id: Some(crate::proto::VaultId { id: entry.vault_id }),
         previous_hash: Some(crate::proto::Hash {
             value: entry.previous_vault_hash.to_vec(),
         }),

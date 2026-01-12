@@ -26,9 +26,7 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{
-    Hash, NamespaceId, ShardBlock, VaultEntry, VaultId, compute_tx_merkle_root,
-};
+use ledger_types::{Hash, NamespaceId, ShardBlock, VaultEntry, VaultId, compute_tx_merkle_root};
 
 use crate::types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest};
 
@@ -280,6 +278,11 @@ impl AppliedStateAccessor {
             .cloned()
             .collect()
     }
+
+    /// Get the current shard height (for snapshot info).
+    pub fn shard_height(&self) -> u64 {
+        self.state.read().shard_height
+    }
 }
 
 /// Combined Raft storage backed by redb.
@@ -434,6 +437,9 @@ impl RaftLogStore {
         {
             let state: AppliedState =
                 bincode::deserialize(state_data.value()).map_err(|e| to_serde_error(&e))?;
+            // Restore shard chain tracking from persisted state
+            *self.shard_height.write() = state.shard_height;
+            *self.previous_shard_hash.write() = state.previous_shard_hash;
             *self.applied_state.write() = state;
         }
 
@@ -637,6 +643,46 @@ impl RaftLogStore {
                     }
                 };
                 (response, None)
+            }
+
+            LedgerRequest::UpdateVaultHealth {
+                namespace_id,
+                vault_id,
+                healthy,
+                expected_root,
+                computed_root,
+                diverged_at_height,
+            } => {
+                let key = (*namespace_id, *vault_id);
+                if *healthy {
+                    // Mark vault as healthy
+                    state.vault_health.insert(key, VaultHealthStatus::Healthy);
+                    tracing::info!(
+                        namespace_id,
+                        vault_id,
+                        "Vault health updated to Healthy via Raft"
+                    );
+                } else {
+                    // Mark vault as diverged
+                    let expected = expected_root.unwrap_or(ledger_types::ZERO_HASH);
+                    let computed = computed_root.unwrap_or(ledger_types::ZERO_HASH);
+                    let at_height = diverged_at_height.unwrap_or(0);
+                    state.vault_health.insert(
+                        key,
+                        VaultHealthStatus::Diverged {
+                            expected,
+                            computed,
+                            at_height,
+                        },
+                    );
+                    tracing::warn!(
+                        namespace_id,
+                        vault_id,
+                        at_height,
+                        "Vault health updated to Diverged via Raft"
+                    );
+                }
+                (LedgerResponse::VaultHealthUpdated { success: true }, None)
             }
 
             LedgerRequest::System(system_request) => {
@@ -985,20 +1031,19 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             // Update previous vault hashes for each entry
             for entry in &vault_entries {
-                let vault_block = shard_block.extract_vault_block(entry.namespace_id, entry.vault_id);
+                let vault_block =
+                    shard_block.extract_vault_block(entry.namespace_id, entry.vault_id);
                 if let Some(vb) = vault_block {
                     let block_hash = ledger_types::hash::block_hash(&vb.header);
-                    state.previous_vault_hashes.insert(
-                        (entry.namespace_id, entry.vault_id),
-                        block_hash,
-                    );
+                    state
+                        .previous_vault_hashes
+                        .insert((entry.namespace_id, entry.vault_id), block_hash);
                 }
             }
 
             // Update shard chain tracking
-            let shard_hash = ledger_types::sha256(
-                &postcard::to_allocvec(&shard_block).unwrap_or_default(),
-            );
+            let shard_hash =
+                ledger_types::sha256(&postcard::to_allocvec(&shard_block).unwrap_or_default());
             *self.shard_height.write() = new_shard_height;
             *self.previous_shard_hash.write() = shard_hash;
 
@@ -1306,6 +1351,97 @@ mod tests {
                 assert!(message.contains("diverged"));
             }
             _ => panic!("expected error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_vault_health_to_healthy() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.redb");
+
+        let store = RaftLogStore::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Start with a diverged vault
+        state.vault_health.insert(
+            (1, 1),
+            VaultHealthStatus::Diverged {
+                expected: [1u8; 32],
+                computed: [2u8; 32],
+                at_height: 10,
+            },
+        );
+
+        // Update to healthy
+        let request = LedgerRequest::UpdateVaultHealth {
+            namespace_id: 1,
+            vault_id: 1,
+            healthy: true,
+            expected_root: None,
+            computed_root: None,
+            diverged_at_height: None,
+        };
+
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::VaultHealthUpdated { success } => {
+                assert!(success);
+            }
+            _ => panic!("expected VaultHealthUpdated response"),
+        }
+
+        // Verify vault is now healthy
+        assert_eq!(
+            state.vault_health.get(&(1, 1)),
+            Some(&VaultHealthStatus::Healthy)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_vault_health_to_diverged() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.redb");
+
+        let store = RaftLogStore::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Start healthy
+        state
+            .vault_health
+            .insert((1, 1), VaultHealthStatus::Healthy);
+
+        // Update to diverged
+        let request = LedgerRequest::UpdateVaultHealth {
+            namespace_id: 1,
+            vault_id: 1,
+            healthy: false,
+            expected_root: Some([0xAA; 32]),
+            computed_root: Some([0xBB; 32]),
+            diverged_at_height: Some(42),
+        };
+
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::VaultHealthUpdated { success } => {
+                assert!(success);
+            }
+            _ => panic!("expected VaultHealthUpdated response"),
+        }
+
+        // Verify vault is now diverged with correct values
+        match state.vault_health.get(&(1, 1)) {
+            Some(VaultHealthStatus::Diverged {
+                expected,
+                computed,
+                at_height,
+            }) => {
+                assert_eq!(*expected, [0xAA; 32]);
+                assert_eq!(*computed, [0xBB; 32]);
+                assert_eq!(*at_height, 42);
+            }
+            _ => panic!("expected Diverged health status"),
         }
     }
 
@@ -1675,5 +1811,412 @@ mod tests {
         assert_eq!(counters.namespace, 1, "Namespace counter should start at 1");
         assert_eq!(counters.vault, 1, "Vault counter should start at 1");
         assert_eq!(counters.user, 1, "User counter should start at 1");
+    }
+
+    // ========================================================================
+    // State Machine Integration Tests
+    // ========================================================================
+    //
+    // These tests verify the full state machine flow including StateLayer
+    // integration, block creation, and snapshot persistence.
+
+    /// Test that Write with transactions produces a VaultEntry with proper fields.
+    ///
+    /// This verifies the critical path: Write → apply → VaultEntry creation.
+    #[tokio::test]
+    async fn test_write_produces_vault_entry() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.redb");
+
+        let store = RaftLogStore::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Setup: create namespace and vault
+        store.apply_request(
+            &LedgerRequest::CreateNamespace {
+                name: "test".to_string(),
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: 1,
+                name: Some("vault1".to_string()),
+            },
+            &mut state,
+        );
+
+        // Apply a write with transactions
+        let tx = ledger_types::Transaction {
+            id: [1u8; 16],
+            client_id: "test-client".to_string(),
+            sequence: 1,
+            operations: vec![ledger_types::Operation::SetEntity {
+                key: "key1".to_string(),
+                value: b"value1".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+            actor: "test-actor".to_string(),
+        };
+
+        let request = LedgerRequest::Write {
+            namespace_id: 1,
+            vault_id: 1,
+            transactions: vec![tx],
+        };
+
+        let (response, vault_entry) = store.apply_request(&request, &mut state);
+
+        // Verify response
+        match response {
+            LedgerResponse::Write { block_height, .. } => {
+                assert_eq!(block_height, 1, "First write should be height 1");
+            }
+            _ => panic!("Expected Write response"),
+        }
+
+        // Verify VaultEntry was created
+        let entry = vault_entry.expect("VaultEntry should be created");
+        assert_eq!(entry.namespace_id, 1);
+        assert_eq!(entry.vault_id, 1);
+        assert_eq!(entry.vault_height, 1);
+        assert_eq!(entry.transactions.len(), 1);
+        // state_root and tx_merkle_root will be ZERO_HASH without StateLayer configured
+        // but the structure should be correct
+    }
+
+    /// Test that shard_height is tracked in AppliedState for snapshot persistence.
+    #[tokio::test]
+    async fn test_shard_height_tracked_in_applied_state() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.redb");
+
+        let store = RaftLogStore::open(&path).expect("open store");
+
+        // Initial shard height should be 0
+        assert_eq!(store.current_shard_height(), 0);
+
+        // After applying entries, shard height should increment
+        // Note: full shard height increment requires apply_to_state_machine
+        // which creates ShardBlocks. This test verifies the accessor.
+        let state = store.applied_state.read();
+        assert_eq!(state.shard_height, 0, "Initial shard height should be 0");
+    }
+
+    /// Test that AppliedState serialization preserves all fields including shard tracking.
+    #[tokio::test]
+    async fn test_applied_state_snapshot_round_trip() {
+        use openraft::StoredMembership;
+
+        let mut original = AppliedState {
+            last_applied: Some(make_log_id(1, 10)),
+            membership: StoredMembership::default(),
+            sequences: SequenceCounters::new(),
+            vault_heights: HashMap::new(),
+            vault_health: HashMap::new(),
+            previous_vault_hashes: HashMap::new(),
+            namespaces: HashMap::new(),
+            vaults: HashMap::new(),
+            shard_height: 42,
+            previous_shard_hash: [0xAB; 32],
+        };
+
+        // Add some data
+        original.sequences.next_namespace();
+        original.sequences.next_vault();
+        original.vault_heights.insert((1, 1), 100);
+        original.vault_heights.insert((1, 2), 50);
+        original.vault_health.insert(
+            (2, 1),
+            VaultHealthStatus::Diverged {
+                expected: [1u8; 32],
+                computed: [2u8; 32],
+                at_height: 10,
+            },
+        );
+        original.previous_vault_hashes.insert((1, 1), [0xCD; 32]);
+        original.namespaces.insert(
+            1,
+            NamespaceMeta {
+                namespace_id: 1,
+                shard_id: 0,
+                name: "test-ns".to_string(),
+                deleted: false,
+            },
+        );
+        original.vaults.insert(
+            (1, 1),
+            VaultMeta {
+                namespace_id: 1,
+                vault_id: 1,
+                name: Some("test-vault".to_string()),
+                deleted: false,
+                last_write_timestamp: 1234567899,
+            },
+        );
+
+        // Serialize and deserialize
+        let bytes = bincode::serialize(&original).expect("serialize");
+        let restored: AppliedState = bincode::deserialize(&bytes).expect("deserialize");
+
+        // Verify key fields restored
+        assert_eq!(restored.sequences, original.sequences);
+        assert_eq!(restored.vault_heights, original.vault_heights);
+        assert_eq!(restored.vault_health, original.vault_health);
+        assert_eq!(
+            restored.previous_vault_hashes,
+            original.previous_vault_hashes
+        );
+        assert_eq!(restored.shard_height, 42, "shard_height must be preserved");
+        assert_eq!(
+            restored.previous_shard_hash, [0xAB; 32],
+            "previous_shard_hash must be preserved"
+        );
+        // Verify namespace and vault counts (HashMaps don't implement PartialEq for complex types)
+        assert_eq!(restored.namespaces.len(), 1);
+        assert_eq!(restored.vaults.len(), 1);
+        assert!(restored.namespaces.contains_key(&1));
+        assert!(restored.vaults.contains_key(&(1, 1)));
+    }
+
+    /// Test that AppliedStateAccessor provides correct data.
+    #[tokio::test]
+    async fn test_applied_state_accessor() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.redb");
+
+        let store = RaftLogStore::open(&path).expect("open store");
+        let accessor = store.accessor();
+
+        // Setup some state
+        {
+            let mut state = store.applied_state.write();
+            state.vault_heights.insert((1, 1), 42);
+            state.vault_heights.insert((1, 2), 100);
+            state.shard_height = 99;
+            state.namespaces.insert(
+                1,
+                NamespaceMeta {
+                    namespace_id: 1,
+                    shard_id: 0,
+                    name: "test".to_string(),
+                    deleted: false,
+                },
+            );
+        }
+
+        // Test accessor methods
+        assert_eq!(accessor.vault_height(1, 1), 42);
+        assert_eq!(accessor.vault_height(1, 2), 100);
+        assert_eq!(accessor.vault_height(1, 99), 0); // Non-existent returns 0
+        assert_eq!(accessor.shard_height(), 99);
+
+        let all_heights = accessor.all_vault_heights();
+        assert_eq!(all_heights.len(), 2);
+        assert_eq!(all_heights.get(&(1, 1)), Some(&42));
+
+        assert!(accessor.get_namespace(1).is_some());
+        assert!(accessor.get_namespace(99).is_none());
+    }
+
+    // ========================================================================
+    // Snapshot Install Tests
+    // ========================================================================
+    //
+    // These tests verify that snapshot installation correctly restores state,
+    // which is critical for follower catch-up and cluster recovery.
+
+    /// Test that snapshot install restores all AppliedState fields.
+    ///
+    /// This test directly creates a CombinedSnapshot and verifies install_snapshot
+    /// correctly restores all state including shard tracking.
+    #[tokio::test]
+    async fn test_snapshot_install_restores_state() {
+        use openraft::{SnapshotMeta, StoredMembership};
+        use std::io::Cursor;
+
+        // Build a CombinedSnapshot with realistic data
+        let mut applied_state = AppliedState {
+            last_applied: Some(make_log_id(1, 100)),
+            membership: StoredMembership::default(),
+            sequences: SequenceCounters::new(),
+            vault_heights: HashMap::new(),
+            vault_health: HashMap::new(),
+            previous_vault_hashes: HashMap::new(),
+            namespaces: HashMap::new(),
+            vaults: HashMap::new(),
+            shard_height: 55,
+            previous_shard_hash: [0xBE; 32],
+        };
+
+        // Add state data
+        applied_state.sequences.next_namespace();
+        applied_state.sequences.next_namespace();
+        applied_state.sequences.next_vault();
+        applied_state.vault_heights.insert((1, 1), 42);
+        applied_state.vault_heights.insert((1, 2), 100);
+        applied_state.namespaces.insert(
+            1,
+            NamespaceMeta {
+                namespace_id: 1,
+                shard_id: 0,
+                name: "production".to_string(),
+                deleted: false,
+            },
+        );
+        applied_state.namespaces.insert(
+            2,
+            NamespaceMeta {
+                namespace_id: 2,
+                shard_id: 0,
+                name: "staging".to_string(),
+                deleted: false,
+            },
+        );
+        applied_state.vaults.insert(
+            (1, 1),
+            VaultMeta {
+                namespace_id: 1,
+                vault_id: 1,
+                name: Some("main-vault".to_string()),
+                deleted: false,
+                last_write_timestamp: 1234567890,
+            },
+        );
+
+        let combined = CombinedSnapshot {
+            applied_state,
+            vault_entities: HashMap::new(),
+        };
+
+        let snapshot_data = bincode::serialize(&combined).expect("serialize snapshot");
+
+        // Create target store (simulating a new follower)
+        let target_dir = tempdir().expect("create target dir");
+        let mut target_store =
+            RaftLogStore::open(target_dir.path().join("raft.redb")).expect("open target");
+
+        // Verify initial state is empty
+        assert_eq!(target_store.current_shard_height(), 0);
+        assert!(target_store.applied_state.read().vault_heights.is_empty());
+
+        // Install snapshot on target
+        let meta = SnapshotMeta {
+            last_log_id: Some(make_log_id(1, 100)),
+            last_membership: StoredMembership::default(),
+            snapshot_id: "test-snapshot".to_string(),
+        };
+        target_store
+            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
+            .await
+            .expect("install snapshot");
+
+        // Verify state was restored
+        let restored = target_store.applied_state.read();
+
+        // Check sequence counters
+        assert_eq!(
+            restored.sequences.namespace, 3,
+            "namespace counter should be restored"
+        );
+        assert_eq!(
+            restored.sequences.vault, 2,
+            "vault counter should be restored"
+        );
+
+        // Check vault heights
+        assert_eq!(restored.vault_heights.get(&(1, 1)), Some(&42));
+        assert_eq!(restored.vault_heights.get(&(1, 2)), Some(&100));
+
+        // Check shard tracking
+        assert_eq!(restored.shard_height, 55, "shard_height should be restored");
+        assert_eq!(
+            restored.previous_shard_hash, [0xBE; 32],
+            "previous_shard_hash should be restored"
+        );
+
+        // Check namespace registry
+        assert_eq!(restored.namespaces.len(), 2);
+        let ns1 = restored
+            .namespaces
+            .get(&1)
+            .expect("namespace 1 should exist");
+        assert_eq!(ns1.name, "production");
+
+        // Check vault registry
+        assert_eq!(restored.vaults.len(), 1);
+        let v1 = restored
+            .vaults
+            .get(&(1, 1))
+            .expect("vault (1,1) should exist");
+        assert_eq!(v1.name, Some("main-vault".to_string()));
+
+        // Verify the target store's runtime fields are also updated
+        drop(restored);
+        assert_eq!(target_store.current_shard_height(), 55);
+    }
+
+    /// Test that snapshot install on empty store works correctly.
+    #[tokio::test]
+    async fn test_snapshot_install_on_fresh_node() {
+        use openraft::{SnapshotMeta, StoredMembership};
+        use std::io::Cursor;
+
+        // Create a minimal CombinedSnapshot
+        let combined = CombinedSnapshot {
+            applied_state: AppliedState {
+                last_applied: Some(make_log_id(2, 50)),
+                membership: StoredMembership::default(),
+                sequences: SequenceCounters {
+                    namespace: 5,
+                    vault: 10,
+                    user: 3,
+                },
+                vault_heights: {
+                    let mut h = HashMap::new();
+                    h.insert((1, 1), 25);
+                    h
+                },
+                vault_health: HashMap::new(),
+                previous_vault_hashes: HashMap::new(),
+                namespaces: HashMap::new(),
+                vaults: HashMap::new(),
+                shard_height: 30,
+                previous_shard_hash: [0xAA; 32],
+            },
+            vault_entities: HashMap::new(),
+        };
+
+        let snapshot_data = bincode::serialize(&combined).expect("serialize snapshot");
+
+        // Fresh node
+        let dir = tempdir().expect("create dir");
+        let mut store = RaftLogStore::open(dir.path().join("raft.redb")).expect("open");
+
+        // Verify initial state is empty
+        assert_eq!(store.current_shard_height(), 0);
+        assert!(store.applied_state.read().vault_heights.is_empty());
+
+        // Install snapshot
+        let meta = SnapshotMeta {
+            last_log_id: Some(make_log_id(2, 50)),
+            last_membership: StoredMembership::default(),
+            snapshot_id: "fresh-install".to_string(),
+        };
+        store
+            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
+            .await
+            .expect("install");
+
+        // Verify state
+        assert_eq!(store.current_shard_height(), 30);
+        assert_eq!(store.applied_state.read().sequences.namespace, 5);
+        assert_eq!(store.applied_state.read().sequences.vault, 10);
+        assert_eq!(
+            store.applied_state.read().vault_heights.get(&(1, 1)),
+            Some(&25)
+        );
     }
 }

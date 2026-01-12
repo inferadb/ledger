@@ -10,16 +10,18 @@ use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
 use crate::log_storage::AppliedStateAccessor;
+use crate::log_storage::VaultHealthStatus;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
     BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember, ClusterMemberRole,
-    CreateNamespaceRequest, CreateNamespaceResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, CreateVaultRequest, CreateVaultResponse, DeleteNamespaceRequest,
-    DeleteNamespaceResponse, DeleteVaultRequest, DeleteVaultResponse, GetClusterInfoRequest,
-    GetClusterInfoResponse, GetNamespaceRequest, GetNamespaceResponse, GetVaultRequest,
-    GetVaultResponse, Hash, IntegrityIssue, JoinClusterRequest, JoinClusterResponse,
-    LeaveClusterRequest, LeaveClusterResponse, ListNamespacesRequest, ListNamespacesResponse,
-    ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, ShardId, VaultId,
+    CreateNamespaceRequest, CreateNamespaceResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    CreateVaultRequest, CreateVaultResponse, DeleteNamespaceRequest, DeleteNamespaceResponse,
+    DeleteVaultRequest, DeleteVaultResponse, GetClusterInfoRequest, GetClusterInfoResponse,
+    GetNamespaceRequest, GetNamespaceResponse, GetVaultRequest, GetVaultResponse, Hash,
+    IntegrityIssue, JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest,
+    LeaveClusterResponse, ListNamespacesRequest, ListNamespacesResponse, ListVaultsRequest,
+    ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest, RecoverVaultResponse, ShardId,
+    VaultHealthProto, VaultId,
 };
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
@@ -231,9 +233,7 @@ impl AdminService for AdminServiceImpl {
 
                 // Compute empty state root for genesis block
                 let state = self.state.read();
-                let state_root = state
-                    .compute_state_root(vault_id)
-                    .unwrap_or(ZERO_HASH);
+                let state_root = state.compute_state_root(vault_id).unwrap_or(ZERO_HASH);
 
                 // Build genesis block header (height 0)
                 let genesis = BlockHeader {
@@ -397,8 +397,11 @@ impl AdminService for AdminServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("Snapshot error: {}", e)))?;
 
+        // Get actual shard height from applied state
+        let block_height = self.applied_state.shard_height();
+
         Ok(Response::new(CreateSnapshotResponse {
-            block_height: 0, // TODO: Get actual height
+            block_height,
             state_root: None,
             snapshot_path: format!("/snapshots/snapshot_{}", chrono::Utc::now().timestamp()),
         }))
@@ -415,23 +418,23 @@ impl AdminService for AdminServiceImpl {
         let vault_id = req.vault_id.as_ref().map(|v| v.id);
 
         // Get all vault heights to check
-        let vault_heights: Vec<(i64, i64, u64)> = if let (Some(ns), Some(v)) = (namespace_id, vault_id)
-        {
-            // Specific vault
-            let height = self.applied_state.vault_height(ns, v);
-            if height > 0 {
-                vec![(ns, v, height)]
+        let vault_heights: Vec<(i64, i64, u64)> =
+            if let (Some(ns), Some(v)) = (namespace_id, vault_id) {
+                // Specific vault
+                let height = self.applied_state.vault_height(ns, v);
+                if height > 0 {
+                    vec![(ns, v, height)]
+                } else {
+                    vec![]
+                }
             } else {
-                vec![]
-            }
-        } else {
-            // All vaults
-            self.applied_state
-                .all_vault_heights()
-                .into_iter()
-                .map(|((ns, v), h)| (ns, v, h))
-                .collect()
-        };
+                // All vaults
+                self.applied_state
+                    .all_vault_heights()
+                    .into_iter()
+                    .map(|((ns, v), h)| (ns, v, h))
+                    .collect()
+            };
 
         if vault_heights.is_empty() {
             return Ok(Response::new(CheckIntegrityResponse {
@@ -447,7 +450,7 @@ impl AdminService for AdminServiceImpl {
                 None => {
                     return Err(Status::unavailable(
                         "Block archive not configured for full integrity check",
-                    ))
+                    ));
                 }
             };
 
@@ -670,44 +673,153 @@ impl AdminService for AdminServiceImpl {
             addr: req.address.clone(),
         };
 
-        // Step 1: Add as learner (blocking=true to wait for replication to start)
-        match self.raft.add_learner(req.node_id, node, true).await {
-            Ok(_) => {
-                tracing::info!(node_id = req.node_id, "Added node as learner");
+        // Check if node is already in the membership (idempotent handling)
+        let current_membership = metrics.membership_config.membership();
+        let already_voter = current_membership.voter_ids().any(|id| id == req.node_id);
+        let already_in_membership = current_membership.nodes().any(|(id, _)| *id == req.node_id);
+
+        if already_voter {
+            // Already a voter, nothing to do
+            return Ok(Response::new(JoinClusterResponse {
+                success: true,
+                message: "Node is already a voter in the cluster".to_string(),
+                leader_id: metrics.id,
+                leader_address: String::new(),
+            }));
+        }
+
+        // Step 1: Add as learner if not already in membership
+        // Use blocking=false so we don't wait for replication - the new node
+        // might not be ready yet. We'll wait for the config change to commit below.
+        // Retry with backoff if there's a pending config change.
+        if !already_in_membership {
+            let mut add_success = false;
+            for attempt in 0..10 {
+                match self
+                    .raft
+                    .add_learner(req.node_id, node.clone(), false)
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(node_id = req.node_id, "Initiated add_learner");
+                        add_success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        let err_str = format!("{}", e);
+                        if err_str.contains("already undergoing a configuration change") {
+                            tracing::info!(
+                                node_id = req.node_id,
+                                attempt,
+                                "Config change in progress, retrying"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                100 * (attempt + 1) as u64,
+                            ))
+                            .await;
+                        } else {
+                            return Ok(Response::new(JoinClusterResponse {
+                                success: false,
+                                message: format!("Failed to add learner: {}", e),
+                                leader_id: metrics.id,
+                                leader_address: String::new(),
+                            }));
+                        }
+                    }
+                }
             }
-            Err(e) => {
+            if !add_success {
                 return Ok(Response::new(JoinClusterResponse {
                     success: false,
-                    message: format!("Failed to add learner: {}", e),
+                    message: "Timeout: cluster membership changes not completing".to_string(),
                     leader_id: metrics.id,
                     leader_address: String::new(),
                 }));
             }
+        } else {
+            tracing::info!(
+                node_id = req.node_id,
+                "Node already in membership as learner"
+            );
         }
 
-        // Step 2: Promote to voter by changing membership
-        // Get current voters and add the new node
-        let current_membership = metrics.membership_config.membership();
-        let mut new_voters: BTreeSet<u64> = current_membership.voter_ids().collect();
-        new_voters.insert(req.node_id);
+        // Step 2: Wait for the learner membership change to commit
+        // OpenRaft requires serialized membership changes - we must wait for the
+        // add_learner to commit before we can change_membership
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
 
-        match self.raft.change_membership(new_voters, false).await {
-            Ok(_) => {
-                tracing::info!(node_id = req.node_id, "Promoted node to voter");
-                Ok(Response::new(JoinClusterResponse {
-                    success: true,
-                    message: "Node joined cluster successfully".to_string(),
+        loop {
+            let fresh_metrics = self.raft.metrics().borrow().clone();
+            let membership = fresh_metrics.membership_config.membership();
+
+            // Check if the node is now in the membership as a learner
+            let is_in_membership = membership.nodes().any(|(id, _)| *id == req.node_id);
+
+            if is_in_membership {
+                break;
+            }
+
+            if start.elapsed() > timeout {
+                return Ok(Response::new(JoinClusterResponse {
+                    success: false,
+                    message: "Timeout waiting for learner membership to commit".to_string(),
                     leader_id: metrics.id,
                     leader_address: String::new(),
-                }))
+                }));
             }
-            Err(e) => Ok(Response::new(JoinClusterResponse {
-                success: false,
-                message: format!("Failed to promote to voter: {}", e),
-                leader_id: metrics.id,
-                leader_address: String::new(),
-            })),
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+
+        // Step 3: Promote to voter by changing membership
+        // Retry with backoff if there's still a pending config change
+        for attempt in 0..10 {
+            let fresh_metrics = self.raft.metrics().borrow().clone();
+            let current_membership = fresh_metrics.membership_config.membership();
+            let mut new_voters: BTreeSet<u64> = current_membership.voter_ids().collect();
+            new_voters.insert(req.node_id);
+
+            match self.raft.change_membership(new_voters, false).await {
+                Ok(_) => {
+                    tracing::info!(node_id = req.node_id, "Promoted node to voter");
+                    return Ok(Response::new(JoinClusterResponse {
+                        success: true,
+                        message: "Node joined cluster successfully".to_string(),
+                        leader_id: fresh_metrics.id,
+                        leader_address: String::new(),
+                    }));
+                }
+                Err(e) => {
+                    let err_str = format!("{}", e);
+                    if err_str.contains("already undergoing a configuration change") {
+                        tracing::info!(
+                            node_id = req.node_id,
+                            attempt,
+                            "Config change in progress for promotion, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100 * (attempt + 1) as u64,
+                        ))
+                        .await;
+                    } else {
+                        return Ok(Response::new(JoinClusterResponse {
+                            success: false,
+                            message: format!("Failed to promote to voter: {}", e),
+                            leader_id: fresh_metrics.id,
+                            leader_address: String::new(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(Response::new(JoinClusterResponse {
+            success: false,
+            message: "Timeout: could not complete voter promotion".to_string(),
+            leader_id: metrics.id,
+            leader_address: String::new(),
+        }))
     }
 
     async fn leave_cluster(
@@ -790,6 +902,301 @@ impl AdminService for AdminServiceImpl {
             term: metrics.vote.leader_id().term,
         }))
     }
+
+    // =========================================================================
+    // Vault Recovery
+    // =========================================================================
+
+    async fn recover_vault(
+        &self,
+        request: Request<RecoverVaultRequest>,
+    ) -> Result<Response<RecoverVaultResponse>, Status> {
+        let req = request.into_inner();
+
+        let namespace_id = req
+            .namespace_id
+            .as_ref()
+            .map(|n| n.id)
+            .ok_or_else(|| Status::invalid_argument("namespace_id required"))?;
+        let vault_id = req
+            .vault_id
+            .as_ref()
+            .map(|v| v.id)
+            .ok_or_else(|| Status::invalid_argument("vault_id required"))?;
+
+        // Check current vault health
+        let current_health = self.applied_state.vault_health(namespace_id, vault_id);
+
+        // Only recover diverged vaults unless force is set
+        if !req.force {
+            match &current_health {
+                VaultHealthStatus::Healthy => {
+                    return Ok(Response::new(RecoverVaultResponse {
+                        success: false,
+                        message: "Vault is already healthy. Use force=true to recover anyway."
+                            .to_string(),
+                        health_status: VaultHealthProto::Healthy.into(),
+                        final_height: self.applied_state.vault_height(namespace_id, vault_id),
+                        final_state_root: None,
+                    }));
+                }
+                VaultHealthStatus::Diverged { .. } => {
+                    // Proceed with recovery
+                }
+            }
+        }
+
+        // Require block archive for recovery
+        let archive = match &self.block_archive {
+            Some(a) => a,
+            None => {
+                return Err(Status::unavailable(
+                    "Block archive not configured, cannot recover vault",
+                ));
+            }
+        };
+
+        // Get expected height from applied state
+        let expected_height = self.applied_state.vault_height(namespace_id, vault_id);
+        if expected_height == 0 {
+            return Ok(Response::new(RecoverVaultResponse {
+                success: false,
+                message: "Vault has no blocks to recover".to_string(),
+                health_status: VaultHealthProto::Healthy.into(),
+                final_height: 0,
+                final_state_root: None,
+            }));
+        }
+
+        tracing::info!(
+            namespace_id,
+            vault_id,
+            expected_height,
+            "Starting vault recovery"
+        );
+
+        // Step 1: Clear vault state
+        {
+            let state = self.state.write();
+            if let Err(e) = state.clear_vault(vault_id) {
+                return Ok(Response::new(RecoverVaultResponse {
+                    success: false,
+                    message: format!("Failed to clear vault state: {:?}", e),
+                    health_status: VaultHealthProto::Diverged.into(),
+                    final_height: 0,
+                    final_state_root: None,
+                }));
+            }
+        }
+
+        // Step 2: Replay blocks from archive
+        let mut last_vault_hash: Option<[u8; 32]> = None;
+        let mut divergence_detected = false;
+        let mut final_state_root = ZERO_HASH;
+
+        for height in 1..=expected_height {
+            // Find shard height for this vault height
+            let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
+                Ok(Some(h)) => h,
+                Ok(None) => {
+                    return Ok(Response::new(RecoverVaultResponse {
+                        success: false,
+                        message: format!(
+                            "Block not found in archive: ns={}, vault={}, height={}",
+                            namespace_id, vault_id, height
+                        ),
+                        health_status: VaultHealthProto::Diverged.into(),
+                        final_height: height - 1,
+                        final_state_root: Some(Hash {
+                            value: final_state_root.to_vec(),
+                        }),
+                    }));
+                }
+                Err(e) => {
+                    return Ok(Response::new(RecoverVaultResponse {
+                        success: false,
+                        message: format!("Index lookup failed at height {}: {:?}", height, e),
+                        health_status: VaultHealthProto::Diverged.into(),
+                        final_height: height - 1,
+                        final_state_root: Some(Hash {
+                            value: final_state_root.to_vec(),
+                        }),
+                    }));
+                }
+            };
+
+            // Read the shard block
+            let shard_block = match archive.read_block(shard_height) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Ok(Response::new(RecoverVaultResponse {
+                        success: false,
+                        message: format!("Block read failed at height {}: {:?}", height, e),
+                        health_status: VaultHealthProto::Diverged.into(),
+                        final_height: height - 1,
+                        final_state_root: Some(Hash {
+                            value: final_state_root.to_vec(),
+                        }),
+                    }));
+                }
+            };
+
+            // Find the vault entry
+            let entry = match shard_block.vault_entries.iter().find(|e| {
+                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+            }) {
+                Some(e) => e,
+                None => {
+                    return Ok(Response::new(RecoverVaultResponse {
+                        success: false,
+                        message: format!(
+                            "Vault entry not found in shard block at height {}",
+                            height
+                        ),
+                        health_status: VaultHealthProto::Diverged.into(),
+                        final_height: height - 1,
+                        final_state_root: Some(Hash {
+                            value: final_state_root.to_vec(),
+                        }),
+                    }));
+                }
+            };
+
+            // Verify chain continuity
+            if let Some(expected_prev) = last_vault_hash {
+                if entry.previous_vault_hash != expected_prev {
+                    tracing::warn!(
+                        height,
+                        "Chain break detected during recovery: expected {:x?}, got {:x?}",
+                        &expected_prev[..8],
+                        &entry.previous_vault_hash[..8]
+                    );
+                }
+            }
+
+            // Apply transactions
+            {
+                let state = self.state.write();
+                for tx in &entry.transactions {
+                    if let Err(e) = state.apply_operations(vault_id, &tx.operations, height) {
+                        return Ok(Response::new(RecoverVaultResponse {
+                            success: false,
+                            message: format!(
+                                "Transaction apply failed at height {}: {:?}",
+                                height, e
+                            ),
+                            health_status: VaultHealthProto::Diverged.into(),
+                            final_height: height - 1,
+                            final_state_root: Some(Hash {
+                                value: final_state_root.to_vec(),
+                            }),
+                        }));
+                    }
+                }
+
+                // Compute and verify state root
+                match state.compute_state_root(vault_id) {
+                    Ok(computed_root) => {
+                        if computed_root != entry.state_root {
+                            tracing::error!(
+                                height,
+                                "State divergence reproduced during recovery: computed {:x?}, expected {:x?}",
+                                &computed_root[..8],
+                                &entry.state_root[..8]
+                            );
+                            divergence_detected = true;
+                            // Continue anyway to see if it recovers
+                        }
+                        final_state_root = computed_root;
+                    }
+                    Err(e) => {
+                        return Ok(Response::new(RecoverVaultResponse {
+                            success: false,
+                            message: format!(
+                                "State root computation failed at height {}: {:?}",
+                                height, e
+                            ),
+                            health_status: VaultHealthProto::Diverged.into(),
+                            final_height: height - 1,
+                            final_state_root: Some(Hash {
+                                value: final_state_root.to_vec(),
+                            }),
+                        }));
+                    }
+                }
+            }
+
+            // Track hash for next iteration
+            last_vault_hash = Some(compute_vault_block_hash(entry));
+        }
+
+        // Step 3: Update vault health based on recovery result via Raft
+        if divergence_detected {
+            tracing::error!(
+                namespace_id,
+                vault_id,
+                "Recovery reproduced divergence - possible determinism bug"
+            );
+
+            // Update vault health to Diverged via Raft for cluster-wide consistency
+            let health_request = LedgerRequest::UpdateVaultHealth {
+                namespace_id,
+                vault_id,
+                healthy: false,
+                expected_root: None, // Already diverged during recovery
+                computed_root: Some(final_state_root),
+                diverged_at_height: Some(expected_height),
+            };
+
+            if let Err(e) = self.raft.client_write(health_request).await {
+                tracing::error!("Failed to update vault health via Raft: {}", e);
+                // Continue with response - the local state will be inconsistent but
+                // the next recovery attempt can retry
+            }
+
+            Ok(Response::new(RecoverVaultResponse {
+                success: false,
+                message: "Recovery reproduced divergence - possible determinism bug. Manual investigation required.".to_string(),
+                health_status: VaultHealthProto::Diverged.into(),
+                final_height: expected_height,
+                final_state_root: Some(Hash {
+                    value: final_state_root.to_vec(),
+                }),
+            }))
+        } else {
+            tracing::info!(
+                namespace_id,
+                vault_id,
+                expected_height,
+                "Vault recovery successful"
+            );
+
+            // Update vault health to Healthy via Raft for cluster-wide consistency
+            let health_request = LedgerRequest::UpdateVaultHealth {
+                namespace_id,
+                vault_id,
+                healthy: true,
+                expected_root: None,
+                computed_root: None,
+                diverged_at_height: None,
+            };
+
+            if let Err(e) = self.raft.client_write(health_request).await {
+                tracing::error!("Failed to update vault health via Raft: {}", e);
+                // The vault was successfully recovered locally - log error but return success
+            }
+
+            Ok(Response::new(RecoverVaultResponse {
+                success: true,
+                message: "Vault recovered successfully".to_string(),
+                health_status: VaultHealthProto::Healthy.into(),
+                final_height: expected_height,
+                final_state_root: Some(Hash {
+                    value: final_state_root.to_vec(),
+                }),
+            }))
+        }
+    }
 }
 
 /// Compute the hash of a vault block entry for chain verification.
@@ -803,9 +1210,195 @@ fn compute_vault_block_hash(entry: &VaultEntry) -> [u8; 32] {
     hasher.update(entry.namespace_id.to_le_bytes());
     hasher.update(entry.vault_id.to_le_bytes());
     hasher.update(entry.vault_height.to_le_bytes());
-    hasher.update(&entry.previous_vault_hash);
-    hasher.update(&entry.tx_merkle_root);
-    hasher.update(&entry.state_root);
+    hasher.update(entry.previous_vault_hash);
+    hasher.update(entry.tx_merkle_root);
+    hasher.update(entry.state_root);
 
     hasher.finalize().into()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // compute_vault_block_hash Tests
+    // =========================================================================
+
+    #[test]
+    fn test_vault_block_hash_deterministic() {
+        // Same input should always produce the same hash
+        let entry = VaultEntry {
+            namespace_id: 1,
+            vault_id: 2,
+            vault_height: 10,
+            previous_vault_hash: [0u8; 32],
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [0u8; 32],
+        };
+
+        let hash1 = compute_vault_block_hash(&entry);
+        let hash2 = compute_vault_block_hash(&entry);
+
+        assert_eq!(hash1, hash2, "Hash must be deterministic");
+    }
+
+    #[test]
+    fn test_vault_block_hash_different_for_different_inputs() {
+        let entry1 = VaultEntry {
+            namespace_id: 1,
+            vault_id: 2,
+            vault_height: 10,
+            previous_vault_hash: [0u8; 32],
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [0u8; 32],
+        };
+
+        let entry2 = VaultEntry {
+            namespace_id: 1,
+            vault_id: 2,
+            vault_height: 11, // Different height
+            previous_vault_hash: [0u8; 32],
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [0u8; 32],
+        };
+
+        let hash1 = compute_vault_block_hash(&entry1);
+        let hash2 = compute_vault_block_hash(&entry2);
+
+        assert_ne!(
+            hash1, hash2,
+            "Different inputs should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_vault_block_hash_different_state_root() {
+        let entry1 = VaultEntry {
+            namespace_id: 1,
+            vault_id: 2,
+            vault_height: 10,
+            previous_vault_hash: [0u8; 32],
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [0u8; 32],
+        };
+
+        let entry2 = VaultEntry {
+            namespace_id: 1,
+            vault_id: 2,
+            vault_height: 10,
+            previous_vault_hash: [0u8; 32],
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [1u8; 32], // Different state root
+        };
+
+        let hash1 = compute_vault_block_hash(&entry1);
+        let hash2 = compute_vault_block_hash(&entry2);
+
+        assert_ne!(
+            hash1, hash2,
+            "Different state_root should produce different hash"
+        );
+    }
+
+    #[test]
+    fn test_vault_block_hash_chain_continuity() {
+        // Simulate a chain of blocks
+        let entry1 = VaultEntry {
+            namespace_id: 1,
+            vault_id: 1,
+            vault_height: 1,
+            previous_vault_hash: ZERO_HASH, // Genesis block
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [1u8; 32],
+        };
+
+        let hash1 = compute_vault_block_hash(&entry1);
+
+        let entry2 = VaultEntry {
+            namespace_id: 1,
+            vault_id: 1,
+            vault_height: 2,
+            previous_vault_hash: hash1, // Chain to previous block
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [2u8; 32],
+        };
+
+        let hash2 = compute_vault_block_hash(&entry2);
+
+        // Verify the hash commits to the chain
+        assert_ne!(hash1, hash2);
+
+        // If we create entry2 with wrong previous_vault_hash, it should differ
+        let entry2_wrong = VaultEntry {
+            namespace_id: 1,
+            vault_id: 1,
+            vault_height: 2,
+            previous_vault_hash: ZERO_HASH, // Wrong previous hash
+            transactions: vec![],
+            tx_merkle_root: [0u8; 32],
+            state_root: [2u8; 32],
+        };
+
+        let hash2_wrong = compute_vault_block_hash(&entry2_wrong);
+        assert_ne!(
+            hash2, hash2_wrong,
+            "Different previous_vault_hash should produce different hash"
+        );
+    }
+
+    #[test]
+    fn test_vault_block_hash_includes_all_fields() {
+        let base_entry = VaultEntry {
+            namespace_id: 1,
+            vault_id: 2,
+            vault_height: 3,
+            previous_vault_hash: [4u8; 32],
+            transactions: vec![],
+            tx_merkle_root: [5u8; 32],
+            state_root: [6u8; 32],
+        };
+
+        let base_hash = compute_vault_block_hash(&base_entry);
+
+        // Changing namespace_id should change hash
+        let mut modified = base_entry.clone();
+        modified.namespace_id = 99;
+        assert_ne!(
+            compute_vault_block_hash(&modified),
+            base_hash,
+            "namespace_id affects hash"
+        );
+
+        // Changing vault_id should change hash
+        let mut modified = base_entry.clone();
+        modified.vault_id = 99;
+        assert_ne!(
+            compute_vault_block_hash(&modified),
+            base_hash,
+            "vault_id affects hash"
+        );
+
+        // Changing tx_merkle_root should change hash
+        let mut modified = base_entry.clone();
+        modified.tx_merkle_root = [99u8; 32];
+        assert_ne!(
+            compute_vault_block_hash(&modified),
+            base_hash,
+            "tx_merkle_root affects hash"
+        );
+    }
 }

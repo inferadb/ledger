@@ -51,9 +51,8 @@ impl HealthService for HealthServiceImpl {
         // If a vault_id is specified, check vault health
         if let Some(vault_id_proto) = req.vault_id {
             let vault_id = vault_id_proto.id;
-            // Note: namespace_id not in HealthCheckRequest, assume default (0)
-            // In production, extend proto to include namespace_id
-            let namespace_id = 0;
+            // Get namespace_id from request, default to 0 if not provided
+            let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
 
             let mut details = std::collections::HashMap::new();
 

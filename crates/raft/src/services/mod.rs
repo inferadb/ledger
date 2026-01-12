@@ -6,11 +6,13 @@
 mod admin;
 mod discovery;
 mod health;
+mod raft;
 mod read;
 mod write;
 
 pub use admin::AdminServiceImpl;
 pub use discovery::DiscoveryServiceImpl;
 pub use health::HealthServiceImpl;
+pub use raft::RaftServiceImpl;
 pub use read::ReadServiceImpl;
 pub use write::WriteServiceImpl;

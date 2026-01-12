@@ -150,10 +150,30 @@ async fn test_write_idempotency() {
     }
 }
 
+/// Test two-node cluster formation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_two_node_cluster_formation() {
+    let cluster = TestCluster::new(2).await;
+
+    // Wait for leader election
+    let leader_id = cluster.wait_for_leader().await;
+    assert!(
+        leader_id >= 1 && leader_id <= 2,
+        "leader should be one of the nodes"
+    );
+
+    // Should have exactly one leader
+    let leaders: Vec<_> = cluster.nodes().iter().filter(|n| n.is_leader()).collect();
+    assert_eq!(leaders.len(), 1, "should have exactly one leader");
+
+    // Should have one follower
+    let followers = cluster.followers();
+    assert_eq!(followers.len(), 1, "should have one follower");
+}
+
 /// Test three-node cluster formation and leader election.
 /// Note: This test requires proper cluster joining which is not yet implemented.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_cluster_formation() {
     let cluster = TestCluster::new(3).await;
 
@@ -174,9 +194,7 @@ async fn test_three_node_cluster_formation() {
 }
 
 /// Test write to leader replicates to followers.
-/// Note: This test requires proper cluster joining which is not yet implemented.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_write_replication() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;

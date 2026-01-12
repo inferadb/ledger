@@ -14,8 +14,8 @@ use parking_lot::RwLock;
 use redb::Database;
 use tonic::transport::Channel;
 
-use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_raft::proto::JoinClusterRequest;
+use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_raft::{
     GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig, RaftLogStore,
     TtlGarbageCollector,
@@ -36,6 +36,7 @@ pub enum BootstrapError {
     /// Failed to initialize cluster.
     Initialize(String),
     /// Failed to join existing cluster.
+    #[allow(dead_code)] // Reserved for join-cluster mode
     Join(String),
 }
 
@@ -140,13 +141,18 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     let server = LedgerServer::with_block_archive(
         raft.clone(),
         state.clone(),
-        applied_state_accessor,
+        applied_state_accessor.clone(),
         Some(block_archive),
         config.listen_addr,
     );
 
     // Start TTL garbage collector as background task
-    let gc = TtlGarbageCollector::new(raft.clone(), config.node_id, state.clone());
+    let gc = TtlGarbageCollector::new(
+        raft.clone(),
+        config.node_id,
+        state.clone(),
+        applied_state_accessor,
+    );
     let gc_handle = gc.start();
     tracing::info!("Started TTL garbage collector");
 
@@ -207,6 +213,7 @@ async fn bootstrap_cluster(
 ///
 /// Note: This should be called after the gRPC server has started, since the
 /// leader needs to be able to reach this node to replicate logs.
+#[allow(dead_code)] // Reserved for join-cluster mode in main.rs
 pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
     if config.peers.is_empty() {
         return Err(BootstrapError::Join(
@@ -252,10 +259,7 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
             Ok(response) => {
                 let resp = response.into_inner();
                 if resp.success {
-                    tracing::info!(
-                        node_id = config.node_id,
-                        "Successfully joined cluster"
-                    );
+                    tracing::info!(node_id = config.node_id, "Successfully joined cluster");
                     return Ok(());
                 }
 
@@ -267,7 +271,9 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
                     );
 
                     // Connect to leader
-                    if let Ok(endpoint) = Channel::from_shared(format!("http://{}", resp.leader_address)) {
+                    if let Ok(endpoint) =
+                        Channel::from_shared(format!("http://{}", resp.leader_address))
+                    {
                         if let Ok(leader_channel) = endpoint
                             .connect_timeout(Duration::from_secs(5))
                             .connect()
@@ -279,7 +285,9 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
                                 address: my_address.clone(),
                             };
 
-                            if let Ok(leader_response) = leader_client.join_cluster(leader_request).await {
+                            if let Ok(leader_response) =
+                                leader_client.join_cluster(leader_request).await
+                            {
                                 if leader_response.into_inner().success {
                                     tracing::info!(
                                         node_id = config.node_id,

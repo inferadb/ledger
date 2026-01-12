@@ -676,6 +676,11 @@ service AdminService {
 
   // Run integrity check
   rpc CheckIntegrity(CheckIntegrityRequest) returns (CheckIntegrityResponse);
+
+  // Recover a diverged vault by replaying blocks from archive.
+  // This clears the vault's state, replays transactions from block archive,
+  // and verifies state roots match. Only works on diverged vaults unless force=true.
+  rpc RecoverVault(RecoverVaultRequest) returns (RecoverVaultResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -841,6 +846,34 @@ message IntegrityIssue {
   string description = 3;
 }
 
+// Recover a diverged vault by replaying blocks from archive.
+message RecoverVaultRequest {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  // Force recovery even if vault is healthy (for testing/maintenance).
+  // Required for manual intervention after automatic recovery exhausted.
+  bool force = 3;
+}
+
+message RecoverVaultResponse {
+  bool success = 1;
+  string message = 2; // Error details if !success
+  // New vault health status after recovery attempt.
+  VaultHealthProto health_status = 3;
+  // Final block height after recovery.
+  uint64 final_height = 4;
+  // Final state root after recovery (should match expected).
+  Hash final_state_root = 5;
+}
+
+// Vault health status (mirrors internal VaultHealthStatus enum).
+enum VaultHealthProto {
+  VAULT_HEALTH_PROTO_UNSPECIFIED = 0;
+  VAULT_HEALTH_PROTO_HEALTHY = 1;
+  VAULT_HEALTH_PROTO_DIVERGED = 2;
+  VAULT_HEALTH_PROTO_RECOVERING = 3;
+}
+
 // -----------------------------------------------------------------------------
 // Cluster Membership Messages
 // -----------------------------------------------------------------------------
@@ -901,7 +934,8 @@ service HealthService {
 }
 
 message HealthCheckRequest {
-  optional VaultId vault_id = 1; // If empty, check node health
+  optional NamespaceId namespace_id = 1; // Namespace for vault health check
+  optional VaultId vault_id = 2; // If empty, check node health
 }
 
 message HealthCheckResponse {

@@ -331,7 +331,9 @@ fn merkle_root(hashes: &[Hash]) -> Hash {
     // Pad to even length by duplicating last hash
     let mut level = hashes.to_vec();
     if level.len() % 2 == 1 {
-        level.push(*level.last().expect("non-empty checked above"));
+        // Safety: We returned early above if len == 1, so len >= 2 here, thus last() is Some
+        #[allow(clippy::expect_used)]
+        level.push(*level.last().expect("non-empty: len >= 2"));
     }
 
     // Compute parent level: each pair becomes SHA-256(left || right)
@@ -504,7 +506,7 @@ mod tests {
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
 
-        let root = compute_tx_merkle_root(&[tx.clone()]);
+        let root = compute_tx_merkle_root(std::slice::from_ref(&tx));
         // Single tx: root equals the tx hash directly
         assert_eq!(root, tx_hash(&tx));
     }
@@ -588,8 +590,8 @@ mod tests {
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
 
-        let root1 = compute_tx_merkle_root(&[tx.clone()]);
-        let root2 = compute_tx_merkle_root(&[tx]);
+        let root1 = compute_tx_merkle_root(std::slice::from_ref(&tx));
+        let root2 = compute_tx_merkle_root(std::slice::from_ref(&tx));
         assert_eq!(root1, root2);
     }
 }

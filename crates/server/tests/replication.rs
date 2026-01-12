@@ -17,8 +17,7 @@ use std::time::Duration;
 use common::TestCluster;
 
 /// Test that multiple writes replicate in order.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ordered_replication() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -79,8 +78,7 @@ async fn test_ordered_replication() {
 }
 
 /// Test that followers have consistent state after writes.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_follower_state_consistency() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -142,8 +140,7 @@ async fn test_follower_state_consistency() {
 }
 
 /// Test replication continues after a brief network delay.
-#[tokio::test]
-#[ignore = "multi-node cluster joining not yet implemented"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_replication_after_delay() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
