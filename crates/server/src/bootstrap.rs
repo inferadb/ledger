@@ -5,6 +5,7 @@
 //! - Join an existing cluster by contacting the leader
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,16 +14,18 @@ use openraft::{BasicNode, Raft};
 use parking_lot::RwLock;
 use redb::Database;
 use tonic::transport::Channel;
+use tracing::info;
 
 use ledger_raft::proto::JoinClusterRequest;
 use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_raft::{
-    GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig, RaftLogStore,
-    TtlGarbageCollector,
+    BlockCompactor, GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig,
+    RaftLogStore, TtlGarbageCollector,
 };
 use ledger_storage::{BlockArchive, StateLayer};
 
 use crate::config::Config;
+use crate::discovery::resolve_bootstrap_peers;
 
 /// Error type for bootstrap operations.
 #[derive(Debug)]
@@ -67,6 +70,9 @@ pub struct BootstrappedNode {
     /// TTL garbage collector background task handle.
     #[allow(dead_code)]
     pub gc_handle: tokio::task::JoinHandle<()>,
+    /// Block compactor background task handle.
+    #[allow(dead_code)]
+    pub compactor_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Bootstrap a new cluster or join an existing one based on configuration.
@@ -137,6 +143,9 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         bootstrap_cluster(&raft, config).await?;
     }
 
+    // Clone block_archive for compactor before it's moved to server
+    let block_archive_for_compactor = block_archive.clone();
+
     // Create server with block archive for GetBlock/GetBlockRange
     let server = LedgerServer::with_block_archive(
         raft.clone(),
@@ -155,16 +164,27 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         raft.clone(),
         config.node_id,
         state.clone(),
-        applied_state_accessor,
+        applied_state_accessor.clone(),
     );
     let gc_handle = gc.start();
     tracing::info!("Started TTL garbage collector");
+
+    // Start block compactor for COMPACTED retention mode
+    let compactor = BlockCompactor::new(
+        raft.clone(),
+        config.node_id,
+        block_archive_for_compactor,
+        applied_state_accessor,
+    );
+    let compactor_handle = compactor.start();
+    tracing::info!("Started block compactor");
 
     Ok(BootstrappedNode {
         raft,
         state,
         server,
         gc_handle,
+        compactor_handle,
     })
 }
 
@@ -215,114 +235,130 @@ async fn bootstrap_cluster(
 /// an existing cluster. The node contacts one of the configured peers and
 /// requests to be added to the cluster.
 ///
+/// Per DESIGN.md §3.6: Uses DNS SRV discovery to find cluster entry points,
+/// combined with cached peers and static configuration.
+///
 /// Note: This should be called after the gRPC server has started, since the
 /// leader needs to be able to reach this node to replicate logs.
 #[allow(dead_code)] // Reserved for join-cluster mode in main.rs
 pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
-    if config.peers.is_empty() {
+    // Extract static peer addresses from config
+    let static_peer_addrs: Vec<String> = config.peers.iter().map(|p| p.addr.clone()).collect();
+
+    // Resolve all bootstrap peers: cached + static + DNS SRV
+    let peer_addresses = resolve_bootstrap_peers(&static_peer_addrs, &config.discovery).await;
+
+    if peer_addresses.is_empty() {
         return Err(BootstrapError::Join(
-            "No peers configured, cannot join cluster".to_string(),
+            "No peers available (checked cache, config, and DNS SRV)".to_string(),
         ));
     }
+
+    info!(
+        peer_count = peer_addresses.len(),
+        "Resolved bootstrap peers for cluster join"
+    );
 
     let my_address = config.listen_addr.to_string();
 
     // Try each peer until one accepts our join request
-    for peer in &config.peers {
-        tracing::info!(
-            peer_addr = %peer.addr,
-            "Attempting to join cluster via peer"
-        );
-
-        // Connect to peer
-        let endpoint = match Channel::from_shared(format!("http://{}", peer.addr)) {
-            Ok(e) => e.connect_timeout(Duration::from_secs(5)),
-            Err(e) => {
-                tracing::warn!(peer_addr = %peer.addr, error = %e, "Invalid peer address");
-                continue;
-            }
-        };
-
-        let channel = match endpoint.connect().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(peer_addr = %peer.addr, error = %e, "Failed to connect to peer");
-                continue;
-            }
-        };
-
-        let mut client = AdminServiceClient::new(channel);
-
-        // Request to join
-        let request = JoinClusterRequest {
-            node_id: config.node_id,
-            address: my_address.clone(),
-        };
-
-        match client.join_cluster(request).await {
-            Ok(response) => {
-                let resp = response.into_inner();
-                if resp.success {
-                    tracing::info!(node_id = config.node_id, "Successfully joined cluster");
-                    return Ok(());
-                }
-
-                // If not leader, try the leader address if provided
-                if !resp.leader_address.is_empty() {
-                    tracing::info!(
-                        leader_addr = %resp.leader_address,
-                        "Peer redirected to leader"
-                    );
-
-                    // Connect to leader
-                    if let Ok(endpoint) =
-                        Channel::from_shared(format!("http://{}", resp.leader_address))
-                    {
-                        if let Ok(leader_channel) = endpoint
-                            .connect_timeout(Duration::from_secs(5))
-                            .connect()
-                            .await
-                        {
-                            let mut leader_client = AdminServiceClient::new(leader_channel);
-                            let leader_request = JoinClusterRequest {
-                                node_id: config.node_id,
-                                address: my_address.clone(),
-                            };
-
-                            if let Ok(leader_response) =
-                                leader_client.join_cluster(leader_request).await
-                            {
-                                if leader_response.into_inner().success {
-                                    tracing::info!(
-                                        node_id = config.node_id,
-                                        "Successfully joined cluster via leader"
-                                    );
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                }
-
-                tracing::warn!(
-                    peer_addr = %peer.addr,
-                    message = %resp.message,
-                    "Join request rejected"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    peer_addr = %peer.addr,
-                    error = %e,
-                    "Join request failed"
-                );
-            }
+    for peer_addr in &peer_addresses {
+        if let Err(e) = try_join_via_peer(config.node_id, &my_address, *peer_addr).await {
+            tracing::warn!(peer_addr = %peer_addr, error = %e, "Join attempt failed");
+            continue;
         }
+        return Ok(());
     }
 
     Err(BootstrapError::Join(
-        "Failed to join cluster via any configured peer".to_string(),
+        "Failed to join cluster via any discovered peer".to_string(),
     ))
+}
+
+/// Attempt to join the cluster via a specific peer address.
+async fn try_join_via_peer(
+    node_id: u64,
+    my_address: &str,
+    peer_addr: SocketAddr,
+) -> Result<(), String> {
+    tracing::info!(peer_addr = %peer_addr, "Attempting to join cluster via peer");
+
+    // Connect to peer
+    let endpoint = Channel::from_shared(format!("http://{}", peer_addr))
+        .map_err(|e| format!("Invalid peer address: {}", e))?
+        .connect_timeout(Duration::from_secs(5));
+
+    let channel = endpoint
+        .connect()
+        .await
+        .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    let mut client = AdminServiceClient::new(channel);
+
+    // Request to join
+    let request = JoinClusterRequest {
+        node_id,
+        address: my_address.to_string(),
+    };
+
+    let response = client
+        .join_cluster(request)
+        .await
+        .map_err(|e| format!("Join RPC failed: {}", e))?;
+
+    let resp = response.into_inner();
+    if resp.success {
+        tracing::info!(node_id, "Successfully joined cluster");
+        return Ok(());
+    }
+
+    // If not leader, try the leader address if provided
+    if !resp.leader_address.is_empty() {
+        tracing::info!(leader_addr = %resp.leader_address, "Peer redirected to leader");
+
+        let leader_addr: SocketAddr = resp
+            .leader_address
+            .parse()
+            .map_err(|e| format!("Invalid leader address: {}", e))?;
+
+        return try_join_via_leader(node_id, my_address, leader_addr).await;
+    }
+
+    Err(format!("Join request rejected: {}", resp.message))
+}
+
+/// Follow a redirect to join via the leader.
+async fn try_join_via_leader(
+    node_id: u64,
+    my_address: &str,
+    leader_addr: SocketAddr,
+) -> Result<(), String> {
+    let endpoint = Channel::from_shared(format!("http://{}", leader_addr))
+        .map_err(|e| format!("Invalid leader address: {}", e))?
+        .connect_timeout(Duration::from_secs(5));
+
+    let leader_channel = endpoint
+        .connect()
+        .await
+        .map_err(|e| format!("Failed to connect to leader: {}", e))?;
+
+    let mut leader_client = AdminServiceClient::new(leader_channel);
+    let leader_request = JoinClusterRequest {
+        node_id,
+        address: my_address.to_string(),
+    };
+
+    let leader_response = leader_client
+        .join_cluster(leader_request)
+        .await
+        .map_err(|e| format!("Leader join RPC failed: {}", e))?;
+
+    if leader_response.into_inner().success {
+        tracing::info!(node_id, "Successfully joined cluster via leader");
+        return Ok(());
+    }
+
+    Err("Leader rejected join request".to_string())
 }
 
 #[cfg(test)]

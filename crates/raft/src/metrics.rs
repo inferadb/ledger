@@ -70,6 +70,9 @@ const BATCH_COALESCE_TOTAL: &str = "ledger_batch_coalesce_total";
 const BATCH_COALESCE_SIZE: &str = "ledger_batch_coalesce_size";
 const BATCH_FLUSH_LATENCY: &str = "ledger_batch_flush_latency_seconds";
 
+// Rate limiting metrics
+const RATE_LIMIT_EXCEEDED: &str = "ledger_rate_limit_exceeded_total";
+
 // =============================================================================
 // Write Service Metrics
 // =============================================================================
@@ -89,6 +92,12 @@ pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
     counter!(BATCH_WRITES_TOTAL, "status" => status).increment(1);
     histogram!(WRITES_LATENCY, "status" => status).record(latency_secs);
     histogram!(BATCH_SIZE).record(batch_size as f64);
+}
+
+/// Record a rate limit exceeded event.
+#[inline]
+pub fn record_rate_limit_exceeded(namespace_id: i64) {
+    counter!(RATE_LIMIT_EXCEEDED, "namespace_id" => namespace_id.to_string()).increment(1);
 }
 
 // =============================================================================

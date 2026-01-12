@@ -40,12 +40,16 @@ toml.workspace = true
 
 # Serialization
 serde.workspace = true
+serde_json.workspace = true
 
 # Concurrency
 parking_lot.workspace = true
 
 # Error handling
 snafu.workspace = true
+
+# DNS SRV discovery
+hickory-resolver.workspace = true
 
 # Logging
 tracing.workspace = true

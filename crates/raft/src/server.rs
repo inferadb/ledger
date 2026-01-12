@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
+use crate::rate_limit::NamespaceRateLimiter;
 use crate::IdempotencyCache;
 use crate::log_storage::AppliedStateAccessor;
 use crate::proto::BlockAnnouncement;
@@ -59,6 +60,8 @@ pub struct LedgerServer {
     max_concurrent: usize,
     /// Request timeout in seconds.
     timeout_secs: u64,
+    /// Per-namespace rate limiter (optional).
+    namespace_rate_limiter: Option<Arc<NamespaceRateLimiter>>,
 }
 
 impl LedgerServer {
@@ -95,6 +98,7 @@ impl LedgerServer {
             requests_per_second: 1000,
             max_concurrent: 100,
             timeout_secs: 30,
+            namespace_rate_limiter: None,
         }
     }
 
@@ -105,6 +109,15 @@ impl LedgerServer {
     pub fn with_rate_limit(mut self, max_concurrent: usize, timeout_secs: u64) -> Self {
         self.max_concurrent = max_concurrent;
         self.timeout_secs = timeout_secs;
+        self
+    }
+
+    /// Configure per-namespace rate limiting.
+    ///
+    /// Per DESIGN.md §3.7: Mitigates noisy neighbor problems by limiting
+    /// requests per namespace. Each namespace gets an independent rate limit.
+    pub fn with_namespace_rate_limit(mut self, requests_per_second: u64) -> Self {
+        self.namespace_rate_limiter = Some(Arc::new(NamespaceRateLimiter::with_limit(requests_per_second)));
         self
     }
 
@@ -139,13 +152,20 @@ impl LedgerServer {
             self.block_announcements.clone(),
             self.idempotency.clone(),
         );
-        let write_service = match &self.block_archive {
-            Some(archive) => WriteServiceImpl::with_block_archive(
-                self.raft.clone(),
-                self.idempotency.clone(),
-                archive.clone(),
-            ),
-            None => WriteServiceImpl::new(self.raft.clone(), self.idempotency.clone()),
+        let write_service = {
+            let base = match &self.block_archive {
+                Some(archive) => WriteServiceImpl::with_block_archive(
+                    self.raft.clone(),
+                    self.idempotency.clone(),
+                    archive.clone(),
+                ),
+                None => WriteServiceImpl::new(self.raft.clone(), self.idempotency.clone()),
+            };
+            // Add per-namespace rate limiting if configured
+            match &self.namespace_rate_limiter {
+                Some(limiter) => base.with_rate_limiter(limiter.clone()),
+                None => base,
+            }
         };
         let admin_service = match &self.block_archive {
             Some(archive) => AdminServiceImpl::with_block_archive(

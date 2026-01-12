@@ -23,7 +23,9 @@ use crate::proto::{
     ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest, RecoverVaultResponse, ShardId,
     VaultHealthProto, VaultId,
 };
-use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
+use crate::types::{
+    BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
+};
 
 use ledger_storage::{BlockArchive, StateLayer, StorageEngine};
 use ledger_types::{VaultEntry, ZERO_HASH};
@@ -213,10 +215,28 @@ impl AdminService for AdminServiceImpl {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
+        // Convert proto retention policy to internal type
+        let retention_policy = req.retention_policy.map(|proto_policy| {
+            use crate::proto::BlockRetentionMode as ProtoMode;
+            let mode = match proto_policy.mode() {
+                ProtoMode::Unspecified | ProtoMode::Full => BlockRetentionMode::Full,
+                ProtoMode::Compacted => BlockRetentionMode::Compacted,
+            };
+            BlockRetentionPolicy {
+                mode,
+                retention_blocks: if proto_policy.retention_blocks > 0 {
+                    proto_policy.retention_blocks
+                } else {
+                    10_000 // Default
+                },
+            }
+        });
+
         // Submit create vault through Raft
         let ledger_request = LedgerRequest::CreateVault {
             namespace_id,
             name: None, // CreateVaultRequest doesn't have name field
+            retention_policy,
         };
 
         let result = self
@@ -1291,6 +1311,119 @@ impl AdminService for AdminServiceImpl {
                 )))
             }
         }
+    }
+
+    async fn force_gc(
+        &self,
+        request: Request<crate::proto::ForceGcRequest>,
+    ) -> Result<Response<crate::proto::ForceGcResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if this node is the leader
+        let metrics = self.raft.metrics().borrow().clone();
+        let node_id = metrics.id;
+        if metrics.current_leader != Some(node_id) {
+            return Err(Status::failed_precondition(
+                "Only the leader can run garbage collection",
+            ));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut total_expired = 0u64;
+        let mut vaults_scanned = 0u64;
+
+        // Determine which vaults to scan
+        let vault_heights: Vec<((i64, i64), u64)> =
+            if let (Some(ns), Some(v)) = (req.namespace_id, req.vault_id) {
+                // Single vault
+                let height = self.applied_state.vault_height(ns.id, v.id);
+                vec![((ns.id, v.id), height)]
+            } else {
+                // All vaults
+                self.applied_state.all_vault_heights().into_iter().collect()
+            };
+
+        for ((namespace_id, vault_id), _height) in vault_heights {
+            vaults_scanned += 1;
+
+            // Find expired entities in this vault
+            let expired = {
+                let state = self.state.read();
+                match state.list_entities(vault_id, None, None, 1000) {
+                    Ok(entities) => entities
+                        .into_iter()
+                        .filter(|e| e.expires_at > 0 && e.expires_at < now)
+                        .map(|e| {
+                            let key = String::from_utf8_lossy(&e.key).to_string();
+                            (key, e.expires_at)
+                        })
+                        .collect::<Vec<_>>(),
+                    Err(e) => {
+                        tracing::warn!(namespace_id, vault_id, error = %e, "Failed to list entities for GC");
+                        continue;
+                    }
+                }
+            };
+
+            if expired.is_empty() {
+                continue;
+            }
+
+            let count = expired.len();
+
+            // Create ExpireEntity operations
+            let operations: Vec<ledger_types::Operation> = expired
+                .iter()
+                .map(|(key, expired_at)| ledger_types::Operation::ExpireEntity {
+                    key: key.clone(),
+                    expired_at: *expired_at,
+                })
+                .collect();
+
+            let transaction = ledger_types::Transaction {
+                id: *uuid::Uuid::new_v4().as_bytes(),
+                client_id: "system:gc".to_string(),
+                sequence: now, // Use timestamp as sequence for GC
+                operations,
+                timestamp: chrono::Utc::now(),
+                actor: "system:gc".to_string(),
+            };
+
+            let gc_request = LedgerRequest::Write {
+                namespace_id,
+                vault_id,
+                transactions: vec![transaction],
+            };
+
+            match self.raft.client_write(gc_request).await {
+                Ok(_) => {
+                    total_expired += count as u64;
+                    tracing::info!(
+                        namespace_id,
+                        vault_id,
+                        count,
+                        "GC expired entities via ForceGc"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(namespace_id, vault_id, error = %e, "GC write failed");
+                }
+            }
+        }
+
+        Ok(Response::new(crate::proto::ForceGcResponse {
+            success: true,
+            message: format!(
+                "GC cycle complete: {} expired entities removed from {} vaults",
+                total_expired, vaults_scanned
+            ),
+            expired_count: total_expired,
+            vaults_scanned,
+        }))
     }
 }
 

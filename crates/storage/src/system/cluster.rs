@@ -1,14 +1,52 @@
 //! Cluster membership and Voter/Learner scaling model.
 //!
 //! Per DESIGN.md lines 1966-1996.
+//!
+//! ## Learner Staleness Handling (TODO)
+//!
+//! Per DESIGN.md §3.5, learners receive replication but may lag during network issues.
+//! The design specifies:
+//! - `learner_cache_ttl`: Maximum age before learner considers cache stale (default: 5s)
+//! - `learner_refresh_interval`: Interval for polling voter freshness (default: 1s)
+//!
+//! When a learner's cache is stale, it should fallback to querying a voter directly.
+//! This is currently NOT implemented - learners serve from their local state which
+//! is kept reasonably fresh via OpenRaft's built-in replication.
+//!
+//! Future work: Add `LearnerCacheConfig` and integrate staleness checks into
+//! `SystemNamespaceService::get_namespace()` and similar read paths.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
 use ledger_types::NodeId;
 
 use super::types::{NodeInfo, NodeRole};
+
+/// Configuration for learner cache staleness handling.
+///
+/// Per DESIGN.md §3.5. Currently not actively used - included for future implementation.
+#[derive(Debug, Clone)]
+pub struct LearnerCacheConfig {
+    /// Maximum age before learner considers its cache stale and falls back to voter query.
+    /// Default: 5 seconds.
+    pub cache_ttl: Duration,
+
+    /// Interval at which learners poll voters for freshness checks.
+    /// Default: 1 second.
+    pub refresh_interval: Duration,
+}
+
+impl Default for LearnerCacheConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl: Duration::from_secs(5),
+            refresh_interval: Duration::from_secs(1),
+        }
+    }
+}
 
 /// Maximum number of voters in a `_system` Raft group.
 ///
@@ -339,5 +377,12 @@ mod tests {
         let stale = cluster.find_stale_nodes(chrono::Duration::seconds(30), now);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0], "node-stale");
+    }
+
+    #[test]
+    fn test_learner_cache_config_defaults() {
+        let config = LearnerCacheConfig::default();
+        assert_eq!(config.cache_ttl, std::time::Duration::from_secs(5));
+        assert_eq!(config.refresh_interval, std::time::Duration::from_secs(1));
     }
 }

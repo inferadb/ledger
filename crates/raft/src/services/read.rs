@@ -361,6 +361,81 @@ impl ReadServiceImpl {
 
         Some(crate::proto::ChainProof { headers })
     }
+
+    /// Fetch historical block announcements from the block archive.
+    ///
+    /// Used by watch_blocks to replay committed blocks before streaming new ones.
+    fn fetch_historical_announcements(
+        &self,
+        namespace_id: i64,
+        vault_id: i64,
+        start_height: u64,
+        end_height: u64,
+    ) -> Vec<BlockAnnouncement> {
+        use prost_types::Timestamp;
+
+        let archive = match &self.block_archive {
+            Some(a) => a,
+            None => {
+                debug!("No block archive configured; cannot replay historical blocks");
+                return vec![];
+            }
+        };
+
+        let mut announcements = Vec::with_capacity((end_height - start_height + 1) as usize);
+
+        for height in start_height..=end_height {
+            // Find the shard height containing this vault block
+            let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
+                Ok(Some(h)) => h,
+                Ok(None) => {
+                    debug!(height, "Vault block not found in archive");
+                    continue;
+                }
+                Err(e) => {
+                    warn!(height, error = %e, "Error finding shard height");
+                    continue;
+                }
+            };
+
+            // Read the shard block
+            let shard_block = match archive.read_block(shard_height) {
+                Ok(block) => block,
+                Err(e) => {
+                    warn!(shard_height, error = %e, "Error reading shard block");
+                    continue;
+                }
+            };
+
+            // Find the vault entry in the shard block
+            if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
+                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+            }) {
+                // Compute vault block hash using the same function as get_tip_hashes
+                let block_hash = ledger_types::vault_entry_hash(entry);
+
+                announcements.push(BlockAnnouncement {
+                    namespace_id: Some(crate::proto::NamespaceId {
+                        id: entry.namespace_id,
+                    }),
+                    vault_id: Some(crate::proto::VaultId { id: entry.vault_id }),
+                    height: entry.vault_height,
+                    block_hash: Some(crate::proto::Hash {
+                        value: block_hash.to_vec(),
+                    }),
+                    state_root: Some(crate::proto::Hash {
+                        value: entry.state_root.to_vec(),
+                    }),
+                    timestamp: Some(Timestamp {
+                        seconds: shard_block.timestamp.timestamp(),
+                        nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
+                    }),
+                });
+            }
+        }
+
+        announcements
+    }
 }
 
 #[tonic::async_trait]
@@ -667,44 +742,93 @@ impl ReadService for ReadServiceImpl {
     type WatchBlocksStream =
         Pin<Box<dyn Stream<Item = Result<BlockAnnouncement, Status>> + Send + 'static>>;
 
+    /// Watch blocks with historical replay support.
+    ///
+    /// Per DESIGN.md §3.3:
+    /// - If start_height <= current tip: replays committed blocks first, then streams new
+    /// - If start_height > current tip: waits for that block, then streams
+    /// - start_height must be >= 1 (0 is rejected with INVALID_ARGUMENT)
     async fn watch_blocks(
         &self,
         request: Request<WatchBlocksRequest>,
     ) -> Result<Response<Self::WatchBlocksStream>, Status> {
         let req = request.into_inner();
 
-        // Subscribe to block announcements
+        // Extract identifiers
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let start_height = req.start_height;
+
+        // Validate start_height >= 1 (per DESIGN.md)
+        if start_height == 0 {
+            return Err(Status::invalid_argument(
+                "start_height must be >= 1 (use 1 for full replay from genesis)",
+            ));
+        }
+
+        // Get current tip for this vault
+        let current_tip = self.applied_state.vault_height(namespace_id, vault_id);
+
+        // Subscribe to broadcast BEFORE reading historical blocks
+        // This ensures we don't miss any blocks committed between reading history and subscribing
         let receiver = self.block_announcements.subscribe();
 
-        // Filter by namespace and vault
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id);
+        // Build historical blocks stream if start_height <= current_tip
+        let historical_blocks: Vec<BlockAnnouncement> = if start_height <= current_tip {
+            self.fetch_historical_announcements(namespace_id, vault_id, start_height, current_tip)
+        } else {
+            vec![]
+        };
 
-        let stream =
-            tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
-                let namespace_id = namespace_id;
-                let vault_id = vault_id;
+        debug!(
+            namespace_id,
+            vault_id,
+            start_height,
+            current_tip,
+            historical_count = historical_blocks.len(),
+            "WatchBlocks: starting stream"
+        );
+
+        // Create the combined stream:
+        // 1. Historical blocks (if any)
+        // 2. New blocks from broadcast (filtered and deduplicated)
+        let historical_stream = futures::stream::iter(
+            historical_blocks
+                .into_iter()
+                .map(Ok::<_, Status>),
+        );
+
+        // Track the last height we've sent to avoid duplicates
+        // (broadcast might include some blocks we already sent from history)
+        let last_historical_height = if start_height <= current_tip {
+            current_tip
+        } else {
+            start_height - 1 // Will accept blocks at start_height and above
+        };
+
+        let broadcast_stream = tokio_stream::wrappers::BroadcastStream::new(receiver)
+            .filter_map(move |result| {
                 async move {
                     match result {
                         Ok(announcement) => {
                             // Filter by namespace
-                            if let Some(ns_id) = namespace_id {
-                                if announcement
-                                    .namespace_id
-                                    .as_ref()
-                                    .map(|n| n.id)
-                                    .unwrap_or(0)
-                                    != ns_id
-                                {
-                                    return None;
-                                }
+                            if announcement
+                                .namespace_id
+                                .as_ref()
+                                .map(|n| n.id)
+                                .unwrap_or(0)
+                                != namespace_id
+                            {
+                                return None;
                             }
                             // Filter by vault
-                            if let Some(v_id) = vault_id {
-                                if announcement.vault_id.as_ref().map(|v| v.id).unwrap_or(0) != v_id
-                                {
-                                    return None;
-                                }
+                            if announcement.vault_id.as_ref().map(|v| v.id).unwrap_or(0) != vault_id
+                            {
+                                return None;
+                            }
+                            // Skip blocks we already sent from history
+                            if announcement.height <= last_historical_height {
+                                return None;
                             }
                             Some(Ok(announcement))
                         }
@@ -713,7 +837,10 @@ impl ReadService for ReadServiceImpl {
                 }
             });
 
-        Ok(Response::new(Box::pin(stream)))
+        // Chain historical blocks followed by broadcast
+        let combined = historical_stream.chain(broadcast_stream);
+
+        Ok(Response::new(Box::pin(combined)))
     }
 
     async fn get_block(

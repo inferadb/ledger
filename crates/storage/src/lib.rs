@@ -30,7 +30,7 @@ pub use keys::{StorageKey, decode_storage_key, encode_storage_key};
 pub use relationship::RelationshipStore;
 pub use shard::ShardManager;
 pub use snapshot::{Snapshot, SnapshotManager};
-pub use state::StateLayer;
+pub use state::{StateError, StateLayer};
 pub use tables::Tables;
 pub use tiered_storage::{
     LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredConfig,

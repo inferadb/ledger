@@ -23,23 +23,55 @@ use crate::tables::Tables;
 /// State layer error types.
 #[derive(Debug, Snafu)]
 pub enum StateError {
+    /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: redb::StorageError },
+    Storage {
+        /// The underlying redb storage error.
+        source: redb::StorageError,
+    },
 
+    /// Table operation failed.
     #[snafu(display("Table error: {source}"))]
-    Table { source: redb::TableError },
+    Table {
+        /// The underlying redb table error.
+        source: redb::TableError,
+    },
 
+    /// Transaction operation failed.
     #[snafu(display("Transaction error: {source}"))]
-    Transaction { source: redb::TransactionError },
+    Transaction {
+        /// The underlying redb transaction error.
+        source: redb::TransactionError,
+    },
 
+    /// Commit operation failed.
     #[snafu(display("Commit error: {source}"))]
-    Commit { source: redb::CommitError },
+    Commit {
+        /// The underlying redb commit error.
+        source: redb::CommitError,
+    },
 
+    /// Serialization/deserialization failed.
     #[snafu(display("Serialization error: {message}"))]
-    Serialization { message: String },
+    Serialization {
+        /// Description of the serialization error.
+        message: String,
+    },
 
-    #[snafu(display("Precondition failed for key: {key}"))]
-    PreconditionFailed { key: String },
+    /// Conditional write precondition failed.
+    ///
+    /// Per DESIGN.md §6.1: Returns current state for client-side conflict resolution.
+    /// When a CAS (compare-and-swap) condition fails, this error provides the current
+    /// entity state so clients can implement retry or conflict resolution logic.
+    #[snafu(display("Precondition failed for key '{key}'"))]
+    PreconditionFailed {
+        /// The key that failed the condition check.
+        key: String,
+        /// Current version of the entity (block height when last modified), if it exists.
+        current_version: Option<u64>,
+        /// Current value of the entity, if it exists.
+        current_value: Option<Vec<u8>>,
+    },
 }
 
 /// Result type for state operations.
@@ -107,55 +139,63 @@ impl StateLayer {
                         let storage_key = encode_storage_key(vault_id, local_key);
 
                         // Check condition - extract data and drop borrow before mutation
-                        let (condition_met, is_update) = {
+                        // Also capture current entity state for error details if condition fails
+                        let (condition_met, is_update, current_entity) = {
                             let existing = entities.get(&storage_key[..]).context(StorageSnafu)?;
                             let is_update = existing.is_some();
+
+                            let entity_data = existing
+                                .as_ref()
+                                .and_then(|e| postcard::from_bytes::<Entity>(e.value()).ok());
 
                             let condition_met = match condition {
                                 None => true,
                                 Some(SetCondition::MustNotExist) => existing.is_none(),
                                 Some(SetCondition::MustExist) => existing.is_some(),
-                                Some(SetCondition::VersionEquals(v)) => existing
+                                Some(SetCondition::VersionEquals(v)) => entity_data
                                     .as_ref()
-                                    .and_then(|e| postcard::from_bytes::<Entity>(e.value()).ok())
                                     .map(|e| e.version == *v)
                                     .unwrap_or(false),
-                                Some(SetCondition::ValueEquals(expected)) => existing
+                                Some(SetCondition::ValueEquals(expected)) => entity_data
                                     .as_ref()
-                                    .and_then(|e| postcard::from_bytes::<Entity>(e.value()).ok())
                                     .map(|e| e.value == *expected)
                                     .unwrap_or(false),
                             };
-                            (condition_met, is_update)
+                            (condition_met, is_update, entity_data)
                         };
 
                         if !condition_met {
-                            WriteStatus::PreconditionFailed
-                        } else {
-                            let entity = Entity {
-                                key: local_key.to_vec(),
-                                value: value.clone(),
-                                expires_at: expires_at.unwrap_or(0),
-                                version: block_height,
-                            };
+                            // Per DESIGN.md §5.9: All-or-nothing - if ANY condition fails, entire batch fails
+                            return Err(StateError::PreconditionFailed {
+                                key: key.clone(),
+                                current_version: current_entity.as_ref().map(|e| e.version),
+                                current_value: current_entity.map(|e| e.value),
+                            });
+                        }
 
-                            let encoded = postcard::to_allocvec(&entity).map_err(|e| {
-                                StateError::Serialization {
-                                    message: e.to_string(),
-                                }
-                            })?;
+                        let entity = Entity {
+                            key: local_key.to_vec(),
+                            value: value.clone(),
+                            expires_at: expires_at.unwrap_or(0),
+                            version: block_height,
+                        };
 
-                            entities
-                                .insert(&storage_key[..], &encoded[..])
-                                .context(StorageSnafu)?;
-
-                            dirty_keys.push(local_key.to_vec());
-
-                            if is_update {
-                                WriteStatus::Updated
-                            } else {
-                                WriteStatus::Created
+                        let encoded = postcard::to_allocvec(&entity).map_err(|e| {
+                            StateError::Serialization {
+                                message: e.to_string(),
                             }
+                        })?;
+
+                        entities
+                            .insert(&storage_key[..], &encoded[..])
+                            .context(StorageSnafu)?;
+
+                        dirty_keys.push(local_key.to_vec());
+
+                        if is_update {
+                            WriteStatus::Updated
+                        } else {
+                            WriteStatus::Created
                         }
                     }
 
@@ -741,15 +781,29 @@ mod tests {
         let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        // Second set should fail
+        // Second set should fail with error (per DESIGN.md §5.9: batch atomicity)
         let ops = vec![Operation::SetEntity {
             key: "key".to_string(),
             value: b"value2".to_vec(),
             condition: Some(SetCondition::MustNotExist),
             expires_at: None,
         }];
-        let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
-        assert_eq!(statuses, vec![WriteStatus::PreconditionFailed]);
+        let result = state.apply_operations(vault_id, &ops, 2);
+
+        // Should return PreconditionFailed error with current state details
+        match result {
+            Err(StateError::PreconditionFailed {
+                key,
+                current_version,
+                current_value,
+            }) => {
+                assert_eq!(key, "key");
+                assert_eq!(current_version, Some(1)); // Set at block_height 1
+                assert_eq!(current_value, Some(b"value1".to_vec()));
+            }
+            Ok(_) => panic!("Expected PreconditionFailed error, got Ok"),
+            Err(e) => panic!("Expected PreconditionFailed error, got: {:?}", e),
+        }
     }
 
     #[test]

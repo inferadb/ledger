@@ -386,7 +386,15 @@ pub enum WriteStatus {
     /// Entity/relationship was not found.
     NotFound,
     /// Precondition failed (for conditional writes).
-    PreconditionFailed,
+    /// Contains details about the current state for client-side conflict resolution.
+    PreconditionFailed {
+        /// The key that failed the condition check.
+        key: String,
+        /// Current version of the entity (block height when last modified), if it exists.
+        current_version: Option<u64>,
+        /// Current value of the entity, if it exists.
+        current_value: Option<Vec<u8>>,
+    },
 }
 
 /// Result of processing a write request.

@@ -10,6 +10,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
+use crate::rate_limit::NamespaceRateLimiter;
 use crate::IdempotencyCache;
 use crate::metrics;
 use crate::proof::{self, ProofError};
@@ -30,6 +31,8 @@ pub struct WriteServiceImpl {
     idempotency: Arc<IdempotencyCache>,
     /// Block archive for proof generation (optional).
     block_archive: Option<Arc<BlockArchive>>,
+    /// Per-namespace rate limiter.
+    rate_limiter: Option<Arc<NamespaceRateLimiter>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -40,6 +43,7 @@ impl WriteServiceImpl {
             raft,
             idempotency,
             block_archive: None,
+            rate_limiter: None,
         }
     }
 
@@ -53,7 +57,25 @@ impl WriteServiceImpl {
             raft,
             idempotency,
             block_archive: Some(block_archive),
+            rate_limiter: None,
         }
+    }
+
+    /// Create a write service with per-namespace rate limiting.
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<NamespaceRateLimiter>) -> Self {
+        self.rate_limiter = Some(rate_limiter);
+        self
+    }
+
+    /// Check rate limit for a namespace. Returns Status::resource_exhausted if limit exceeded.
+    fn check_rate_limit(&self, namespace_id: i64) -> Result<(), Status> {
+        if let Some(ref limiter) = self.rate_limiter {
+            limiter.check(namespace_id).map_err(|e| {
+                metrics::record_rate_limit_exceeded(namespace_id);
+                Status::resource_exhausted(e.to_string())
+            })?;
+        }
+        Ok(())
     }
 
     /// Convert a proto SetCondition to internal SetCondition.
@@ -238,6 +260,9 @@ impl WriteService for WriteServiceImpl {
             tracing::Span::current().record("vault_id", vid);
         }
 
+        // Check per-namespace rate limit
+        self.check_rate_limit(namespace_id)?;
+
         // Convert to internal request
         let ledger_request = self.operations_to_request(
             namespace_id,
@@ -313,6 +338,28 @@ impl WriteService for WriteServiceImpl {
                     })),
                 }))
             }
+            LedgerResponse::PreconditionFailed {
+                key,
+                current_version,
+                current_value,
+            } => {
+                // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
+                warn!(key = %key, "Write failed: precondition failed");
+                metrics::record_write(false, latency);
+
+                Ok(Response::new(WriteResponse {
+                    result: Some(crate::proto::write_response::Result::Error(WriteError {
+                        code: WriteErrorCode::VersionMismatch.into(),
+                        key,
+                        current_version,
+                        current_value,
+                        message: "Precondition failed".to_string(),
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        last_committed_sequence: None,
+                    })),
+                }))
+            }
             _ => {
                 metrics::record_write(false, latency);
                 Err(Status::internal("Unexpected response type"))
@@ -381,6 +428,9 @@ impl WriteService for WriteServiceImpl {
         if let Some(vid) = vault_id {
             tracing::Span::current().record("vault_id", vid);
         }
+
+        // Check per-namespace rate limit
+        self.check_rate_limit(namespace_id)?;
 
         // Flatten all operations from all groups
         let all_operations: Vec<crate::proto::Operation> = req
@@ -470,6 +520,30 @@ impl WriteService for WriteServiceImpl {
                             current_version: None,
                             current_value: None,
                             message,
+                            committed_tx_id: None,
+                            committed_block_height: None,
+                            last_committed_sequence: None,
+                        },
+                    )),
+                }))
+            }
+            LedgerResponse::PreconditionFailed {
+                key,
+                current_version,
+                current_value,
+            } => {
+                // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
+                warn!(key = %key, batch_size, "Batch write failed: precondition failed");
+                metrics::record_batch_write(false, batch_size, latency);
+
+                Ok(Response::new(BatchWriteResponse {
+                    result: Some(crate::proto::batch_write_response::Result::Error(
+                        WriteError {
+                            code: WriteErrorCode::VersionMismatch.into(),
+                            key,
+                            current_version,
+                            current_value,
+                            message: "Precondition failed".to_string(),
                             committed_tx_id: None,
                             committed_block_height: None,
                             last_committed_sequence: None,

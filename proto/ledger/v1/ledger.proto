@@ -686,6 +686,11 @@ service AdminService {
   // Forces a vault into the Diverged state without actual state corruption.
   // Only available when the server is built with the "test-utils" feature.
   rpc SimulateDivergence(SimulateDivergenceRequest) returns (SimulateDivergenceResponse);
+
+  // Force a garbage collection cycle for expired entities.
+  // Useful for testing TTL behavior and operational debugging.
+  // Only the leader can run GC; followers return an error.
+  rpc ForceGc(ForceGcRequest) returns (ForceGcResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -889,6 +894,23 @@ message SimulateDivergenceResponse {
   string message = 2;
   // Vault health status after simulation (should be DIVERGED).
   VaultHealthProto health_status = 3;
+}
+
+// Force a garbage collection cycle for expired entities.
+// If namespace_id and vault_id are specified, only that vault is scanned.
+// If omitted, all vaults are scanned (cluster-wide GC).
+message ForceGcRequest {
+  optional NamespaceId namespace_id = 1;
+  optional VaultId vault_id = 2;
+}
+
+message ForceGcResponse {
+  bool success = 1;
+  string message = 2;
+  // Number of expired entities that were removed.
+  uint64 expired_count = 3;
+  // Number of vaults that were scanned.
+  uint64 vaults_scanned = 4;
 }
 
 // Vault health status (mirrors internal VaultHealthStatus enum).

@@ -13,7 +13,7 @@ mod keys;
 mod service;
 mod types;
 
-pub use cluster::{ClusterMembership, MAX_VOTERS, SystemRole};
+pub use cluster::{ClusterMembership, LearnerCacheConfig, MAX_VOTERS, SystemRole};
 pub use keys::SystemKeys;
 pub use service::{SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, SystemError, SystemNamespaceService};
 pub use types::{

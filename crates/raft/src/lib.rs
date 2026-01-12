@@ -18,11 +18,15 @@
 //! by Engine/Control services upstream. Ledger trusts all incoming requests.
 
 pub mod batching;
+mod block_compaction;
 mod idempotency;
 mod log_storage;
 pub mod metrics;
+pub mod peer_maintenance;
+pub mod peer_tracker;
 pub mod proof;
 mod raft_network;
+mod rate_limit;
 mod server;
 pub mod services;
 mod ttl_gc;
@@ -36,12 +40,19 @@ pub mod proto {
 }
 
 pub use batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle};
+pub use block_compaction::BlockCompactor;
 pub use idempotency::IdempotencyCache;
 pub use log_storage::{
     AppliedState, AppliedStateAccessor, NamespaceMeta, RaftLogStore, SequenceCounters,
     VaultHealthStatus, VaultMeta,
 };
 pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
+pub use peer_maintenance::PeerMaintenance;
+pub use peer_tracker::{PeerTracker, PeerTrackerConfig};
+pub use rate_limit::{NamespaceRateLimiter, RateLimitExceeded};
 pub use server::LedgerServer;
 pub use ttl_gc::TtlGarbageCollector;
-pub use types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest};
+pub use types::{
+    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse,
+    LedgerTypeConfig, SystemRequest,
+};

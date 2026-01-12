@@ -52,6 +52,48 @@ openraft::declare_raft_types!(
 );
 
 // ============================================================================
+// Block Retention Policy
+// ============================================================================
+
+/// Block retention mode for storage/compliance trade-off.
+///
+/// Per DESIGN.md §4.4: Configurable retention policy determines
+/// whether transaction bodies are preserved after snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BlockRetentionMode {
+    /// Full retention: all transaction bodies preserved indefinitely.
+    /// Use case: Audit/compliance requirements.
+    #[default]
+    Full,
+    /// Compacted retention: after snapshot, transaction bodies are removed
+    /// for blocks older than retention_blocks from tip.
+    /// Headers (state_root, tx_merkle_root) are preserved for verification.
+    /// Use case: High-volume workloads prioritizing storage efficiency.
+    Compacted,
+}
+
+/// Block retention policy for a vault.
+///
+/// Controls how long transaction bodies are preserved vs. compacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockRetentionPolicy {
+    /// Retention mode (Full or Compacted).
+    pub mode: BlockRetentionMode,
+    /// For COMPACTED mode: blocks newer than tip - retention_blocks keep full transactions.
+    /// Ignored for FULL mode. Default: 10000 blocks.
+    pub retention_blocks: u64,
+}
+
+impl Default for BlockRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            mode: BlockRetentionMode::Full,
+            retention_blocks: 10_000,
+        }
+    }
+}
+
+// ============================================================================
 // Request/Response Types
 // ============================================================================
 
@@ -83,6 +125,9 @@ pub enum LedgerRequest {
         namespace_id: NamespaceId,
         /// Optional vault name (for display).
         name: Option<String>,
+        /// Block retention policy for this vault.
+        /// Defaults to Full retention if not specified.
+        retention_policy: Option<BlockRetentionPolicy>,
     },
 
     /// Delete a namespace.
@@ -211,6 +256,17 @@ pub enum LedgerResponse {
         /// Error message.
         message: String,
     },
+
+    /// Precondition failed for conditional write.
+    /// Per DESIGN.md §6.1: Returns current state for client-side conflict resolution.
+    PreconditionFailed {
+        /// Key that failed the condition.
+        key: String,
+        /// Current version of the entity (block height when last modified).
+        current_version: Option<u64>,
+        /// Current value of the entity.
+        current_value: Option<Vec<u8>>,
+    },
 }
 
 impl fmt::Display for LedgerResponse {
@@ -240,6 +296,9 @@ impl fmt::Display for LedgerResponse {
             }
             LedgerResponse::Error { message } => {
                 write!(f, "Error({})", message)
+            }
+            LedgerResponse::PreconditionFailed { key, .. } => {
+                write!(f, "PreconditionFailed(key={})", key)
             }
         }
     }

@@ -17,6 +17,7 @@
 
 mod bootstrap;
 mod config;
+mod discovery;
 mod shutdown;
 
 use std::env;

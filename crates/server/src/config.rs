@@ -30,6 +30,9 @@ pub struct Config {
     /// Rate limiting configuration.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// Peer discovery configuration (DNS SRV, caching).
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
     /// Whether this node should bootstrap a new cluster.
     #[serde(default)]
     pub bootstrap: bool,
@@ -92,6 +95,37 @@ fn default_max_concurrent() -> usize {
 
 fn default_timeout_secs() -> u64 {
     30 // 30 second timeout
+}
+
+/// Peer discovery configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscoveryConfig {
+    /// DNS SRV domain for bootstrap discovery.
+    /// When set, the server will query `_ledger._tcp.<domain>` to discover peers.
+    #[serde(default)]
+    pub srv_domain: Option<String>,
+
+    /// Path to cache discovered peers for faster subsequent startups.
+    #[serde(default)]
+    pub cached_peers_path: Option<String>,
+
+    /// TTL for cached peers in seconds (default: 3600 = 1 hour).
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl_secs: u64,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            srv_domain: None,
+            cached_peers_path: None,
+            cache_ttl_secs: default_cache_ttl(),
+        }
+    }
+}
+
+fn default_cache_ttl() -> u64 {
+    3600 // 1 hour
 }
 
 impl Default for BatchConfig {
@@ -158,6 +192,7 @@ impl Config {
             peers: vec![],
             batching: BatchConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            discovery: DiscoveryConfig::default(),
             bootstrap: true,
         }
     }

@@ -28,10 +28,13 @@ use serde::{Deserialize, Serialize};
 
 use ledger_types::{Hash, NamespaceId, ShardBlock, VaultEntry, VaultId, compute_tx_merkle_root};
 
-use crate::types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest};
+use crate::types::{
+    BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
+    SystemRequest,
+};
 
 // Re-export storage types used in this module
-use ledger_storage::{BlockArchive, StateLayer};
+use ledger_storage::{BlockArchive, StateError, StateLayer};
 
 // ============================================================================
 // Table Definitions
@@ -126,6 +129,9 @@ pub struct VaultMeta {
     /// Timestamp of last write (Unix seconds).
     #[serde(default)]
     pub last_write_timestamp: u64,
+    /// Block retention policy for this vault.
+    #[serde(default)]
+    pub retention_policy: BlockRetentionPolicy,
 }
 
 /// Sequence counters for deterministic ID generation.
@@ -282,6 +288,17 @@ impl AppliedStateAccessor {
     /// Get the current shard height (for snapshot info).
     pub fn shard_height(&self) -> u64 {
         self.state.read().shard_height
+    }
+
+    /// Get all vault metadata (for retention policy checks).
+    pub fn all_vaults(&self) -> HashMap<(NamespaceId, VaultId), VaultMeta> {
+        self.state
+            .read()
+            .vaults
+            .iter()
+            .filter(|(_, v)| !v.deleted)
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
     }
 }
 
@@ -514,12 +531,27 @@ impl RaftLogStore {
                     // Acquire write lock and apply operations
                     let state_layer = state_layer_lock.write();
                     if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
-                        return (
-                            LedgerResponse::Error {
-                                message: format!("Failed to apply operations: {}", e),
-                            },
-                            None,
-                        );
+                        // Per DESIGN.md §6.1: On CAS failure, return current state for conflict resolution
+                        return match e {
+                            StateError::PreconditionFailed {
+                                key,
+                                current_version,
+                                current_value,
+                            } => (
+                                LedgerResponse::PreconditionFailed {
+                                    key,
+                                    current_version,
+                                    current_value,
+                                },
+                                None,
+                            ),
+                            other => (
+                                LedgerResponse::Error {
+                                    message: format!("Failed to apply operations: {}", other),
+                                },
+                                None,
+                            ),
+                        };
                     }
 
                     // Compute state root
@@ -590,7 +622,11 @@ impl RaftLogStore {
                 (LedgerResponse::NamespaceCreated { namespace_id }, None)
             }
 
-            LedgerRequest::CreateVault { namespace_id, name } => {
+            LedgerRequest::CreateVault {
+                namespace_id,
+                name,
+                retention_policy,
+            } => {
                 let vault_id = state.sequences.next_vault();
                 let key = (*namespace_id, vault_id);
                 state.vault_heights.insert(key, 0);
@@ -603,6 +639,7 @@ impl RaftLogStore {
                         name: name.clone(),
                         deleted: false,
                         last_write_timestamp: 0, // No writes yet
+                        retention_policy: retention_policy.unwrap_or_default(),
                     },
                 );
                 (LedgerResponse::VaultCreated { vault_id }, None)
@@ -1307,6 +1344,7 @@ mod tests {
         let request = LedgerRequest::CreateVault {
             namespace_id: 1,
             name: Some("test-vault".to_string()),
+            retention_policy: None,
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -1484,14 +1522,17 @@ mod tests {
             LedgerRequest::CreateVault {
                 namespace_id: 1,
                 name: Some("production".to_string()),
+                retention_policy: None,
             },
             LedgerRequest::CreateVault {
                 namespace_id: 1,
                 name: Some("staging".to_string()),
+                retention_policy: None,
             },
             LedgerRequest::CreateVault {
                 namespace_id: 2,
                 name: Some("main".to_string()),
+                retention_policy: None,
             },
             LedgerRequest::Write {
                 namespace_id: 1,
@@ -1647,6 +1688,7 @@ mod tests {
         let create_vault = LedgerRequest::CreateVault {
             namespace_id: 1,
             name: Some("test".to_string()),
+            retention_policy: None,
         };
         store_a.apply_request(&create_vault, &mut state_a);
         store_b.apply_request(&create_vault, &mut state_b);
@@ -1698,10 +1740,12 @@ mod tests {
             LedgerRequest::CreateVault {
                 namespace_id: 1,
                 name: Some("vault-a".to_string()),
+                retention_policy: None,
             },
             LedgerRequest::CreateVault {
                 namespace_id: 1,
                 name: Some("vault-b".to_string()),
+                retention_policy: None,
             },
         ];
 
@@ -1842,6 +1886,7 @@ mod tests {
             &LedgerRequest::CreateVault {
                 namespace_id: 1,
                 name: Some("vault1".to_string()),
+                retention_policy: None,
             },
             &mut state,
         );
@@ -1954,6 +1999,7 @@ mod tests {
                 name: Some("test-vault".to_string()),
                 deleted: false,
                 last_write_timestamp: 1234567899,
+                retention_policy: BlockRetentionPolicy::default(),
             },
         );
 
@@ -2083,6 +2129,7 @@ mod tests {
                 name: Some("main-vault".to_string()),
                 deleted: false,
                 last_write_timestamp: 1234567890,
+                retention_policy: BlockRetentionPolicy::default(),
             },
         );
 

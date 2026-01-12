@@ -100,6 +100,7 @@ impl TestCluster {
             peers: vec![], // Empty! Single-node cluster can immediately elect self as leader
             batching: ledger_server::config::BatchConfig::default(),
             rate_limit: ledger_server::config::RateLimitConfig::default(),
+            discovery: ledger_server::config::DiscoveryConfig::default(),
             bootstrap: true,
         };
 
@@ -166,6 +167,7 @@ impl TestCluster {
                 peers,
                 batching: ledger_server::config::BatchConfig::default(),
                 rate_limit: ledger_server::config::RateLimitConfig::default(),
+                discovery: ledger_server::config::DiscoveryConfig::default(),
                 bootstrap: false, // Non-bootstrap nodes join dynamically
             };
 

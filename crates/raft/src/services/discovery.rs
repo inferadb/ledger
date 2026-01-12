@@ -5,17 +5,15 @@
 //! Per DESIGN.md, peer addresses must be private/WireGuard IPs. Public IPs are
 //! rejected to ensure cluster traffic stays within the private network.
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::time::Instant;
 
 use openraft::Raft;
 use parking_lot::RwLock;
-use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use crate::log_storage::AppliedStateAccessor;
+use crate::peer_tracker::PeerTracker;
 use crate::proto::system_discovery_service_server::SystemDiscoveryService;
 use crate::proto::{
     AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
@@ -162,49 +160,6 @@ fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
     Ok(())
 }
 
-/// Tracks when peers were last seen for health monitoring.
-#[derive(Debug, Default)]
-struct PeerTracker {
-    /// Map of node ID string to last seen instant.
-    last_seen: HashMap<String, Instant>,
-}
-
-impl PeerTracker {
-    fn new() -> Self {
-        Self {
-            last_seen: HashMap::new(),
-        }
-    }
-
-    /// Record that a peer was seen now.
-    fn record_seen(&mut self, node_id: &str) {
-        self.last_seen.insert(node_id.to_string(), Instant::now());
-    }
-
-    /// Get the last seen timestamp for a peer as a proto Timestamp.
-    /// Returns None if the peer has never been seen.
-    fn get_last_seen(&self, node_id: &str) -> Option<Timestamp> {
-        self.last_seen.get(node_id).map(|instant| {
-            // Convert Instant to wall-clock time
-            let elapsed_since_seen = instant.elapsed();
-            let now = std::time::SystemTime::now();
-            let seen_time = now - elapsed_since_seen;
-
-            // Convert to proto Timestamp
-            match seen_time.duration_since(std::time::UNIX_EPOCH) {
-                Ok(duration) => Timestamp {
-                    seconds: duration.as_secs() as i64,
-                    nanos: duration.subsec_nanos() as i32,
-                },
-                Err(_) => Timestamp {
-                    seconds: 0,
-                    nanos: 0,
-                },
-            }
-        })
-    }
-}
-
 /// Discovery service implementation.
 pub struct DiscoveryServiceImpl {
     /// The Raft instance.
@@ -231,6 +186,29 @@ impl DiscoveryServiceImpl {
             applied_state,
             peer_tracker: RwLock::new(PeerTracker::new()),
         }
+    }
+
+    /// Prune stale peers that haven't been seen within the staleness threshold.
+    ///
+    /// Per DESIGN.md §3.6: Peers not seen in >1 hour should be pruned.
+    /// This method should be called periodically (every 5 minutes).
+    ///
+    /// Returns the number of peers pruned.
+    pub fn prune_stale_peers(&self) -> usize {
+        let mut tracker = self.peer_tracker.write();
+        tracker.prune_stale()
+    }
+
+    /// Get the number of tracked peers.
+    pub fn peer_count(&self) -> usize {
+        let tracker = self.peer_tracker.read();
+        tracker.peer_count()
+    }
+
+    /// Get the maintenance interval from the peer tracker config.
+    pub fn maintenance_interval(&self) -> std::time::Duration {
+        let tracker = self.peer_tracker.read();
+        tracker.maintenance_interval()
     }
 }
 
@@ -394,90 +372,6 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
 )]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // PeerTracker Tests
-    // =========================================================================
-
-    #[test]
-    fn test_peer_tracker_new() {
-        let tracker = PeerTracker::new();
-        assert!(tracker.last_seen.is_empty());
-    }
-
-    #[test]
-    fn test_peer_tracker_record_seen() {
-        let mut tracker = PeerTracker::new();
-
-        tracker.record_seen("node-1");
-        assert!(tracker.last_seen.contains_key("node-1"));
-        assert!(tracker.get_last_seen("node-1").is_some());
-    }
-
-    #[test]
-    fn test_peer_tracker_unknown_peer_returns_none() {
-        let tracker = PeerTracker::new();
-        assert!(tracker.get_last_seen("unknown").is_none());
-    }
-
-    #[test]
-    fn test_peer_tracker_updates_timestamp() {
-        let mut tracker = PeerTracker::new();
-
-        // Record first sighting
-        tracker.record_seen("node-1");
-        let first_seen = tracker.get_last_seen("node-1").unwrap();
-
-        // Wait a bit
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Record again
-        tracker.record_seen("node-1");
-        let second_seen = tracker.get_last_seen("node-1").unwrap();
-
-        // Second timestamp should be later (or at least equal due to resolution)
-        assert!(
-            second_seen.seconds >= first_seen.seconds
-                || (second_seen.seconds == first_seen.seconds
-                    && second_seen.nanos >= first_seen.nanos),
-            "Second sighting should have later or equal timestamp"
-        );
-    }
-
-    #[test]
-    fn test_peer_tracker_multiple_peers() {
-        let mut tracker = PeerTracker::new();
-
-        tracker.record_seen("node-1");
-        tracker.record_seen("node-2");
-        tracker.record_seen("node-3");
-
-        assert!(tracker.get_last_seen("node-1").is_some());
-        assert!(tracker.get_last_seen("node-2").is_some());
-        assert!(tracker.get_last_seen("node-3").is_some());
-        assert!(tracker.get_last_seen("node-4").is_none());
-    }
-
-    #[test]
-    fn test_peer_tracker_timestamp_is_reasonable() {
-        let mut tracker = PeerTracker::new();
-
-        tracker.record_seen("node-1");
-        let ts = tracker.get_last_seen("node-1").unwrap();
-
-        // Timestamp should be recent (within last minute)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        assert!(
-            ts.seconds >= now - 60 && ts.seconds <= now + 1,
-            "Timestamp should be within last minute: got {}, now {}",
-            ts.seconds,
-            now
-        );
-    }
 
     // =========================================================================
     // IP Validation Tests
