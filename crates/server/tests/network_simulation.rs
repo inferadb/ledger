@@ -175,15 +175,15 @@ fn test_network_partition_blocks_communication() {
             };
 
             client1
-                .vote(vote_req.clone())
+                .vote(vote_req)
                 .await
                 .expect("vote to node1 should succeed");
             client2
-                .vote(vote_req.clone())
+                .vote(vote_req)
                 .await
                 .expect("vote to node2 should succeed");
             client3
-                .vote(vote_req.clone())
+                .vote(vote_req)
                 .await
                 .expect("vote to node3 should succeed");
         }
@@ -228,7 +228,7 @@ fn test_network_partition_blocks_communication() {
                 last_log_id: None,
             };
             client1
-                .vote(vote_req.clone())
+                .vote(vote_req)
                 .await
                 .expect("vote to node1 should succeed during partition");
             client2
