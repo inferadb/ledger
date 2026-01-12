@@ -1688,6 +1688,7 @@ dependencies = [
  "redb",
  "seahash",
  "serde",
+ "serde_json",
  "sha2",
  "snafu",
  "tempfile",

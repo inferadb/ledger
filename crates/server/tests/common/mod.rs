@@ -296,16 +296,16 @@ impl TestCluster {
         Self { nodes }
     }
 
-    /// Wait for a leader to be elected.
+    /// Wait for a leader to be elected AND all nodes to agree.
     ///
     /// Returns the leader's node ID.
     pub async fn wait_for_leader(&self) -> u64 {
-        self.wait_for_leader_timeout(Duration::from_secs(10))
+        self.wait_for_leader_agreement(Duration::from_secs(10))
             .await
             .expect("leader election timed out")
     }
 
-    /// Wait for a leader with timeout.
+    /// Wait for a leader with timeout (any node reporting a leader).
     pub async fn wait_for_leader_timeout(&self, duration: Duration) -> Option<u64> {
         let start = tokio::time::Instant::now();
 
@@ -321,9 +321,42 @@ impl TestCluster {
         None
     }
 
+    /// Wait for ALL nodes to agree on the same leader.
+    ///
+    /// This is more robust than `wait_for_leader_timeout` as it ensures
+    /// leader information has propagated to all nodes.
+    pub async fn wait_for_leader_agreement(&self, duration: Duration) -> Option<u64> {
+        let start = tokio::time::Instant::now();
+
+        while start.elapsed() < duration {
+            let leaders: Vec<Option<u64>> = self.nodes.iter().map(|n| n.current_leader()).collect();
+
+            // Check if all nodes report the same leader (and it's not None)
+            if let Some(first) = leaders.first().copied().flatten() {
+                if leaders.iter().all(|&l| l == Some(first)) {
+                    return Some(first);
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        None
+    }
+
     /// Get the current leader node.
+    ///
+    /// Uses consensus from node metrics rather than relying on a single node.
     pub fn leader(&self) -> Option<&TestNode> {
-        self.nodes.iter().find(|n| n.is_leader())
+        // Find consensus leader ID from node metrics
+        let leader_id = self
+            .nodes
+            .iter()
+            .filter_map(|n| n.current_leader())
+            .next()?;
+
+        // Return the node with that ID
+        self.nodes.iter().find(|n| n.id == leader_id)
     }
 
     /// Get all follower nodes.

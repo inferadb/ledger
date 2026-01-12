@@ -38,7 +38,10 @@ impl PeerMaintenance {
     /// Create a new peer maintenance task.
     pub fn new(discovery: Arc<DiscoveryServiceImpl>) -> Self {
         let interval = discovery.maintenance_interval();
-        Self { discovery, interval }
+        Self {
+            discovery,
+            interval,
+        }
     }
 
     /// Create with a custom interval (for testing).

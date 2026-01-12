@@ -10,7 +10,6 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::rate_limit::NamespaceRateLimiter;
 use crate::IdempotencyCache;
 use crate::metrics;
 use crate::proof::{self, ProofError};
@@ -19,6 +18,7 @@ use crate::proto::{
     BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
     WriteRequest, WriteResponse, WriteSuccess,
 };
+use crate::rate_limit::NamespaceRateLimiter;
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
 use ledger_storage::BlockArchive;

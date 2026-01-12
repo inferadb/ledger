@@ -69,10 +69,12 @@ impl NamespaceRateLimiter {
         let now = Instant::now();
         let mut counters = self.counters.lock();
 
-        let counter = counters.entry(namespace_id).or_insert_with(|| WindowCounter {
-            window_start: now,
-            count: 0,
-        });
+        let counter = counters
+            .entry(namespace_id)
+            .or_insert_with(|| WindowCounter {
+                window_start: now,
+                count: 0,
+            });
 
         // If we're in a new window, reset the counter
         if now.duration_since(counter.window_start) >= self.window_size {

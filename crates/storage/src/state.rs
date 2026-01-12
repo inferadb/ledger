@@ -734,7 +734,12 @@ impl Clone for StateLayer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::engine::StorageEngine;

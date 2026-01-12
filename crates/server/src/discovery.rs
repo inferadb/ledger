@@ -12,8 +12,8 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -96,7 +96,9 @@ pub async fn resolve_bootstrap_peers(
                 // Add to address list (sorted by priority, then weight)
                 let mut sorted_peers = srv_peers;
                 sorted_peers.sort_by(|a, b| {
-                    a.priority.cmp(&b.priority).then_with(|| b.weight.cmp(&a.weight))
+                    a.priority
+                        .cmp(&b.priority)
+                        .then_with(|| b.weight.cmp(&a.weight))
                 });
 
                 for peer in sorted_peers {
@@ -159,7 +161,8 @@ async fn dns_srv_lookup(domain: &str) -> Result<Vec<DiscoveredPeer>, DiscoveryEr
 
 /// Load cached peers from file.
 fn load_cached_peers(path: &str, ttl_secs: u64) -> Result<Vec<DiscoveredPeer>, DiscoveryError> {
-    let content = std::fs::read_to_string(path).map_err(|e| DiscoveryError::CacheRead(e.to_string()))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| DiscoveryError::CacheRead(e.to_string()))?;
 
     let cached: CachedPeers =
         serde_json::from_str(&content).map_err(|e| DiscoveryError::CacheParse(e.to_string()))?;
@@ -194,8 +197,8 @@ fn save_cached_peers(path: &str, peers: &[DiscoveredPeer]) -> Result<(), Discove
         std::fs::create_dir_all(parent).map_err(|e| DiscoveryError::CacheWrite(e.to_string()))?;
     }
 
-    let content =
-        serde_json::to_string_pretty(&cached).map_err(|e| DiscoveryError::CacheWrite(e.to_string()))?;
+    let content = serde_json::to_string_pretty(&cached)
+        .map_err(|e| DiscoveryError::CacheWrite(e.to_string()))?;
 
     std::fs::write(path, content).map_err(|e| DiscoveryError::CacheWrite(e.to_string()))?;
 
@@ -295,10 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_with_static_peers_only() {
-        let static_peers = vec![
-            "127.0.0.1:50051".to_string(),
-            "127.0.0.1:50052".to_string(),
-        ];
+        let static_peers = vec!["127.0.0.1:50051".to_string(), "127.0.0.1:50052".to_string()];
         let discovery = DiscoveryConfig::default();
 
         let addresses = resolve_bootstrap_peers(&static_peers, &discovery).await;

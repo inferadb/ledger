@@ -6,6 +6,7 @@
 //! - Snapshot creation and restoration
 //! - Dual indexes for relationship queries
 //! - System namespace types and cluster membership
+//! - Time-travel index for historical queries
 
 mod block_archive;
 mod bucket;
@@ -20,6 +21,7 @@ mod state;
 pub mod system;
 mod tables;
 mod tiered_storage;
+mod time_travel;
 
 pub use block_archive::{BlockArchive, BlockArchiveError};
 pub use bucket::VaultCommitment;
@@ -35,4 +37,7 @@ pub use tables::Tables;
 pub use tiered_storage::{
     LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredConfig,
     TieredSnapshotManager, TieredStorageError,
+};
+pub use time_travel::{
+    TimeTravelConfig, TimeTravelEntry, TimeTravelError, TimeTravelIndex, TimeTravelStats,
 };

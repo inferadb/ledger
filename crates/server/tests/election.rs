@@ -40,7 +40,8 @@ async fn test_single_node_self_election() {
 async fn test_three_node_leader_election() {
     let cluster = TestCluster::new(3).await;
 
-    // Wait for leader election
+    // Wait for leader election with agreement across all nodes
+    // wait_for_leader() now waits for ALL nodes to agree
     let leader_id = cluster.wait_for_leader().await;
 
     // Leader should be one of the nodes
@@ -50,14 +51,15 @@ async fn test_three_node_leader_election() {
         leader_id
     );
 
-    // Verify leader consistency across nodes
+    // Double-check leader consistency (should pass since wait_for_leader ensures agreement)
     for node in cluster.nodes() {
         let node_view = node.current_leader();
         assert_eq!(
             node_view,
             Some(leader_id),
-            "node {} should agree on leader",
-            node.id
+            "node {} should agree on leader (saw {:?})",
+            node.id,
+            node_view
         );
     }
 }
@@ -91,17 +93,24 @@ async fn test_term_agreement() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_leader_term_dominance() {
     let cluster = TestCluster::new(3).await;
-    let _leader_id = cluster.wait_for_leader().await;
+    let leader_id = cluster.wait_for_leader().await;
 
-    let leader = cluster.leader().expect("should have leader");
+    // Get leader node by ID (more reliable than leader() which depends on is_leader())
+    let leader = cluster
+        .node(leader_id)
+        .expect("leader node should exist in cluster");
     let leader_term = leader.current_term();
 
-    for follower in cluster.followers() {
+    // Check all other nodes have term <= leader term
+    for node in cluster.nodes() {
+        if node.id == leader_id {
+            continue;
+        }
         assert!(
-            follower.current_term() <= leader_term,
-            "follower {} term {} should not exceed leader term {}",
-            follower.id,
-            follower.current_term(),
+            node.current_term() <= leader_term,
+            "node {} term {} should not exceed leader term {}",
+            node.id,
+            node.current_term(),
             leader_term
         );
     }

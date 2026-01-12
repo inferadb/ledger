@@ -46,9 +46,9 @@ pub use log_storage::{
     AppliedState, AppliedStateAccessor, NamespaceMeta, RaftLogStore, SequenceCounters,
     VaultHealthStatus, VaultMeta,
 };
-pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use peer_maintenance::PeerMaintenance;
 pub use peer_tracker::{PeerTracker, PeerTrackerConfig};
+pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use rate_limit::{NamespaceRateLimiter, RateLimitExceeded};
 pub use server::LedgerServer;
 pub use ttl_gc::TtlGarbageCollector;

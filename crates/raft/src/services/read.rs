@@ -792,11 +792,8 @@ impl ReadService for ReadServiceImpl {
         // Create the combined stream:
         // 1. Historical blocks (if any)
         // 2. New blocks from broadcast (filtered and deduplicated)
-        let historical_stream = futures::stream::iter(
-            historical_blocks
-                .into_iter()
-                .map(Ok::<_, Status>),
-        );
+        let historical_stream =
+            futures::stream::iter(historical_blocks.into_iter().map(Ok::<_, Status>));
 
         // Track the last height we've sent to avoid duplicates
         // (broadcast might include some blocks we already sent from history)
@@ -806,8 +803,8 @@ impl ReadService for ReadServiceImpl {
             start_height - 1 // Will accept blocks at start_height and above
         };
 
-        let broadcast_stream = tokio_stream::wrappers::BroadcastStream::new(receiver)
-            .filter_map(move |result| {
+        let broadcast_stream =
+            tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
                 async move {
                     match result {
                         Ok(announcement) => {
