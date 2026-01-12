@@ -13,7 +13,7 @@ use openraft::BasicNode;
 use openraft::impls::OneshotResponder;
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{Hash, NamespaceId, Transaction, VaultId};
+use ledger_types::{Hash, NamespaceId, SetCondition, Transaction, VaultId};
 
 // ============================================================================
 // Type Configuration
@@ -150,7 +150,7 @@ pub enum LedgerRequest {
         namespace_id: NamespaceId,
         /// Vault ID to update.
         vault_id: VaultId,
-        /// New health status.
+        /// New health status: true = Healthy, false = Diverged/Recovering.
         healthy: bool,
         /// If diverged, the expected state root.
         expected_root: Option<Hash>,
@@ -158,6 +158,10 @@ pub enum LedgerRequest {
         computed_root: Option<Hash>,
         /// If diverged, the height at which divergence was detected.
         diverged_at_height: Option<u64>,
+        /// If recovering, the recovery attempt number (1-based).
+        recovery_attempt: Option<u8>,
+        /// If recovering, the start timestamp (Unix seconds).
+        recovery_started_at: Option<i64>,
     },
 
     /// System operation (user management, node membership, etc.).
@@ -266,6 +270,8 @@ pub enum LedgerResponse {
         current_version: Option<u64>,
         /// Current value of the entity.
         current_value: Option<Vec<u8>>,
+        /// The condition that failed (for specific error code mapping).
+        failed_condition: Option<SetCondition>,
     },
 }
 

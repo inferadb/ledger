@@ -19,8 +19,8 @@ use tracing::info;
 use ledger_raft::proto::JoinClusterRequest;
 use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_raft::{
-    BlockCompactor, GrpcRaftNetworkFactory, LedgerNodeId, LedgerServer, LedgerTypeConfig,
-    RaftLogStore, TtlGarbageCollector,
+    AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
+    LedgerServer, LedgerTypeConfig, RaftLogStore, TtlGarbageCollector,
 };
 use ledger_storage::{BlockArchive, StateLayer};
 
@@ -73,6 +73,12 @@ pub struct BootstrappedNode {
     /// Block compactor background task handle.
     #[allow(dead_code)]
     pub compactor_handle: tokio::task::JoinHandle<()>,
+    /// Auto-recovery background task handle.
+    #[allow(dead_code)]
+    pub recovery_handle: tokio::task::JoinHandle<()>,
+    /// Learner refresh background task handle (only active on learner nodes).
+    #[allow(dead_code)]
+    pub learner_refresh_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Bootstrap a new cluster or join an existing one based on configuration.
@@ -143,8 +149,9 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         bootstrap_cluster(&raft, config).await?;
     }
 
-    // Clone block_archive for compactor before it's moved to server
+    // Clone block_archive for background jobs before it's moved to server
     let block_archive_for_compactor = block_archive.clone();
+    let block_archive_for_recovery = block_archive.clone();
 
     // Create server with block archive for GetBlock/GetBlockRange
     let server = LedgerServer::with_block_archive(
@@ -174,10 +181,32 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         raft.clone(),
         config.node_id,
         block_archive_for_compactor,
-        applied_state_accessor,
+        applied_state_accessor.clone(),
     );
     let compactor_handle = compactor.start();
     tracing::info!("Started block compactor");
+
+    // Start auto-recovery job for detecting and recovering diverged vaults
+    // Per DESIGN.md §8.2: Circuit breaker with bounded retries
+    let recovery = AutoRecoveryJob::new(
+        raft.clone(),
+        config.node_id,
+        applied_state_accessor.clone(),
+        state.clone(),
+    )
+    .with_block_archive(block_archive_for_recovery);
+    let recovery_handle = recovery.start();
+    tracing::info!("Started auto-recovery job");
+
+    // Start learner refresh job for keeping learner state synchronized
+    // Per DESIGN.md §9.3: Background polling of voters for fresh state
+    let learner_refresh = LearnerRefreshJob::new(
+        raft.clone(),
+        config.node_id,
+        applied_state_accessor,
+    );
+    let learner_refresh_handle = learner_refresh.start();
+    tracing::info!("Started learner refresh job");
 
     Ok(BootstrappedNode {
         raft,
@@ -185,6 +214,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         server,
         gc_handle,
         compactor_handle,
+        recovery_handle,
+        learner_refresh_handle,
     })
 }
 

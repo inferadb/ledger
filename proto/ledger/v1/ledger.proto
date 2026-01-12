@@ -178,6 +178,7 @@ message SetCondition {
     bool not_exists = 1; // Only set if key doesn't exist
     uint64 version = 2; // Only set if key was last modified at this block height
     bytes value_equals = 3; // Only set if current value matches exactly
+    bool must_exists = 4; // Only set if key already exists (for safe updates)
   }
 }
 

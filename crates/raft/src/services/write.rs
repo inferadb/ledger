@@ -11,6 +11,7 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::IdempotencyCache;
+use crate::log_storage::AppliedStateAccessor;
 use crate::metrics;
 use crate::proof::{self, ProofError};
 use crate::proto::write_service_server::WriteService;
@@ -22,6 +23,7 @@ use crate::rate_limit::NamespaceRateLimiter;
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
 use ledger_storage::BlockArchive;
+use ledger_types::SetCondition;
 
 /// Write service implementation.
 pub struct WriteServiceImpl {
@@ -33,6 +35,8 @@ pub struct WriteServiceImpl {
     block_archive: Option<Arc<BlockArchive>>,
     /// Per-namespace rate limiter.
     rate_limiter: Option<Arc<NamespaceRateLimiter>>,
+    /// Accessor for applied state (client sequences for gap detection).
+    applied_state: Option<AppliedStateAccessor>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -44,6 +48,7 @@ impl WriteServiceImpl {
             idempotency,
             block_archive: None,
             rate_limiter: None,
+            applied_state: None,
         }
     }
 
@@ -58,6 +63,7 @@ impl WriteServiceImpl {
             idempotency,
             block_archive: Some(block_archive),
             rate_limiter: None,
+            applied_state: None,
         }
     }
 
@@ -65,6 +71,60 @@ impl WriteServiceImpl {
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<NamespaceRateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
         self
+    }
+
+    /// Set the applied state accessor for sequence gap detection.
+    pub fn with_applied_state(mut self, applied_state: AppliedStateAccessor) -> Self {
+        self.applied_state = Some(applied_state);
+        self
+    }
+
+    /// Check for sequence gaps before submitting to Raft.
+    ///
+    /// Per DESIGN.md §5.3: If `sequence > last_committed + 1`, the client
+    /// has a gap indicating missed writes. Returns SEQUENCE_GAP error
+    /// with the last committed sequence so clients can retry correctly.
+    fn check_sequence_gap(
+        &self,
+        namespace_id: i64,
+        vault_id: i64,
+        client_id: &str,
+        sequence: u64,
+    ) -> Result<(), WriteError> {
+        // Sequence 0 is a special case (no sequence tracking)
+        if sequence == 0 || client_id.is_empty() {
+            return Ok(());
+        }
+
+        let Some(ref applied_state) = self.applied_state else {
+            // No applied state accessor - skip gap detection
+            return Ok(());
+        };
+
+        let last_committed = applied_state.client_sequence(namespace_id, vault_id, client_id);
+
+        // Allow sequence == last_committed + 1 (normal case)
+        // or sequence <= last_committed (idempotency cache handles duplicates)
+        // Only reject if sequence > last_committed + 1 (gap detected)
+        if sequence > last_committed + 1 {
+            return Err(WriteError {
+                code: WriteErrorCode::SequenceGap.into(),
+                key: String::new(),
+                current_version: None,
+                current_value: None,
+                message: format!(
+                    "Sequence gap detected: received {}, expected {} (last committed: {})",
+                    sequence,
+                    last_committed + 1,
+                    last_committed
+                ),
+                committed_tx_id: None,
+                committed_block_height: None,
+                last_committed_sequence: Some(last_committed),
+            });
+        }
+
+        Ok(())
     }
 
     /// Check rate limit for a namespace. Returns Status::resource_exhausted if limit exceeded.
@@ -78,6 +138,49 @@ impl WriteServiceImpl {
         Ok(())
     }
 
+    /// Map a failed SetCondition to the appropriate WriteErrorCode.
+    ///
+    /// Per DESIGN.md §6.1 and proto WriteErrorCode:
+    /// - MustNotExist failed → KEY_EXISTS (key already exists)
+    /// - MustExist failed → KEY_NOT_FOUND (key doesn't exist)
+    /// - VersionEquals failed with existing key → VERSION_MISMATCH
+    /// - VersionEquals failed with missing key → KEY_NOT_FOUND
+    /// - ValueEquals failed with existing key → VALUE_MISMATCH
+    /// - ValueEquals failed with missing key → KEY_NOT_FOUND
+    fn map_condition_to_error_code(
+        condition: Option<&SetCondition>,
+        key_exists: bool,
+    ) -> WriteErrorCode {
+        match condition {
+            Some(SetCondition::MustNotExist) => {
+                // MustNotExist failed means the key exists
+                WriteErrorCode::KeyExists
+            }
+            Some(SetCondition::MustExist) => {
+                // MustExist failed means the key doesn't exist
+                WriteErrorCode::KeyNotFound
+            }
+            Some(SetCondition::VersionEquals(_)) => {
+                if key_exists {
+                    WriteErrorCode::VersionMismatch
+                } else {
+                    WriteErrorCode::KeyNotFound
+                }
+            }
+            Some(SetCondition::ValueEquals(_)) => {
+                if key_exists {
+                    WriteErrorCode::ValueMismatch
+                } else {
+                    WriteErrorCode::KeyNotFound
+                }
+            }
+            None => {
+                // No condition - shouldn't reach here for PreconditionFailed
+                WriteErrorCode::Unspecified
+            }
+        }
+    }
+
     /// Convert a proto SetCondition to internal SetCondition.
     fn convert_set_condition(
         proto_condition: &crate::proto::SetCondition,
@@ -87,6 +190,8 @@ impl WriteServiceImpl {
         proto_condition.condition.as_ref().map(|c| match c {
             Condition::NotExists(true) => ledger_types::SetCondition::MustNotExist,
             Condition::NotExists(false) => ledger_types::SetCondition::MustExist,
+            Condition::MustExists(true) => ledger_types::SetCondition::MustExist,
+            Condition::MustExists(false) => ledger_types::SetCondition::MustNotExist,
             Condition::Version(v) => ledger_types::SetCondition::VersionEquals(*v),
             Condition::ValueEquals(v) => ledger_types::SetCondition::ValueEquals(v.clone()),
         })
@@ -263,6 +368,24 @@ impl WriteService for WriteServiceImpl {
         // Check per-namespace rate limit
         self.check_rate_limit(namespace_id)?;
 
+        // Check for sequence gaps (per DESIGN.md §5.3)
+        if let Err(gap_error) = self.check_sequence_gap(
+            namespace_id,
+            vault_id.unwrap_or(0),
+            &client_id,
+            sequence,
+        ) {
+            warn!(
+                client_id = %client_id,
+                sequence,
+                "Sequence gap detected"
+            );
+            metrics::record_write(false, start.elapsed().as_secs_f64());
+            return Ok(Response::new(WriteResponse {
+                result: Some(crate::proto::write_response::Result::Error(gap_error)),
+            }));
+        }
+
         // Convert to internal request
         let ledger_request = self.operations_to_request(
             namespace_id,
@@ -342,14 +465,19 @@ impl WriteService for WriteServiceImpl {
                 key,
                 current_version,
                 current_value,
+                failed_condition,
             } => {
                 // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
-                warn!(key = %key, "Write failed: precondition failed");
+                // Key exists if we have a current_version (which is the version when entity was last modified)
+                let key_exists = current_version.is_some();
+                let error_code = Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
+
+                warn!(key = %key, error_code = ?error_code, "Write failed: precondition failed");
                 metrics::record_write(false, latency);
 
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Error(WriteError {
-                        code: WriteErrorCode::VersionMismatch.into(),
+                        code: error_code.into(),
                         key,
                         current_version,
                         current_value,
@@ -431,6 +559,24 @@ impl WriteService for WriteServiceImpl {
 
         // Check per-namespace rate limit
         self.check_rate_limit(namespace_id)?;
+
+        // Check for sequence gaps (per DESIGN.md §5.3)
+        if let Err(gap_error) = self.check_sequence_gap(
+            namespace_id,
+            vault_id.unwrap_or(0),
+            &client_id,
+            sequence,
+        ) {
+            warn!(
+                client_id = %client_id,
+                sequence,
+                "Sequence gap detected in batch write"
+            );
+            metrics::record_batch_write(false, 0, start.elapsed().as_secs_f64());
+            return Ok(Response::new(BatchWriteResponse {
+                result: Some(crate::proto::batch_write_response::Result::Error(gap_error)),
+            }));
+        }
 
         // Flatten all operations from all groups
         let all_operations: Vec<crate::proto::Operation> = req
@@ -531,15 +677,20 @@ impl WriteService for WriteServiceImpl {
                 key,
                 current_version,
                 current_value,
+                failed_condition,
             } => {
                 // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
-                warn!(key = %key, batch_size, "Batch write failed: precondition failed");
+                // Key exists if we have a current_version (which is the version when entity was last modified)
+                let key_exists = current_version.is_some();
+                let error_code = Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
+
+                warn!(key = %key, error_code = ?error_code, batch_size, "Batch write failed: precondition failed");
                 metrics::record_batch_write(false, batch_size, latency);
 
                 Ok(Response::new(BatchWriteResponse {
                     result: Some(crate::proto::batch_write_response::Result::Error(
                         WriteError {
-                            code: WriteErrorCode::VersionMismatch.into(),
+                            code: error_code.into(),
                             key,
                             current_version,
                             current_value,

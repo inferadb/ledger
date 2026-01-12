@@ -84,6 +84,18 @@ impl HealthService for HealthServiceImpl {
                     );
                     (HealthStatus::Unavailable, "Vault has diverged state")
                 }
+                VaultHealthStatus::Recovering {
+                    started_at,
+                    attempt,
+                } => {
+                    details.insert("health_status".to_string(), "recovering".to_string());
+                    details.insert("recovery_started_at".to_string(), started_at.to_string());
+                    details.insert("recovery_attempt".to_string(), attempt.to_string());
+                    (
+                        HealthStatus::Degraded,
+                        "Vault is recovering from divergence",
+                    )
+                }
             };
 
             // Get vault metadata (last write timestamp)

@@ -947,7 +947,7 @@ impl AdminService for AdminServiceImpl {
         // Check current vault health
         let current_health = self.applied_state.vault_health(namespace_id, vault_id);
 
-        // Only recover diverged vaults unless force is set
+        // Only recover diverged/recovering vaults unless force is set
         if !req.force {
             match &current_health {
                 VaultHealthStatus::Healthy => {
@@ -960,7 +960,7 @@ impl AdminService for AdminServiceImpl {
                         final_state_root: None,
                     }));
                 }
-                VaultHealthStatus::Diverged { .. } => {
+                VaultHealthStatus::Diverged { .. } | VaultHealthStatus::Recovering { .. } => {
                     // Proceed with recovery
                 }
             }
@@ -1166,6 +1166,8 @@ impl AdminService for AdminServiceImpl {
                 expected_root: None, // Already diverged during recovery
                 computed_root: Some(final_state_root),
                 diverged_at_height: Some(expected_height),
+                recovery_attempt: None,
+                recovery_started_at: None,
             };
 
             if let Err(e) = self.raft.client_write(health_request).await {
@@ -1199,6 +1201,8 @@ impl AdminService for AdminServiceImpl {
                 expected_root: None,
                 computed_root: None,
                 diverged_at_height: None,
+                recovery_attempt: None,
+                recovery_started_at: None,
             };
 
             if let Err(e) = self.raft.client_write(health_request).await {
@@ -1278,6 +1282,8 @@ impl AdminService for AdminServiceImpl {
             expected_root: Some(expected_root),
             computed_root: Some(computed_root),
             diverged_at_height: Some(at_height),
+            recovery_attempt: None,
+            recovery_started_at: None,
         };
 
         match self.raft.client_write(health_request).await {

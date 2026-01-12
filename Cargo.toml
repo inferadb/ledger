@@ -35,9 +35,11 @@ redb = "2.4"
 # Crypto
 sha2 = "0.10"
 seahash = "4.1"
+hmac = "0.12"
 rs_merkle = "1.4"
 subtle = "2.6"
 zeroize = { version = "1.8", features = ["derive"] }
+base64 = "0.22"
 
 # Compression
 zstd = "0.13"

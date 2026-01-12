@@ -160,6 +160,9 @@ fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
     Ok(())
 }
 
+/// Default learner cache TTL (5 seconds).
+const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Discovery service implementation.
 pub struct DiscoveryServiceImpl {
     /// The Raft instance.
@@ -171,10 +174,16 @@ pub struct DiscoveryServiceImpl {
     applied_state: AppliedStateAccessor,
     /// Tracks when peers were last seen.
     peer_tracker: RwLock<PeerTracker>,
+    /// This node's ID for voter/learner checks (optional for backward compatibility).
+    node_id: Option<crate::types::LedgerNodeId>,
+    /// Timestamp of last state update (for learner staleness checks).
+    last_state_update: RwLock<std::time::Instant>,
+    /// Learner cache TTL (stale after this duration).
+    learner_cache_ttl: std::time::Duration,
 }
 
 impl DiscoveryServiceImpl {
-    /// Create a new discovery service.
+    /// Create a new discovery service (without node_id, staleness checks disabled).
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<RwLock<StateLayer>>,
@@ -185,7 +194,70 @@ impl DiscoveryServiceImpl {
             state,
             applied_state,
             peer_tracker: RwLock::new(PeerTracker::new()),
+            node_id: None,
+            last_state_update: RwLock::new(std::time::Instant::now()),
+            learner_cache_ttl: DEFAULT_LEARNER_CACHE_TTL,
         }
+    }
+
+    /// Add node_id for learner staleness checks.
+    ///
+    /// When set, the service can detect when a learner's cache is stale
+    /// and return appropriate errors with leader hints for client retry.
+    pub fn with_node_id(mut self, node_id: crate::types::LedgerNodeId) -> Self {
+        self.node_id = Some(node_id);
+        self
+    }
+
+    /// Create with custom learner cache TTL (for testing).
+    #[cfg(test)]
+    pub fn with_cache_ttl(mut self, ttl: std::time::Duration) -> Self {
+        self.learner_cache_ttl = ttl;
+        self
+    }
+
+    /// Update the last state update timestamp.
+    ///
+    /// Should be called after applying Raft entries.
+    pub fn mark_state_updated(&self) {
+        *self.last_state_update.write() = std::time::Instant::now();
+    }
+
+    /// Check if this node is a voter (participates in consensus).
+    ///
+    /// Returns true if this node is in the voter set, or if node_id is not
+    /// configured (assume voter behavior as fallback).
+    fn is_voter(&self) -> bool {
+        let Some(node_id) = self.node_id else {
+            // No node_id configured, assume voter (skip staleness checks)
+            return true;
+        };
+
+        let metrics = self.raft.metrics().borrow().clone();
+        let membership = metrics.membership_config.membership();
+
+        // Check if this node is in the voter set
+        membership.voter_ids().any(|id| id == node_id)
+    }
+
+    /// Check if the local state cache is stale (for learners).
+    ///
+    /// Voters always have fresh state; learners check time since last update.
+    fn is_cache_stale(&self) -> bool {
+        if self.is_voter() {
+            // Voters always have authoritative state
+            return false;
+        }
+
+        // Learners check cache age
+        let last_update = *self.last_state_update.read();
+        last_update.elapsed() > self.learner_cache_ttl
+    }
+
+    /// Get the current leader's node ID (for forwarding from stale learners).
+    fn get_leader_hint(&self) -> Option<String> {
+        let metrics = self.raft.metrics().borrow().clone();
+        metrics.current_leader.map(|id| id.to_string())
     }
 
     /// Prune stale peers that haven't been seen within the staleness threshold.
@@ -300,6 +372,16 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
         request: Request<GetSystemStateRequest>,
     ) -> Result<Response<GetSystemStateResponse>, Status> {
         let req = request.into_inner();
+
+        // Check learner staleness (per DESIGN.md §3.5).
+        // If this is a learner with stale cache, return error with leader hint.
+        if self.is_cache_stale() {
+            let leader_hint = self.get_leader_hint();
+            return Err(Status::unavailable(format!(
+                "Learner cache is stale. Retry with leader: {}",
+                leader_hint.unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
 
         // Get current system version (Raft term)
         let metrics = self.raft.metrics().borrow().clone();

@@ -2,12 +2,21 @@
 //!
 //! Handles all read operations including verified reads, block queries,
 //! and relationship/entity listing.
+//!
+//! ## Consistency Levels
+//!
+//! Per DESIGN.md §10, reads support two consistency levels:
+//! - **EVENTUAL** (default): Read from any replica. Fastest, may be slightly stale.
+//! - **LINEARIZABLE**: Read from leader only. Strong consistency, higher latency.
+//!
+//! Use linearizable reads when you need read-after-write consistency guarantees.
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
 use futures::StreamExt;
+use openraft::Raft;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
@@ -21,14 +30,16 @@ use crate::proto::{
     GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest, GetTipResponse,
     HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
     ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
-    ListResourcesResponse, ReadRequest, ReadResponse, VerifiedReadRequest, VerifiedReadResponse,
-    WatchBlocksRequest,
+    ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse, VerifiedReadRequest,
+    VerifiedReadResponse, WatchBlocksRequest,
 };
 
 use ledger_storage::{BlockArchive, SnapshotManager, StateLayer, StorageEngine};
 
 use crate::IdempotencyCache;
 use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus};
+use crate::pagination::{PageToken, PageTokenCodec};
+use crate::types::{LedgerNodeId, LedgerTypeConfig};
 
 /// Read service implementation.
 pub struct ReadServiceImpl {
@@ -44,6 +55,12 @@ pub struct ReadServiceImpl {
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Idempotency cache for client state tracking.
     idempotency: Option<Arc<IdempotencyCache>>,
+    /// Raft instance for consistency checks (linearizable reads).
+    raft: Option<Arc<Raft<LedgerTypeConfig>>>,
+    /// This node's ID for leadership checks.
+    node_id: Option<LedgerNodeId>,
+    /// Page token codec for secure pagination (HMAC-protected).
+    page_token_codec: PageTokenCodec,
 }
 
 impl ReadServiceImpl {
@@ -60,6 +77,9 @@ impl ReadServiceImpl {
             snapshot_manager: None,
             block_announcements,
             idempotency: None,
+            raft: None,
+            node_id: None,
+            page_token_codec: PageTokenCodec::with_random_key(),
         }
     }
 
@@ -77,6 +97,9 @@ impl ReadServiceImpl {
             snapshot_manager: None,
             block_announcements,
             idempotency: None,
+            raft: None,
+            node_id: None,
+            page_token_codec: PageTokenCodec::with_random_key(),
         }
     }
 
@@ -95,6 +118,9 @@ impl ReadServiceImpl {
             snapshot_manager: Some(snapshot_manager),
             block_announcements,
             idempotency: None,
+            raft: None,
+            node_id: None,
+            page_token_codec: PageTokenCodec::with_random_key(),
         }
     }
 
@@ -113,6 +139,9 @@ impl ReadServiceImpl {
             snapshot_manager: None,
             block_announcements,
             idempotency: Some(idempotency),
+            raft: None,
+            node_id: None,
+            page_token_codec: PageTokenCodec::with_random_key(),
         }
     }
 
@@ -132,6 +161,63 @@ impl ReadServiceImpl {
             snapshot_manager,
             block_announcements,
             idempotency,
+            raft: None,
+            node_id: None,
+            page_token_codec: PageTokenCodec::with_random_key(),
+        }
+    }
+
+    /// Add Raft instance for linearizable read support.
+    ///
+    /// When set, the service can enforce linearizable reads by checking
+    /// that this node is the current leader before serving read requests.
+    pub fn with_raft(mut self, raft: Arc<Raft<LedgerTypeConfig>>, node_id: LedgerNodeId) -> Self {
+        self.raft = Some(raft);
+        self.node_id = Some(node_id);
+        self
+    }
+
+    /// Check if this node is the current Raft leader.
+    ///
+    /// Returns false if Raft is not configured.
+    fn is_leader(&self) -> bool {
+        match (&self.raft, &self.node_id) {
+            (Some(raft), Some(node_id)) => {
+                let metrics = raft.metrics().borrow().clone();
+                metrics.current_leader == Some(*node_id)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check consistency requirements for a read request.
+    ///
+    /// Returns Ok(()) if the request can proceed, or an error if consistency
+    /// requirements cannot be met.
+    fn check_consistency(&self, consistency: i32) -> Result<(), Status> {
+        let consistency =
+            ReadConsistency::try_from(consistency).unwrap_or(ReadConsistency::Unspecified);
+
+        match consistency {
+            ReadConsistency::Linearizable => {
+                // Linearizable reads require this node to be the leader
+                if self.raft.is_none() {
+                    // No Raft configured - cannot guarantee linearizability
+                    return Err(Status::unavailable(
+                        "Linearizable reads not available: Raft not configured",
+                    ));
+                }
+                if !self.is_leader() {
+                    return Err(Status::failed_precondition(
+                        "Linearizable reads require leader; this node is not the leader",
+                    ));
+                }
+                Ok(())
+            }
+            ReadConsistency::Eventual | ReadConsistency::Unspecified => {
+                // Eventual reads can be served by any node
+                Ok(())
+            }
         }
     }
 
@@ -447,6 +533,9 @@ impl ReadService for ReadServiceImpl {
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         let start = Instant::now();
         let req = request.into_inner();
+
+        // Check consistency requirements first
+        self.check_consistency(req.consistency)?;
 
         // Extract IDs
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
@@ -995,17 +1084,26 @@ impl ReadService for ReadServiceImpl {
     ) -> Result<Response<GetClientStateResponse>, Status> {
         let req = request.into_inner();
 
-        // Get client ID from request
+        // Extract IDs
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
-        // Query the idempotency cache for last committed sequence
-        // Note: This is in-memory with 5-minute TTL. For persistent client state,
-        // we would need to store in the state layer at _system/clients/{client_id}.
-        let last_committed_sequence = self
+        // Query the idempotency cache first (hot path)
+        let cached_sequence = self
             .idempotency
             .as_ref()
             .map(|cache| cache.get_last_sequence(client_id))
             .unwrap_or(0);
+
+        // If cache has data, use it; otherwise fall back to persistent state
+        let last_committed_sequence = if cached_sequence > 0 {
+            cached_sequence
+        } else {
+            // Fall back to persistent AppliedState (survives restarts)
+            self.applied_state
+                .client_sequence(namespace_id, vault_id, client_id)
+        };
 
         Ok(Response::new(GetClientStateResponse {
             last_committed_sequence,
@@ -1018,16 +1116,47 @@ impl ReadService for ReadServiceImpl {
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
         let req = request.into_inner();
 
+        // Check consistency requirements first
+        self.check_consistency(req.consistency)?;
+
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
         let limit = if req.limit == 0 {
             100
         } else {
             req.limit as usize
         };
-        let page_token = if req.page_token.is_empty() {
-            None
+
+        // Compute query hash from all filter parameters for token validation
+        let query_params = format!(
+            "resource:{},relation:{},subject:{}",
+            req.resource.as_deref().unwrap_or(""),
+            req.relation.as_deref().unwrap_or(""),
+            req.subject.as_deref().unwrap_or("")
+        );
+        let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
+
+        // Get current block height for consistent pagination
+        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+
+        // Decode and validate page token if provided
+        let (resume_key, at_height) = if req.page_token.is_empty() {
+            (None, block_height)
         } else {
-            Some(req.page_token.as_str())
+            let token = self
+                .page_token_codec
+                .decode(&req.page_token)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            // Validate token context matches request
+            self.page_token_codec
+                .validate_context(&token, namespace_id, vault_id, query_hash)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            (
+                Some(String::from_utf8_lossy(&token.last_key).to_string()),
+                token.at_height,
+            )
         };
 
         let state = self.state.read();
@@ -1067,7 +1196,7 @@ impl ReadService for ReadServiceImpl {
             } else {
                 // Full scan with optional resource filter
                 let raw_rels = state
-                    .list_relationships(vault_id, page_token, limit)
+                    .list_relationships(vault_id, resume_key.as_deref(), limit)
                     .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
                 raw_rels
@@ -1082,19 +1211,26 @@ impl ReadService for ReadServiceImpl {
                     .collect()
             };
 
-        // Create pagination token from last relationship
+        // Create secure pagination token from last relationship
         let next_page_token = if relationships.len() >= limit {
             relationships
                 .last()
-                .map(|r| format!("{}#{}@{}", r.resource, r.relation, r.subject))
+                .map(|r| {
+                    let cursor = format!("{}#{}@{}", r.resource, r.relation, r.subject);
+                    let token = PageToken {
+                        version: 1,
+                        namespace_id,
+                        vault_id,
+                        last_key: cursor.into_bytes(),
+                        at_height,
+                        query_hash,
+                    };
+                    self.page_token_codec.encode(&token)
+                })
                 .unwrap_or_default()
         } else {
             String::new()
         };
-
-        // Get current block height for this vault
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
 
         Ok(Response::new(ListRelationshipsResponse {
             relationships,
@@ -1108,6 +1244,10 @@ impl ReadService for ReadServiceImpl {
         request: Request<ListResourcesRequest>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
         let req = request.into_inner();
+
+        // Check consistency requirements first
+        self.check_consistency(req.consistency)?;
+
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
         let limit = if req.limit == 0 {
@@ -1115,19 +1255,38 @@ impl ReadService for ReadServiceImpl {
         } else {
             req.limit as usize
         };
-        let page_token = if req.page_token.is_empty() {
-            None
-        } else {
-            Some(req.page_token.as_str())
-        };
 
-        // Get current block height for this vault
+        // Compute query hash from filter parameters for token validation
+        let query_params = format!("resource_type:{}", req.resource_type);
+        let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
+
+        // Get current block height for consistent pagination
         let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+
+        // Decode and validate page token if provided
+        let (resume_key, at_height) = if req.page_token.is_empty() {
+            (None, block_height)
+        } else {
+            let token = self
+                .page_token_codec
+                .decode(&req.page_token)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            // Validate token context matches request
+            self.page_token_codec
+                .validate_context(&token, namespace_id, vault_id, query_hash)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            (
+                Some(String::from_utf8_lossy(&token.last_key).to_string()),
+                token.at_height,
+            )
+        };
 
         // List relationships and extract unique resources matching the type prefix
         let state = self.state.read();
         let relationships = state
-            .list_relationships(vault_id, page_token, limit * 10) // Over-fetch to filter
+            .list_relationships(vault_id, resume_key.as_deref(), limit * 10) // Over-fetch to filter
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
         // Extract unique resource IDs matching the type prefix
@@ -1142,9 +1301,22 @@ impl ReadService for ReadServiceImpl {
         resources.dedup();
         resources.truncate(limit);
 
-        // Create pagination token from last resource if there are more
+        // Create secure pagination token from last resource if there are more
         let next_page_token = if resources.len() >= limit {
-            resources.last().cloned().unwrap_or_default()
+            resources
+                .last()
+                .map(|res| {
+                    let token = PageToken {
+                        version: 1,
+                        namespace_id,
+                        vault_id,
+                        last_key: res.as_bytes().to_vec(),
+                        at_height,
+                        query_hash,
+                    };
+                    self.page_token_codec.encode(&token)
+                })
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -1161,16 +1333,15 @@ impl ReadService for ReadServiceImpl {
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
         let req = request.into_inner();
+
+        // Check consistency requirements first
+        self.check_consistency(req.consistency)?;
+
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let limit = if req.limit == 0 {
             100
         } else {
             req.limit as usize
-        };
-        let page_token = if req.page_token.is_empty() {
-            None
-        } else {
-            Some(req.page_token.as_str())
         };
         let prefix = if req.key_prefix.is_empty() {
             None
@@ -1181,10 +1352,48 @@ impl ReadService for ReadServiceImpl {
         // Entities are namespace-level (stored in vault_id=0 by convention)
         let vault_id = 0i64;
 
+        // Compute query hash from filter parameters for token validation
+        // This prevents clients from changing filters mid-pagination
+        let query_params = format!(
+            "prefix:{},include_expired:{}",
+            req.key_prefix, req.include_expired
+        );
+        let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
+
+        // Get current block height for consistent pagination
+        let block_height = self
+            .applied_state
+            .all_vault_heights()
+            .iter()
+            .filter(|((ns, _), _)| *ns == namespace_id)
+            .map(|(_, h)| *h)
+            .max()
+            .unwrap_or(0);
+
+        // Decode and validate page token if provided
+        let (resume_key, at_height) = if req.page_token.is_empty() {
+            (None, block_height)
+        } else {
+            let token = self
+                .page_token_codec
+                .decode(&req.page_token)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            // Validate token context matches request
+            self.page_token_codec
+                .validate_context(&token, namespace_id, vault_id, query_hash)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+            (
+                Some(String::from_utf8_lossy(&token.last_key).to_string()),
+                token.at_height,
+            )
+        };
+
         // Get entities from state layer
         let state = self.state.read();
         let raw_entities = state
-            .list_entities(vault_id, prefix, page_token, limit + 1)
+            .list_entities(vault_id, prefix, resume_key.as_deref(), limit + 1)
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
         // Filter expired entities if not requested
@@ -1218,25 +1427,25 @@ impl ReadService for ReadServiceImpl {
             })
             .collect();
 
-        // Create pagination token from last key if there are more
+        // Create secure pagination token from last key if there are more
         let next_page_token = if entities.len() >= limit {
             filtered
                 .last()
-                .map(|e| String::from_utf8_lossy(&e.key).to_string())
+                .map(|e| {
+                    let token = PageToken {
+                        version: 1,
+                        namespace_id,
+                        vault_id,
+                        last_key: e.key.clone(),
+                        at_height,
+                        query_hash,
+                    };
+                    self.page_token_codec.encode(&token)
+                })
                 .unwrap_or_default()
         } else {
             String::new()
         };
-
-        // Entities are namespace-level, so get max height across all vaults in namespace
-        let block_height = self
-            .applied_state
-            .all_vault_heights()
-            .iter()
-            .filter(|((ns, _), _)| *ns == namespace_id)
-            .map(|(_, h)| *h)
-            .max()
-            .unwrap_or(0);
 
         Ok(Response::new(ListEntitiesResponse {
             entities,

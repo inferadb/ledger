@@ -69,9 +69,16 @@ const GRPC_REQUEST_LATENCY: &str = "ledger_grpc_request_latency_seconds";
 const BATCH_COALESCE_TOTAL: &str = "ledger_batch_coalesce_total";
 const BATCH_COALESCE_SIZE: &str = "ledger_batch_coalesce_size";
 const BATCH_FLUSH_LATENCY: &str = "ledger_batch_flush_latency_seconds";
+const BATCH_EAGER_COMMITS_TOTAL: &str = "ledger_batch_eager_commits_total";
+const BATCH_TIMEOUT_COMMITS_TOTAL: &str = "ledger_batch_timeout_commits_total";
 
 // Rate limiting metrics
 const RATE_LIMIT_EXCEEDED: &str = "ledger_rate_limit_exceeded_total";
+
+// Recovery metrics
+const RECOVERY_SUCCESS_TOTAL: &str = "ledger_recovery_success_total";
+const RECOVERY_FAILURE_TOTAL: &str = "ledger_recovery_failure_total";
+const DETERMINISM_BUG_TOTAL: &str = "ledger_determinism_bug_total";
 
 // =============================================================================
 // Write Service Metrics
@@ -290,6 +297,59 @@ pub fn record_batch_coalesce(size: usize) {
 #[inline]
 pub fn record_batch_flush(latency_secs: f64) {
     histogram!(BATCH_FLUSH_LATENCY).record(latency_secs);
+}
+
+/// Record an eager commit (batch flushed due to queue draining).
+///
+/// Per DESIGN.md §6.3: Eager commits occur when the incoming queue drains
+/// and the batch is flushed immediately rather than waiting for timeout.
+#[inline]
+pub fn record_eager_commit() {
+    counter!(BATCH_EAGER_COMMITS_TOTAL).increment(1);
+}
+
+/// Record a timeout commit (batch flushed due to deadline).
+#[inline]
+pub fn record_timeout_commit() {
+    counter!(BATCH_TIMEOUT_COMMITS_TOTAL).increment(1);
+}
+
+// =============================================================================
+// Recovery Metrics
+// =============================================================================
+
+/// Record a successful vault recovery.
+#[inline]
+pub fn record_recovery_success(namespace_id: i64, vault_id: i64) {
+    counter!(
+        RECOVERY_SUCCESS_TOTAL,
+        "namespace_id" => namespace_id.to_string(),
+        "vault_id" => vault_id.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a failed vault recovery attempt.
+#[inline]
+pub fn record_recovery_failure(namespace_id: i64, vault_id: i64, reason: &str) {
+    counter!(
+        RECOVERY_FAILURE_TOTAL,
+        "namespace_id" => namespace_id.to_string(),
+        "vault_id" => vault_id.to_string(),
+        "reason" => reason.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a determinism bug detection (critical alert).
+#[inline]
+pub fn record_determinism_bug(namespace_id: i64, vault_id: i64) {
+    counter!(
+        DETERMINISM_BUG_TOTAL,
+        "namespace_id" => namespace_id.to_string(),
+        "vault_id" => vault_id.to_string()
+    )
+    .increment(1);
 }
 
 // =============================================================================

@@ -71,6 +71,8 @@ pub enum StateError {
         current_version: Option<u64>,
         /// Current value of the entity, if it exists.
         current_value: Option<Vec<u8>>,
+        /// The condition that failed (for specific error code mapping).
+        failed_condition: Option<SetCondition>,
     },
 }
 
@@ -170,6 +172,7 @@ impl StateLayer {
                                 key: key.clone(),
                                 current_version: current_entity.as_ref().map(|e| e.version),
                                 current_value: current_entity.map(|e| e.value),
+                                failed_condition: condition.clone(),
                             });
                         }
 
@@ -801,10 +804,12 @@ mod tests {
                 key,
                 current_version,
                 current_value,
+                failed_condition,
             }) => {
                 assert_eq!(key, "key");
                 assert_eq!(current_version, Some(1)); // Set at block_height 1
                 assert_eq!(current_value, Some(b"value1".to_vec()));
+                assert_eq!(failed_condition, Some(SetCondition::MustNotExist));
             }
             Ok(_) => panic!("Expected PreconditionFailed error, got Ok"),
             Err(e) => panic!("Expected PreconditionFailed error, got: {:?}", e),

@@ -55,6 +55,8 @@ pub struct SagaOrchestrator {
     /// The shared state layer.
     state: Arc<RwLock<StateLayer>>,
     /// Accessor for applied state.
+    /// Reserved for future saga state queries.
+    #[allow(dead_code)]
     applied_state: AppliedStateAccessor,
     /// Poll interval.
     interval: Duration,
@@ -384,13 +386,7 @@ impl SagaOrchestrator {
             state
                 .get_entity(0, seq_key.as_bytes())
                 .map_err(|e| format!("Read sequence failed: {}", e))?
-                .and_then(|e| {
-                    e.value
-                        .get(..8)?
-                        .try_into()
-                        .ok()
-                        .map(i64::from_le_bytes)
-                })
+                .and_then(|e| e.value.get(..8)?.try_into().ok().map(i64::from_le_bytes))
                 .unwrap_or(1)
         };
 

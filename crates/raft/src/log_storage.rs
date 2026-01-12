@@ -86,6 +86,10 @@ pub struct AppliedState {
     /// Previous shard hash for chain continuity.
     #[serde(default)]
     pub previous_shard_hash: Hash,
+    /// Per-client last committed sequence numbers (for idempotency recovery).
+    /// Key: (namespace_id, vault_id, client_id), Value: last committed sequence.
+    #[serde(default)]
+    pub client_sequences: HashMap<(NamespaceId, VaultId, String), u64>,
 }
 
 /// Combined snapshot containing both metadata and entity state.
@@ -177,13 +181,16 @@ impl SequenceCounters {
     }
 }
 
+/// Maximum recovery attempts before requiring manual intervention.
+pub const MAX_RECOVERY_ATTEMPTS: u8 = 3;
+
 /// Health status for a vault.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VaultHealthStatus {
     /// Vault is healthy and accepting writes.
     #[default]
     Healthy,
-    /// Vault has diverged and is in recovery.
+    /// Vault has diverged and needs recovery.
     Diverged {
         /// Expected state root.
         expected: Hash,
@@ -191,6 +198,13 @@ pub enum VaultHealthStatus {
         computed: Hash,
         /// Height at which divergence was detected.
         at_height: u64,
+    },
+    /// Vault is currently recovering from divergence.
+    Recovering {
+        /// When recovery started (Unix timestamp).
+        started_at: i64,
+        /// Current recovery attempt (1-based, max MAX_RECOVERY_ATTEMPTS).
+        attempt: u8,
     },
 }
 
@@ -283,6 +297,23 @@ impl AppliedStateAccessor {
             .filter(|v| v.namespace_id == namespace_id && !v.deleted)
             .cloned()
             .collect()
+    }
+
+    /// Get the last committed sequence for a client.
+    ///
+    /// Returns 0 if no sequence has been committed for this client.
+    pub fn client_sequence(
+        &self,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
+        client_id: &str,
+    ) -> u64 {
+        self.state
+            .read()
+            .client_sequences
+            .get(&(namespace_id, vault_id, client_id.to_string()))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Get the current shard height (for snapshot info).
@@ -537,11 +568,13 @@ impl RaftLogStore {
                                 key,
                                 current_version,
                                 current_value,
+                                failed_condition,
                             } => (
                                 LedgerResponse::PreconditionFailed {
                                     key,
                                     current_version,
                                     current_value,
+                                    failed_condition,
                                 },
                                 None,
                             ),
@@ -581,6 +614,20 @@ impl RaftLogStore {
                 if let Some(last_tx) = transactions.last() {
                     if let Some(vault_meta) = state.vaults.get_mut(&key) {
                         vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
+                    }
+                }
+
+                // Persist client sequences for idempotency recovery.
+                // Track the highest sequence number per client for this vault.
+                for tx in transactions {
+                    let client_key = (*namespace_id, *vault_id, tx.client_id.clone());
+                    let current = state
+                        .client_sequences
+                        .get(&client_key)
+                        .copied()
+                        .unwrap_or(0);
+                    if tx.sequence > current {
+                        state.client_sequences.insert(client_key, tx.sequence);
                     }
                 }
 
@@ -689,6 +736,8 @@ impl RaftLogStore {
                 expected_root,
                 computed_root,
                 diverged_at_height,
+                recovery_attempt,
+                recovery_started_at,
             } => {
                 let key = (*namespace_id, *vault_id);
                 if *healthy {
@@ -698,6 +747,23 @@ impl RaftLogStore {
                         namespace_id,
                         vault_id,
                         "Vault health updated to Healthy via Raft"
+                    );
+                } else if let (Some(attempt), Some(started_at)) =
+                    (recovery_attempt, recovery_started_at)
+                {
+                    // Mark vault as recovering
+                    state.vault_health.insert(
+                        key,
+                        VaultHealthStatus::Recovering {
+                            started_at: *started_at,
+                            attempt: *attempt,
+                        },
+                    );
+                    tracing::info!(
+                        namespace_id,
+                        vault_id,
+                        attempt,
+                        "Vault health updated to Recovering via Raft"
                     );
                 } else {
                     // Mark vault as diverged
@@ -1418,6 +1484,8 @@ mod tests {
             expected_root: None,
             computed_root: None,
             diverged_at_height: None,
+            recovery_attempt: None,
+            recovery_started_at: None,
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -1457,6 +1525,8 @@ mod tests {
             expected_root: Some([0xAA; 32]),
             computed_root: Some([0xBB; 32]),
             diverged_at_height: Some(42),
+            recovery_attempt: None,
+            recovery_started_at: None,
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -1480,6 +1550,82 @@ mod tests {
                 assert_eq!(*at_height, 42);
             }
             _ => panic!("expected Diverged health status"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_vault_health_to_recovering() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.redb");
+
+        let store = RaftLogStore::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Start with a diverged vault
+        state.vault_health.insert(
+            (1, 1),
+            VaultHealthStatus::Diverged {
+                expected: [1u8; 32],
+                computed: [2u8; 32],
+                at_height: 10,
+            },
+        );
+
+        // Update to recovering
+        let request = LedgerRequest::UpdateVaultHealth {
+            namespace_id: 1,
+            vault_id: 1,
+            healthy: false,
+            expected_root: None,
+            computed_root: None,
+            diverged_at_height: None,
+            recovery_attempt: Some(1),
+            recovery_started_at: Some(chrono::Utc::now().timestamp()),
+        };
+
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::VaultHealthUpdated { success } => {
+                assert!(success);
+            }
+            _ => panic!("expected VaultHealthUpdated response"),
+        }
+
+        // Verify vault is now recovering
+        match state.vault_health.get(&(1, 1)) {
+            Some(VaultHealthStatus::Recovering { attempt, .. }) => {
+                assert_eq!(*attempt, 1);
+            }
+            _ => panic!("expected Recovering health status"),
+        }
+
+        // Test recovery attempt 2 (circuit breaker)
+        let request = LedgerRequest::UpdateVaultHealth {
+            namespace_id: 1,
+            vault_id: 1,
+            healthy: false,
+            expected_root: None,
+            computed_root: None,
+            diverged_at_height: None,
+            recovery_attempt: Some(2),
+            recovery_started_at: Some(chrono::Utc::now().timestamp()),
+        };
+
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::VaultHealthUpdated { success } => {
+                assert!(success);
+            }
+            _ => panic!("expected VaultHealthUpdated response"),
+        }
+
+        match state.vault_health.get(&(1, 1)) {
+            Some(VaultHealthStatus::Recovering { attempt, .. }) => {
+                assert_eq!(*attempt, 2);
+            }
+            _ => panic!("expected Recovering health status with attempt 2"),
         }
     }
 
@@ -1966,6 +2112,7 @@ mod tests {
             vaults: HashMap::new(),
             shard_height: 42,
             previous_shard_hash: [0xAB; 32],
+            client_sequences: HashMap::new(),
         };
 
         // Add some data
@@ -2095,6 +2242,7 @@ mod tests {
             vaults: HashMap::new(),
             shard_height: 55,
             previous_shard_hash: [0xBE; 32],
+            client_sequences: HashMap::new(),
         };
 
         // Add state data
@@ -2232,6 +2380,7 @@ mod tests {
                 vaults: HashMap::new(),
                 shard_height: 30,
                 previous_shard_hash: [0xAA; 32],
+                client_sequences: HashMap::new(),
             },
             vault_entities: HashMap::new(),
         };

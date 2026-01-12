@@ -17,12 +17,15 @@
 //! Ledger runs behind WireGuard VPN. Authentication and authorization are handled
 //! by Engine/Control services upstream. Ledger trusts all incoming requests.
 
+mod auto_recovery;
 pub mod batching;
 mod block_compaction;
 mod idempotency;
+mod learner_refresh;
 mod log_storage;
 pub mod metrics;
 mod orphan_cleanup;
+pub mod pagination;
 pub mod peer_maintenance;
 pub mod peer_tracker;
 pub mod proof;
@@ -41,7 +44,9 @@ pub mod proto {
     tonic::include_proto!("ledger.v1");
 }
 
+pub use auto_recovery::{AutoRecoveryConfig, AutoRecoveryJob, RecoveryResult};
 pub use batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle};
+pub use learner_refresh::{CachedSystemState, LearnerRefreshConfig, LearnerRefreshJob};
 pub use block_compaction::BlockCompactor;
 pub use idempotency::IdempotencyCache;
 pub use log_storage::{
@@ -49,6 +54,7 @@ pub use log_storage::{
     VaultHealthStatus, VaultMeta,
 };
 pub use orphan_cleanup::OrphanCleanupJob;
+pub use pagination::{PageToken, PageTokenCodec, PageTokenError};
 pub use peer_maintenance::PeerMaintenance;
 pub use peer_tracker::{PeerTracker, PeerTrackerConfig};
 pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
