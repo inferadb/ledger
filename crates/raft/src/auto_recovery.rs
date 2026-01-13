@@ -28,7 +28,7 @@ use crate::error::{
     ApplyOperationsSnafu, BlockArchiveNotConfiguredSnafu, BlockReadSnafu, IndexLookupSnafu,
     RecoveryError, StateRootComputationSnafu,
 };
-use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus, MAX_RECOVERY_ATTEMPTS};
+use crate::log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus};
 use crate::types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
 /// Default interval between recovery scans.
@@ -144,7 +144,10 @@ impl AutoRecoveryJob {
     /// Calculate retry delay with exponential backoff.
     fn retry_delay(&self, attempt: u8) -> Duration {
         let multiplier = 2u64.saturating_pow(attempt.saturating_sub(1) as u32);
-        let delay = self.config.base_retry_delay.saturating_mul(multiplier as u32);
+        let delay = self
+            .config
+            .base_retry_delay
+            .saturating_mul(multiplier as u32);
         std::cmp::min(delay, self.config.max_retry_delay)
     }
 
@@ -171,7 +174,10 @@ impl AutoRecoveryJob {
                 VaultHealthStatus::Diverged { .. } => {
                     needs_recovery.push((namespace_id, vault_id, health));
                 }
-                VaultHealthStatus::Recovering { started_at, attempt } => {
+                VaultHealthStatus::Recovering {
+                    started_at,
+                    attempt,
+                } => {
                     if *attempt < MAX_RECOVERY_ATTEMPTS
                         && self.is_ready_for_retry(*started_at, *attempt)
                     {
@@ -213,7 +219,16 @@ impl AutoRecoveryJob {
         // First, transition to Recovering state
         let now = chrono::Utc::now().timestamp();
         if let Err(e) = self
-            .propose_health_update(namespace_id, vault_id, false, None, None, None, Some(attempt), Some(now))
+            .propose_health_update(
+                namespace_id,
+                vault_id,
+                false,
+                None,
+                None,
+                None,
+                Some(attempt),
+                Some(now),
+            )
             .await
         {
             warn!(
@@ -228,9 +243,7 @@ impl AutoRecoveryJob {
 
         info!(
             namespace_id,
-            vault_id,
-            attempt,
-            "Starting vault recovery attempt"
+            vault_id, attempt, "Starting vault recovery attempt"
         );
 
         // Get the expected state root from the divergence info
@@ -258,7 +271,16 @@ impl AutoRecoveryJob {
                 if computed_root == expected_root || expected_root == ledger_types::ZERO_HASH {
                     // Recovery successful
                     if let Err(e) = self
-                        .propose_health_update(namespace_id, vault_id, true, None, None, None, None, None)
+                        .propose_health_update(
+                            namespace_id,
+                            vault_id,
+                            true,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
                         .await
                     {
                         warn!(
@@ -320,10 +342,7 @@ impl AutoRecoveryJob {
 
         debug!(
             namespace_id,
-            vault_id,
-            start_height,
-            tip_height,
-            "Replaying vault state for recovery"
+            vault_id, start_height, tip_height, "Replaying vault state for recovery"
         );
 
         // Replay blocks from start_height to tip
@@ -385,10 +404,7 @@ impl AutoRecoveryJob {
                             .iter()
                             .find(|v| v.vault_id == vault_id)
                         {
-                            return Ok((
-                                vault_state.vault_height + 1,
-                                vault_state.state_root,
-                            ));
+                            return Ok((vault_state.vault_height + 1, vault_state.state_root));
                         }
                     }
                 }
@@ -423,14 +439,14 @@ impl AutoRecoveryJob {
             recovery_started_at,
         };
 
-        let result = self
-            .raft
-            .client_write(request)
-            .await
-            .map_err(|e| RecoveryError::RaftConsensus {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
+        let result =
+            self.raft
+                .client_write(request)
+                .await
+                .map_err(|e| RecoveryError::RaftConsensus {
+                    message: format!("{:?}", e),
+                    backtrace: snafu::Backtrace::generate(),
+                })?;
 
         match result.data {
             LedgerResponse::VaultHealthUpdated { success: true } => Ok(()),

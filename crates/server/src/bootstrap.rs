@@ -205,11 +205,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     // Start learner refresh job for keeping learner state synchronized
     // Per DESIGN.md §9.3: Background polling of voters for fresh state
-    let learner_refresh = LearnerRefreshJob::new(
-        raft.clone(),
-        config.node_id,
-        applied_state_accessor,
-    );
+    let learner_refresh =
+        LearnerRefreshJob::new(raft.clone(), config.node_id, applied_state_accessor);
     let learner_refresh_handle = learner_refresh.start();
     tracing::info!("Started learner refresh job");
 

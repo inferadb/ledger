@@ -133,7 +133,9 @@ impl MultiRaftConfig {
         if shard_id == 0 {
             self.data_dir.join("shards").join("_system")
         } else {
-            self.data_dir.join("shards").join(format!("shard_{:04}", shard_id))
+            self.data_dir
+                .join("shards")
+                .join(format!("shard_{:04}", shard_id))
         }
     }
 }
@@ -532,13 +534,8 @@ impl MultiRaftManager {
         info!(shard_id, "Started block compactor");
 
         // Auto Recovery Job
-        let recovery = AutoRecoveryJob::new(
-            raft,
-            self.config.node_id,
-            applied_state,
-            state,
-        )
-        .with_block_archive(block_archive);
+        let recovery = AutoRecoveryJob::new(raft, self.config.node_id, applied_state, state)
+            .with_block_archive(block_archive);
         let recovery_handle = recovery.start();
         info!(shard_id, "Started auto recovery job");
 
@@ -781,7 +778,11 @@ mod tests {
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
         let result = manager.start_system_shard(shard_config).await;
 
-        assert!(result.is_ok(), "start_system_shard failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "start_system_shard failed: {:?}",
+            result.err()
+        );
 
         let shard = result.unwrap();
         assert_eq!(shard.shard_id(), 0);
@@ -797,11 +798,17 @@ mod tests {
 
         // Start system shard
         let system_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(system_config).await.expect("start system");
+        manager
+            .start_system_shard(system_config)
+            .await
+            .expect("start system");
 
         // Start data shard
         let data_config = ShardConfig::data(1, vec![(1, "127.0.0.1:50051".to_string())]);
-        manager.start_data_shard(data_config).await.expect("start data shard");
+        manager
+            .start_data_shard(data_config)
+            .await
+            .expect("start data shard");
 
         assert_eq!(manager.list_shards().len(), 2);
         assert!(manager.has_shard(0));
@@ -816,11 +823,17 @@ mod tests {
 
         // Start system shard
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config.clone()).await.expect("start system");
+        manager
+            .start_system_shard(shard_config.clone())
+            .await
+            .expect("start system");
 
         // Try to start again
         let result = manager.start_system_shard(shard_config).await;
-        assert!(matches!(result, Err(MultiRaftError::ShardExists { shard_id: 0 })));
+        assert!(matches!(
+            result,
+            Err(MultiRaftError::ShardExists { shard_id: 0 })
+        ));
     }
 
     #[tokio::test]
@@ -831,7 +844,10 @@ mod tests {
 
         // Start system shard
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config).await.expect("start system");
+        manager
+            .start_system_shard(shard_config)
+            .await
+            .expect("start system");
 
         assert!(manager.has_shard(0));
 
@@ -849,11 +865,17 @@ mod tests {
 
         // Try to get non-existent shard
         let result = manager.get_shard(0);
-        assert!(matches!(result, Err(MultiRaftError::ShardNotFound { shard_id: 0 })));
+        assert!(matches!(
+            result,
+            Err(MultiRaftError::ShardNotFound { shard_id: 0 })
+        ));
 
         // Start and get
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config).await.expect("start system");
+        manager
+            .start_system_shard(shard_config)
+            .await
+            .expect("start system");
 
         let shard = manager.get_shard(0).expect("get shard");
         assert_eq!(shard.shard_id(), 0);
@@ -892,7 +914,10 @@ mod tests {
         let mut shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
         shard_config.enable_background_jobs = false;
 
-        manager.start_system_shard(shard_config).await.expect("start system");
+        manager
+            .start_system_shard(shard_config)
+            .await
+            .expect("start system");
 
         let shard = manager.get_shard(0).expect("get shard");
 
@@ -913,15 +938,24 @@ mod tests {
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
         assert!(shard_config.enable_background_jobs); // Verify default is true
 
-        manager.start_system_shard(shard_config).await.expect("start system");
+        manager
+            .start_system_shard(shard_config)
+            .await
+            .expect("start system");
 
         let shard = manager.get_shard(0).expect("get shard");
 
         // Background jobs should be Some when enabled
         let jobs = shard.background_jobs.lock();
         assert!(jobs.gc_handle.is_some(), "GC job should be started");
-        assert!(jobs.compactor_handle.is_some(), "Compactor job should be started");
-        assert!(jobs.recovery_handle.is_some(), "Recovery job should be started");
+        assert!(
+            jobs.compactor_handle.is_some(),
+            "Compactor job should be started"
+        );
+        assert!(
+            jobs.recovery_handle.is_some(),
+            "Recovery job should be started"
+        );
     }
 
     #[tokio::test]
@@ -932,7 +966,10 @@ mod tests {
 
         // Start with background jobs enabled
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config).await.expect("start system");
+        manager
+            .start_system_shard(shard_config)
+            .await
+            .expect("start system");
 
         // Verify jobs are running before stop
         {

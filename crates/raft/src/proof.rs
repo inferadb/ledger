@@ -513,8 +513,8 @@ mod tests {
     // State Proof Tests
     // ========================================================================
 
-    use super::{generate_state_proof, verify_state_proof, StateProofVerification};
-    use ledger_types::{bucket_id, sha256_concat, Entity, EMPTY_HASH};
+    use super::{StateProofVerification, generate_state_proof, verify_state_proof};
+    use ledger_types::{EMPTY_HASH, Entity, bucket_id, sha256_concat};
 
     fn make_entity(key: &[u8], value: &[u8]) -> Entity {
         Entity {
@@ -586,7 +586,7 @@ mod tests {
                 assert_eq!(expected, bucket_id(b"test_key"));
                 assert_eq!(actual, (bucket_id(b"test_key") as u32 + 1) % 256);
             }
-            _ => panic!("Expected InvalidBucketId, got {:?}", result),
+            _ => unreachable!("Expected InvalidBucketId, got {:?}", result),
         }
     }
 
@@ -613,10 +613,7 @@ mod tests {
 
         let result = verify_state_proof(&proof, &expected_state_root);
 
-        assert_eq!(
-            result,
-            StateProofVerification::MissingField("bucket_root")
-        );
+        assert_eq!(result, StateProofVerification::MissingField("bucket_root"));
     }
 
     #[test]
@@ -657,7 +654,13 @@ mod tests {
         assert_eq!(proof2.bucket_id, bucket2 as u32);
 
         // Both should verify against the same state root
-        assert_eq!(verify_state_proof(&proof1, &state_root), StateProofVerification::Valid);
-        assert_eq!(verify_state_proof(&proof2, &state_root), StateProofVerification::Valid);
+        assert_eq!(
+            verify_state_proof(&proof1, &state_root),
+            StateProofVerification::Valid
+        );
+        assert_eq!(
+            verify_state_proof(&proof2, &state_root),
+            StateProofVerification::Valid
+        );
     }
 }

@@ -223,7 +223,10 @@ impl ForwardClient {
         &mut self,
         request: ListResourcesRequest,
     ) -> Result<Response<ListResourcesResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding list_resources request");
+        debug!(
+            shard_id = self.shard_id,
+            "Forwarding list_resources request"
+        );
         let mut req = Request::new(request);
         req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
         self.read_client.list_resources(req).await.map_err(|e| {

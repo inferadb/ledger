@@ -55,7 +55,10 @@ async fn test_basic_sequence_gap_detection() {
         include_tx_proof: false,
     };
 
-    let response1 = write_client.write(request1).await.expect("write should succeed");
+    let response1 = write_client
+        .write(request1)
+        .await
+        .expect("write should succeed");
     match response1.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Success(_)) => {}
         other => panic!("first write should succeed, got: {:?}", other),
@@ -85,7 +88,10 @@ async fn test_basic_sequence_gap_detection() {
         include_tx_proof: false,
     };
 
-    let response2 = write_client.write(request2).await.expect("write RPC should succeed");
+    let response2 = write_client
+        .write(request2)
+        .await
+        .expect("write RPC should succeed");
     match response2.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Error(e)) => {
             assert_eq!(
@@ -99,7 +105,10 @@ async fn test_basic_sequence_gap_detection() {
                 "last committed should be 1"
             );
         }
-        other => panic!("second write should fail with SequenceGap, got: {:?}", other),
+        other => panic!(
+            "second write should fail with SequenceGap, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -117,7 +126,9 @@ async fn test_same_vault_two_writes() {
 
     // Write sequence 1
     let request1 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: "same-vault".to_string() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: "same-vault".to_string(),
+        }),
         sequence: 1,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
@@ -146,7 +157,9 @@ async fn test_same_vault_two_writes() {
 
     // Write sequence 2
     let request2 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: "same-vault".to_string() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: "same-vault".to_string(),
+        }),
         sequence: 2,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
@@ -186,7 +199,9 @@ async fn test_only_vault_2() {
 
     // Write to vault 2 with sequence 1
     let request1 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: "only-v2".to_string() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: "only-v2".to_string(),
+        }),
         sequence: 1,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 2 }),
@@ -215,7 +230,9 @@ async fn test_only_vault_2() {
 
     // Write to vault 2 with sequence 2
     let request2 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: "only-v2".to_string() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: "only-v2".to_string(),
+        }),
         sequence: 2,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 2 }),
@@ -257,7 +274,9 @@ async fn test_vault_2_first_then_1_then_2() {
 
     // Write to vault 2 FIRST with sequence 1
     let request1 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: client_id.clone() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: client_id.clone(),
+        }),
         sequence: 1,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 2 }), // Vault 2 first!
@@ -286,7 +305,9 @@ async fn test_vault_2_first_then_1_then_2() {
 
     // Write to vault 1 with sequence 1
     let request2 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: client_id.clone() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: client_id.clone(),
+        }),
         sequence: 1,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 1 }), // Now vault 1
@@ -315,7 +336,9 @@ async fn test_vault_2_first_then_1_then_2() {
 
     // Write to vault 2 again with sequence 2
     let request3 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: client_id.clone() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: client_id.clone(),
+        }),
         sequence: 2,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 2 }), // Back to vault 2
@@ -361,7 +384,9 @@ async fn test_two_vault_sequence_tracking() {
 
     // Write to vault 1 with sequence 1
     let request1 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: client_id.clone() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: client_id.clone(),
+        }),
         sequence: 1,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(ledger_raft::proto::VaultId { id: vault1_id }),
@@ -378,7 +403,10 @@ async fn test_two_vault_sequence_tracking() {
         include_tx_proof: false,
     };
 
-    let resp1 = write_client.write(request1).await.expect("write to vault 1");
+    let resp1 = write_client
+        .write(request1)
+        .await
+        .expect("write to vault 1");
     match resp1.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 1 with sequence 1 succeeded");
@@ -393,7 +421,9 @@ async fn test_two_vault_sequence_tracking() {
     // Note: Sequence tracking is per (namespace_id, vault_id, client_id), so
     // writing to a different vault starts fresh at sequence 1
     let request2 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: client_id.clone() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: client_id.clone(),
+        }),
         sequence: 1, // Fresh sequence for new vault (not 2!)
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(ledger_raft::proto::VaultId { id: vault2_id }),
@@ -410,7 +440,10 @@ async fn test_two_vault_sequence_tracking() {
         include_tx_proof: false,
     };
 
-    let resp2 = write_client.write(request2).await.expect("write to vault 2");
+    let resp2 = write_client
+        .write(request2)
+        .await
+        .expect("write to vault 2");
     match resp2.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 2 with sequence 1 succeeded");
@@ -423,7 +456,9 @@ async fn test_two_vault_sequence_tracking() {
 
     // Write to vault 2 with sequence 2 (should succeed)
     let request3 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId { id: client_id.clone() }),
+        client_id: Some(ledger_raft::proto::ClientId {
+            id: client_id.clone(),
+        }),
         sequence: 2, // Next sequence for vault 2
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(ledger_raft::proto::VaultId { id: vault2_id }),
@@ -440,7 +475,10 @@ async fn test_two_vault_sequence_tracking() {
         include_tx_proof: false,
     };
 
-    let resp3 = write_client.write(request3).await.expect("write to vault 2 seq 2");
+    let resp3 = write_client
+        .write(request3)
+        .await
+        .expect("write to vault 2 seq 2");
     match resp3.into_inner().result {
         Some(ledger_raft::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 2 with sequence 2 succeeded");

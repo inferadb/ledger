@@ -294,8 +294,8 @@ impl SagaOrchestrator {
                 };
 
                 if let Some(entity) = user_entity {
-                    let mut user_data: serde_json::Value =
-                        serde_json::from_slice(&entity.value).context(DeserializationSnafu {
+                    let mut user_data: serde_json::Value = serde_json::from_slice(&entity.value)
+                        .context(DeserializationSnafu {
                             entity_type: "User".to_string(),
                         })?;
 

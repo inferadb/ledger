@@ -230,7 +230,10 @@ impl ShardResolver for MultiShardResolver {
                 ))
             } else {
                 // Namespace not found in routing table
-                Status::not_found(format!("Namespace {} not found in routing table", namespace_id))
+                Status::not_found(format!(
+                    "Namespace {} not found in routing table",
+                    namespace_id
+                ))
             }
         })?;
 
@@ -259,21 +262,19 @@ impl ShardResolver for MultiShardResolver {
         }
 
         // Not local - check if we have routing info for forwarding
-        let router = self.router().ok_or_else(|| {
-            Status::unavailable("Shard router not initialized")
-        })?;
+        let router = self
+            .router()
+            .ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
 
         // Get routing info from the ShardRouter
-        let routing = router.get_routing(namespace_id).map_err(|e| {
-            match e {
-                crate::shard_router::RoutingError::NamespaceNotFound { .. } => {
-                    Status::not_found(format!("Namespace {} not found in routing table", namespace_id))
-                }
-                crate::shard_router::RoutingError::NamespaceUnavailable { status, .. } => {
-                    Status::unavailable(format!("Namespace {} is {:?}", namespace_id, status))
-                }
-                _ => Status::internal(format!("Routing error: {}", e)),
+        let routing = router.get_routing(namespace_id).map_err(|e| match e {
+            crate::shard_router::RoutingError::NamespaceNotFound { .. } => Status::not_found(
+                format!("Namespace {} not found in routing table", namespace_id),
+            ),
+            crate::shard_router::RoutingError::NamespaceUnavailable { status, .. } => {
+                Status::unavailable(format!("Namespace {} is {:?}", namespace_id, status))
             }
+            _ => Status::internal(format!("Routing error: {}", e)),
         })?;
 
         // Return forwarding info
@@ -285,9 +286,10 @@ impl ShardResolver for MultiShardResolver {
     }
 
     fn system_shard(&self) -> Result<ShardContext, Status> {
-        let shard = self.manager.system_shard().map_err(|e| {
-            Status::unavailable(format!("System shard not available: {}", e))
-        })?;
+        let shard = self
+            .manager
+            .system_shard()
+            .map_err(|e| Status::unavailable(format!("System shard not available: {}", e)))?;
 
         Ok(ShardContext {
             raft: shard.raft().clone(),
@@ -303,6 +305,7 @@ impl ShardResolver for MultiShardResolver {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -363,7 +366,7 @@ mod tests {
         let result = ResolveResult::Remote(remote);
 
         match result {
-            ResolveResult::Local(_) => panic!("Expected Remote variant"),
+            ResolveResult::Local(_) => unreachable!("Expected Remote variant"),
             ResolveResult::Remote(info) => {
                 assert_eq!(info.shard_id, 2);
                 assert_eq!(info.namespace_id, 100);
@@ -382,15 +385,18 @@ mod tests {
     #[test]
     fn test_shard_context_debug() {
         // Verify our custom Debug impl compiles and works
-        let debug_output = format!("{:?}", RemoteShardInfo {
-            shard_id: 1,
-            namespace_id: 1,
-            routing: RoutingInfo {
+        let debug_output = format!(
+            "{:?}",
+            RemoteShardInfo {
                 shard_id: 1,
-                member_nodes: vec![],
-                leader_hint: None,
-            },
-        });
+                namespace_id: 1,
+                routing: RoutingInfo {
+                    shard_id: 1,
+                    member_nodes: vec![],
+                    leader_hint: None,
+                },
+            }
+        );
         assert!(debug_output.contains("RemoteShardInfo"));
     }
 

@@ -155,7 +155,13 @@ impl IdempotencyCache {
         }
 
         // Not a duplicate, insert the new result
-        self.insert(namespace_id, vault_id, client_id.to_string(), sequence, result);
+        self.insert(
+            namespace_id,
+            vault_id,
+            client_id.to_string(),
+            sequence,
+            result,
+        );
         None
     }
 
@@ -280,7 +286,10 @@ mod tests {
 
         // Same client, same sequence, but different vault should NOT be duplicate
         let cached = cache.check(1, 2, "client-1", 1);
-        assert!(cached.is_none(), "different vault should not be a duplicate");
+        assert!(
+            cached.is_none(),
+            "different vault should not be a duplicate"
+        );
 
         // Now insert for vault 2
         cache.insert(1, 2, "client-1".to_string(), 1, result);
@@ -302,7 +311,10 @@ mod tests {
 
         // Same client, same vault, same sequence, but different namespace should NOT be duplicate
         let cached = cache.check(2, 1, "client-1", 1);
-        assert!(cached.is_none(), "different namespace should not be a duplicate");
+        assert!(
+            cached.is_none(),
+            "different namespace should not be a duplicate"
+        );
     }
 
     /// DESIGN.md compliance test: sequence numbers must be monotonically increasing.

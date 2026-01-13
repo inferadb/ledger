@@ -56,9 +56,7 @@ impl std::fmt::Display for LockError {
 impl std::error::Error for LockError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            LockError::CreateFailed(_, err) | LockError::DirectoryCreateFailed(_, err) => {
-                Some(err)
-            }
+            LockError::CreateFailed(_, err) | LockError::DirectoryCreateFailed(_, err) => Some(err),
             LockError::AlreadyLocked(_) => None,
         }
     }
@@ -114,8 +112,8 @@ impl DataDirLock {
         }
 
         // Create/open the lock file
-        let file = File::create(&lock_path)
-            .map_err(|e| LockError::CreateFailed(lock_path.clone(), e))?;
+        let file =
+            File::create(&lock_path).map_err(|e| LockError::CreateFailed(lock_path.clone(), e))?;
 
         // Try to acquire an exclusive lock (non-blocking)
         match file.try_lock_exclusive() {
@@ -189,6 +187,7 @@ impl Drop for DataDirLock {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

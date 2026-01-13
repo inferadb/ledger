@@ -6,7 +6,7 @@
 //! - Query hash to detect filter changes mid-pagination
 //! - Height tracking for consistent pagination across pages
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -77,11 +77,12 @@ impl PageTokenCodec {
     /// Encode a page token to an opaque string.
     pub fn encode(&self, token: &PageToken) -> String {
         // Serialize the token
-        let token_bytes = bincode::serialize(token).expect("PageToken serialization should not fail");
+        let token_bytes =
+            bincode::serialize(token).expect("PageToken serialization should not fail");
 
         // Compute HMAC
-        let mut mac = <Hmac<Sha256>>::new_from_slice(&self.key)
-            .expect("HMAC key length should be valid");
+        let mut mac =
+            <Hmac<Sha256>>::new_from_slice(&self.key).expect("HMAC key length should be valid");
         mac.update(&token_bytes);
         let result = mac.finalize();
         let hmac_full = result.into_bytes();
@@ -97,7 +98,8 @@ impl PageTokenCodec {
         };
 
         // Serialize and base64 encode
-        let bytes = bincode::serialize(&encoded).expect("EncodedToken serialization should not fail");
+        let bytes =
+            bincode::serialize(&encoded).expect("EncodedToken serialization should not fail");
         URL_SAFE_NO_PAD.encode(&bytes)
     }
 
@@ -118,11 +120,11 @@ impl PageTokenCodec {
             bincode::deserialize(&bytes).map_err(|_| PageTokenError::InvalidFormat)?;
 
         // Verify HMAC
-        let token_bytes = bincode::serialize(&encoded_token.token)
-            .map_err(|_| PageTokenError::InvalidFormat)?;
+        let token_bytes =
+            bincode::serialize(&encoded_token.token).map_err(|_| PageTokenError::InvalidFormat)?;
 
-        let mut mac = <Hmac<Sha256>>::new_from_slice(&self.key)
-            .expect("HMAC key length should be valid");
+        let mut mac =
+            <Hmac<Sha256>>::new_from_slice(&self.key).expect("HMAC key length should be valid");
         mac.update(&token_bytes);
         let result = mac.finalize();
         let expected_hmac = result.into_bytes();
@@ -134,7 +136,9 @@ impl PageTokenCodec {
 
         // Check version
         if encoded_token.token.version != TOKEN_VERSION {
-            return Err(PageTokenError::UnsupportedVersion(encoded_token.token.version));
+            return Err(PageTokenError::UnsupportedVersion(
+                encoded_token.token.version,
+            ));
         }
 
         Ok(encoded_token.token)
@@ -193,7 +197,9 @@ impl std::fmt::Display for PageTokenError {
         match self {
             PageTokenError::InvalidFormat => write!(f, "invalid page token"),
             PageTokenError::InvalidHmac => write!(f, "invalid page token"),
-            PageTokenError::UnsupportedVersion(v) => write!(f, "unsupported page token version: {}", v),
+            PageTokenError::UnsupportedVersion(v) => {
+                write!(f, "unsupported page token version: {}", v)
+            }
             PageTokenError::ContextMismatch => write!(f, "page token does not match request"),
             PageTokenError::QueryChanged => {
                 write!(f, "query parameters changed; start new pagination")
@@ -255,11 +261,7 @@ mod tests {
             .map(|(i, c)| {
                 if i == 10 {
                     // Change one character
-                    if *c == 'A' {
-                        'B'
-                    } else {
-                        'A'
-                    }
+                    if *c == 'A' { 'B' } else { 'A' }
                 } else {
                     *c
                 }
@@ -268,10 +270,7 @@ mod tests {
 
         // Decoding tampered token should fail
         let result = codec.decode(&tampered);
-        assert!(
-            result.is_err(),
-            "tampered token should fail validation"
-        );
+        assert!(result.is_err(), "tampered token should fail validation");
     }
 
     #[test]
@@ -292,10 +291,7 @@ mod tests {
 
         // Decoding with different key should fail
         let result = codec2.decode(&encoded);
-        assert!(
-            result.is_err(),
-            "token from different codec should fail"
-        );
+        assert!(result.is_err(), "token from different codec should fail");
     }
 
     #[test]
@@ -313,9 +309,7 @@ mod tests {
         };
 
         // Matching context should succeed
-        assert!(codec
-            .validate_context(&token, 42, 100, query_hash)
-            .is_ok());
+        assert!(codec.validate_context(&token, 42, 100, query_hash).is_ok());
 
         // Wrong namespace should fail
         assert_eq!(

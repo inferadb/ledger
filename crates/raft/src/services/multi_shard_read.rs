@@ -69,10 +69,7 @@ impl MultiShardReadService {
 
 #[tonic::async_trait]
 impl ReadService for MultiShardReadService {
-    #[instrument(
-        skip(self, request),
-        fields(namespace_id, vault_id, key)
-    )]
+    #[instrument(skip(self, request), fields(namespace_id, vault_id, key))]
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         let start = Instant::now();
         let req = request.into_inner();
@@ -133,10 +130,7 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(
-        skip(self, request),
-        fields(namespace_id, vault_id, key)
-    )]
+    #[instrument(skip(self, request), fields(namespace_id, vault_id, key))]
     async fn verified_read(
         &self,
         request: Request<VerifiedReadRequest>,
@@ -185,7 +179,11 @@ impl ReadService for MultiShardReadService {
 
         let latency = start.elapsed().as_secs_f64();
         let found = entity.is_some();
-        debug!(found, latency_ms = latency * 1000.0, "Verified read completed");
+        debug!(
+            found,
+            latency_ms = latency * 1000.0,
+            "Verified read completed"
+        );
         metrics::record_verified_read(true, latency);
 
         // Get block height
@@ -245,7 +243,11 @@ impl ReadService for MultiShardReadService {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit as usize
+        };
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -317,7 +319,11 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit as usize
+        };
         let prefix = if req.key_prefix.is_empty() {
             None
         } else {
@@ -385,7 +391,11 @@ impl ReadService for MultiShardReadService {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit as usize
+        };
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -476,7 +486,10 @@ impl ReadService for MultiShardReadService {
 
         // Block retrieval is complex for multi-shard
         // Return None for now - full implementation would use vault_entry_to_proto_block helper
-        warn!(namespace_id, "get_block: block retrieval not yet fully implemented for multi-shard");
+        warn!(
+            namespace_id,
+            "get_block: block retrieval not yet fully implemented for multi-shard"
+        );
 
         Ok(Response::new(GetBlockResponse { block: None }))
     }
@@ -499,7 +512,10 @@ impl ReadService for MultiShardReadService {
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
         let current_tip = ctx.applied_state.vault_height(namespace_id, vault_id);
 
-        warn!(namespace_id, "get_block_range: not yet optimized for multi-shard");
+        warn!(
+            namespace_id,
+            "get_block_range: not yet optimized for multi-shard"
+        );
 
         // Return empty for now - full implementation would iterate blocks
         Ok(Response::new(GetBlockRangeResponse {
@@ -522,7 +538,10 @@ impl ReadService for MultiShardReadService {
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
         // Historical reads require snapshot reconstruction which is complex
-        warn!(namespace_id, "Historical reads not yet implemented for multi-shard");
+        warn!(
+            namespace_id,
+            "Historical reads not yet implemented for multi-shard"
+        );
         Err(Status::unimplemented(
             "Historical reads not yet implemented for multi-shard deployments",
         ))
@@ -545,7 +564,10 @@ impl ReadService for MultiShardReadService {
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
         // Block watching requires broadcast channel per shard which is complex
-        warn!(namespace_id, "Block watching not yet implemented for multi-shard");
+        warn!(
+            namespace_id,
+            "Block watching not yet implemented for multi-shard"
+        );
         Err(Status::unimplemented(
             "Block watching not yet implemented for multi-shard deployments",
         ))

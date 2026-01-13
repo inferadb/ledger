@@ -125,8 +125,13 @@ impl MultiShardWriteService {
         };
 
         // Use the proof module's implementation
-        match proof::generate_write_proof(&ctx.block_archive, namespace_id, vault_id, vault_height, 0)
-        {
+        match proof::generate_write_proof(
+            &ctx.block_archive,
+            namespace_id,
+            vault_id,
+            vault_height,
+            0,
+        ) {
             Ok(write_proof) => (Some(write_proof.block_header), Some(write_proof.tx_proof)),
             Err(e) => {
                 match &e {
@@ -238,12 +243,7 @@ impl MultiShardWriteService {
 impl WriteService for MultiShardWriteService {
     #[instrument(
         skip(self, request),
-        fields(
-            client_id,
-            sequence,
-            namespace_id,
-            vault_id
-        )
+        fields(client_id, sequence, namespace_id, vault_id)
     )]
     async fn write(
         &self,
@@ -306,8 +306,14 @@ impl WriteService for MultiShardWriteService {
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Build request
-        let ledger_request =
-            self.build_request(&req.operations, namespace_id, vault_id, &client_id, sequence, &actor)?;
+        let ledger_request = self.build_request(
+            &req.operations,
+            namespace_id,
+            vault_id,
+            &client_id,
+            sequence,
+            &actor,
+        )?;
 
         // Submit to the resolved shard's Raft
         metrics::record_raft_proposal();
@@ -342,11 +348,20 @@ impl WriteService for MultiShardWriteService {
                 };
 
                 // Cache the successful result
-                self.idempotency
-                    .insert(namespace_id, vault_id, client_id.clone(), sequence, success.clone());
+                self.idempotency.insert(
+                    namespace_id,
+                    vault_id,
+                    client_id.clone(),
+                    sequence,
+                    success.clone(),
+                );
 
                 metrics::record_write(true, latency);
-                info!(block_height, latency_ms = latency * 1000.0, "Write committed");
+                info!(
+                    block_height,
+                    latency_ms = latency * 1000.0,
+                    "Write committed"
+                );
 
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Success(success)),
@@ -362,13 +377,7 @@ impl WriteService for MultiShardWriteService {
 
     #[instrument(
         skip(self, request),
-        fields(
-            client_id,
-            sequence,
-            namespace_id,
-            vault_id,
-            batch_size
-        )
+        fields(client_id, sequence, namespace_id, vault_id, batch_size)
     )]
     async fn batch_write(
         &self,
@@ -425,8 +434,14 @@ impl WriteService for MultiShardWriteService {
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Build request with flattened operations
-        let ledger_request =
-            self.build_request(&all_operations, namespace_id, vault_id, &client_id, sequence, "system")?;
+        let ledger_request = self.build_request(
+            &all_operations,
+            namespace_id,
+            vault_id,
+            &client_id,
+            sequence,
+            "system",
+        )?;
 
         // Submit to Raft
         metrics::record_raft_proposal();
@@ -482,6 +497,7 @@ impl WriteService for MultiShardWriteService {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -492,8 +508,8 @@ mod tests {
 
     #[test]
     fn test_convert_set_condition_not_exists() {
-        use crate::proto::set_condition::Condition;
         use crate::proto::SetCondition;
+        use crate::proto::set_condition::Condition;
 
         let proto_condition = SetCondition {
             condition: Some(Condition::NotExists(true)),
@@ -508,8 +524,8 @@ mod tests {
 
     #[test]
     fn test_convert_set_condition_must_exists() {
-        use crate::proto::set_condition::Condition;
         use crate::proto::SetCondition;
+        use crate::proto::set_condition::Condition;
 
         let proto_condition = SetCondition {
             condition: Some(Condition::MustExists(true)),
@@ -524,8 +540,8 @@ mod tests {
 
     #[test]
     fn test_convert_set_condition_version() {
-        use crate::proto::set_condition::Condition;
         use crate::proto::SetCondition;
+        use crate::proto::set_condition::Condition;
 
         let proto_condition = SetCondition {
             condition: Some(Condition::Version(42)),
@@ -540,8 +556,8 @@ mod tests {
 
     #[test]
     fn test_convert_set_condition_value_equals() {
-        use crate::proto::set_condition::Condition;
         use crate::proto::SetCondition;
+        use crate::proto::set_condition::Condition;
 
         let proto_condition = SetCondition {
             condition: Some(Condition::ValueEquals(b"test_value".to_vec())),
@@ -552,7 +568,7 @@ mod tests {
             Some(ledger_types::SetCondition::ValueEquals(v)) => {
                 assert_eq!(v, b"test_value");
             }
-            _ => panic!("Expected ValueEquals condition"),
+            _ => unreachable!("Expected ValueEquals condition"),
         }
     }
 
@@ -590,7 +606,7 @@ mod tests {
                 assert_eq!(relation, "viewer");
                 assert_eq!(subject, "user:456");
             }
-            _ => panic!("Expected CreateRelationship operation"),
+            _ => unreachable!("Expected CreateRelationship operation"),
         }
     }
 
@@ -618,7 +634,7 @@ mod tests {
                 assert_eq!(relation, "viewer");
                 assert_eq!(subject, "user:456");
             }
-            _ => panic!("Expected DeleteRelationship operation"),
+            _ => unreachable!("Expected DeleteRelationship operation"),
         }
     }
 
@@ -649,7 +665,7 @@ mod tests {
                 assert!(condition.is_none());
                 assert_eq!(expires_at, Some(1000));
             }
-            _ => panic!("Expected SetEntity operation"),
+            _ => unreachable!("Expected SetEntity operation"),
         }
     }
 
@@ -669,7 +685,7 @@ mod tests {
             ledger_types::Operation::DeleteEntity { key } => {
                 assert_eq!(key, "user:123");
             }
-            _ => panic!("Expected DeleteEntity operation"),
+            _ => unreachable!("Expected DeleteEntity operation"),
         }
     }
 
@@ -691,7 +707,7 @@ mod tests {
                 assert_eq!(key, "user:123");
                 assert_eq!(expired_at, 2000);
             }
-            _ => panic!("Expected ExpireEntity operation"),
+            _ => unreachable!("Expected ExpireEntity operation"),
         }
     }
 

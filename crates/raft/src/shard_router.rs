@@ -227,8 +227,12 @@ impl ShardRouter {
         let routing = self.get_routing_internal(namespace_id)?;
 
         // 2. Get or create connection
-        self.get_connection(routing.shard_id, &routing.member_nodes, routing.leader_hint.as_deref())
-            .await
+        self.get_connection(
+            routing.shard_id,
+            &routing.member_nodes,
+            routing.leader_hint.as_deref(),
+        )
+        .await
     }
 
     /// Get routing information for a namespace (public API).
@@ -366,11 +370,7 @@ impl ShardRouter {
     }
 
     /// Connect to a specific node.
-    async fn connect_to_node(
-        &self,
-        shard_id: ShardId,
-        node_id: &str,
-    ) -> Result<ShardConnection> {
+    async fn connect_to_node(&self, shard_id: ShardId, node_id: &str) -> Result<ShardConnection> {
         // Parse node address (format: "host:port" or just "host")
         let address = self.resolve_node_address(node_id)?;
 
@@ -416,10 +416,12 @@ impl ShardRouter {
 
         // Assume it's just a hostname, append default port
         let addr_str = format!("{}:{}", node_id, self.config.grpc_port);
-        addr_str.parse().map_err(|_| RoutingError::ConnectionFailed {
-            shard_id: 0,
-            message: format!("Invalid hostname: {}", node_id),
-        })
+        addr_str
+            .parse()
+            .map_err(|_| RoutingError::ConnectionFailed {
+                shard_id: 0,
+                message: format!("Invalid hostname: {}", node_id),
+            })
     }
 
     /// Invalidate cached routing for a namespace.
@@ -511,8 +513,7 @@ mod tests {
     use std::sync::Arc;
 
     fn create_test_router() -> (ShardRouter, Arc<RwLock<StateLayer>>) {
-        let engine =
-            ledger_storage::StorageEngine::open_in_memory().expect("open storage engine");
+        let engine = ledger_storage::StorageEngine::open_in_memory().expect("open storage engine");
         let state = Arc::new(RwLock::new(StateLayer::new(engine.db())));
         let system = Arc::new(SystemNamespaceService::new(Arc::clone(&state)));
 

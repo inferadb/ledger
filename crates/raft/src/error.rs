@@ -56,7 +56,10 @@ pub enum RecoveryError {
 
     /// Raft consensus write failed.
     #[snafu(display("Raft consensus write failed: {message}"))]
-    RaftConsensus { message: String, backtrace: Backtrace },
+    RaftConsensus {
+        message: String,
+        backtrace: Backtrace,
+    },
 
     /// Health update was rejected by the state machine.
     #[snafu(display("Health update rejected: {reason}"))]
@@ -88,7 +91,10 @@ pub enum SagaError {
 
     /// Raft consensus write failed.
     #[snafu(display("Raft write failed for saga operation: {message}"))]
-    SagaRaftWrite { message: String, backtrace: Backtrace },
+    SagaRaftWrite {
+        message: String,
+        backtrace: Backtrace,
+    },
 
     /// Entity read from state failed.
     #[snafu(display("Failed to read {entity_type} from state: {source}"))]
@@ -106,7 +112,10 @@ pub enum SagaError {
 
     /// Sequence allocation failed.
     #[snafu(display("Sequence allocation failed: {message}"))]
-    SequenceAllocation { message: String, backtrace: Backtrace },
+    SequenceAllocation {
+        message: String,
+        backtrace: Backtrace,
+    },
 
     /// Unexpected response from state machine.
     #[snafu(display("Unexpected saga response: {description}"))]
@@ -123,7 +132,10 @@ pub enum SagaError {
 pub enum OrphanCleanupError {
     /// Raft consensus write failed.
     #[snafu(display("Raft write failed during orphan cleanup: {message}"))]
-    OrphanRaftWrite { message: String, backtrace: Backtrace },
+    OrphanRaftWrite {
+        message: String,
+        backtrace: Backtrace,
+    },
 
     /// Failed to delete orphaned entity.
     #[snafu(display("Failed to delete orphan entity {key}: {reason}"))]
@@ -142,7 +154,10 @@ pub enum OrphanCleanupError {
 pub enum ServiceError {
     /// Raft consensus operation failed.
     #[snafu(display("Raft operation failed: {message}"))]
-    Raft { message: String, backtrace: Backtrace },
+    Raft {
+        message: String,
+        backtrace: Backtrace,
+    },
 
     /// Storage operation failed.
     #[snafu(display("Storage operation failed: {source}"))]

@@ -41,11 +41,17 @@ pub type ClientId = String;
 
 /// Block header containing cryptographic chain metadata.
 ///
-/// Per DESIGN.md, block headers are hashed with a fixed 148-byte encoding.
+/// Per DESIGN.md lines 695-708, block headers are hashed with a fixed 148-byte encoding:
+/// height (8) + namespace_id (8) + vault_id (8) + previous_hash (32) + tx_merkle_root (32)
+/// + state_root (32) + timestamp_secs (8) + timestamp_nanos (4) + term (8) + committed_index (8)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockHeader {
     /// Block height (0 for genesis).
     pub height: u64,
+    /// Namespace owning this vault.
+    pub namespace_id: NamespaceId,
+    /// Vault identifier within the namespace.
+    pub vault_id: VaultId,
     /// Hash of the previous block (ZERO_HASH for genesis).
     pub previous_hash: Hash,
     /// Merkle root of transactions in this block.
@@ -54,8 +60,10 @@ pub struct BlockHeader {
     pub state_root: Hash,
     /// Block creation timestamp.
     pub timestamp: DateTime<Utc>,
-    /// Node that proposed this block.
-    pub proposer: NodeId,
+    /// Raft term when this block was committed.
+    pub term: u64,
+    /// Raft committed index for this block.
+    pub committed_index: u64,
 }
 
 /// Client-facing block structure (VaultBlock).
@@ -64,14 +72,30 @@ pub struct BlockHeader {
 /// independent chain for cryptographic isolation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultBlock {
-    /// Namespace owning this vault.
-    pub namespace_id: NamespaceId,
-    /// Vault identifier.
-    pub vault_id: VaultId,
-    /// Block header with chain metadata.
+    /// Block header with chain metadata (includes namespace_id, vault_id).
     pub header: BlockHeader,
     /// Transactions in this block.
     pub transactions: Vec<Transaction>,
+}
+
+impl VaultBlock {
+    /// Get the namespace ID from the header.
+    #[inline]
+    pub fn namespace_id(&self) -> NamespaceId {
+        self.header.namespace_id
+    }
+
+    /// Get the vault ID from the header.
+    #[inline]
+    pub fn vault_id(&self) -> VaultId {
+        self.header.vault_id
+    }
+
+    /// Get the block height from the header.
+    #[inline]
+    pub fn height(&self) -> u64 {
+        self.header.height
+    }
 }
 
 /// Internal shard block structure (ShardBlock).
@@ -143,13 +167,17 @@ pub struct ChainCommitment {
 impl ShardBlock {
     /// Convert this ShardBlock to a shard-level BlockHeader for chain commitment computation.
     ///
+    /// Create a shard-level BlockHeader for ChainCommitment computation.
+    ///
     /// The shard-level BlockHeader uses:
     /// - `height` = shard_height
+    /// - `namespace_id` = 0 (shard-level aggregate)
+    /// - `vault_id` = shard_id (for identification)
     /// - `previous_hash` = previous_shard_hash
     /// - `tx_merkle_root` = merkle root of all vault entry tx_merkle_roots
     /// - `state_root` = merkle root of all vault entry state_roots
     /// - `timestamp` = block timestamp
-    /// - `proposer` = leader_id
+    /// - `term`, `committed_index` = Raft consensus state
     ///
     /// This enables computing ChainCommitment over the shard chain for snapshot verification.
     pub fn to_shard_header(&self) -> BlockHeader {
@@ -169,11 +197,14 @@ impl ShardBlock {
 
         BlockHeader {
             height: self.shard_height,
+            namespace_id: 0, // Shard-level aggregate, not vault-specific
+            vault_id: self.shard_id as VaultId,
             previous_hash: self.previous_shard_hash,
             tx_merkle_root,
             state_root,
             timestamp: self.timestamp,
-            proposer: self.leader_id.clone(),
+            term: self.term,
+            committed_index: self.committed_index,
         }
     }
 
@@ -191,15 +222,16 @@ impl ShardBlock {
             .iter()
             .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)
             .map(|e| VaultBlock {
-                namespace_id: e.namespace_id,
-                vault_id: e.vault_id,
                 header: BlockHeader {
                     height: e.vault_height,
+                    namespace_id: e.namespace_id,
+                    vault_id: e.vault_id,
                     previous_hash: e.previous_vault_hash,
                     tx_merkle_root: e.tx_merkle_root,
                     state_root: e.state_root,
                     timestamp: self.timestamp,
-                    proposer: self.leader_id.clone(),
+                    term: self.term,
+                    committed_index: self.committed_index,
                 },
                 transactions: e.transactions.clone(),
             })

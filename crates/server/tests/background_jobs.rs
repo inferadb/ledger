@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{create_admin_client, TestCluster};
+use common::{TestCluster, create_admin_client};
 use serial_test::serial;
 use std::time::Duration;
 
@@ -33,10 +33,7 @@ async fn test_auto_recovery_job_starts() {
     // The auto-recovery job should be running in the background.
     // We can verify it's working by checking that the cluster is healthy.
     let metrics = leader.raft.metrics().borrow().clone();
-    assert!(
-        metrics.current_leader.is_some(),
-        "leader should be elected"
-    );
+    assert!(metrics.current_leader.is_some(), "leader should be elected");
 
     // Give the recovery job time to run at least one scan cycle (30s default,
     // but in tests we just verify it doesn't crash)
@@ -67,11 +64,7 @@ async fn test_vault_health_tracking() {
         .await
         .unwrap();
 
-    let namespace_id = ns_response
-        .into_inner()
-        .namespace_id
-        .map(|n| n.id)
-        .unwrap();
+    let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
 
     let vault_response = client
         .create_vault(ledger_raft::proto::CreateVaultRequest {
@@ -94,7 +87,10 @@ async fn test_vault_health_tracking() {
 
     // Cluster should still be healthy (no recovery needed for fresh vault)
     let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "leader should still exist");
+    assert!(
+        metrics.current_leader.is_some(),
+        "leader should still exist"
+    );
 }
 
 // ============================================================================
@@ -195,11 +191,7 @@ async fn test_concurrent_background_jobs() {
         .await
         .unwrap();
 
-    let namespace_id = ns_response
-        .into_inner()
-        .namespace_id
-        .map(|n| n.id)
-        .unwrap();
+    let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
 
     // Create vault
     let _vault_response = client

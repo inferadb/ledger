@@ -28,8 +28,8 @@ use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use crate::log_storage::AppliedStateAccessor;
-use crate::proto::system_discovery_service_client::SystemDiscoveryServiceClient;
 use crate::proto::GetSystemStateRequest;
+use crate::proto::system_discovery_service_client::SystemDiscoveryServiceClient;
 use crate::types::{LedgerNodeId, LedgerTypeConfig};
 
 /// Default refresh interval for learner background task.
@@ -154,11 +154,7 @@ impl LearnerRefreshJob {
 
         membership
             .voter_ids()
-            .filter_map(|id| {
-                membership
-                    .get_node(&id)
-                    .map(|node| (id, node.addr.clone()))
-            })
+            .filter_map(|id| membership.get_node(&id).map(|node| (id, node.addr.clone())))
             .collect()
     }
 

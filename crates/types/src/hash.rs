@@ -55,26 +55,35 @@ pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
 
 /// Compute block header hash per DESIGN.md fixed 148-byte encoding.
 ///
-/// Encoding layout:
-/// - height: 8 bytes (BE)
+/// Encoding layout (DESIGN.md lines 695-708):
+/// - height: 8 bytes (u64 BE)
+/// - namespace_id: 8 bytes (i64 BE)
+/// - vault_id: 8 bytes (i64 BE)
 /// - previous_hash: 32 bytes
 /// - tx_merkle_root: 32 bytes
 /// - state_root: 32 bytes
-/// - timestamp_secs: 8 bytes (BE)
-/// - timestamp_nanos: 4 bytes (BE)
-/// - proposer_len: 4 bytes (LE)
-/// - proposer: variable (up to 28 bytes, padded)
+/// - timestamp_secs: 8 bytes (i64 BE)
+/// - timestamp_nanos: 4 bytes (u32 BE)
+/// - term: 8 bytes (u64 BE)
+/// - committed_index: 8 bytes (u64 BE)
 ///
 /// Total: 148 bytes (fixed)
 pub fn block_hash(header: &BlockHeader) -> Hash {
     const BLOCK_ENCODING_SIZE: usize = 148;
-    const PROPOSER_MAX_LEN: usize = 28;
 
     let mut buf = [0u8; BLOCK_ENCODING_SIZE];
     let mut offset = 0;
 
     // height: u64 BE
     buf[offset..offset + 8].copy_from_slice(&header.height.to_be_bytes());
+    offset += 8;
+
+    // namespace_id: i64 BE
+    buf[offset..offset + 8].copy_from_slice(&header.namespace_id.to_be_bytes());
+    offset += 8;
+
+    // vault_id: i64 BE
+    buf[offset..offset + 8].copy_from_slice(&header.vault_id.to_be_bytes());
     offset += 8;
 
     // previous_hash: 32 bytes
@@ -98,15 +107,13 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
         .copy_from_slice(&header.timestamp.timestamp_subsec_nanos().to_be_bytes());
     offset += 4;
 
-    // proposer_len: u32 LE
-    let proposer_bytes = header.proposer.as_bytes();
-    let proposer_len = proposer_bytes.len().min(PROPOSER_MAX_LEN);
-    buf[offset..offset + 4].copy_from_slice(&(proposer_len as u32).to_le_bytes());
-    offset += 4;
+    // term: u64 BE
+    buf[offset..offset + 8].copy_from_slice(&header.term.to_be_bytes());
+    offset += 8;
 
-    // proposer: variable, zero-padded to 28 bytes
-    buf[offset..offset + proposer_len].copy_from_slice(&proposer_bytes[..proposer_len]);
-    // Remaining bytes already zero from initialization
+    // committed_index: u64 BE
+    buf[offset..offset + 8].copy_from_slice(&header.committed_index.to_be_bytes());
+    // offset += 8; // Final field, no need to increment
 
     sha256(&buf)
 }
@@ -526,11 +533,14 @@ mod tests {
     fn test_block_hash_deterministic() {
         let header = BlockHeader {
             height: 100,
+            namespace_id: 1,
+            vault_id: 2,
             previous_hash: ZERO_HASH,
             tx_merkle_root: sha256(b"tx_root"),
             state_root: sha256(b"state_root"),
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
-            proposer: "node-1".to_string(),
+            term: 5,
+            committed_index: 42,
         };
 
         let hash1 = block_hash(&header);
@@ -657,11 +667,14 @@ mod tests {
     fn test_chain_commitment_single_block() {
         let header = BlockHeader {
             height: 1,
+            namespace_id: 1,
+            vault_id: 1,
             previous_hash: ZERO_HASH,
             tx_merkle_root: [1u8; 32],
             state_root: [2u8; 32],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
-            proposer: "node-1".to_string(),
+            term: 1,
+            committed_index: 1,
         };
 
         let commitment = compute_chain_commitment(std::slice::from_ref(&header), 1, 1);
@@ -683,11 +696,14 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=3)
             .map(|i| BlockHeader {
                 height: i,
+                namespace_id: 1,
+                vault_id: 1,
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],
                 state_root: [(i + 20) as u8; 32],
                 timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
-                proposer: format!("node-{}", i),
+                term: i,
+                committed_index: i * 10,
             })
             .collect();
 
@@ -714,11 +730,14 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=5)
             .map(|i| BlockHeader {
                 height: i,
+                namespace_id: 1,
+                vault_id: 1,
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],
                 state_root: [(i + 20) as u8; 32],
                 timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
-                proposer: "node".to_string(),
+                term: 1,
+                committed_index: i,
             })
             .collect();
 

@@ -51,14 +51,18 @@ pub mod proto {
 
 pub use auto_recovery::{AutoRecoveryConfig, AutoRecoveryJob, RecoveryResult};
 pub use batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle};
-pub use learner_refresh::{CachedSystemState, LearnerRefreshConfig, LearnerRefreshJob};
 pub use block_compaction::BlockCompactor;
 pub use file_lock::{DataDirLock, LockError};
 pub use idempotency::IdempotencyCache;
+pub use learner_refresh::{CachedSystemState, LearnerRefreshConfig, LearnerRefreshJob};
 pub use log_storage::{
     AppliedState, AppliedStateAccessor, NamespaceMeta, RaftLogStore, SequenceCounters,
     VaultHealthStatus, VaultMeta,
 };
+pub use multi_raft::{
+    MultiRaftConfig, MultiRaftError, MultiRaftManager, MultiRaftStats, ShardConfig, ShardGroup,
+};
+pub use multi_shard_server::MultiShardLedgerServer;
 pub use orphan_cleanup::OrphanCleanupJob;
 pub use pagination::{PageToken, PageTokenCodec, PageTokenError};
 pub use peer_maintenance::PeerMaintenance;
@@ -67,12 +71,8 @@ pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use rate_limit::{NamespaceRateLimiter, RateLimitExceeded};
 pub use saga_orchestrator::SagaOrchestrator;
 pub use server::LedgerServer;
-pub use multi_shard_server::MultiShardLedgerServer;
 pub use shard_router::{
     RouterConfig, RouterStats, RoutingError, RoutingInfo, ShardConnection, ShardRouter,
-};
-pub use multi_raft::{
-    MultiRaftConfig, MultiRaftError, MultiRaftManager, MultiRaftStats, ShardConfig, ShardGroup,
 };
 // Re-export multi-shard service types
 pub use services::{

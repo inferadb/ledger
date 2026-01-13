@@ -581,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn test_eager_commit_flushes_quickly() {
         let config = BatchConfig {
-            max_batch_size: 100, // High limit
+            max_batch_size: 100,                    // High limit
             batch_timeout: Duration::from_secs(10), // Very long timeout
             tick_interval: Duration::from_millis(5),
             eager_commit: true, // Enable eager commit

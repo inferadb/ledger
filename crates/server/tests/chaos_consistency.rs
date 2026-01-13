@@ -680,7 +680,7 @@ fn test_consistency_after_partition_heals() {
 // Additional Chaos Tests (DESIGN.md Phase 3)
 // ============================================================================
 
-use ledger_types::{Entity, EMPTY_HASH, Hash, sha256_concat};
+use ledger_types::{EMPTY_HASH, Entity, Hash, sha256_concat};
 
 /// Simulated storage layer for testing state root verification.
 struct SimulatedStateLayer {
@@ -1037,7 +1037,10 @@ fn test_network_delay_request_completion() {
                 vote: None,
                 last_log_id: None,
             };
-            client.vote(req).await.expect("slow node should eventually respond");
+            client
+                .vote(req)
+                .await
+                .expect("slow node should eventually respond");
         }
 
         Ok(())

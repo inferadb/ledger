@@ -352,7 +352,10 @@ impl WriteService for WriteServiceImpl {
 
         // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
         // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
-        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
+        if let Some(cached) = self
+            .idempotency
+            .check(namespace_id, vault_id, &client_id, sequence)
+        {
             debug!("Returning cached result for duplicate request");
             metrics::record_idempotency_hit();
             metrics::record_write(true, start.elapsed().as_secs_f64());
@@ -366,12 +369,9 @@ impl WriteService for WriteServiceImpl {
         self.check_rate_limit(namespace_id)?;
 
         // Check for sequence gaps (per DESIGN.md §5.3)
-        if let Err(gap_error) = self.check_sequence_gap(
-            namespace_id,
-            vault_id,
-            &client_id,
-            sequence,
-        ) {
+        if let Err(gap_error) =
+            self.check_sequence_gap(namespace_id, vault_id, &client_id, sequence)
+        {
             warn!(
                 client_id = %client_id,
                 sequence,
@@ -426,8 +426,13 @@ impl WriteService for WriteServiceImpl {
                 };
 
                 // Cache the result for idempotency (keyed by namespace_id, vault_id, client_id)
-                self.idempotency
-                    .insert(namespace_id, vault_id, client_id.clone(), sequence, success.clone());
+                self.idempotency.insert(
+                    namespace_id,
+                    vault_id,
+                    client_id.clone(),
+                    sequence,
+                    success.clone(),
+                );
                 metrics::set_idempotency_cache_size(self.idempotency.len());
 
                 info!(
@@ -467,7 +472,8 @@ impl WriteService for WriteServiceImpl {
                 // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
                 // Key exists if we have a current_version (which is the version when entity was last modified)
                 let key_exists = current_version.is_some();
-                let error_code = Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
+                let error_code =
+                    Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
 
                 warn!(key = %key, error_code = ?error_code, "Write failed: precondition failed");
                 metrics::record_write(false, latency);
@@ -534,7 +540,10 @@ impl WriteService for WriteServiceImpl {
 
         // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
         // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
-        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
+        if let Some(cached) = self
+            .idempotency
+            .check(namespace_id, vault_id, &client_id, sequence)
+        {
             debug!("Returning cached result for duplicate batch request");
             metrics::record_idempotency_hit();
             metrics::record_batch_write(true, 0, start.elapsed().as_secs_f64());
@@ -555,12 +564,9 @@ impl WriteService for WriteServiceImpl {
         self.check_rate_limit(namespace_id)?;
 
         // Check for sequence gaps (per DESIGN.md §5.3)
-        if let Err(gap_error) = self.check_sequence_gap(
-            namespace_id,
-            vault_id,
-            &client_id,
-            sequence,
-        ) {
+        if let Err(gap_error) =
+            self.check_sequence_gap(namespace_id, vault_id, &client_id, sequence)
+        {
             warn!(
                 client_id = %client_id,
                 sequence,
@@ -625,8 +631,13 @@ impl WriteService for WriteServiceImpl {
                 };
 
                 // Cache the result for idempotency (keyed by namespace_id, vault_id, client_id)
-                self.idempotency
-                    .insert(namespace_id, vault_id, client_id.clone(), sequence, success.clone());
+                self.idempotency.insert(
+                    namespace_id,
+                    vault_id,
+                    client_id.clone(),
+                    sequence,
+                    success.clone(),
+                );
                 metrics::set_idempotency_cache_size(self.idempotency.len());
 
                 info!(
@@ -676,7 +687,8 @@ impl WriteService for WriteServiceImpl {
                 // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
                 // Key exists if we have a current_version (which is the version when entity was last modified)
                 let key_exists = current_version.is_some();
-                let error_code = Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
+                let error_code =
+                    Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
 
                 warn!(key = %key, error_code = ?error_code, batch_size, "Batch write failed: precondition failed");
                 metrics::record_batch_write(false, batch_size, latency);
