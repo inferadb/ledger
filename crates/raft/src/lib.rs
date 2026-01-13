@@ -21,10 +21,13 @@ mod auto_recovery;
 pub mod batching;
 mod block_compaction;
 pub mod error;
+mod file_lock;
 mod idempotency;
 mod learner_refresh;
 mod log_storage;
 pub mod metrics;
+mod multi_raft;
+mod multi_shard_server;
 mod orphan_cleanup;
 pub mod pagination;
 pub mod peer_maintenance;
@@ -35,6 +38,7 @@ mod rate_limit;
 mod saga_orchestrator;
 mod server;
 pub mod services;
+mod shard_router;
 mod ttl_gc;
 mod types;
 
@@ -49,6 +53,7 @@ pub use auto_recovery::{AutoRecoveryConfig, AutoRecoveryJob, RecoveryResult};
 pub use batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle};
 pub use learner_refresh::{CachedSystemState, LearnerRefreshConfig, LearnerRefreshJob};
 pub use block_compaction::BlockCompactor;
+pub use file_lock::{DataDirLock, LockError};
 pub use idempotency::IdempotencyCache;
 pub use log_storage::{
     AppliedState, AppliedStateAccessor, NamespaceMeta, RaftLogStore, SequenceCounters,
@@ -62,6 +67,18 @@ pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use rate_limit::{NamespaceRateLimiter, RateLimitExceeded};
 pub use saga_orchestrator::SagaOrchestrator;
 pub use server::LedgerServer;
+pub use multi_shard_server::MultiShardLedgerServer;
+pub use shard_router::{
+    RouterConfig, RouterStats, RoutingError, RoutingInfo, ShardConnection, ShardRouter,
+};
+pub use multi_raft::{
+    MultiRaftConfig, MultiRaftError, MultiRaftManager, MultiRaftStats, ShardConfig, ShardGroup,
+};
+// Re-export multi-shard service types
+pub use services::{
+    ForwardClient, MultiShardReadService, MultiShardResolver, MultiShardWriteService,
+    RemoteShardInfo, ResolveResult, ShardContext, ShardResolver, SingleShardResolver,
+};
 pub use ttl_gc::TtlGarbageCollector;
 pub use types::{
     BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse,

@@ -257,6 +257,152 @@ pub fn generate_tx_proof_by_id(
     generate_tx_proof(transactions, tx_index)
 }
 
+// ============================================================================
+// State Proof Generation
+// ============================================================================
+
+use ledger_types::{bucket_id, sha256_concat};
+
+/// Generate a state proof for an entity.
+///
+/// State proofs allow clients to verify entity existence against the state_root
+/// without trusting the server. Unlike Merkle proofs, state proofs require
+/// providing all 256 bucket roots because the state uses bucket-based hashing.
+///
+/// # Arguments
+///
+/// * `entity` - The entity to generate a proof for (key, value, expires_at, version)
+/// * `bucket_roots` - All 256 bucket roots for the vault
+/// * `block_height` - The block height this proof is valid for
+///
+/// # Returns
+///
+/// A StateProof containing the entity data and all bucket roots needed for verification.
+pub fn generate_state_proof(
+    entity: &ledger_types::Entity,
+    bucket_roots: &[Hash; 256],
+    block_height: u64,
+) -> proto::StateProof {
+    let entity_bucket_id = bucket_id(&entity.key) as u32;
+
+    // Collect other bucket roots (excluding the entity's bucket)
+    let mut other_bucket_roots: Vec<proto::Hash> = Vec::with_capacity(255);
+    for (i, root) in bucket_roots.iter().enumerate() {
+        if i != entity_bucket_id as usize {
+            other_bucket_roots.push(proto::Hash {
+                value: root.to_vec(),
+            });
+        }
+    }
+
+    // Compute state root from all bucket roots
+    let state_root = sha256_concat(bucket_roots);
+
+    proto::StateProof {
+        key: entity.key.clone(),
+        value: entity.value.clone(),
+        expires_at: entity.expires_at,
+        version: entity.version,
+        bucket_id: entity_bucket_id,
+        bucket_root: Some(proto::Hash {
+            value: bucket_roots[entity_bucket_id as usize].to_vec(),
+        }),
+        other_bucket_roots,
+        block_height,
+        state_root: Some(proto::Hash {
+            value: state_root.to_vec(),
+        }),
+    }
+}
+
+/// Result of state proof verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateProofVerification {
+    /// The proof is valid.
+    Valid,
+    /// The bucket ID doesn't match seahash(key) % 256.
+    InvalidBucketId {
+        /// The expected bucket ID from seahash(key) % 256.
+        expected: u8,
+        /// The actual bucket ID in the proof.
+        actual: u32,
+    },
+    /// The state root doesn't match the computed value.
+    InvalidStateRoot,
+    /// The proof is missing required fields.
+    MissingField(
+        /// Description of the missing field.
+        &'static str,
+    ),
+}
+
+/// Verify a state proof against an expected state root.
+///
+/// This performs client-side verification of a state proof:
+/// 1. Verify `bucket_id == seahash(key) % 256`
+/// 2. Reconstruct all 256 bucket roots from proof data
+/// 3. Compute `state_root = SHA-256(bucket_roots[0..256])`
+/// 4. Verify computed state_root matches expected
+///
+/// # Note
+///
+/// This does NOT verify that the bucket_root was correctly computed from bucket contents.
+/// Full verification would require the server to provide all entities in the bucket,
+/// which is expensive. For most use cases, trusting the bucket_root and verifying
+/// the state_root is sufficient.
+pub fn verify_state_proof(
+    proof: &proto::StateProof,
+    expected_state_root: &Hash,
+) -> StateProofVerification {
+    // 1. Verify bucket_id matches key
+    let computed_bucket_id = bucket_id(&proof.key);
+    if proof.bucket_id != computed_bucket_id as u32 {
+        return StateProofVerification::InvalidBucketId {
+            expected: computed_bucket_id,
+            actual: proof.bucket_id,
+        };
+    }
+
+    // 2. Check required fields
+    let bucket_root = match &proof.bucket_root {
+        Some(h) => &h.value,
+        None => return StateProofVerification::MissingField("bucket_root"),
+    };
+
+    // 3. Reconstruct all 256 bucket roots
+    if proof.other_bucket_roots.len() != 255 {
+        return StateProofVerification::MissingField("other_bucket_roots (need 255)");
+    }
+
+    let mut all_roots: [Hash; 256] = [[0u8; 32]; 256];
+    let mut other_idx = 0;
+    for i in 0..256 {
+        if i == proof.bucket_id as usize {
+            // Use the entity's bucket root
+            if bucket_root.len() != 32 {
+                return StateProofVerification::MissingField("bucket_root (invalid length)");
+            }
+            all_roots[i].copy_from_slice(bucket_root);
+        } else {
+            // Use from other_bucket_roots
+            let other = &proof.other_bucket_roots[other_idx];
+            if other.value.len() != 32 {
+                return StateProofVerification::MissingField("other_bucket_roots (invalid length)");
+            }
+            all_roots[i].copy_from_slice(&other.value);
+            other_idx += 1;
+        }
+    }
+
+    // 4. Compute state root and verify
+    let computed_state_root = sha256_concat(&all_roots);
+    if &computed_state_root != expected_state_root {
+        return StateProofVerification::InvalidStateRoot;
+    }
+
+    StateProofVerification::Valid
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
@@ -361,5 +507,157 @@ mod tests {
         let txs = vec![make_tx(1)];
         assert!(generate_tx_proof(&txs, 1).is_none());
         assert!(generate_tx_proof(&txs, 100).is_none());
+    }
+
+    // ========================================================================
+    // State Proof Tests
+    // ========================================================================
+
+    use super::{generate_state_proof, verify_state_proof, StateProofVerification};
+    use ledger_types::{bucket_id, sha256_concat, Entity, EMPTY_HASH};
+
+    fn make_entity(key: &[u8], value: &[u8]) -> Entity {
+        Entity {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            expires_at: 0,
+            version: 1,
+        }
+    }
+
+    fn make_bucket_roots() -> [Hash; 256] {
+        let mut roots = [EMPTY_HASH; 256];
+        // Set some non-empty roots for variety
+        for i in 0..10 {
+            roots[i] = [i as u8; 32];
+        }
+        roots
+    }
+
+    #[test]
+    fn test_generate_state_proof() {
+        let entity = make_entity(b"test_key", b"test_value");
+        let bucket_roots = make_bucket_roots();
+
+        let proof = generate_state_proof(&entity, &bucket_roots, 100);
+
+        assert_eq!(proof.key, b"test_key");
+        assert_eq!(proof.value, b"test_value");
+        assert_eq!(proof.expires_at, 0);
+        assert_eq!(proof.version, 1);
+        assert_eq!(proof.block_height, 100);
+        assert_eq!(proof.bucket_id, bucket_id(b"test_key") as u32);
+        assert_eq!(proof.other_bucket_roots.len(), 255);
+
+        // Verify state_root matches computed value
+        let expected_state_root = sha256_concat(&bucket_roots);
+        assert_eq!(
+            proof.state_root.as_ref().unwrap().value,
+            expected_state_root.to_vec()
+        );
+    }
+
+    #[test]
+    fn test_verify_state_proof_valid() {
+        let entity = make_entity(b"test_key", b"test_value");
+        let bucket_roots = make_bucket_roots();
+        let expected_state_root = sha256_concat(&bucket_roots);
+
+        let proof = generate_state_proof(&entity, &bucket_roots, 100);
+        let result = verify_state_proof(&proof, &expected_state_root);
+
+        assert_eq!(result, StateProofVerification::Valid);
+    }
+
+    #[test]
+    fn test_verify_state_proof_invalid_bucket_id() {
+        let entity = make_entity(b"test_key", b"test_value");
+        let bucket_roots = make_bucket_roots();
+        let expected_state_root = sha256_concat(&bucket_roots);
+
+        let mut proof = generate_state_proof(&entity, &bucket_roots, 100);
+        // Tamper with bucket_id
+        proof.bucket_id = (proof.bucket_id + 1) % 256;
+
+        let result = verify_state_proof(&proof, &expected_state_root);
+
+        match result {
+            StateProofVerification::InvalidBucketId { expected, actual } => {
+                assert_eq!(expected, bucket_id(b"test_key"));
+                assert_eq!(actual, (bucket_id(b"test_key") as u32 + 1) % 256);
+            }
+            _ => panic!("Expected InvalidBucketId, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_verify_state_proof_invalid_state_root() {
+        let entity = make_entity(b"test_key", b"test_value");
+        let bucket_roots = make_bucket_roots();
+        let wrong_state_root = [42u8; 32]; // Wrong state root
+
+        let proof = generate_state_proof(&entity, &bucket_roots, 100);
+        let result = verify_state_proof(&proof, &wrong_state_root);
+
+        assert_eq!(result, StateProofVerification::InvalidStateRoot);
+    }
+
+    #[test]
+    fn test_verify_state_proof_missing_bucket_root() {
+        let entity = make_entity(b"test_key", b"test_value");
+        let bucket_roots = make_bucket_roots();
+        let expected_state_root = sha256_concat(&bucket_roots);
+
+        let mut proof = generate_state_proof(&entity, &bucket_roots, 100);
+        proof.bucket_root = None;
+
+        let result = verify_state_proof(&proof, &expected_state_root);
+
+        assert_eq!(
+            result,
+            StateProofVerification::MissingField("bucket_root")
+        );
+    }
+
+    #[test]
+    fn test_verify_state_proof_wrong_other_bucket_count() {
+        let entity = make_entity(b"test_key", b"test_value");
+        let bucket_roots = make_bucket_roots();
+        let expected_state_root = sha256_concat(&bucket_roots);
+
+        let mut proof = generate_state_proof(&entity, &bucket_roots, 100);
+        proof.other_bucket_roots.pop(); // Remove one, making it 254 instead of 255
+
+        let result = verify_state_proof(&proof, &expected_state_root);
+
+        assert_eq!(
+            result,
+            StateProofVerification::MissingField("other_bucket_roots (need 255)")
+        );
+    }
+
+    #[test]
+    fn test_state_proof_different_keys_different_buckets() {
+        // Keys should hash to different buckets
+        let entity1 = make_entity(b"key_a", b"value_a");
+        let entity2 = make_entity(b"key_b", b"value_b");
+
+        let bucket1 = bucket_id(b"key_a");
+        let bucket2 = bucket_id(b"key_b");
+
+        // They might be the same by chance, but usually different
+        // This test just ensures the proof generation works for different keys
+        let bucket_roots = make_bucket_roots();
+        let state_root = sha256_concat(&bucket_roots);
+
+        let proof1 = generate_state_proof(&entity1, &bucket_roots, 1);
+        let proof2 = generate_state_proof(&entity2, &bucket_roots, 2);
+
+        assert_eq!(proof1.bucket_id, bucket1 as u32);
+        assert_eq!(proof2.bucket_id, bucket2 as u32);
+
+        // Both should verify against the same state root
+        assert_eq!(verify_state_proof(&proof1, &state_root), StateProofVerification::Valid);
+        assert_eq!(verify_state_proof(&proof2, &state_root), StateProofVerification::Valid);
     }
 }

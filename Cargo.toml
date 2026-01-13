@@ -77,6 +77,9 @@ config = "0.14"
 toml = "0.8"
 humantime = "2.1"
 
+# File locking
+fs2 = "0.4"
+
 # Testing
 tempfile = "3.14"
 rand = "0.8"

@@ -53,6 +53,7 @@ bytes.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+fs2.workspace = true
 
 # Metrics
 metrics.workspace = true
