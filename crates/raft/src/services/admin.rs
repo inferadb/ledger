@@ -6,7 +6,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use openraft::{BasicNode, Raft};
-use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
 use crate::error::ServiceError;
@@ -37,7 +36,7 @@ pub struct AdminServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Block archive for integrity verification.
@@ -48,7 +47,7 @@ impl AdminServiceImpl {
     /// Create a new admin service.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -62,7 +61,7 @@ impl AdminServiceImpl {
     /// Create with block archive for integrity verification.
     pub fn with_block_archive(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         block_archive: Arc<BlockArchive>,
     ) -> Self {
@@ -84,7 +83,11 @@ impl AdminService for AdminServiceImpl {
         let req = request.into_inner();
 
         // Submit create namespace through Raft
-        let ledger_request = LedgerRequest::CreateNamespace { name: req.name };
+        // Map proto ShardId to ledger_types::ShardId (i32)
+        let ledger_request = LedgerRequest::CreateNamespace {
+            name: req.name,
+            shard_id: req.shard_id.map(|s| s.id),
+        };
 
         let result = self
             .raft
@@ -93,10 +96,10 @@ impl AdminService for AdminServiceImpl {
             .map_err(ServiceError::raft)?;
 
         match result.data {
-            LedgerResponse::NamespaceCreated { namespace_id } => {
+            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
                 Ok(Response::new(CreateNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: namespace_id }),
-                    shard_id: Some(ShardId { id: 0 }), // Default shard
+                    shard_id: Some(ShardId { id: shard_id }),
                 }))
             }
             LedgerResponse::Error { message } => Err(Status::internal(message)),
@@ -251,7 +254,7 @@ impl AdminService for AdminServiceImpl {
                 let leader_id = metrics.current_leader.unwrap_or(metrics.id);
 
                 // Compute empty state root for genesis block
-                let state = self.state.read();
+                let state = &*self.state;
                 let state_root = state.compute_state_root(vault_id).unwrap_or(ZERO_HASH);
 
                 // Build genesis block header (height 0)
@@ -604,7 +607,7 @@ impl AdminService for AdminServiceImpl {
                 }
 
                 // Compare final replayed state root against current state
-                let current_state = self.state.read();
+                let current_state = &*self.state;
                 if let Ok(current_root) = current_state.compute_state_root(*v_id) {
                     if let Ok(replayed_root) = temp_state.compute_state_root(*v_id) {
                         if current_root != replayed_root {
@@ -624,7 +627,7 @@ impl AdminService for AdminServiceImpl {
             }
         } else {
             // Quick check: Verify state roots can be computed without errors
-            let state = self.state.read();
+            let state = &*self.state;
 
             for (_ns_id, v_id, height) in &vault_heights {
                 match state.compute_state_root(*v_id) {
@@ -996,7 +999,7 @@ impl AdminService for AdminServiceImpl {
 
         // Step 1: Clear vault state
         {
-            let state = self.state.write();
+            let state = &*self.state;
             if let Err(e) = state.clear_vault(vault_id) {
                 return Ok(Response::new(RecoverVaultResponse {
                     success: false,
@@ -1095,7 +1098,7 @@ impl AdminService for AdminServiceImpl {
 
             // Apply transactions
             {
-                let state = self.state.write();
+                let state = &*self.state;
                 for tx in &entry.transactions {
                     if let Err(e) = state.apply_operations(vault_id, &tx.operations, height) {
                         return Ok(Response::new(RecoverVaultResponse {
@@ -1357,7 +1360,7 @@ impl AdminService for AdminServiceImpl {
 
             // Find expired entities in this vault
             let expired = {
-                let state = self.state.read();
+                let state = &*self.state;
                 match state.list_entities(vault_id, None, None, 1000) {
                     Ok(entities) => entities
                         .into_iter()

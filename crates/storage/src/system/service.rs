@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId};
@@ -63,13 +62,14 @@ pub type Result<T> = std::result::Result<T, SystemError>;
 /// Service for reading from and writing to the `_system` namespace.
 ///
 /// All _system data is stored in namespace_id=0, vault_id=0.
+/// StateLayer is internally thread-safe via redb's MVCC.
 pub struct SystemNamespaceService {
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
 }
 
 impl SystemNamespaceService {
     /// Create a new system namespace service.
-    pub fn new(state: Arc<RwLock<StateLayer>>) -> Self {
+    pub fn new(state: Arc<StateLayer>) -> Self {
         Self { state }
     }
 
@@ -81,10 +81,9 @@ impl SystemNamespaceService {
     ///
     /// If the counter doesn't exist, initializes it to `start_value`.
     pub fn next_sequence(&self, key: &str, start_value: i64) -> Result<i64> {
-        let state = self.state.read();
-
+        // StateLayer is internally thread-safe via redb MVCC
         // Read current value
-        let current = match state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+        let current = match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
                 let value_str = String::from_utf8_lossy(&entity.value);
                 value_str.parse::<i64>().unwrap_or(start_value)
@@ -97,9 +96,6 @@ impl SystemNamespaceService {
             }
         };
 
-        // We need to drop the read lock before acquiring write lock
-        drop(state);
-
         // Increment and save
         let next_value = current + 1;
         let ops = vec![Operation::SetEntity {
@@ -109,8 +105,7 @@ impl SystemNamespaceService {
             expires_at: None,
         }];
 
-        let state = self.state.write();
-        state
+        self.state
             .apply_operations(SYSTEM_VAULT_ID, &ops, 0) // height 0 for system ops
             .context(StateSnafu)?;
 
@@ -146,8 +141,7 @@ impl SystemNamespaceService {
             expires_at: None,
         }];
 
-        let state = self.state.write();
-        state
+        self.state
             .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
             .context(StateSnafu)?;
 
@@ -157,9 +151,8 @@ impl SystemNamespaceService {
     /// Get a node by ID.
     pub fn get_node(&self, node_id: &NodeId) -> Result<Option<NodeInfo>> {
         let key = SystemKeys::node_key(node_id);
-        let state = self.state.read();
 
-        match state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+        match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
                 let node: NodeInfo = postcard::from_bytes(&entity.value).map_err(|e| {
                     SystemError::Serialization {
@@ -177,9 +170,8 @@ impl SystemNamespaceService {
 
     /// List all registered nodes.
     pub fn list_nodes(&self) -> Result<Vec<NodeInfo>> {
-        let state = self.state.read();
-
-        let entities = state
+        let entities = self
+            .state
             .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::NODE_PREFIX), None, 1000)
             .context(StateSnafu)?;
 
@@ -198,8 +190,8 @@ impl SystemNamespaceService {
         let key = SystemKeys::node_key(node_id);
         let ops = vec![Operation::DeleteEntity { key }];
 
-        let state = self.state.write();
-        let statuses = state
+        let statuses = self
+            .state
             .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
             .context(StateSnafu)?;
 
@@ -239,8 +231,7 @@ impl SystemNamespaceService {
             },
         ];
 
-        let state = self.state.write();
-        state
+        self.state
             .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
             .context(StateSnafu)?;
 
@@ -250,9 +241,8 @@ impl SystemNamespaceService {
     /// Get a namespace by ID.
     pub fn get_namespace(&self, namespace_id: NamespaceId) -> Result<Option<NamespaceRegistry>> {
         let key = SystemKeys::namespace_key(namespace_id);
-        let state = self.state.read();
 
-        match state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+        match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
                 let registry: NamespaceRegistry =
                     postcard::from_bytes(&entity.value).map_err(|e| {
@@ -272,10 +262,9 @@ impl SystemNamespaceService {
     /// Get a namespace by name.
     pub fn get_namespace_by_name(&self, name: &str) -> Result<Option<NamespaceRegistry>> {
         let index_key = SystemKeys::namespace_name_index_key(name);
-        let state = self.state.read();
 
         // First, look up the namespace ID from the index
-        let namespace_id = match state.get_entity(SYSTEM_VAULT_ID, index_key.as_bytes()) {
+        let namespace_id = match self.state.get_entity(SYSTEM_VAULT_ID, index_key.as_bytes()) {
             Ok(Some(entity)) => {
                 let id_str = String::from_utf8_lossy(&entity.value);
                 id_str.parse::<NamespaceId>().ok()
@@ -288,9 +277,6 @@ impl SystemNamespaceService {
             }
         };
 
-        // Drop read lock before getting the namespace
-        drop(state);
-
         match namespace_id {
             Some(id) => self.get_namespace(id),
             None => Ok(None),
@@ -299,9 +285,8 @@ impl SystemNamespaceService {
 
     /// List all namespaces.
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceRegistry>> {
-        let state = self.state.read();
-
-        let entities = state
+        let entities = self
+            .state
             .list_entities(
                 SYSTEM_VAULT_ID,
                 Some(SystemKeys::NAMESPACE_PREFIX),
@@ -387,7 +372,7 @@ mod tests {
     fn create_test_service() -> SystemNamespaceService {
         // Use StorageEngine which initializes all tables
         let engine = StorageEngine::open_in_memory().unwrap();
-        let state = Arc::new(RwLock::new(StateLayer::new(engine.db().clone())));
+        let state = Arc::new(StateLayer::new(engine.db().clone()));
         SystemNamespaceService::new(state)
     }
 

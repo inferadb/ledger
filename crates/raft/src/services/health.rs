@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use openraft::Raft;
-use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
 use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus};
@@ -20,7 +19,7 @@ pub struct HealthServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
 }
@@ -29,7 +28,7 @@ impl HealthServiceImpl {
     /// Create a new health service.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -111,9 +110,8 @@ impl HealthService for HealthServiceImpl {
                 }
             }
 
-            // Get entity count from state layer
-            let state = self.state.read();
-            if let Ok(entities) = state.list_entities(vault_id, None, None, 1) {
+            // Get entity count from state layer (StateLayer is internally thread-safe)
+            if let Ok(entities) = self.state.list_entities(vault_id, None, None, 1) {
                 // We fetch 1 to check if any exist, actual count needs full scan
                 // For now, indicate whether vault has entities
                 details.insert(

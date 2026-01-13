@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openraft::Raft;
-use parking_lot::RwLock;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -54,8 +53,8 @@ pub struct SagaOrchestrator {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer.
-    state: Arc<RwLock<StateLayer>>,
+    /// The shared state layer (internally thread-safe via redb MVCC).
+    state: Arc<StateLayer>,
     /// Accessor for applied state.
     /// Reserved for future saga state queries.
     #[allow(dead_code)]
@@ -69,7 +68,7 @@ impl SagaOrchestrator {
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -96,10 +95,10 @@ impl SagaOrchestrator {
 
     /// Load all pending sagas from _system namespace.
     fn load_pending_sagas(&self) -> Vec<Saga> {
-        let state = self.state.read();
+        // StateLayer is internally thread-safe via redb MVCC
 
         // List all entities with saga: prefix in _system (vault_id=0)
-        let entities = match state.list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000) {
+        let entities = match self.state.list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000) {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Failed to list sagas");
@@ -283,15 +282,13 @@ impl SagaOrchestrator {
                 // Step 1: Mark user as deleting
                 let user_key = format!("user:{}", saga.input.user_id);
 
-                // Read current user value (scoped to ensure guard is dropped before await)
-                let user_entity = {
-                    let state = self.state.read();
-                    state
-                        .get_entity(0, user_key.as_bytes())
-                        .context(StateReadSnafu {
-                            entity_type: "User".to_string(),
-                        })?
-                };
+                // Read current user value (StateLayer is internally thread-safe)
+                let user_entity = self
+                    .state
+                    .get_entity(0, user_key.as_bytes())
+                    .context(StateReadSnafu {
+                        entity_type: "User".to_string(),
+                    })?;
 
                 if let Some(entity) = user_entity {
                     let mut user_data: serde_json::Value = serde_json::from_slice(&entity.value)
@@ -389,17 +386,15 @@ impl SagaOrchestrator {
     async fn allocate_sequence_id(&self, entity_type: &str) -> Result<i64, SagaError> {
         let seq_key = format!("_meta:seq:{}", entity_type);
 
-        // Read current value (scoped to ensure guard is dropped before await)
-        let current = {
-            let state = self.state.read();
-            state
-                .get_entity(0, seq_key.as_bytes())
-                .context(StateReadSnafu {
-                    entity_type: "Sequence".to_string(),
-                })?
-                .and_then(|e| e.value.get(..8)?.try_into().ok().map(i64::from_le_bytes))
-                .unwrap_or(1)
-        };
+        // Read current value (StateLayer is internally thread-safe)
+        let current = self
+            .state
+            .get_entity(0, seq_key.as_bytes())
+            .context(StateReadSnafu {
+                entity_type: "Sequence".to_string(),
+            })?
+            .and_then(|e| e.value.get(..8)?.try_into().ok().map(i64::from_le_bytes))
+            .unwrap_or(1);
 
         let next_id = current;
         let new_seq = (current + 1).to_le_bytes().to_vec();

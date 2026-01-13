@@ -1,6 +1,14 @@
 //! Test harness for cluster integration tests.
 //!
 //! Provides utilities for spawning and managing multi-node test clusters.
+//!
+//! ## Cluster Types
+//!
+//! - `TestCluster`: Single-shard cluster using the standard bootstrap flow.
+//!   Best for testing Raft consensus, membership changes, and basic operations.
+//!
+//! - `MultiShardTestCluster`: Multi-shard cluster using `MultiRaftManager`.
+//!   Best for testing horizontal scaling, shard routing, and high-throughput.
 
 #![allow(
     dead_code,
@@ -14,13 +22,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openraft::Raft;
-use parking_lot::RwLock;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 use ledger_raft::LedgerTypeConfig;
 use ledger_raft::proto::JoinClusterRequest;
 use ledger_raft::proto::admin_service_client::AdminServiceClient;
+use ledger_raft::{
+    MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig, ShardGroup,
+};
 use ledger_storage::StateLayer;
 
 /// A test node in a cluster.
@@ -31,8 +41,8 @@ pub struct TestNode {
     pub addr: SocketAddr,
     /// The Raft instance.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer.
-    pub state: Arc<RwLock<StateLayer>>,
+    /// The state layer (internally thread-safe via redb MVCC).
+    pub state: Arc<StateLayer>,
     /// Temporary directory for node data.
     _temp_dir: TempDir,
     /// Server task handle for cleanup.
@@ -439,4 +449,266 @@ pub async fn create_admin_client(
 > {
     let endpoint = format!("http://{}", addr);
     ledger_raft::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
+}
+
+// ============================================================================
+// Multi-Shard Test Infrastructure
+// ============================================================================
+
+/// A test node with multiple shards.
+///
+/// Uses `MultiRaftManager` to manage independent Raft groups per shard,
+/// enabling horizontal scaling and parallel consensus.
+pub struct MultiShardTestNode {
+    /// The node ID.
+    pub id: u64,
+    /// The gRPC address.
+    pub addr: SocketAddr,
+    /// The multi-raft manager containing all shards.
+    pub manager: Arc<MultiRaftManager>,
+    /// Temporary directory for node data.
+    _temp_dir: TempDir,
+    /// Server task handle for cleanup.
+    _server_handle: tokio::task::JoinHandle<()>,
+}
+
+impl MultiShardTestNode {
+    /// Get the system shard (shard 0).
+    pub fn system_shard(&self) -> Arc<ShardGroup> {
+        self.manager.system_shard().expect("system shard exists")
+    }
+
+    /// Get a data shard by ID.
+    pub fn shard(&self, shard_id: u32) -> Option<Arc<ShardGroup>> {
+        self.manager.get_shard(shard_id).ok()
+    }
+
+    /// Get all shard IDs.
+    pub fn shard_ids(&self) -> Vec<u32> {
+        self.manager.list_shards()
+    }
+
+    /// Check if this node is leader for the system shard.
+    pub fn is_system_leader(&self) -> bool {
+        let shard = self.system_shard();
+        let metrics = shard.raft().metrics().borrow().clone();
+        metrics.current_leader == Some(self.id)
+    }
+
+    /// Get leader ID for the system shard.
+    pub fn system_leader(&self) -> Option<u64> {
+        let shard = self.system_shard();
+        shard.raft().metrics().borrow().current_leader
+    }
+}
+
+/// A multi-shard test cluster.
+///
+/// Each node runs multiple independent Raft groups (shards), allowing
+/// horizontal scaling of both reads and writes.
+///
+/// ## Architecture
+///
+/// ```text
+/// MultiShardTestCluster
+///     |
+///     +-- Node 1 (MultiRaftManager)
+///     |       +-- Shard 0 (system): namespace/vault metadata
+///     |       +-- Shard 1 (data): entity storage
+///     |       +-- Shard 2 (data): entity storage
+///     |
+///     +-- Node 2 (MultiRaftManager)
+///     |       +-- Shard 0, 1, 2 (same structure)
+///     |
+///     +-- Node 3 ...
+/// ```
+pub struct MultiShardTestCluster {
+    /// The nodes in the cluster.
+    nodes: Vec<MultiShardTestNode>,
+    /// Number of data shards.
+    num_shards: usize,
+}
+
+impl MultiShardTestCluster {
+    /// Create a new multi-shard test cluster.
+    ///
+    /// # Arguments
+    ///
+    /// * `num_nodes` - Number of nodes in the cluster (typically 1 or 3)
+    /// * `num_data_shards` - Number of data shards (in addition to system shard 0)
+    ///
+    /// Each node will have `num_data_shards + 1` Raft groups running.
+    pub async fn new(num_nodes: usize, num_data_shards: usize) -> Self {
+        assert!(num_nodes >= 1, "cluster must have at least 1 node");
+        assert!(num_data_shards >= 1, "must have at least 1 data shard");
+
+        let base_port = 51000 + (rand::random::<u16>() % 1000);
+        let mut nodes = Vec::with_capacity(num_nodes);
+
+        // Build the member list for all shards
+        let members: Vec<(u64, String)> = (0..num_nodes)
+            .map(|i| {
+                let node_id = (i + 1) as u64;
+                let port = base_port + i as u16;
+                let addr = format!("127.0.0.1:{}", port);
+                (node_id, addr)
+            })
+            .collect();
+
+        // Start each node
+        for i in 0..num_nodes {
+            let node_id = (i + 1) as u64;
+            let port = base_port + i as u16;
+            let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+            let temp_dir = tempfile::tempdir().expect("create temp dir");
+
+            // Create MultiRaftManager config
+            let config = MultiRaftConfig::new(temp_dir.path().to_path_buf(), node_id);
+            let manager = Arc::new(MultiRaftManager::new(config));
+
+            // Start system shard (shard 0) - required first
+            let system_config = ShardConfig {
+                shard_id: 0,
+                initial_members: members.clone(),
+                bootstrap: i == 0, // Only first node bootstraps
+                enable_background_jobs: true,
+            };
+            manager
+                .start_system_shard(system_config)
+                .await
+                .expect("start system shard");
+
+            // Start data shards (shard 1, 2, ...)
+            for shard_id in 1..=num_data_shards {
+                let shard_config = ShardConfig {
+                    shard_id: shard_id as u32,
+                    initial_members: members.clone(),
+                    bootstrap: i == 0,
+                    enable_background_jobs: true,
+                };
+                manager
+                    .start_data_shard(shard_config)
+                    .await
+                    .expect(&format!("start data shard {}", shard_id));
+            }
+
+            // Create and start the multi-shard gRPC server
+            let server = MultiShardLedgerServer::new(manager.clone(), addr)
+                .with_rate_limit(1000, 30); // High concurrency for tests
+
+            let server_handle = tokio::spawn(async move {
+                if let Err(e) = server.serve().await {
+                    tracing::error!("multi-shard server error: {}", e);
+                }
+            });
+
+            // Give server time to bind
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            nodes.push(MultiShardTestNode {
+                id: node_id,
+                addr,
+                manager,
+                _temp_dir: temp_dir,
+                _server_handle: server_handle,
+            });
+        }
+
+        // Wait for all shards to elect leaders
+        let start = tokio::time::Instant::now();
+        let timeout_duration = Duration::from_secs(10);
+
+        'outer: while start.elapsed() < timeout_duration {
+            let mut all_ready = true;
+
+            // Check each shard on the first node
+            if let Some(node) = nodes.first() {
+                for shard_id in 0..=num_data_shards as u32 {
+                    if let Ok(shard) = node.manager.get_shard(shard_id) {
+                        let metrics = shard.raft().metrics().borrow().clone();
+                        if metrics.current_leader.is_none() {
+                            all_ready = false;
+                            break;
+                        }
+                    } else {
+                        all_ready = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_ready {
+                break 'outer;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Self {
+            nodes,
+            num_shards: num_data_shards,
+        }
+    }
+
+    /// Get all nodes.
+    pub fn nodes(&self) -> &[MultiShardTestNode] {
+        &self.nodes
+    }
+
+    /// Get a node by ID.
+    pub fn node(&self, id: u64) -> Option<&MultiShardTestNode> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// Get the leader node for the system shard.
+    pub fn system_leader(&self) -> Option<&MultiShardTestNode> {
+        self.nodes.iter().find(|n| n.is_system_leader())
+    }
+
+    /// Get any node (for client connections).
+    pub fn any_node(&self) -> &MultiShardTestNode {
+        &self.nodes[0]
+    }
+
+    /// Get the number of data shards.
+    pub fn num_data_shards(&self) -> usize {
+        self.num_shards
+    }
+
+    /// Get all node addresses.
+    pub fn addresses(&self) -> Vec<SocketAddr> {
+        self.nodes.iter().map(|n| n.addr).collect()
+    }
+
+    /// Wait for a leader to be elected on all shards.
+    pub async fn wait_for_leaders(&self, timeout_duration: Duration) -> bool {
+        let start = tokio::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            let mut all_have_leaders = true;
+
+            for node in &self.nodes {
+                for shard_id in node.shard_ids() {
+                    if let Some(shard) = node.shard(shard_id) {
+                        let metrics = shard.raft().metrics().borrow().clone();
+                        if metrics.current_leader.is_none() {
+                            all_have_leaders = false;
+                            break;
+                        }
+                    }
+                }
+                if !all_have_leaders {
+                    break;
+                }
+            }
+
+            if all_have_leaders {
+                return true;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        false
+    }
 }

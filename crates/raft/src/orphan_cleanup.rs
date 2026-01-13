@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openraft::Raft;
-use parking_lot::RwLock;
 use snafu::GenerateImplicitData;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -55,8 +54,8 @@ pub struct OrphanCleanupJob {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer.
-    state: Arc<RwLock<StateLayer>>,
+    /// The shared state layer (internally thread-safe via redb MVCC).
+    state: Arc<StateLayer>,
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,
     /// Cleanup interval.
@@ -68,7 +67,7 @@ impl OrphanCleanupJob {
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -99,10 +98,10 @@ impl OrphanCleanupJob {
     /// - User has deleted_at set
     /// - User has status = "DELETED" or "DELETING"
     fn get_deleted_user_ids(&self) -> HashSet<i64> {
-        let state = self.state.read();
+        // StateLayer is internally thread-safe via redb MVCC
 
         // List all user entities in _system (vault_id = 0)
-        let entities = match state.list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10) {
+        let entities = match self.state.list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10) {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Failed to list users");
@@ -143,14 +142,13 @@ impl OrphanCleanupJob {
             return Vec::new();
         }
 
-        let state = self.state.read();
-
+        // StateLayer is internally thread-safe via redb MVCC
         // Note: Namespace entities live in vault_id = 0 for the namespace
         // We need to list entities in the namespace, not vault 0 of _system
         // Actually, namespace-level entities (members, teams) are stored with the namespace
         // For this implementation, we assume entities are in vault_id = 0 per namespace
 
-        let entities = match state.list_entities(0, Some("member:"), None, MAX_BATCH_SIZE) {
+        let entities = match self.state.list_entities(0, Some("member:"), None, MAX_BATCH_SIZE) {
             Ok(e) => e,
             Err(e) => {
                 warn!(namespace_id, error = %e, "Failed to list memberships");

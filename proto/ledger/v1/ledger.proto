@@ -277,6 +277,11 @@ service ReadService {
   // Read a value from the state tree (unverified, fastest)
   rpc Read(ReadRequest) returns (ReadResponse);
 
+  // Batch read multiple keys in a single RPC call.
+  // Amortizes network overhead across multiple reads for higher throughput.
+  // All reads use the same namespace/vault scope and consistency level.
+  rpc BatchRead(BatchReadRequest) returns (BatchReadResponse);
+
   // Read with merkle proof for client-side verification.
   // Supports both current and historical reads via optional at_height.
   // Use include_chain_proof=true to verify against a trusted checkpoint.
@@ -322,6 +327,28 @@ message ReadRequest {
 message ReadResponse {
   optional bytes value = 1;
   uint64 block_height = 2;
+}
+
+// Batch read request: read multiple keys in a single RPC for higher throughput.
+// All reads share the same namespace, vault, and consistency level.
+message BatchReadRequest {
+  NamespaceId namespace_id = 1;
+  optional VaultId vault_id = 2;
+  repeated string keys = 3;           // Keys to read (max 1000)
+  ReadConsistency consistency = 4;    // Applied to all reads
+}
+
+// Batch read response: results for all requested keys.
+message BatchReadResponse {
+  repeated BatchReadResult results = 1;
+  uint64 block_height = 2;            // Block height at time of read
+}
+
+// Result for a single key in a batch read.
+message BatchReadResult {
+  string key = 1;
+  optional bytes value = 2;           // None if key not found
+  bool found = 3;                     // Explicit found flag for clarity
 }
 
 // Verified read: retrieve state with cryptographic proofs for client-side verification.
@@ -699,9 +726,10 @@ service AdminService {
 // -----------------------------------------------------------------------------
 
 // Create a new namespace. NamespaceId is leader-assigned from _meta:seq:namespace.
-// The namespace is assigned to the shard with lowest load.
+// The namespace is assigned to the shard with lowest load, or to the specified shard.
 message CreateNamespaceRequest {
   string name = 1; // Human-readable name (e.g., "acme_corp")
+  optional ShardId shard_id = 2; // Target shard (auto-assigned if not specified)
 }
 
 message CreateNamespaceResponse {

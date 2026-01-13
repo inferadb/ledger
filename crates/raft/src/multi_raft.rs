@@ -228,7 +228,7 @@ pub struct ShardGroup {
     /// The Raft consensus instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// Shared state layer for this shard.
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
     /// Block archive for historical blocks.
     block_archive: Arc<BlockArchive>,
     /// Accessor for applied state.
@@ -249,7 +249,7 @@ impl ShardGroup {
     }
 
     /// Get the state layer.
-    pub fn state(&self) -> &Arc<RwLock<StateLayer>> {
+    pub fn state(&self) -> &Arc<StateLayer> {
         &self.state
     }
 
@@ -507,7 +507,7 @@ impl MultiRaftManager {
         &self,
         shard_id: ShardId,
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         block_archive: Arc<BlockArchive>,
         applied_state: AppliedStateAccessor,
     ) -> ShardBackgroundJobs {
@@ -551,14 +551,14 @@ impl MultiRaftManager {
         &self,
         shard_id: ShardId,
         shard_dir: &PathBuf,
-    ) -> Result<(Arc<RwLock<StateLayer>>, Arc<BlockArchive>, RaftLogStore)> {
+    ) -> Result<(Arc<StateLayer>, Arc<BlockArchive>, RaftLogStore)> {
         // Open state database
         let state_db_path = shard_dir.join("state.redb");
         let engine = StorageEngine::open(&state_db_path).map_err(|e| MultiRaftError::Storage {
             shard_id,
             message: format!("Failed to open state db: {}", e),
         })?;
-        let state = Arc::new(RwLock::new(StateLayer::new(engine.db())));
+        let state = Arc::new(StateLayer::new(engine.db()));
 
         // Open block archive
         let blocks_db_path = shard_dir.join("blocks.redb");

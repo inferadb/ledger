@@ -92,8 +92,8 @@ pub struct AutoRecoveryJob {
     block_archive: Option<Arc<BlockArchive>>,
     /// Snapshot manager for finding recovery starting points.
     snapshot_manager: Option<Arc<SnapshotManager>>,
-    /// State layer for applying recovered state.
-    state: Arc<parking_lot::RwLock<StateLayer>>,
+    /// State layer for applying recovered state (internally thread-safe via redb MVCC).
+    state: Arc<StateLayer>,
     /// Configuration.
     config: AutoRecoveryConfig,
 }
@@ -104,7 +104,7 @@ impl AutoRecoveryJob {
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
         applied_state: AppliedStateAccessor,
-        state: Arc<parking_lot::RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
     ) -> Self {
         Self {
             raft,
@@ -370,15 +370,16 @@ impl AutoRecoveryJob {
 
             if let Some(entry) = vault_entry {
                 // Apply transactions and compute new state root
-                let state = self.state.read();
+                // StateLayer is internally thread-safe via redb MVCC
                 for tx in &entry.transactions {
-                    state
+                    self.state
                         .apply_operations(vault_id, &tx.operations, height)
                         .context(ApplyOperationsSnafu { height })?;
                 }
 
                 // Compute state root after applying
-                computed_root = state
+                computed_root = self
+                    .state
                     .compute_state_root(vault_id)
                     .context(StateRootComputationSnafu { vault_id })?;
             }

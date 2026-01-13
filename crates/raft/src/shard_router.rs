@@ -512,9 +512,9 @@ mod tests {
     use ledger_storage::StateLayer;
     use std::sync::Arc;
 
-    fn create_test_router() -> (ShardRouter, Arc<RwLock<StateLayer>>) {
+    fn create_test_router() -> (ShardRouter, Arc<StateLayer>) {
         let engine = ledger_storage::StorageEngine::open_in_memory().expect("open storage engine");
-        let state = Arc::new(RwLock::new(StateLayer::new(engine.db())));
+        let state = Arc::new(StateLayer::new(engine.db()));
         let system = Arc::new(SystemNamespaceService::new(Arc::clone(&state)));
 
         let router = ShardRouter::new(system);

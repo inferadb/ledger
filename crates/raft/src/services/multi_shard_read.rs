@@ -106,9 +106,9 @@ impl ReadService for MultiShardReadService {
             )));
         }
 
-        // Read from the shard's state layer
-        let state = ctx.state.read();
-        let entity = state
+        // Read from the shard's state layer (internally thread-safe via redb MVCC)
+        let entity = ctx
+            .state
             .get_entity(vault_id, req.key.as_bytes())
             .map_err(|e| {
                 warn!(error = %e, "Read failed");
@@ -126,6 +126,101 @@ impl ReadService for MultiShardReadService {
 
         Ok(Response::new(ReadResponse {
             value: entity.map(|e| e.value),
+            block_height,
+        }))
+    }
+
+    /// Batch read multiple keys in a single RPC call.
+    #[instrument(skip(self, request), fields(namespace_id, vault_id, batch_size))]
+    async fn batch_read(
+        &self,
+        request: Request<crate::proto::BatchReadRequest>,
+    ) -> Result<Response<crate::proto::BatchReadResponse>, Status> {
+        use crate::proto::{BatchReadResponse, BatchReadResult};
+
+        let start = Instant::now();
+        let req = request.into_inner();
+
+        // Extract namespace_id for routing
+        let namespace_id = req
+            .namespace_id
+            .as_ref()
+            .map(|n| n.id)
+            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+
+        // Limit batch size
+        const MAX_BATCH_SIZE: usize = 1000;
+        if req.keys.len() > MAX_BATCH_SIZE {
+            return Err(Status::invalid_argument(format!(
+                "Batch size {} exceeds maximum {}",
+                req.keys.len(),
+                MAX_BATCH_SIZE
+            )));
+        }
+
+        // Record span fields
+        tracing::Span::current().record("namespace_id", namespace_id);
+        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("batch_size", req.keys.len());
+
+        // Check consistency requirements
+        self.check_consistency(namespace_id, req.consistency)?;
+
+        // Resolve shard for this namespace
+        let ctx = self.resolver.resolve(namespace_id)?;
+
+        // Check vault health - diverged vaults cannot be read
+        let health = ctx.applied_state.vault_health(namespace_id, vault_id);
+        if let VaultHealthStatus::Diverged { at_height, .. } = &health {
+            warn!(
+                namespace_id,
+                vault_id, at_height, "BatchRead rejected: vault has diverged"
+            );
+            return Err(Status::unavailable(format!(
+                "Vault {}:{} has diverged at height {}",
+                namespace_id, vault_id, at_height
+            )));
+        }
+
+        // Read all keys from the shard's state layer
+        let mut results = Vec::with_capacity(req.keys.len());
+
+        for key in &req.keys {
+            let entity = ctx
+                .state
+                .get_entity(vault_id, key.as_bytes())
+                .map_err(|e| {
+                    warn!(error = %e, key = key, "BatchRead key failed");
+                    Status::internal(format!("Storage error: {}", e))
+                })?;
+
+            let found = entity.is_some();
+            results.push(BatchReadResult {
+                key: key.clone(),
+                value: entity.map(|e| e.value),
+                found,
+            });
+        }
+
+        let latency = start.elapsed().as_secs_f64();
+        let batch_size = results.len();
+        debug!(
+            batch_size,
+            latency_ms = latency * 1000.0,
+            "BatchRead completed"
+        );
+
+        // Record metrics
+        for _ in 0..batch_size {
+            metrics::record_read(true, latency / batch_size as f64);
+        }
+
+        // Get current block height
+        let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+
+        Ok(Response::new(BatchReadResponse {
+            results,
             block_height,
         }))
     }
@@ -167,9 +262,9 @@ impl ReadService for MultiShardReadService {
             )));
         }
 
-        // Read from state layer
-        let state = ctx.state.read();
-        let entity = state
+        // Read from state layer (internally thread-safe via redb MVCC)
+        let entity = ctx
+            .state
             .get_entity(vault_id, req.key.as_bytes())
             .map_err(|e| {
                 warn!(error = %e, "Verified read failed");
@@ -259,11 +354,12 @@ impl ReadService for MultiShardReadService {
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Read from state layer - simple listing without complex pagination
-        let state = ctx.state.read();
+        // StateLayer is internally thread-safe via redb MVCC
 
         // Use subject-based lookup if subject is specified
         let relationships = if let Some(subject) = &req.subject {
-            let resources = state
+            let resources = ctx
+                .state
                 .list_resources_for_subject(vault_id, subject)
                 .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
@@ -282,7 +378,8 @@ impl ReadService for MultiShardReadService {
                 .collect()
         } else {
             // Full scan with filters
-            let raw_rels = state
+            let raw_rels = ctx
+                .state
                 .list_relationships(vault_id, None, limit)
                 .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
@@ -341,9 +438,9 @@ impl ReadService for MultiShardReadService {
         // Entities are namespace-level (stored in vault_id=0 by convention)
         let vault_id = 0i64;
 
-        // Read from state layer
-        let state = ctx.state.read();
-        let raw_entities = state
+        // Read from state layer (internally thread-safe via redb MVCC)
+        let raw_entities = ctx
+            .state
             .list_entities(vault_id, prefix, None, limit)
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
@@ -407,8 +504,9 @@ impl ReadService for MultiShardReadService {
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Read from state layer - list relationships and extract unique resources
-        let state = ctx.state.read();
-        let relationships = state
+        // StateLayer is internally thread-safe via redb MVCC
+        let relationships = ctx
+            .state
             .list_relationships(vault_id, None, limit * 10) // Over-fetch to filter
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 

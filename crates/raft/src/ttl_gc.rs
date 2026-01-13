@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openraft::Raft;
-use parking_lot::RwLock;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -42,8 +41,8 @@ pub struct TtlGarbageCollector {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer.
-    state: Arc<RwLock<StateLayer>>,
+    /// The shared state layer (internally thread-safe via redb MVCC).
+    state: Arc<StateLayer>,
     /// Accessor for applied state (vault registry).
     applied_state: AppliedStateAccessor,
     /// GC interval.
@@ -57,7 +56,7 @@ impl TtlGarbageCollector {
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -92,10 +91,9 @@ impl TtlGarbageCollector {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let state = self.state.read();
-
+        // StateLayer is internally thread-safe via redb MVCC
         // List all entities including expired ones
-        match state.list_entities(vault_id, None, None, self.max_batch_size * 2) {
+        match self.state.list_entities(vault_id, None, None, self.max_batch_size * 2) {
             Ok(entities) => entities
                 .into_iter()
                 .filter(|e| e.expires_at > 0 && e.expires_at < now)

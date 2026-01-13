@@ -40,6 +40,7 @@ async fn create_namespace(
     let response = client
         .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
             name: name.to_string(),
+            shard_id: None,
         })
         .await?;
 

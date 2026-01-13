@@ -26,7 +26,7 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{Hash, NamespaceId, ShardBlock, VaultEntry, VaultId, compute_tx_merkle_root};
+use ledger_types::{Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root};
 
 use crate::types::{
     BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
@@ -35,6 +35,7 @@ use crate::types::{
 
 // Re-export storage types used in this module
 use ledger_storage::{BlockArchive, StateError, StateLayer};
+use ledger_storage::system::{NamespaceRegistry, NamespaceStatus, SystemKeys, SYSTEM_VAULT_ID};
 
 // ============================================================================
 // Table Definitions
@@ -114,7 +115,7 @@ pub struct NamespaceMeta {
     /// Human-readable name.
     pub name: String,
     /// Shard hosting this namespace (0 for default).
-    pub shard_id: u32,
+    pub shard_id: ShardId,
     /// Whether the namespace is deleted.
     pub deleted: bool,
 }
@@ -354,11 +355,11 @@ pub struct RaftLogStore {
     /// Applied state (state machine) - shared with accessor.
     applied_state: Arc<RwLock<AppliedState>>,
     /// State layer for entity/relationship storage (shared with read service).
-    state_layer: Option<Arc<RwLock<StateLayer>>>,
+    state_layer: Option<Arc<StateLayer>>,
     /// Block archive for permanent block storage.
     block_archive: Option<Arc<BlockArchive>>,
     /// Shard ID for this Raft group.
-    shard_id: i32,
+    shard_id: ShardId,
     /// Node ID for block metadata.
     node_id: String,
     /// Current shard height (for block creation).
@@ -411,7 +412,7 @@ impl RaftLogStore {
     }
 
     /// Configure the state layer for transaction application.
-    pub fn with_state_layer(mut self, state_layer: Arc<RwLock<StateLayer>>) -> Self {
+    pub fn with_state_layer(mut self, state_layer: Arc<StateLayer>) -> Self {
         self.state_layer = Some(state_layer);
         self
     }
@@ -423,7 +424,7 @@ impl RaftLogStore {
     }
 
     /// Configure shard metadata.
-    pub fn with_shard_config(mut self, shard_id: i32, node_id: String) -> Self {
+    pub fn with_shard_config(mut self, shard_id: ShardId, node_id: String) -> Self {
         self.shard_id = shard_id;
         self.node_id = node_id;
         self
@@ -435,7 +436,7 @@ impl RaftLogStore {
     }
 
     /// Get a reference to the state layer (if configured).
-    pub fn state_layer(&self) -> Option<&Arc<RwLock<StateLayer>>> {
+    pub fn state_layer(&self) -> Option<&Arc<StateLayer>> {
         self.state_layer.as_ref()
     }
 
@@ -552,15 +553,14 @@ impl RaftLogStore {
                     .unwrap_or(ledger_types::ZERO_HASH);
 
                 // Apply transactions to state layer if configured
-                let state_root = if let Some(state_layer_lock) = &self.state_layer {
+                let state_root = if let Some(state_layer) = &self.state_layer {
                     // Collect all operations from all transactions
                     let all_ops: Vec<_> = transactions
                         .iter()
                         .flat_map(|tx| tx.operations.clone())
                         .collect();
 
-                    // Acquire write lock and apply operations
-                    let state_layer = state_layer_lock.write();
+                    // Apply operations (StateLayer is internally thread-safe via redb MVCC)
                     if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
                         // Per DESIGN.md §6.1: On CAS failure, return current state for conflict resolution
                         return match e {
@@ -655,18 +655,69 @@ impl RaftLogStore {
                 )
             }
 
-            LedgerRequest::CreateNamespace { name } => {
+            LedgerRequest::CreateNamespace { name, shard_id } => {
                 let namespace_id = state.sequences.next_namespace();
+                // Use provided shard_id or default to 0 (system shard)
+                let assigned_shard = shard_id.unwrap_or(0);
                 state.namespaces.insert(
                     namespace_id,
                     NamespaceMeta {
                         namespace_id,
                         name: name.clone(),
-                        shard_id: 0, // Default shard
+                        shard_id: assigned_shard,
                         deleted: false,
                     },
                 );
-                (LedgerResponse::NamespaceCreated { namespace_id }, None)
+
+                // Persist namespace to StateLayer for ShardRouter discovery.
+                // This enables the ShardRouter to find the namespace->shard mapping.
+                if let Some(state_layer) = &self.state_layer {
+                    let registry = NamespaceRegistry {
+                        namespace_id,
+                        name: name.clone(),
+                        shard_id: assigned_shard,
+                        member_nodes: vec![],  // TODO: populate from cluster membership
+                        status: NamespaceStatus::Active,
+                        config_version: 1,
+                        created_at: chrono::Utc::now(),
+                    };
+
+                    // Serialize and write to StateLayer
+                    if let Ok(value) = postcard::to_allocvec(&registry) {
+                        let key = SystemKeys::namespace_key(namespace_id);
+                        let name_index_key = SystemKeys::namespace_name_index_key(name);
+                        let ops = vec![
+                            Operation::SetEntity {
+                                key,
+                                value,
+                                condition: None,
+                                expires_at: None,
+                            },
+                            Operation::SetEntity {
+                                key: name_index_key,
+                                value: namespace_id.to_string().into_bytes(),
+                                condition: None,
+                                expires_at: None,
+                            },
+                        ];
+
+                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            tracing::error!(
+                                namespace_id,
+                                error = %e,
+                                "Failed to persist namespace to StateLayer"
+                            );
+                        }
+                    }
+                }
+
+                (
+                    LedgerResponse::NamespaceCreated {
+                        namespace_id,
+                        shard_id: assigned_shard,
+                    },
+                    None,
+                )
             }
 
             LedgerRequest::CreateVault {
@@ -1196,7 +1247,6 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         // Restore StateLayer entities if StateLayer is configured
         if let Some(state_layer) = &self.state_layer {
-            let state = state_layer.write();
             for (vault_id, entities) in &combined.vault_entities {
                 for entity in entities {
                     // Convert entity to SetEntity operation
@@ -1211,7 +1261,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                         },
                     }];
                     // Apply at the entity's version height
-                    if let Err(e) = state.apply_operations(*vault_id, &ops, entity.version) {
+                    if let Err(e) = state_layer.apply_operations(*vault_id, &ops, entity.version) {
                         tracing::warn!(
                             vault_id,
                             key = %String::from_utf8_lossy(&entity.key),
@@ -1240,14 +1290,14 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         // Collect entities from StateLayer if configured
+        // StateLayer is internally thread-safe via redb's MVCC, so no lock needed
         let vault_entities = if let Some(state_layer) = &self.state_layer {
-            let sl = state_layer.read();
             let mut entities_map = HashMap::new();
 
             // Get entities for each known vault
             for &(namespace_id, vault_id) in state.vault_heights.keys() {
                 // List all entities in this vault (up to 10000 per vault for snapshot)
-                match sl.list_entities(vault_id, None, None, 10000) {
+                match state_layer.list_entities(vault_id, None, None, 10000) {
                     Ok(entities) => {
                         if !entities.is_empty() {
                             entities_map.insert(vault_id, entities);
@@ -1387,12 +1437,13 @@ mod tests {
 
         let request = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
+            shard_id: None,
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::NamespaceCreated { namespace_id } => {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => {
                 assert_eq!(namespace_id, 1);
             }
             _ => panic!("unexpected response"),
@@ -1661,9 +1712,11 @@ mod tests {
         let requests = vec![
             LedgerRequest::CreateNamespace {
                 name: "acme-corp".to_string(),
+                shard_id: None,
             },
             LedgerRequest::CreateNamespace {
                 name: "startup-inc".to_string(),
+                shard_id: None,
             },
             LedgerRequest::CreateVault {
                 namespace_id: 1,
@@ -1882,6 +1935,7 @@ mod tests {
         let requests: Vec<LedgerRequest> = vec![
             LedgerRequest::CreateNamespace {
                 name: "ns1".to_string(),
+                shard_id: None,
             },
             LedgerRequest::CreateVault {
                 namespace_id: 1,
@@ -2025,6 +2079,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateNamespace {
                 name: "test".to_string(),
+                shard_id: None,
             },
             &mut state,
         );

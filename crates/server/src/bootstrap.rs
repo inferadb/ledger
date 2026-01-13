@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use openraft::storage::Adaptor;
 use openraft::{BasicNode, Raft};
-use parking_lot::RwLock;
 use redb::Database;
 use tonic::transport::Channel;
 use tracing::info;
@@ -62,9 +61,9 @@ pub struct BootstrappedNode {
     /// The Raft instance.
     #[allow(dead_code)]
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The shared state layer.
+    /// The shared state layer (internally thread-safe via redb MVCC).
     #[allow(dead_code)]
-    pub state: Arc<RwLock<StateLayer>>,
+    pub state: Arc<StateLayer>,
     /// The configured Ledger server.
     pub server: LedgerServer,
     /// TTL garbage collector background task handle.
@@ -90,12 +89,16 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
 
-    // Open state database
+    // Open state database and initialize tables
     let state_db_path = config.data_dir.join("state.redb");
     let state_db = Database::create(&state_db_path)
         .map_err(|e| BootstrapError::Database(format!("failed to create state db: {}", e)))?;
     let state_db = Arc::new(state_db);
-    let state = Arc::new(RwLock::new(StateLayer::new(state_db)));
+    // StateLayer is internally thread-safe via redb MVCC - no external lock needed
+    let state = Arc::new(
+        StateLayer::open(state_db)
+            .map_err(|e| BootstrapError::Database(format!("failed to init state tables: {}", e)))?,
+    );
 
     // Open block archive for historical block storage
     let blocks_db_path = config.data_dir.join("blocks.redb");

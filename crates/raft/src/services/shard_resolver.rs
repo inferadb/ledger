@@ -28,7 +28,6 @@
 use std::sync::Arc;
 
 use openraft::Raft;
-use parking_lot::RwLock;
 use tonic::Status;
 
 use crate::log_storage::AppliedStateAccessor;
@@ -46,7 +45,7 @@ pub struct ShardContext {
     /// The Raft instance for this shard.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer for this shard.
-    pub state: Arc<RwLock<StateLayer>>,
+    pub state: Arc<StateLayer>,
     /// The block archive for this shard.
     pub block_archive: Arc<BlockArchive>,
     /// Applied state accessor for this shard.
@@ -147,7 +146,7 @@ pub trait ShardResolver: Send + Sync {
 /// are handled by a single Raft group.
 pub struct SingleShardResolver {
     raft: Arc<Raft<LedgerTypeConfig>>,
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
     block_archive: Arc<BlockArchive>,
     applied_state: AppliedStateAccessor,
 }
@@ -156,7 +155,7 @@ impl SingleShardResolver {
     /// Create a new single-shard resolver.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         block_archive: Arc<BlockArchive>,
         applied_state: AppliedStateAccessor,
     ) -> Self {

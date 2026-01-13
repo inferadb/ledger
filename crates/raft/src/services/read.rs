@@ -17,7 +17,6 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use openraft::Raft;
-use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
@@ -44,7 +43,7 @@ use crate::types::{LedgerNodeId, LedgerTypeConfig};
 /// Read service implementation.
 pub struct ReadServiceImpl {
     /// The state layer for reading data.
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Block archive for retrieving stored blocks.
@@ -66,7 +65,7 @@ pub struct ReadServiceImpl {
 impl ReadServiceImpl {
     /// Create a new read service.
     pub fn new(
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
     ) -> Self {
@@ -85,7 +84,7 @@ impl ReadServiceImpl {
 
     /// Create a read service with block archive access.
     pub fn with_block_archive(
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         block_archive: Arc<BlockArchive>,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
@@ -105,7 +104,7 @@ impl ReadServiceImpl {
 
     /// Create a read service with block archive and snapshot manager.
     pub fn with_snapshots(
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         block_archive: Arc<BlockArchive>,
         snapshot_manager: Arc<SnapshotManager>,
@@ -126,7 +125,7 @@ impl ReadServiceImpl {
 
     /// Create a read service with full configuration.
     pub fn with_idempotency(
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         block_archive: Option<Arc<BlockArchive>>,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
@@ -147,7 +146,7 @@ impl ReadServiceImpl {
 
     /// Create a read service with full configuration including snapshots.
     pub fn with_full_config(
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         block_archive: Option<Arc<BlockArchive>>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
@@ -561,7 +560,7 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Read from state layer
-        let state = self.state.read();
+        let state = &*self.state;
         let entity = state
             .get_entity(vault_id as i64, req.key.as_bytes())
             .map_err(|e| {
@@ -583,6 +582,103 @@ impl ReadService for ReadServiceImpl {
 
         Ok(Response::new(ReadResponse {
             value: entity.map(|e| e.value),
+            block_height,
+        }))
+    }
+
+    /// Batch read multiple keys in a single RPC call.
+    ///
+    /// Amortizes network overhead across multiple reads for higher throughput.
+    /// All reads use the same namespace/vault scope and consistency level.
+    #[instrument(
+        skip(self, request),
+        fields(vault_id = tracing::field::Empty, batch_size = tracing::field::Empty)
+    )]
+    async fn batch_read(
+        &self,
+        request: Request<crate::proto::BatchReadRequest>,
+    ) -> Result<Response<crate::proto::BatchReadResponse>, Status> {
+        use crate::proto::{BatchReadResponse, BatchReadResult};
+
+        let start = Instant::now();
+        let req = request.into_inner();
+
+        // Check consistency requirements
+        self.check_consistency(req.consistency)?;
+
+        // Limit batch size to prevent DoS
+        const MAX_BATCH_SIZE: usize = 1000;
+        if req.keys.len() > MAX_BATCH_SIZE {
+            return Err(Status::invalid_argument(format!(
+                "Batch size {} exceeds maximum {}",
+                req.keys.len(),
+                MAX_BATCH_SIZE
+            )));
+        }
+
+        // Extract IDs
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
+
+        // Record span fields
+        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("batch_size", req.keys.len());
+
+        // Check vault health - diverged vaults cannot be read
+        let health = self
+            .applied_state
+            .vault_health(namespace_id, vault_id as i64);
+        if let VaultHealthStatus::Diverged { at_height, .. } = &health {
+            warn!(
+                namespace_id,
+                vault_id, at_height, "BatchRead rejected: vault has diverged"
+            );
+            return Err(Status::unavailable(format!(
+                "Vault {}:{} has diverged at height {}",
+                namespace_id, vault_id, at_height
+            )));
+        }
+
+        // Read all keys from state layer
+        let state = &*self.state;
+        let mut results = Vec::with_capacity(req.keys.len());
+
+        for key in &req.keys {
+            let entity = state
+                .get_entity(vault_id as i64, key.as_bytes())
+                .map_err(|e| {
+                    warn!(error = %e, key = key, "BatchRead key failed");
+                    Status::internal(format!("Storage error: {}", e))
+                })?;
+
+            let found = entity.is_some();
+            results.push(BatchReadResult {
+                key: key.clone(),
+                value: entity.map(|e| e.value),
+                found,
+            });
+        }
+
+        let latency = start.elapsed().as_secs_f64();
+        let batch_size = results.len();
+        debug!(
+            batch_size,
+            latency_ms = latency * 1000.0,
+            "BatchRead completed"
+        );
+
+        // Record metrics for each read in the batch
+        for _ in 0..batch_size {
+            metrics::record_read(true, latency / batch_size as f64);
+        }
+
+        // Get current block height for this vault
+        let block_height = self
+            .applied_state
+            .vault_height(namespace_id, vault_id as i64);
+
+        Ok(Response::new(BatchReadResponse {
+            results,
             block_height,
         }))
     }
@@ -621,7 +717,7 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Read from state layer
-        let state = self.state.read();
+        let state = &*self.state;
         let entity = state
             .get_entity(vault_id, req.key.as_bytes())
             .map_err(|e| {
@@ -629,7 +725,6 @@ impl ReadService for ReadServiceImpl {
                 metrics::record_verified_read(false, start.elapsed().as_secs_f64());
                 Status::internal(format!("Storage error: {}", e))
             })?;
-        drop(state);
 
         // Get current block height for this vault
         let block_height = self.applied_state.vault_height(namespace_id, vault_id);
@@ -1160,7 +1255,7 @@ impl ReadService for ReadServiceImpl {
             )
         };
 
-        let state = self.state.read();
+        let state = &*self.state;
 
         // Determine which method to use based on filters
         let relationships: Vec<crate::proto::Relationship> =
@@ -1285,7 +1380,7 @@ impl ReadService for ReadServiceImpl {
         };
 
         // List relationships and extract unique resources matching the type prefix
-        let state = self.state.read();
+        let state = &*self.state;
         let relationships = state
             .list_relationships(vault_id, resume_key.as_deref(), limit * 10) // Over-fetch to filter
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
@@ -1392,7 +1487,7 @@ impl ReadService for ReadServiceImpl {
         };
 
         // Get entities from state layer
-        let state = self.state.read();
+        let state = &*self.state;
         let raw_entities = state
             .list_entities(vault_id, prefix, resume_key.as_deref(), limit + 1)
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;

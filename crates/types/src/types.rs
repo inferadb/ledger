@@ -24,7 +24,7 @@ pub type VaultId = i64;
 pub type UserId = i64;
 
 /// Unique identifier for a Raft shard group.
-pub type ShardId = i32;
+pub type ShardId = u32;
 
 /// Transaction identifier (16 bytes, typically UUIDv4).
 pub type TxId = [u8; 16];

@@ -93,11 +93,43 @@ pub struct StateLayer {
 #[allow(clippy::result_large_err)]
 impl StateLayer {
     /// Create a new state layer backed by the given database.
+    ///
+    /// **Note**: This does not initialize tables. Call `init_tables()` after construction
+    /// or use `open()` which initializes tables automatically.
     pub fn new(db: Arc<Database>) -> Self {
         Self {
             db,
             vault_commitments: DashMap::new(),
         }
+    }
+
+    /// Open a state layer and initialize all required tables.
+    ///
+    /// This is the preferred constructor - it ensures all tables exist before use.
+    pub fn open(db: Arc<Database>) -> Result<Self> {
+        let layer = Self::new(db);
+        layer.init_tables()?;
+        Ok(layer)
+    }
+
+    /// Initialize all required tables in the database.
+    ///
+    /// Creates tables if they don't exist. Safe to call multiple times.
+    pub fn init_tables(&self) -> Result<()> {
+        let txn = self.db.begin_write().context(TransactionSnafu)?;
+
+        // Create all state tables (no-op if they already exist)
+        txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
+        txn.open_table(Tables::RELATIONSHIPS).context(TableSnafu)?;
+        txn.open_table(Tables::OBJ_INDEX).context(TableSnafu)?;
+        txn.open_table(Tables::SUBJ_INDEX).context(TableSnafu)?;
+        txn.open_table(Tables::VAULT_META).context(TableSnafu)?;
+        txn.open_table(Tables::NAMESPACE_META).context(TableSnafu)?;
+        txn.open_table(Tables::SEQUENCES).context(TableSnafu)?;
+        txn.open_table(Tables::CLIENT_SEQUENCES).context(TableSnafu)?;
+
+        txn.commit().context(CommitSnafu)?;
+        Ok(())
     }
 
     /// Get or create commitment tracking for a vault.

@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openraft::Raft;
-use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
@@ -42,7 +41,7 @@ pub struct LedgerServer {
     /// The Raft consensus instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The shared state layer.
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Idempotency cache for duplicate detection.
@@ -68,7 +67,7 @@ impl LedgerServer {
     /// Create a new Ledger server.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         addr: SocketAddr,
     ) -> Self {
@@ -78,7 +77,7 @@ impl LedgerServer {
     /// Create a new Ledger server with block archive for GetBlock/GetBlockRange.
     pub fn with_block_archive(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
         block_archive: Option<Arc<BlockArchive>>,
         addr: SocketAddr,
@@ -220,7 +219,7 @@ impl LedgerServer {
     }
 
     /// Get the state layer.
-    pub fn state(&self) -> &Arc<RwLock<StateLayer>> {
+    pub fn state(&self) -> &Arc<StateLayer> {
         &self.state
     }
 

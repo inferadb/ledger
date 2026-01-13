@@ -169,7 +169,7 @@ pub struct DiscoveryServiceImpl {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
     #[allow(dead_code)]
-    state: Arc<RwLock<StateLayer>>,
+    state: Arc<StateLayer>,
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,
     /// Tracks when peers were last seen.
@@ -186,7 +186,7 @@ impl DiscoveryServiceImpl {
     /// Create a new discovery service (without node_id, staleness checks disabled).
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<RwLock<StateLayer>>,
+        state: Arc<StateLayer>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {

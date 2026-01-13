@@ -13,7 +13,7 @@ use openraft::BasicNode;
 use openraft::impls::OneshotResponder;
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{Hash, NamespaceId, SetCondition, Transaction, VaultId};
+use ledger_types::{Hash, NamespaceId, SetCondition, ShardId, Transaction, VaultId};
 
 // ============================================================================
 // Type Configuration
@@ -117,6 +117,8 @@ pub enum LedgerRequest {
     CreateNamespace {
         /// Requested namespace name.
         name: String,
+        /// Target shard ID (None = auto-assign to shard 0).
+        shard_id: Option<ShardId>,
     },
 
     /// Create a new vault within a namespace.
@@ -223,6 +225,8 @@ pub enum LedgerResponse {
     NamespaceCreated {
         /// Assigned namespace ID.
         namespace_id: NamespaceId,
+        /// Assigned shard ID.
+        shard_id: ShardId,
     },
 
     /// Vault created.
@@ -282,8 +286,15 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
             }
-            LedgerResponse::NamespaceCreated { namespace_id } => {
-                write!(f, "NamespaceCreated(id={})", namespace_id)
+            LedgerResponse::NamespaceCreated {
+                namespace_id,
+                shard_id,
+            } => {
+                write!(
+                    f,
+                    "NamespaceCreated(id={}, shard={})",
+                    namespace_id, shard_id
+                )
             }
             LedgerResponse::VaultCreated { vault_id } => {
                 write!(f, "VaultCreated(id={})", vault_id)
@@ -324,14 +335,16 @@ mod tests {
     fn test_ledger_request_serialization() {
         let request = LedgerRequest::CreateNamespace {
             name: "test-namespace".to_string(),
+            shard_id: Some(1),
         };
 
         let bytes = bincode::serialize(&request).expect("serialize");
         let deserialized: LedgerRequest = bincode::deserialize(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateNamespace { name } => {
+            LedgerRequest::CreateNamespace { name, shard_id } => {
                 assert_eq!(name, "test-namespace");
+                assert_eq!(shard_id, Some(1));
             }
             _ => panic!("unexpected variant"),
         }

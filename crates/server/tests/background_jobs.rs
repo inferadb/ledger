@@ -60,6 +60,7 @@ async fn test_vault_health_tracking() {
     let ns_response = client
         .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
             name: "test_health_ns".to_string(),
+            shard_id: None,
         })
         .await
         .unwrap();
@@ -154,6 +155,7 @@ async fn test_learner_cache_initialization() {
     let _ns_response = client
         .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
             name: "test_cache_ns".to_string(),
+            shard_id: None,
         })
         .await
         .unwrap();
@@ -163,9 +165,9 @@ async fn test_learner_cache_initialization() {
 
     // All nodes should have the namespace replicated
     for node in cluster.nodes() {
-        let state = node.state.read();
-        // Verify state is accessible (doesn't panic)
-        drop(state);
+        // StateLayer is internally thread-safe via redb MVCC
+        // Access it directly to verify it's available (doesn't panic)
+        let _ = &*node.state;
     }
 }
 
@@ -187,6 +189,7 @@ async fn test_concurrent_background_jobs() {
     let ns_response = client
         .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
             name: "concurrent_test_ns".to_string(),
+            shard_id: None,
         })
         .await
         .unwrap();

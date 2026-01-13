@@ -941,6 +941,7 @@ async fn test_sequence_survives_leader_failover() {
     let ns_response = admin_client
         .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
             name: "failover-test-ns".to_string(),
+            shard_id: None,
         })
         .await
         .expect("create namespace");
