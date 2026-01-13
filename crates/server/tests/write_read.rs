@@ -104,11 +104,12 @@ async fn test_write_idempotency() {
         .await
         .expect("connect to leader");
 
+    // Use sequence 1 to pass sequence gap detection (expects 1 for new client)
     let request = ledger_raft::proto::WriteRequest {
         client_id: Some(ledger_raft::proto::ClientId {
             id: "idempotent-client".to_string(),
         }),
-        sequence: 42,
+        sequence: 1,
         namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
         operations: vec![ledger_raft::proto::Operation {

@@ -341,6 +341,8 @@ async fn test_force_gc_all_vaults() {
     .await
     .expect("write to vault 1");
 
+    // Use sequence 1 for vault 2 as well - sequences are tracked
+    // independently per (namespace_id, vault_id, client_id) per DESIGN.md §5.3
     write_entity_with_ttl(
         leader.addr,
         ns_id,
@@ -349,7 +351,7 @@ async fn test_force_gc_all_vaults() {
         b"value-2",
         Some(expired_at),
         "gc-multi-client",
-        2,
+        1, // Independent sequence for vault 2
     )
     .await
     .expect("write to vault 2");

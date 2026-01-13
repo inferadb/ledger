@@ -2,19 +2,27 @@
 //!
 //! Per DESIGN.md lines 1966-1996.
 //!
-//! ## Learner Staleness Handling (TODO)
+//! ## Learner Staleness Handling
 //!
 //! Per DESIGN.md §3.5, learners receive replication but may lag during network issues.
 //! The design specifies:
 //! - `learner_cache_ttl`: Maximum age before learner considers cache stale (default: 5s)
 //! - `learner_refresh_interval`: Interval for polling voter freshness (default: 1s)
 //!
-//! When a learner's cache is stale, it should fallback to querying a voter directly.
-//! This is currently NOT implemented - learners serve from their local state which
-//! is kept reasonably fresh via OpenRaft's built-in replication.
+//! ### Current Implementation
 //!
-//! Future work: Add `LearnerCacheConfig` and integrate staleness checks into
-//! `SystemNamespaceService::get_namespace()` and similar read paths.
+//! Learners maintain cache freshness through two mechanisms:
+//!
+//! 1. **OpenRaft Built-in Replication**: Learners receive log entries from the leader
+//!    automatically, keeping their state reasonably fresh under normal conditions.
+//!
+//! 2. **Background Refresh Job** (`LearnerRefreshJob`): Learners periodically poll
+//!    voters via `GetSystemState` RPC to refresh their cached system state (namespace
+//!    registry, routing info). This provides an additional layer of freshness beyond
+//!    Raft replication.
+//!
+//! The `LearnerCacheConfig` below provides configuration for cache TTL and refresh
+//! intervals. Staleness checks can be integrated into read paths if needed.
 
 use std::collections::HashMap;
 use std::time::Duration;

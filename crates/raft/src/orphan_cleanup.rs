@@ -23,12 +23,14 @@ use std::time::Duration;
 
 use openraft::Raft;
 use parking_lot::RwLock;
+use snafu::GenerateImplicitData;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use ledger_storage::StateLayer;
 use ledger_types::{Operation, Transaction};
 
+use crate::error::OrphanCleanupError;
 use crate::log_storage::AppliedStateAccessor;
 use crate::types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig};
 
@@ -179,7 +181,7 @@ impl OrphanCleanupJob {
         &self,
         namespace_id: i64,
         orphaned: Vec<(String, i64)>,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, OrphanCleanupError> {
         if orphaned.is_empty() {
             return Ok(0);
         }
@@ -218,7 +220,10 @@ impl OrphanCleanupJob {
         self.raft
             .client_write(request)
             .await
-            .map_err(|e| format!("Raft write failed: {}", e))?;
+            .map_err(|e| OrphanCleanupError::OrphanRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         info!(namespace_id, count, "Removed orphaned memberships");
 

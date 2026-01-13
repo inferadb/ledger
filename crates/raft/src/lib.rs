@@ -20,6 +20,7 @@
 mod auto_recovery;
 pub mod batching;
 mod block_compaction;
+pub mod error;
 mod idempotency;
 mod learner_refresh;
 mod log_storage;

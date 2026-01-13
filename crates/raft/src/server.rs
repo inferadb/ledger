@@ -162,7 +162,9 @@ impl LedgerServer {
                     archive.clone(),
                 ),
                 None => WriteServiceImpl::new(self.raft.clone(), self.idempotency.clone()),
-            };
+            }
+            // Add applied state for sequence gap detection
+            .with_applied_state(self.applied_state.clone());
             // Add per-namespace rate limiting if configured
             match &self.namespace_rate_limiter {
                 Some(limiter) => base.with_rate_limiter(limiter.clone()),

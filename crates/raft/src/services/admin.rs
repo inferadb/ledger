@@ -9,6 +9,7 @@ use openraft::{BasicNode, Raft};
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
+use crate::error::ServiceError;
 use crate::log_storage::AppliedStateAccessor;
 use crate::log_storage::VaultHealthStatus;
 use crate::proto::admin_service_server::AdminService;
@@ -89,7 +90,7 @@ impl AdminService for AdminServiceImpl {
             .raft
             .client_write(ledger_request)
             .await
-            .map_err(|e| Status::internal(format!("Raft error: {}", e)))?;
+            .map_err(ServiceError::raft)?;
 
         match result.data {
             LedgerResponse::NamespaceCreated { namespace_id } => {
@@ -113,7 +114,7 @@ impl AdminService for AdminServiceImpl {
             .namespace_id
             .as_ref()
             .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+            .ok_or_else(|| ServiceError::invalid_arg("Missing namespace_id"))?;
 
         // Submit delete namespace through Raft
         let ledger_request = LedgerRequest::DeleteNamespace { namespace_id };
@@ -122,7 +123,7 @@ impl AdminService for AdminServiceImpl {
             .raft
             .client_write(ledger_request)
             .await
-            .map_err(|e| Status::internal(format!("Raft error: {}", e)))?;
+            .map_err(ServiceError::raft)?;
 
         match result.data {
             LedgerResponse::NamespaceDeleted { success } => {
@@ -133,9 +134,7 @@ impl AdminService for AdminServiceImpl {
                         ),
                     }))
                 } else {
-                    Err(Status::failed_precondition(
-                        "Namespace has vaults, cannot delete",
-                    ))
+                    Err(ServiceError::precondition("Namespace has vaults, cannot delete").into())
                 }
             }
             LedgerResponse::Error { message } => Err(Status::internal(message)),
@@ -157,7 +156,7 @@ impl AdminService for AdminServiceImpl {
             Some(crate::proto::get_namespace_request::Lookup::Name(name)) => {
                 self.applied_state.get_namespace_by_name(&name)
             }
-            None => return Err(Status::invalid_argument("Missing namespace lookup")),
+            None => return Err(ServiceError::invalid_arg("Missing namespace lookup").into()),
         };
 
         match ns_meta {
@@ -172,7 +171,7 @@ impl AdminService for AdminServiceImpl {
                 config_version: 0,
                 status: crate::proto::NamespaceStatus::Active.into(),
             })),
-            None => Err(Status::not_found("Namespace not found")),
+            None => Err(ServiceError::not_found("Namespace", "unknown").into()),
         }
     }
 

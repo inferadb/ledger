@@ -1090,10 +1090,11 @@ impl ReadService for ReadServiceImpl {
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
         // Query the idempotency cache first (hot path)
+        // Key is (namespace_id, vault_id, client_id) per DESIGN.md §5.3
         let cached_sequence = self
             .idempotency
             .as_ref()
-            .map(|cache| cache.get_last_sequence(client_id))
+            .map(|cache| cache.get_last_sequence(namespace_id, vault_id, client_id))
             .unwrap_or(0);
 
         // If cache has data, use it; otherwise fall back to persistent state

@@ -17,12 +17,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openraft::Raft;
+use snafu::{GenerateImplicitData, ResultExt};
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use ledger_storage::{BlockArchive, SnapshotManager, StateLayer};
 
+use crate::error::{
+    ApplyOperationsSnafu, BlockArchiveNotConfiguredSnafu, BlockReadSnafu, IndexLookupSnafu,
+    RecoveryError, StateRootComputationSnafu,
+};
 use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus, MAX_RECOVERY_ATTEMPTS};
 use crate::types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
@@ -287,7 +292,7 @@ impl AutoRecoveryJob {
                     error = %e,
                     "Vault recovery attempt failed"
                 );
-                RecoveryResult::TransientFailure(e)
+                RecoveryResult::TransientFailure(e.to_string())
             }
         }
     }
@@ -299,11 +304,12 @@ impl AutoRecoveryJob {
         vault_id: i64,
         _expected_root: ledger_types::Hash,
         _diverged_height: u64,
-    ) -> Result<ledger_types::Hash, String> {
+    ) -> Result<ledger_types::Hash, RecoveryError> {
         let archive = self
             .block_archive
             .as_ref()
-            .ok_or_else(|| "Block archive not configured".to_string())?;
+            .ok_or_else(|| snafu::NoneError)
+            .context(BlockArchiveNotConfiguredSnafu)?;
 
         // Find starting point (snapshot or genesis)
         let (start_height, mut computed_root) =
@@ -324,7 +330,11 @@ impl AutoRecoveryJob {
         for height in start_height..=tip_height {
             let shard_height = archive
                 .find_shard_height(namespace_id, vault_id, height)
-                .map_err(|e| format!("Index lookup failed: {:?}", e))?;
+                .context(IndexLookupSnafu {
+                    namespace_id,
+                    vault_id,
+                    height,
+                })?;
 
             let shard_height = match shard_height {
                 Some(h) => h,
@@ -333,7 +343,7 @@ impl AutoRecoveryJob {
 
             let shard_block = archive
                 .read_block(shard_height)
-                .map_err(|e| format!("Block read failed: {:?}", e))?;
+                .context(BlockReadSnafu { shard_height })?;
 
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
                 e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
@@ -345,13 +355,13 @@ impl AutoRecoveryJob {
                 for tx in &entry.transactions {
                     state
                         .apply_operations(vault_id, &tx.operations, height)
-                        .map_err(|e| format!("Apply failed: {:?}", e))?;
+                        .context(ApplyOperationsSnafu { height })?;
                 }
 
                 // Compute state root after applying
                 computed_root = state
                     .compute_state_root(vault_id)
-                    .map_err(|e| format!("State root computation failed: {:?}", e))?;
+                    .context(StateRootComputationSnafu { vault_id })?;
             }
         }
 
@@ -363,7 +373,7 @@ impl AutoRecoveryJob {
         &self,
         _namespace_id: i64,
         vault_id: i64,
-    ) -> Result<(u64, ledger_types::Hash), String> {
+    ) -> Result<(u64, ledger_types::Hash), RecoveryError> {
         // Try to find a snapshot to start from
         if let Some(snapshot_manager) = &self.snapshot_manager {
             if let Ok(snapshots) = snapshot_manager.list_snapshots() {
@@ -401,7 +411,7 @@ impl AutoRecoveryJob {
         diverged_at_height: Option<u64>,
         recovery_attempt: Option<u8>,
         recovery_started_at: Option<i64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RecoveryError> {
         let request = LedgerRequest::UpdateVaultHealth {
             namespace_id,
             vault_id,
@@ -417,14 +427,21 @@ impl AutoRecoveryJob {
             .raft
             .client_write(request)
             .await
-            .map_err(|e| format!("Raft write failed: {:?}", e))?;
+            .map_err(|e| RecoveryError::RaftConsensus {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         match result.data {
             LedgerResponse::VaultHealthUpdated { success: true } => Ok(()),
             LedgerResponse::VaultHealthUpdated { success: false } => {
-                Err("Health update failed".to_string())
+                Err(RecoveryError::HealthUpdateRejected {
+                    reason: "Health update failed".to_string(),
+                })
             }
-            other => Err(format!("Unexpected response: {:?}", other)),
+            other => Err(RecoveryError::UnexpectedRaftResponse {
+                description: format!("{:?}", other),
+            }),
         }
     }
 

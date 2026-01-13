@@ -335,12 +335,24 @@ impl WriteService for WriteServiceImpl {
             .unwrap_or_default();
         let sequence = req.sequence;
 
+        // Extract namespace and vault IDs (needed for idempotency key)
+        let namespace_id = req
+            .namespace_id
+            .as_ref()
+            .map(|n| n.id)
+            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
         tracing::Span::current().record("sequence", sequence);
+        tracing::Span::current().record("namespace_id", namespace_id);
+        tracing::Span::current().record("vault_id", vault_id);
 
-        // Check idempotency cache for duplicate
-        if let Some(cached) = self.idempotency.check(&client_id, sequence) {
+        // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
+        // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
+        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
             debug!("Returning cached result for duplicate request");
             metrics::record_idempotency_hit();
             metrics::record_write(true, start.elapsed().as_secs_f64());
@@ -350,28 +362,13 @@ impl WriteService for WriteServiceImpl {
         }
         metrics::record_idempotency_miss();
 
-        // Extract namespace and vault IDs
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-
-        let vault_id = req.vault_id.as_ref().map(|v| v.id);
-
-        // Record span fields
-        tracing::Span::current().record("namespace_id", namespace_id);
-        if let Some(vid) = vault_id {
-            tracing::Span::current().record("vault_id", vid);
-        }
-
         // Check per-namespace rate limit
         self.check_rate_limit(namespace_id)?;
 
         // Check for sequence gaps (per DESIGN.md §5.3)
         if let Err(gap_error) = self.check_sequence_gap(
             namespace_id,
-            vault_id.unwrap_or(0),
+            vault_id,
             &client_id,
             sequence,
         ) {
@@ -389,7 +386,7 @@ impl WriteService for WriteServiceImpl {
         // Convert to internal request
         let ledger_request = self.operations_to_request(
             namespace_id,
-            vault_id,
+            Some(vault_id),
             &req.operations,
             &client_id,
             sequence,
@@ -414,7 +411,7 @@ impl WriteService for WriteServiceImpl {
             } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proof {
-                    self.generate_write_proof(namespace_id, vault_id.unwrap_or(0), block_height)
+                    self.generate_write_proof(namespace_id, vault_id, block_height)
                 } else {
                     (None, None)
                 };
@@ -428,9 +425,9 @@ impl WriteService for WriteServiceImpl {
                     tx_proof,
                 };
 
-                // Cache the result for idempotency
+                // Cache the result for idempotency (keyed by namespace_id, vault_id, client_id)
                 self.idempotency
-                    .insert(client_id.clone(), sequence, success.clone());
+                    .insert(namespace_id, vault_id, client_id.clone(), sequence, success.clone());
                 metrics::set_idempotency_cache_size(self.idempotency.len());
 
                 info!(
@@ -520,12 +517,24 @@ impl WriteService for WriteServiceImpl {
             .unwrap_or_default();
         let sequence = req.sequence;
 
+        // Extract namespace and vault IDs (needed for idempotency key)
+        let namespace_id = req
+            .namespace_id
+            .as_ref()
+            .map(|n| n.id)
+            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
         tracing::Span::current().record("sequence", sequence);
+        tracing::Span::current().record("namespace_id", namespace_id);
+        tracing::Span::current().record("vault_id", vault_id);
 
-        // Check idempotency cache for duplicate
-        if let Some(cached) = self.idempotency.check(&client_id, sequence) {
+        // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
+        // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
+        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
             debug!("Returning cached result for duplicate batch request");
             metrics::record_idempotency_hit();
             metrics::record_batch_write(true, 0, start.elapsed().as_secs_f64());
@@ -542,28 +551,13 @@ impl WriteService for WriteServiceImpl {
         }
         metrics::record_idempotency_miss();
 
-        // Extract namespace and vault IDs
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-
-        let vault_id = req.vault_id.as_ref().map(|v| v.id);
-
-        // Record span fields
-        tracing::Span::current().record("namespace_id", namespace_id);
-        if let Some(vid) = vault_id {
-            tracing::Span::current().record("vault_id", vid);
-        }
-
         // Check per-namespace rate limit
         self.check_rate_limit(namespace_id)?;
 
         // Check for sequence gaps (per DESIGN.md §5.3)
         if let Err(gap_error) = self.check_sequence_gap(
             namespace_id,
-            vault_id.unwrap_or(0),
+            vault_id,
             &client_id,
             sequence,
         ) {
@@ -591,7 +585,7 @@ impl WriteService for WriteServiceImpl {
         // Convert to internal request
         let ledger_request = self.operations_to_request(
             namespace_id,
-            vault_id,
+            Some(vault_id),
             &all_operations,
             &client_id,
             sequence,
@@ -616,7 +610,7 @@ impl WriteService for WriteServiceImpl {
             } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proofs {
-                    self.generate_write_proof(namespace_id, vault_id.unwrap_or(0), block_height)
+                    self.generate_write_proof(namespace_id, vault_id, block_height)
                 } else {
                     (None, None)
                 };
@@ -630,9 +624,9 @@ impl WriteService for WriteServiceImpl {
                     tx_proof,
                 };
 
-                // Cache the result for idempotency
+                // Cache the result for idempotency (keyed by namespace_id, vault_id, client_id)
                 self.idempotency
-                    .insert(client_id.clone(), sequence, success.clone());
+                    .insert(namespace_id, vault_id, client_id.clone(), sequence, success.clone());
                 metrics::set_idempotency_cache_size(self.idempotency.len());
 
                 info!(

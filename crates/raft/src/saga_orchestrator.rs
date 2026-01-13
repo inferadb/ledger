@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use openraft::Raft;
 use parking_lot::RwLock;
+use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -31,6 +32,7 @@ use ledger_storage::system::{
 };
 use ledger_types::{Operation, Transaction};
 
+use crate::error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu};
 use crate::log_storage::AppliedStateAccessor;
 use crate::types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig};
 
@@ -128,9 +130,9 @@ impl SagaOrchestrator {
     }
 
     /// Save a saga back to storage.
-    async fn save_saga(&self, saga: &Saga) -> Result<(), String> {
+    async fn save_saga(&self, saga: &Saga) -> Result<(), SagaError> {
         let key = format!("{}{}", SAGA_KEY_PREFIX, saga.id());
-        let value = serde_json::to_vec(saga).map_err(|e| format!("Serialize failed: {}", e))?;
+        let value = serde_json::to_vec(saga).context(SerializationSnafu)?;
 
         let operation = Operation::SetEntity {
             key,
@@ -160,13 +162,16 @@ impl SagaOrchestrator {
         self.raft
             .client_write(request)
             .await
-            .map_err(|e| format!("Raft write failed: {}", e))?;
+            .map_err(|e| SagaError::SagaRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(())
     }
 
     /// Execute a single step of a CreateOrg saga.
-    async fn execute_create_org_step(&self, saga: &mut CreateOrgSaga) -> Result<(), String> {
+    async fn execute_create_org_step(&self, saga: &mut CreateOrgSaga) -> Result<(), SagaError> {
         // Clone state to avoid borrow conflicts with saga.transition()
         match saga.state.clone() {
             CreateOrgSagaState::Pending => {
@@ -272,7 +277,7 @@ impl SagaOrchestrator {
     }
 
     /// Execute a single step of a DeleteUser saga.
-    async fn execute_delete_user_step(&self, saga: &mut DeleteUserSaga) -> Result<(), String> {
+    async fn execute_delete_user_step(&self, saga: &mut DeleteUserSaga) -> Result<(), SagaError> {
         match &saga.state.clone() {
             DeleteUserSagaState::Pending => {
                 // Step 1: Mark user as deleting
@@ -283,12 +288,16 @@ impl SagaOrchestrator {
                     let state = self.state.read();
                     state
                         .get_entity(0, user_key.as_bytes())
-                        .map_err(|e| format!("Read user failed: {}", e))?
+                        .context(StateReadSnafu {
+                            entity_type: "User".to_string(),
+                        })?
                 };
 
                 if let Some(entity) = user_entity {
-                    let mut user_data: serde_json::Value = serde_json::from_slice(&entity.value)
-                        .map_err(|e| format!("Deserialize user failed: {}", e))?;
+                    let mut user_data: serde_json::Value =
+                        serde_json::from_slice(&entity.value).context(DeserializationSnafu {
+                            entity_type: "User".to_string(),
+                        })?;
 
                     // Set deleted_at timestamp
                     user_data["deleted_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
@@ -377,7 +386,7 @@ impl SagaOrchestrator {
     }
 
     /// Allocate a new sequence ID from _system.
-    async fn allocate_sequence_id(&self, entity_type: &str) -> Result<i64, String> {
+    async fn allocate_sequence_id(&self, entity_type: &str) -> Result<i64, SagaError> {
         let seq_key = format!("_meta:seq:{}", entity_type);
 
         // Read current value (scoped to ensure guard is dropped before await)
@@ -385,7 +394,9 @@ impl SagaOrchestrator {
             let state = self.state.read();
             state
                 .get_entity(0, seq_key.as_bytes())
-                .map_err(|e| format!("Read sequence failed: {}", e))?
+                .context(StateReadSnafu {
+                    entity_type: "Sequence".to_string(),
+                })?
                 .and_then(|e| e.value.get(..8)?.try_into().ok().map(i64::from_le_bytes))
                 .unwrap_or(1)
         };
@@ -422,7 +433,10 @@ impl SagaOrchestrator {
         self.raft
             .client_write(request)
             .await
-            .map_err(|e| format!("Sequence allocation failed: {}", e))?;
+            .map_err(|e| SagaError::SequenceAllocation {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(next_id)
     }
@@ -434,9 +448,8 @@ impl SagaOrchestrator {
         vault_id: i64,
         key: &str,
         value: &serde_json::Value,
-    ) -> Result<(), String> {
-        let value_bytes =
-            serde_json::to_vec(value).map_err(|e| format!("Serialize failed: {}", e))?;
+    ) -> Result<(), SagaError> {
+        let value_bytes = serde_json::to_vec(value).context(SerializationSnafu)?;
 
         let operation = Operation::SetEntity {
             key: key.to_string(),
@@ -466,7 +479,10 @@ impl SagaOrchestrator {
         self.raft
             .client_write(request)
             .await
-            .map_err(|e| format!("Write entity failed: {}", e))?;
+            .map_err(|e| SagaError::SagaRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(())
     }
@@ -477,7 +493,7 @@ impl SagaOrchestrator {
         namespace_id: i64,
         vault_id: i64,
         key: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SagaError> {
         let operation = Operation::DeleteEntity {
             key: key.to_string(),
         };
@@ -503,7 +519,10 @@ impl SagaOrchestrator {
         self.raft
             .client_write(request)
             .await
-            .map_err(|e| format!("Delete entity failed: {}", e))?;
+            .map_err(|e| SagaError::SagaRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(())
     }
@@ -547,9 +566,10 @@ impl SagaOrchestrator {
                     },
                 };
 
+                let error_msg = e.to_string();
                 match &mut saga {
-                    Saga::CreateOrg(s) => s.fail(step, e),
-                    Saga::DeleteUser(s) => s.fail(step, e),
+                    Saga::CreateOrg(s) => s.fail(step, error_msg.clone()),
+                    Saga::DeleteUser(s) => s.fail(step, error_msg),
                 }
 
                 // Save failed state
