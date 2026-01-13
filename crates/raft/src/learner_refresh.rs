@@ -259,6 +259,15 @@ impl LearnerRefreshJob {
                 }
                 Err(e) => {
                     warn!(voter_id, voter_addr, error = %e, "Failed to refresh from voter");
+                    // Classify error type for metrics
+                    let error_type = if e.contains("connect") {
+                        "connection"
+                    } else if e.contains("RPC") {
+                        "rpc"
+                    } else {
+                        "other"
+                    };
+                    crate::metrics::record_learner_voter_error(voter_id, error_type);
                     last_error = Some(e);
                 }
             }
@@ -304,14 +313,22 @@ impl LearnerRefreshJob {
                         continue;
                     }
 
-                    // Attempt refresh
+                    // Cache is stale, record metric and attempt refresh
+                    crate::metrics::record_learner_cache_stale();
+
+                    // Attempt refresh with timing
+                    let start = std::time::Instant::now();
                     match self.try_refresh().await {
                         Ok(updated) => {
+                            let latency = start.elapsed().as_secs_f64();
+                            crate::metrics::record_learner_refresh(true, latency);
                             if updated {
                                 debug!("Learner cache updated from voter");
                             }
                         }
                         Err(e) => {
+                            let latency = start.elapsed().as_secs_f64();
+                            crate::metrics::record_learner_refresh(false, latency);
                             warn!(error = %e, "Failed to refresh learner cache from any voter");
                         }
                     }

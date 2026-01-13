@@ -22,7 +22,7 @@ use ledger_raft::{
     AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
     LedgerServer, LedgerTypeConfig, RaftLogStore, TtlGarbageCollector,
 };
-use ledger_storage::{BlockArchive, StateLayer};
+use ledger_storage::{BlockArchive, SnapshotManager, StateLayer};
 
 use crate::config::Config;
 use crate::discovery::resolve_bootstrap_peers;
@@ -153,6 +153,10 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     let block_archive_for_compactor = block_archive.clone();
     let block_archive_for_recovery = block_archive.clone();
 
+    // Create snapshot manager for recovery optimization
+    let snapshot_dir = config.data_dir.join("snapshots");
+    let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir, 5)); // Keep last 5 snapshots
+
     // Create server with block archive for GetBlock/GetBlockRange
     let server = LedgerServer::with_block_archive(
         raft.clone(),
@@ -194,9 +198,10 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         applied_state_accessor.clone(),
         state.clone(),
     )
-    .with_block_archive(block_archive_for_recovery);
+    .with_block_archive(block_archive_for_recovery)
+    .with_snapshot_manager(snapshot_manager);
     let recovery_handle = recovery.start();
-    tracing::info!("Started auto-recovery job");
+    tracing::info!("Started auto-recovery job with snapshot support");
 
     // Start learner refresh job for keeping learner state synchronized
     // Per DESIGN.md §9.3: Background polling of voters for fresh state

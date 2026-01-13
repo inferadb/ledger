@@ -80,6 +80,12 @@ const RECOVERY_SUCCESS_TOTAL: &str = "ledger_recovery_success_total";
 const RECOVERY_FAILURE_TOTAL: &str = "ledger_recovery_failure_total";
 const DETERMINISM_BUG_TOTAL: &str = "ledger_determinism_bug_total";
 
+// Learner refresh metrics
+const LEARNER_REFRESH_TOTAL: &str = "ledger_learner_refresh_total";
+const LEARNER_REFRESH_LATENCY: &str = "ledger_learner_refresh_latency_seconds";
+const LEARNER_CACHE_STALENESS: &str = "ledger_learner_cache_stale_total";
+const LEARNER_VOTER_ERRORS: &str = "ledger_learner_voter_errors_total";
+
 // =============================================================================
 // Write Service Metrics
 // =============================================================================
@@ -348,6 +354,38 @@ pub fn record_determinism_bug(namespace_id: i64, vault_id: i64) {
         DETERMINISM_BUG_TOTAL,
         "namespace_id" => namespace_id.to_string(),
         "vault_id" => vault_id.to_string()
+    )
+    .increment(1);
+}
+
+// =============================================================================
+// Learner Refresh Metrics
+// =============================================================================
+
+/// Record a learner refresh attempt.
+#[inline]
+pub fn record_learner_refresh(success: bool, latency_secs: f64) {
+    let status = if success { "success" } else { "error" };
+    counter!(LEARNER_REFRESH_TOTAL, "status" => status).increment(1);
+    histogram!(LEARNER_REFRESH_LATENCY, "status" => status).record(latency_secs);
+}
+
+/// Record a learner cache staleness event.
+///
+/// This is incremented when a learner's cached state becomes stale
+/// and requires refresh from a voter.
+#[inline]
+pub fn record_learner_cache_stale() {
+    counter!(LEARNER_CACHE_STALENESS).increment(1);
+}
+
+/// Record a voter connection error during learner refresh.
+#[inline]
+pub fn record_learner_voter_error(voter_id: u64, error_type: &str) {
+    counter!(
+        LEARNER_VOTER_ERRORS,
+        "voter_id" => voter_id.to_string(),
+        "error_type" => error_type.to_string()
     )
     .increment(1);
 }

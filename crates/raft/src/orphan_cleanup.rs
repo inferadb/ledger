@@ -310,8 +310,6 @@ impl OrphanCleanupJob {
     clippy::panic
 )]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_deleted_user_detection() {
         // Test user data with deleted_at
