@@ -27,7 +27,9 @@ use crate::types::{
     BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
 };
 
-use ledger_storage::{BlockArchive, StateLayer, StorageEngine};
+use inkwell::{Database, FileBackend};
+use ledger_storage::{BlockArchive, StateLayer};
+use tempfile::TempDir;
 use ledger_types::{VaultEntry, ZERO_HASH};
 use sha2::{Digest, Sha256};
 
@@ -36,18 +38,18 @@ pub struct AdminServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
-    state: Arc<StateLayer>,
+    state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Block archive for integrity verification.
-    block_archive: Option<Arc<BlockArchive>>,
+    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
 }
 
 impl AdminServiceImpl {
     /// Create a new admin service.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -61,9 +63,9 @@ impl AdminServiceImpl {
     /// Create with block archive for integrity verification.
     pub fn with_block_archive(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
-        block_archive: Arc<BlockArchive>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
     ) -> Self {
         Self {
             raft,
@@ -477,19 +479,31 @@ impl AdminService for AdminServiceImpl {
             };
 
             for (ns_id, v_id, expected_height) in &vault_heights {
-                // Create temporary state for replay verification
-                let temp_engine = match StorageEngine::open_in_memory() {
-                    Ok(e) => e,
+                // Create temporary state for replay verification using temp directory
+                let temp_dir = match TempDir::new() {
+                    Ok(d) => d,
                     Err(e) => {
                         issues.push(IntegrityIssue {
                             block_height: 0,
                             issue_type: "internal_error".to_string(),
-                            description: format!("Failed to create temp state: {:?}", e),
+                            description: format!("Failed to create temp dir: {:?}", e),
                         });
                         continue;
                     }
                 };
-                let temp_state = StateLayer::new(temp_engine.db());
+                let temp_db =
+                    match Database::<FileBackend>::create(temp_dir.path().join("verify.inkwell")) {
+                        Ok(db) => Arc::new(db),
+                        Err(e) => {
+                            issues.push(IntegrityIssue {
+                                block_height: 0,
+                                issue_type: "internal_error".to_string(),
+                                description: format!("Failed to create temp db: {:?}", e),
+                            });
+                            continue;
+                        }
+                    };
+                let temp_state = StateLayer::new(temp_db);
 
                 let mut last_vault_hash: Option<[u8; 32]> = None;
 

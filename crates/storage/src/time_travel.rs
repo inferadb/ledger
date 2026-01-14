@@ -19,57 +19,19 @@
 
 use std::sync::Arc;
 
+use inkwell::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
-use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
-
-/// Table for time-travel index configuration per vault.
-const TIME_TRAVEL_CONFIG_TABLE: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("time_travel_config");
-
-/// Table for time-travel index entries.
-/// Key: (vault_id, key_hash, height) encoded as bytes
-/// Value: Serialized TimeTravelEntry
-const TIME_TRAVEL_INDEX_TABLE: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("time_travel_index");
 
 /// Error types for time-travel index operations.
 #[derive(Debug, Snafu)]
 pub enum TimeTravelError {
-    /// Error from redb operations.
-    #[snafu(display("Database error: {source}"))]
-    Database {
-        /// The underlying redb error.
-        source: redb::Error,
-    },
-
-    /// Error from redb transaction operations.
-    #[snafu(display("Transaction error: {source}"))]
-    Transaction {
-        /// The underlying redb transaction error.
-        source: redb::TransactionError,
-    },
-
-    /// Error from redb commit operations.
-    #[snafu(display("Commit error: {source}"))]
-    Commit {
-        /// The underlying redb commit error.
-        source: redb::CommitError,
-    },
-
-    /// Error from redb table operations.
-    #[snafu(display("Table error: {source}"))]
-    Table {
-        /// The underlying redb table error.
-        source: redb::TableError,
-    },
-
-    /// Error from redb storage operations.
+    /// Error from storage operations.
     #[snafu(display("Storage error: {source}"))]
     Storage {
-        /// The underlying redb storage error.
-        source: redb::StorageError,
+        /// The underlying inkwell error.
+        source: inkwell::Error,
     },
 
     /// Serialization error.
@@ -187,31 +149,19 @@ fn parse_index_key(key: &[u8]) -> Option<(u64, u64, u64)> {
 /// Time-travel index manager.
 ///
 /// Manages historical versions of entity values for fast point-in-time queries.
-pub struct TimeTravelIndex {
-    db: Arc<Database>,
+pub struct TimeTravelIndex<B: StorageBackend> {
+    db: Arc<Database<B>>,
     /// Cache of vault configurations.
     config_cache: RwLock<std::collections::HashMap<u64, TimeTravelConfig>>,
 }
 
-impl TimeTravelIndex {
+impl<B: StorageBackend> TimeTravelIndex<B> {
     /// Create a new time-travel index manager.
-    pub fn new(db: Arc<Database>) -> Result<Self> {
-        // Ensure tables exist
-        let write_txn = db.begin_write().context(TransactionSnafu)?;
-        {
-            let _ = write_txn
-                .open_table(TIME_TRAVEL_CONFIG_TABLE)
-                .context(TableSnafu)?;
-            let _ = write_txn
-                .open_table(TIME_TRAVEL_INDEX_TABLE)
-                .context(TableSnafu)?;
-        }
-        write_txn.commit().context(CommitSnafu)?;
-
-        Ok(Self {
+    pub fn new(db: Arc<Database<B>>) -> Self {
+        Self {
             db,
             config_cache: RwLock::new(std::collections::HashMap::new()),
-        })
+        }
     }
 
     /// Configure time-travel indexing for a vault.
@@ -221,16 +171,10 @@ impl TimeTravelIndex {
                 message: e.to_string(),
             })?;
 
-        let write_txn = self.db.begin_write().context(TransactionSnafu)?;
-        {
-            let mut table = write_txn
-                .open_table(TIME_TRAVEL_CONFIG_TABLE)
-                .context(TableSnafu)?;
-            table
-                .insert(vault_id, serialized.as_slice())
-                .context(StorageSnafu)?;
-        }
-        write_txn.commit().context(CommitSnafu)?;
+        let mut txn = self.db.write().context(StorageSnafu)?;
+        txn.insert::<tables::TimeTravelConfig>(&vault_id, &serialized)
+            .context(StorageSnafu)?;
+        txn.commit().context(StorageSnafu)?;
 
         // Update cache
         self.config_cache.write().insert(vault_id, config);
@@ -246,18 +190,17 @@ impl TimeTravelIndex {
         }
 
         // Load from database
-        let read_txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = read_txn
-            .open_table(TIME_TRAVEL_CONFIG_TABLE)
-            .context(TableSnafu)?;
+        let txn = self.db.read().context(StorageSnafu)?;
 
-        match table.get(vault_id).context(StorageSnafu)? {
+        match txn
+            .get::<tables::TimeTravelConfig>(&vault_id)
+            .context(StorageSnafu)?
+        {
             Some(data) => {
-                let config: TimeTravelConfig = postcard::from_bytes(data.value()).map_err(|e| {
-                    TimeTravelError::Serialization {
+                let config: TimeTravelConfig =
+                    postcard::from_bytes(&data).map_err(|e| TimeTravelError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 self.config_cache.write().insert(vault_id, config.clone());
                 Ok(Some(config))
             }
@@ -300,16 +243,10 @@ impl TimeTravelIndex {
 
         let index_key = make_index_key(vault_id, key, height);
 
-        let write_txn = self.db.begin_write().context(TransactionSnafu)?;
-        {
-            let mut table = write_txn
-                .open_table(TIME_TRAVEL_INDEX_TABLE)
-                .context(TableSnafu)?;
-            table
-                .insert(index_key.as_slice(), serialized.as_slice())
-                .context(StorageSnafu)?;
-        }
-        write_txn.commit().context(CommitSnafu)?;
+        let mut txn = self.db.write().context(StorageSnafu)?;
+        txn.insert::<tables::TimeTravelIndex>(&index_key, &serialized)
+            .context(StorageSnafu)?;
+        txn.commit().context(StorageSnafu)?;
 
         Ok(())
     }
@@ -323,10 +260,7 @@ impl TimeTravelIndex {
         key: &str,
         height: u64,
     ) -> Result<Option<TimeTravelEntry>> {
-        let read_txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = read_txn
-            .open_table(TIME_TRAVEL_INDEX_TABLE)
-            .context(TableSnafu)?;
+        let txn = self.db.read().context(StorageSnafu)?;
 
         // Create range start key (vault_id, key_hash, height)
         // Since height is inverted, we start from the requested height
@@ -334,25 +268,22 @@ impl TimeTravelIndex {
         let key_hash = seahash::hash(key.as_bytes());
 
         // Scan for first entry at or before requested height
-        let range = table.range(start_key.as_slice()..).context(StorageSnafu)?;
-
-        for result in range {
-            let (k, v) = result.context(StorageSnafu)?;
-            let key_bytes = k.value();
-
+        for (k, v) in txn
+            .range::<tables::TimeTravelIndex>(Some(&start_key), None)
+            .context(StorageSnafu)?
+        {
             // Parse key to check vault_id and key_hash match
-            if let Some((v_id, k_hash, _entry_height)) = parse_index_key(key_bytes) {
+            if let Some((v_id, k_hash, _entry_height)) = parse_index_key(&k) {
                 if v_id != vault_id || k_hash != key_hash {
                     // Different vault or key - no entry found
                     break;
                 }
 
                 // Found an entry at or before requested height
-                let entry: TimeTravelEntry = postcard::from_bytes(v.value()).map_err(|e| {
-                    TimeTravelError::Serialization {
+                let entry: TimeTravelEntry =
+                    postcard::from_bytes(&v).map_err(|e| TimeTravelError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 return Ok(Some(entry));
             }
         }
@@ -367,38 +298,32 @@ impl TimeTravelIndex {
         key: &str,
         limit: Option<usize>,
     ) -> Result<Vec<TimeTravelEntry>> {
-        let read_txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = read_txn
-            .open_table(TIME_TRAVEL_INDEX_TABLE)
-            .context(TableSnafu)?;
+        let txn = self.db.read().context(StorageSnafu)?;
 
         // Start from most recent (height = u64::MAX means inverted = 0)
         let start_key = make_index_key(vault_id, key, u64::MAX);
         let key_hash = seahash::hash(key.as_bytes());
 
-        let range = table.range(start_key.as_slice()..).context(StorageSnafu)?;
-
         let mut entries = Vec::new();
         let max_entries = limit.unwrap_or(usize::MAX);
 
-        for result in range {
+        for (k, v) in txn
+            .range::<tables::TimeTravelIndex>(Some(&start_key), None)
+            .context(StorageSnafu)?
+        {
             if entries.len() >= max_entries {
                 break;
             }
 
-            let (k, v) = result.context(StorageSnafu)?;
-            let key_bytes = k.value();
-
-            if let Some((v_id, k_hash, _height)) = parse_index_key(key_bytes) {
+            if let Some((v_id, k_hash, _height)) = parse_index_key(&k) {
                 if v_id != vault_id || k_hash != key_hash {
                     break;
                 }
 
-                let entry: TimeTravelEntry = postcard::from_bytes(v.value()).map_err(|e| {
-                    TimeTravelError::Serialization {
+                let entry: TimeTravelEntry =
+                    postcard::from_bytes(&v).map_err(|e| TimeTravelError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 entries.push(entry);
             }
         }
@@ -418,73 +343,65 @@ impl TimeTravelIndex {
             return Ok(0);
         }
 
-        let write_txn = self.db.begin_write().context(TransactionSnafu)?;
-        let mut pruned = 0u64;
+        // Find keys to delete (height < cutoff)
+        // Note: inverted > cutoff_inverted when height < cutoff
+
+        // We need to scan all keys for this vault - use read transaction first
+        let mut keys_to_delete = Vec::new();
+
+        // Scan range for this vault
+        let start = vault_id.to_be_bytes().to_vec();
+        let end = (vault_id + 1).to_be_bytes().to_vec();
+
         {
-            let mut table = write_txn
-                .open_table(TIME_TRAVEL_INDEX_TABLE)
-                .context(TableSnafu)?;
+            let txn = self.db.read().context(StorageSnafu)?;
 
-            // Find keys to delete (height < cutoff)
-            // Note: inverted > cutoff_inverted when height < cutoff
-
-            // We need to scan all keys for this vault
-            let mut keys_to_delete = Vec::new();
-
-            // Scan range for this vault
-            let start = vault_id.to_be_bytes();
-            let end = (vault_id + 1).to_be_bytes();
-
-            let range = table
-                .range(start.as_slice()..end.as_slice())
-                .context(StorageSnafu)?;
-
-            for result in range {
-                let (k, _) = result.context(StorageSnafu)?;
-                let key_bytes = k.value();
-
-                if let Some((v_id, _, height)) = parse_index_key(key_bytes) {
+            for (k, _) in txn
+                .range::<tables::TimeTravelIndex>(Some(&start), Some(&end))
+                .context(StorageSnafu)?
+            {
+                if let Some((v_id, _, height)) = parse_index_key(&k) {
                     if v_id == vault_id && height < cutoff_height {
-                        keys_to_delete.push(key_bytes.to_vec());
+                        keys_to_delete.push(k);
                     }
                 }
             }
-
-            // Delete the keys
-            for key in keys_to_delete {
-                table.remove(key.as_slice()).context(StorageSnafu)?;
-                pruned += 1;
-            }
         }
-        write_txn.commit().context(CommitSnafu)?;
+
+        // Delete the keys in a write transaction
+        let mut txn = self.db.write().context(StorageSnafu)?;
+        let mut pruned = 0u64;
+
+        for key in keys_to_delete {
+            txn.delete::<tables::TimeTravelIndex>(&key)
+                .context(StorageSnafu)?;
+            pruned += 1;
+        }
+
+        txn.commit().context(StorageSnafu)?;
 
         Ok(pruned)
     }
 
     /// Get statistics for time-travel index.
     pub fn stats(&self, vault_id: u64) -> Result<TimeTravelStats> {
-        let read_txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = read_txn
-            .open_table(TIME_TRAVEL_INDEX_TABLE)
-            .context(TableSnafu)?;
+        let txn = self.db.read().context(StorageSnafu)?;
 
-        let start = vault_id.to_be_bytes();
-        let end = (vault_id + 1).to_be_bytes();
-
-        let range = table
-            .range(start.as_slice()..end.as_slice())
-            .context(StorageSnafu)?;
+        let start = vault_id.to_be_bytes().to_vec();
+        let end = (vault_id + 1).to_be_bytes().to_vec();
 
         let mut entry_count = 0u64;
         let mut total_bytes = 0u64;
         let mut unique_keys = std::collections::HashSet::new();
 
-        for result in range {
-            let (k, v) = result.context(StorageSnafu)?;
-            if let Some((_, key_hash, _)) = parse_index_key(k.value()) {
+        for (k, v) in txn
+            .range::<tables::TimeTravelIndex>(Some(&start), Some(&end))
+            .context(StorageSnafu)?
+        {
+            if let Some((_, key_hash, _)) = parse_index_key(&k) {
                 unique_keys.insert(key_hash);
                 entry_count += 1;
-                total_bytes += v.value().len() as u64;
+                total_bytes += v.len() as u64;
             }
         }
 
@@ -516,12 +433,11 @@ pub struct TimeTravelStats {
 )]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use crate::engine::InMemoryStorageEngine;
 
-    fn create_test_db() -> (TempDir, Arc<Database>) {
-        let dir = TempDir::new().unwrap();
-        let db = Database::create(dir.path().join("test.redb")).unwrap();
-        (dir, Arc::new(db))
+    fn create_test_index() -> TimeTravelIndex<inkwell::InMemoryBackend> {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        TimeTravelIndex::new(engine.db())
     }
 
     #[test]
@@ -565,8 +481,7 @@ mod tests {
 
     #[test]
     fn test_configure_vault() {
-        let (_dir, db) = create_test_db();
-        let index = TimeTravelIndex::new(db).unwrap();
+        let index = create_test_index();
 
         // Initially not configured
         assert!(index.get_config(1).unwrap().is_none());
@@ -582,8 +497,7 @@ mod tests {
 
     #[test]
     fn test_record_and_retrieve() {
-        let (_dir, db) = create_test_db();
-        let index = TimeTravelIndex::new(db).unwrap();
+        let index = create_test_index();
 
         // Enable time-travel for vault
         index
@@ -616,8 +530,7 @@ mod tests {
 
     #[test]
     fn test_get_history() {
-        let (_dir, db) = create_test_db();
-        let index = TimeTravelIndex::new(db).unwrap();
+        let index = create_test_index();
 
         index
             .configure_vault(1, TimeTravelConfig::enabled())
@@ -644,8 +557,7 @@ mod tests {
 
     #[test]
     fn test_tombstone() {
-        let (_dir, db) = create_test_db();
-        let index = TimeTravelIndex::new(db).unwrap();
+        let index = create_test_index();
 
         index
             .configure_vault(1, TimeTravelConfig::enabled())
@@ -668,8 +580,7 @@ mod tests {
 
     #[test]
     fn test_prefix_filtering() {
-        let (_dir, db) = create_test_db();
-        let index = TimeTravelIndex::new(db).unwrap();
+        let index = create_test_index();
 
         // Only index "user:" prefix
         index
@@ -698,8 +609,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let (_dir, db) = create_test_db();
-        let index = TimeTravelIndex::new(db).unwrap();
+        let index = create_test_index();
 
         index
             .configure_vault(1, TimeTravelConfig::enabled())
@@ -724,8 +634,7 @@ mod tests {
 
     #[test]
     fn test_not_enabled_skips_recording() {
-        let (_dir, db) = create_test_db();
-        let index = TimeTravelIndex::new(db).unwrap();
+        let index = create_test_index();
 
         // Don't configure vault - time-travel is disabled
 

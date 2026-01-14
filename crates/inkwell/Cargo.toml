@@ -1,0 +1,37 @@
+[package]
+name = "inkwell"
+version.workspace = true
+edition = "2021"
+description = "Purpose-built embedded storage engine for InferaDB Ledger"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Hashing for checksums
+xxhash-rust = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization for key/value encoding
+byteorder = { workspace = true }
+
+# Memory-mapped files
+memmap2 = { workspace = true }
+
+# Parking lot for faster locks
+parking_lot = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+rand = { workspace = true }
+
+[features]
+default = []
+# Enable additional safety checks (slower but catches bugs)
+paranoid = []

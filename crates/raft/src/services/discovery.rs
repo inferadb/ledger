@@ -22,6 +22,7 @@ use crate::proto::{
 };
 use crate::types::LedgerTypeConfig;
 
+use inkwell::FileBackend;
 use ledger_storage::StateLayer;
 
 // =============================================================================
@@ -169,7 +170,7 @@ pub struct DiscoveryServiceImpl {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
     #[allow(dead_code)]
-    state: Arc<StateLayer>,
+    state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,
     /// Tracks when peers were last seen.
@@ -186,7 +187,7 @@ impl DiscoveryServiceImpl {
     /// Create a new discovery service (without node_id, staleness checks disabled).
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {

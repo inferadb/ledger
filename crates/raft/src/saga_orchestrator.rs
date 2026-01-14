@@ -24,6 +24,7 @@ use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use inkwell::StorageBackend;
 use ledger_storage::StateLayer;
 use ledger_storage::system::{
     CreateOrgSaga, CreateOrgSagaState, DeleteUserSaga, DeleteUserSagaState, SAGA_POLL_INTERVAL,
@@ -48,13 +49,13 @@ const SYSTEM_NAMESPACE_ID: i64 = 0;
 ///
 /// Runs as a background task, periodically polling for pending sagas
 /// and driving their state transitions through Raft consensus.
-pub struct SagaOrchestrator {
+pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer (internally thread-safe via redb MVCC).
-    state: Arc<StateLayer>,
+    /// The shared state layer (internally thread-safe via inkwell MVCC).
+    state: Arc<StateLayer<B>>,
     /// Accessor for applied state.
     /// Reserved for future saga state queries.
     #[allow(dead_code)]
@@ -63,12 +64,12 @@ pub struct SagaOrchestrator {
     interval: Duration,
 }
 
-impl SagaOrchestrator {
+impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Create a new saga orchestrator.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<B>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -95,7 +96,7 @@ impl SagaOrchestrator {
 
     /// Load all pending sagas from _system namespace.
     fn load_pending_sagas(&self) -> Vec<Saga> {
-        // StateLayer is internally thread-safe via redb MVCC
+        // StateLayer is internally thread-safe via inkwell MVCC
 
         // List all entities with saga: prefix in _system (vault_id=0)
         let entities = match self.state.list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000) {

@@ -23,7 +23,7 @@
 //!
 //! Each shard group is fully isolated:
 //! - Separate Raft consensus (independent elections, log replication)
-//! - Separate storage files (state.redb, blocks.redb, raft.redb per shard)
+//! - Separate storage files (state.inkwell, blocks.inkwell, raft.inkwell per shard)
 //! - Separate background jobs (GC, compaction, recovery)
 //!
 //! ## Usage
@@ -53,8 +53,9 @@ use snafu::Snafu;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use inkwell::{Database, FileBackend};
 use ledger_storage::system::SystemNamespaceService;
-use ledger_storage::{BlockArchive, StateLayer, StorageEngine};
+use ledger_storage::{BlockArchive, StateLayer};
 use ledger_types::{NamespaceId, ShardId};
 
 use crate::auto_recovery::AutoRecoveryJob;
@@ -222,15 +223,17 @@ impl ShardBackgroundJobs {
 /// A single shard group with its own Raft instance and storage.
 ///
 /// Each ShardGroup is a complete, isolated Raft cluster member for one shard.
+/// Uses FileBackend for production storage - this is intentional as Raft requires
+/// durable storage for safety.
 pub struct ShardGroup {
     /// Shard identifier.
     shard_id: ShardId,
     /// The Raft consensus instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// Shared state layer for this shard.
-    state: Arc<StateLayer>,
+    state: Arc<StateLayer<FileBackend>>,
     /// Block archive for historical blocks.
-    block_archive: Arc<BlockArchive>,
+    block_archive: Arc<BlockArchive<FileBackend>>,
     /// Accessor for applied state.
     applied_state: AppliedStateAccessor,
     /// Background job handles (wrapped in Mutex for mutable access through Arc).
@@ -249,12 +252,12 @@ impl ShardGroup {
     }
 
     /// Get the state layer.
-    pub fn state(&self) -> &Arc<StateLayer> {
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
     }
 
     /// Get the block archive.
-    pub fn block_archive(&self) -> &Arc<BlockArchive> {
+    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
         &self.block_archive
     }
 
@@ -282,14 +285,14 @@ impl ShardGroup {
 /// Manager for multiple Raft shard groups.
 ///
 /// Coordinates the lifecycle of multiple independent Raft consensus groups,
-/// each handling a subset of namespaces.
+/// each handling a subset of namespaces. Uses FileBackend for production storage.
 pub struct MultiRaftManager {
     /// Configuration.
     config: MultiRaftConfig,
     /// Active shard groups indexed by shard ID.
     shards: RwLock<HashMap<ShardId, Arc<ShardGroup>>>,
     /// Router for namespace-to-shard resolution.
-    router: RwLock<Option<Arc<ShardRouter>>>,
+    router: RwLock<Option<Arc<ShardRouter<FileBackend>>>>,
 }
 
 impl MultiRaftManager {
@@ -332,7 +335,7 @@ impl MultiRaftManager {
     }
 
     /// Get the shard router (if initialized).
-    pub fn router(&self) -> Option<Arc<ShardRouter>> {
+    pub fn router(&self) -> Option<Arc<ShardRouter<FileBackend>>> {
         self.router.read().clone()
     }
 
@@ -507,8 +510,8 @@ impl MultiRaftManager {
         &self,
         shard_id: ShardId,
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
-        block_archive: Arc<BlockArchive>,
+        state: Arc<StateLayer<FileBackend>>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> ShardBackgroundJobs {
         info!(shard_id, "Starting background jobs for shard");
@@ -551,27 +554,36 @@ impl MultiRaftManager {
         &self,
         shard_id: ShardId,
         shard_dir: &PathBuf,
-    ) -> Result<(Arc<StateLayer>, Arc<BlockArchive>, RaftLogStore)> {
-        // Open state database
-        let state_db_path = shard_dir.join("state.redb");
-        let engine = StorageEngine::open(&state_db_path).map_err(|e| MultiRaftError::Storage {
+    ) -> Result<(Arc<StateLayer<FileBackend>>, Arc<BlockArchive<FileBackend>>, RaftLogStore<FileBackend>)> {
+        // Open or create state database using inkwell
+        let state_db_path = shard_dir.join("state.inkwell");
+        let state_db = if state_db_path.exists() {
+            Database::<FileBackend>::open(&state_db_path)
+        } else {
+            Database::<FileBackend>::create(&state_db_path)
+        }
+        .map_err(|e| MultiRaftError::Storage {
             shard_id,
             message: format!("Failed to open state db: {}", e),
         })?;
-        let state = Arc::new(StateLayer::new(engine.db()));
+        let state = Arc::new(StateLayer::new(Arc::new(state_db)));
 
-        // Open block archive
-        let blocks_db_path = shard_dir.join("blocks.redb");
-        let blocks_db =
-            redb::Database::create(&blocks_db_path).map_err(|e| MultiRaftError::Storage {
-                shard_id,
-                message: format!("Failed to open blocks db: {}", e),
-            })?;
+        // Open or create block archive database using inkwell
+        let blocks_db_path = shard_dir.join("blocks.inkwell");
+        let blocks_db = if blocks_db_path.exists() {
+            Database::<FileBackend>::open(&blocks_db_path)
+        } else {
+            Database::<FileBackend>::create(&blocks_db_path)
+        }
+        .map_err(|e| MultiRaftError::Storage {
+            shard_id,
+            message: format!("Failed to open blocks db: {}", e),
+        })?;
         let block_archive = Arc::new(BlockArchive::new(Arc::new(blocks_db)));
 
-        // Open Raft log store
-        let log_path = shard_dir.join("raft.redb");
-        let log_store = RaftLogStore::open(&log_path)
+        // Open Raft log store (uses inkwell storage - handles open/create internally)
+        let log_path = shard_dir.join("raft.inkwell");
+        let log_store = RaftLogStore::<FileBackend>::open(&log_path)
             .map_err(|e| MultiRaftError::Storage {
                 shard_id,
                 message: format!("Failed to open log store: {}", e),

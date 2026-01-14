@@ -103,6 +103,37 @@ impl Default for StressConfig {
     }
 }
 
+/// Extract leader address from a forwarding error message.
+///
+/// Error format varies - may have escaped or unescaped quotes:
+/// - Unescaped: addr: "127.0.0.1:50187"
+/// - Escaped: addr: \"127.0.0.1:50187\"
+fn extract_leader_addr_from_error(error_msg: &str) -> Option<SocketAddr> {
+    // Try escaped quotes first (more common in error strings)
+    if let Some(start) = error_msg.find("addr: \\\"") {
+        let addr_start = start + "addr: \\\"".len();
+        let remaining = &error_msg[addr_start..];
+        if let Some(end) = remaining.find("\\\"") {
+            if let Ok(addr) = remaining[..end].parse() {
+                return Some(addr);
+            }
+        }
+    }
+
+    // Fall back to unescaped quotes
+    if let Some(start) = error_msg.find("addr: \"") {
+        let addr_start = start + "addr: \"".len();
+        let remaining = &error_msg[addr_start..];
+        if let Some(end) = remaining.find('"') {
+            if let Ok(addr) = remaining[..end].parse() {
+                return Some(addr);
+            }
+        }
+    }
+
+    None
+}
+
 /// Written value with its location for multi-shard consistency verification.
 #[derive(Debug, Clone)]
 struct WrittenValue {
@@ -420,9 +451,9 @@ async fn write_worker(
     running: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
 ) {
-    let endpoint = format!("http://{}", leader_addr);
+    let mut current_endpoint = format!("http://{}", leader_addr);
     let mut client = match ledger_raft::proto::write_service_client::WriteServiceClient::connect(
-        endpoint.clone(),
+        current_endpoint.clone(),
     )
     .await
     {
@@ -450,7 +481,7 @@ async fn write_worker(
                 consecutive_errors = 0;
                 if let Ok(new_client) =
                     ledger_raft::proto::write_service_client::WriteServiceClient::connect(
-                        endpoint.clone(),
+                        current_endpoint.clone(),
                     )
                     .await
                 {
@@ -558,6 +589,28 @@ async fn write_worker(
                     }
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
+
+                    // Check if this is a forwarding error and extract the leader address
+                    if let Some(leader_addr) = extract_leader_addr_from_error(&error_msg) {
+                        // Don't count forwarding as error - just reconnect to leader
+                        let new_endpoint = format!("http://{}", leader_addr);
+                        if current_endpoint != new_endpoint {
+                            current_endpoint = new_endpoint;
+                            if let Ok(new_client) =
+                                ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+                                    current_endpoint.clone(),
+                                )
+                                .await
+                            {
+                                client = new_client;
+                            }
+                        }
+                        // Retry immediately without counting as error
+                        continue;
+                    }
+
+                    // Other errors are real errors
                     for _ in 0..batch_size {
                         metrics.record_write_error();
                     }
@@ -567,7 +620,7 @@ async fn write_worker(
                     }
                     if let Ok(new_client) =
                         ledger_raft::proto::write_service_client::WriteServiceClient::connect(
-                            endpoint.clone(),
+                            current_endpoint.clone(),
                         )
                         .await
                     {
@@ -637,6 +690,28 @@ async fn write_worker(
                     }
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
+
+                    // Check if this is a forwarding error and extract the leader address
+                    if let Some(leader_addr) = extract_leader_addr_from_error(&error_msg) {
+                        // Don't count forwarding as error - just reconnect to leader
+                        let new_endpoint = format!("http://{}", leader_addr);
+                        if current_endpoint != new_endpoint {
+                            current_endpoint = new_endpoint;
+                            if let Ok(new_client) =
+                                ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+                                    current_endpoint.clone(),
+                                )
+                                .await
+                            {
+                                client = new_client;
+                            }
+                        }
+                        // Retry immediately without counting as error
+                        continue;
+                    }
+
+                    // Other errors are real errors
                     metrics.record_write_error();
                     consecutive_errors += 1;
                     if consecutive_errors <= 3 {
@@ -644,7 +719,7 @@ async fn write_worker(
                     }
                     if let Ok(new_client) =
                         ledger_raft::proto::write_service_client::WriteServiceClient::connect(
-                            endpoint.clone(),
+                            current_endpoint.clone(),
                         )
                         .await
                     {
@@ -1168,7 +1243,7 @@ async fn test_stress_single_node() {
         1, // Single node - no replication
         StressConfig {
             write_workers: 2,  // Multiple writers now that RwLock contention is fixed
-            read_workers: 4,   // Multiple readers - StateLayer is internally thread-safe via redb MVCC
+            read_workers: 4,   // Multiple readers - StateLayer is internally thread-safe via inkwell MVCC
             duration: Duration::from_secs(10),
             batch_size: 1,
             max_concurrent_writes: 20,

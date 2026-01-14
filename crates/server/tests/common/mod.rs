@@ -31,6 +31,7 @@ use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_raft::{
     MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig, ShardGroup,
 };
+use inkwell::FileBackend;
 use ledger_storage::StateLayer;
 
 /// A test node in a cluster.
@@ -41,8 +42,8 @@ pub struct TestNode {
     pub addr: SocketAddr,
     /// The Raft instance.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer (internally thread-safe via redb MVCC).
-    pub state: Arc<StateLayer>,
+    /// The state layer (internally thread-safe via inkwell MVCC).
+    pub state: Arc<StateLayer<FileBackend>>,
     /// Temporary directory for node data.
     _temp_dir: TempDir,
     /// Server task handle for cleanup.

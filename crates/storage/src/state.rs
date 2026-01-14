@@ -10,45 +10,30 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use redb::{Database, ReadableTable};
+use inkwell::{Database, StorageBackend, tables};
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus};
 
 use crate::bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment};
-use crate::indexes::IndexManager;
+use crate::indexes::{IndexError, IndexManager};
 use crate::keys::{bucket_prefix, encode_storage_key};
-use crate::tables::Tables;
 
 /// State layer error types.
 #[derive(Debug, Snafu)]
 pub enum StateError {
     /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
-    Storage {
-        /// The underlying redb storage error.
-        source: redb::StorageError,
+    Inkwell {
+        /// The underlying inkwell storage error.
+        source: inkwell::Error,
     },
 
-    /// Table operation failed.
-    #[snafu(display("Table error: {source}"))]
-    Table {
-        /// The underlying redb table error.
-        source: redb::TableError,
-    },
-
-    /// Transaction operation failed.
-    #[snafu(display("Transaction error: {source}"))]
-    Transaction {
-        /// The underlying redb transaction error.
-        source: redb::TransactionError,
-    },
-
-    /// Commit operation failed.
-    #[snafu(display("Commit error: {source}"))]
-    Commit {
-        /// The underlying redb commit error.
-        source: redb::CommitError,
+    /// Index operation failed.
+    #[snafu(display("Index error: {source}"))]
+    Index {
+        /// The underlying index error.
+        source: IndexError,
     },
 
     /// Serialization/deserialization failed.
@@ -76,6 +61,12 @@ pub enum StateError {
     },
 }
 
+impl From<IndexError> for StateError {
+    fn from(source: IndexError) -> Self {
+        StateError::Index { source }
+    }
+}
+
 /// Result type for state operations.
 pub type Result<T> = std::result::Result<T, StateError>;
 
@@ -83,53 +74,24 @@ pub type Result<T> = std::result::Result<T, StateError>;
 ///
 /// Provides fast K/V queries and efficient state root computation
 /// via bucket-based dirty tracking.
-pub struct StateLayer {
+///
+/// Generic over StorageBackend to support both file-based (production)
+/// and in-memory (testing) storage.
+pub struct StateLayer<B: StorageBackend> {
     /// Shared database handle.
-    db: Arc<Database>,
+    db: Arc<Database<B>>,
     /// Per-vault commitment tracking.
     vault_commitments: DashMap<VaultId, VaultCommitment>,
 }
 
 #[allow(clippy::result_large_err)]
-impl StateLayer {
+impl<B: StorageBackend> StateLayer<B> {
     /// Create a new state layer backed by the given database.
-    ///
-    /// **Note**: This does not initialize tables. Call `init_tables()` after construction
-    /// or use `open()` which initializes tables automatically.
-    pub fn new(db: Arc<Database>) -> Self {
+    pub fn new(db: Arc<Database<B>>) -> Self {
         Self {
             db,
             vault_commitments: DashMap::new(),
         }
-    }
-
-    /// Open a state layer and initialize all required tables.
-    ///
-    /// This is the preferred constructor - it ensures all tables exist before use.
-    pub fn open(db: Arc<Database>) -> Result<Self> {
-        let layer = Self::new(db);
-        layer.init_tables()?;
-        Ok(layer)
-    }
-
-    /// Initialize all required tables in the database.
-    ///
-    /// Creates tables if they don't exist. Safe to call multiple times.
-    pub fn init_tables(&self) -> Result<()> {
-        let txn = self.db.begin_write().context(TransactionSnafu)?;
-
-        // Create all state tables (no-op if they already exist)
-        txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
-        txn.open_table(Tables::RELATIONSHIPS).context(TableSnafu)?;
-        txn.open_table(Tables::OBJ_INDEX).context(TableSnafu)?;
-        txn.open_table(Tables::SUBJ_INDEX).context(TableSnafu)?;
-        txn.open_table(Tables::VAULT_META).context(TableSnafu)?;
-        txn.open_table(Tables::NAMESPACE_META).context(TableSnafu)?;
-        txn.open_table(Tables::SEQUENCES).context(TableSnafu)?;
-        txn.open_table(Tables::CLIENT_SEQUENCES).context(TableSnafu)?;
-
-        txn.commit().context(CommitSnafu)?;
-        Ok(())
     }
 
     /// Get or create commitment tracking for a vault.
@@ -149,215 +111,190 @@ impl StateLayer {
         operations: &[Operation],
         block_height: u64,
     ) -> Result<Vec<WriteStatus>> {
-        let txn = self.db.begin_write().context(TransactionSnafu)?;
+        let mut txn = self.db.write().context(InkwellSnafu)?;
         let mut statuses = Vec::with_capacity(operations.len());
 
         // Track which local keys are modified for dirty bucket marking
         let mut dirty_keys: Vec<Vec<u8>> = Vec::new();
 
-        {
-            let mut entities = txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
-            let mut relationships = txn.open_table(Tables::RELATIONSHIPS).context(TableSnafu)?;
-            let mut obj_index = txn.open_table(Tables::OBJ_INDEX).context(TableSnafu)?;
-            let mut subj_index = txn.open_table(Tables::SUBJ_INDEX).context(TableSnafu)?;
+        for op in operations {
+            let status = match op {
+                Operation::SetEntity {
+                    key,
+                    value,
+                    condition,
+                    expires_at,
+                } => {
+                    let local_key = key.as_bytes();
+                    let storage_key = encode_storage_key(vault_id, local_key);
 
-            for op in operations {
-                let status = match op {
-                    Operation::SetEntity {
-                        key,
-                        value,
-                        condition,
-                        expires_at,
-                    } => {
-                        let local_key = key.as_bytes();
-                        let storage_key = encode_storage_key(vault_id, local_key);
+                    // Check condition - get existing entity
+                    let existing = txn
+                        .get::<tables::Entities>(&storage_key)
+                        .context(InkwellSnafu)?;
 
-                        // Check condition - extract data and drop borrow before mutation
-                        // Also capture current entity state for error details if condition fails
-                        let (condition_met, is_update, current_entity) = {
-                            let existing = entities.get(&storage_key[..]).context(StorageSnafu)?;
-                            let is_update = existing.is_some();
+                    let is_update = existing.is_some();
+                    let entity_data = existing
+                        .as_ref()
+                        .and_then(|data| postcard::from_bytes::<Entity>(data).ok());
 
-                            let entity_data = existing
-                                .as_ref()
-                                .and_then(|e| postcard::from_bytes::<Entity>(e.value()).ok());
+                    let condition_met = match condition {
+                        None => true,
+                        Some(SetCondition::MustNotExist) => !is_update,
+                        Some(SetCondition::MustExist) => is_update,
+                        Some(SetCondition::VersionEquals(v)) => entity_data
+                            .as_ref()
+                            .map(|e| e.version == *v)
+                            .unwrap_or(false),
+                        Some(SetCondition::ValueEquals(expected)) => entity_data
+                            .as_ref()
+                            .map(|e| e.value == *expected)
+                            .unwrap_or(false),
+                    };
 
-                            let condition_met = match condition {
-                                None => true,
-                                Some(SetCondition::MustNotExist) => existing.is_none(),
-                                Some(SetCondition::MustExist) => existing.is_some(),
-                                Some(SetCondition::VersionEquals(v)) => entity_data
-                                    .as_ref()
-                                    .map(|e| e.version == *v)
-                                    .unwrap_or(false),
-                                Some(SetCondition::ValueEquals(expected)) => entity_data
-                                    .as_ref()
-                                    .map(|e| e.value == *expected)
-                                    .unwrap_or(false),
-                            };
-                            (condition_met, is_update, entity_data)
-                        };
+                    if !condition_met {
+                        // Per DESIGN.md §5.9: All-or-nothing - if ANY condition fails, entire batch fails
+                        return Err(StateError::PreconditionFailed {
+                            key: key.clone(),
+                            current_version: entity_data.as_ref().map(|e| e.version),
+                            current_value: entity_data.map(|e| e.value),
+                            failed_condition: condition.clone(),
+                        });
+                    }
 
-                        if !condition_met {
-                            // Per DESIGN.md §5.9: All-or-nothing - if ANY condition fails, entire batch fails
-                            return Err(StateError::PreconditionFailed {
-                                key: key.clone(),
-                                current_version: current_entity.as_ref().map(|e| e.version),
-                                current_value: current_entity.map(|e| e.value),
-                                failed_condition: condition.clone(),
-                            });
+                    let entity = Entity {
+                        key: local_key.to_vec(),
+                        value: value.clone(),
+                        expires_at: expires_at.unwrap_or(0),
+                        version: block_height,
+                    };
+
+                    let encoded = postcard::to_allocvec(&entity).map_err(|e| {
+                        StateError::Serialization {
+                            message: e.to_string(),
                         }
+                    })?;
 
-                        let entity = Entity {
-                            key: local_key.to_vec(),
-                            value: value.clone(),
-                            expires_at: expires_at.unwrap_or(0),
-                            version: block_height,
-                        };
+                    txn.insert::<tables::Entities>(&storage_key, &encoded)
+                        .context(InkwellSnafu)?;
 
-                        let encoded = postcard::to_allocvec(&entity).map_err(|e| {
+                    dirty_keys.push(local_key.to_vec());
+
+                    if is_update {
+                        WriteStatus::Updated
+                    } else {
+                        WriteStatus::Created
+                    }
+                }
+
+                Operation::DeleteEntity { key } => {
+                    let local_key = key.as_bytes();
+                    let storage_key = encode_storage_key(vault_id, local_key);
+
+                    let existed = txn
+                        .delete::<tables::Entities>(&storage_key)
+                        .context(InkwellSnafu)?;
+
+                    if existed {
+                        dirty_keys.push(local_key.to_vec());
+                        WriteStatus::Deleted
+                    } else {
+                        WriteStatus::NotFound
+                    }
+                }
+
+                Operation::ExpireEntity { key, .. } => {
+                    let local_key = key.as_bytes();
+                    let storage_key = encode_storage_key(vault_id, local_key);
+
+                    let existed = txn
+                        .delete::<tables::Entities>(&storage_key)
+                        .context(InkwellSnafu)?;
+
+                    if existed {
+                        dirty_keys.push(local_key.to_vec());
+                        WriteStatus::Deleted
+                    } else {
+                        WriteStatus::NotFound
+                    }
+                }
+
+                Operation::CreateRelationship {
+                    resource,
+                    relation,
+                    subject,
+                } => {
+                    let rel = Relationship::new(resource, relation, subject);
+                    let rel_key = rel.to_key();
+                    let local_key = rel_key.as_bytes();
+                    let storage_key = encode_storage_key(vault_id, local_key);
+
+                    // Check existence
+                    let already_exists = txn
+                        .get::<tables::Relationships>(&storage_key)
+                        .context(InkwellSnafu)?
+                        .is_some();
+
+                    if already_exists {
+                        WriteStatus::AlreadyExists
+                    } else {
+                        let encoded = postcard::to_allocvec(&rel).map_err(|e| {
                             StateError::Serialization {
                                 message: e.to_string(),
                             }
                         })?;
 
-                        entities
-                            .insert(&storage_key[..], &encoded[..])
-                            .context(StorageSnafu)?;
+                        txn.insert::<tables::Relationships>(&storage_key, &encoded)
+                            .context(InkwellSnafu)?;
+
+                        // Update indexes
+                        IndexManager::add_to_obj_index(
+                            &mut txn, vault_id, resource, relation, subject,
+                        )?;
+                        IndexManager::add_to_subj_index(
+                            &mut txn, vault_id, resource, relation, subject,
+                        )?;
 
                         dirty_keys.push(local_key.to_vec());
-
-                        if is_update {
-                            WriteStatus::Updated
-                        } else {
-                            WriteStatus::Created
-                        }
+                        WriteStatus::Created
                     }
+                }
 
-                    Operation::DeleteEntity { key } => {
-                        let local_key = key.as_bytes();
-                        let storage_key = encode_storage_key(vault_id, local_key);
+                Operation::DeleteRelationship {
+                    resource,
+                    relation,
+                    subject,
+                } => {
+                    let rel = Relationship::new(resource, relation, subject);
+                    let rel_key = rel.to_key();
+                    let local_key = rel_key.as_bytes();
+                    let storage_key = encode_storage_key(vault_id, local_key);
 
-                        let existed = entities.remove(&storage_key[..]).context(StorageSnafu)?;
+                    let existed = txn
+                        .delete::<tables::Relationships>(&storage_key)
+                        .context(InkwellSnafu)?;
 
-                        if existed.is_some() {
-                            dirty_keys.push(local_key.to_vec());
-                            WriteStatus::Deleted
-                        } else {
-                            WriteStatus::NotFound
-                        }
+                    if existed {
+                        // Update indexes
+                        IndexManager::remove_from_obj_index(
+                            &mut txn, vault_id, resource, relation, subject,
+                        )?;
+                        IndexManager::remove_from_subj_index(
+                            &mut txn, vault_id, resource, relation, subject,
+                        )?;
+
+                        dirty_keys.push(local_key.to_vec());
+                        WriteStatus::Deleted
+                    } else {
+                        WriteStatus::NotFound
                     }
+                }
+            };
 
-                    Operation::ExpireEntity { key, .. } => {
-                        let local_key = key.as_bytes();
-                        let storage_key = encode_storage_key(vault_id, local_key);
-
-                        let existed = entities.remove(&storage_key[..]).context(StorageSnafu)?;
-
-                        if existed.is_some() {
-                            dirty_keys.push(local_key.to_vec());
-                            WriteStatus::Deleted
-                        } else {
-                            WriteStatus::NotFound
-                        }
-                    }
-
-                    Operation::CreateRelationship {
-                        resource,
-                        relation,
-                        subject,
-                    } => {
-                        let rel = Relationship::new(resource, relation, subject);
-                        let rel_key = rel.to_key();
-                        let local_key = rel_key.as_bytes();
-                        let storage_key = encode_storage_key(vault_id, local_key);
-
-                        // Check existence - extract result and drop borrow before mutation
-                        let already_exists = {
-                            relationships
-                                .get(&storage_key[..])
-                                .context(StorageSnafu)?
-                                .is_some()
-                        };
-
-                        if already_exists {
-                            WriteStatus::AlreadyExists
-                        } else {
-                            let encoded = postcard::to_allocvec(&rel).map_err(|e| {
-                                StateError::Serialization {
-                                    message: e.to_string(),
-                                }
-                            })?;
-
-                            relationships
-                                .insert(&storage_key[..], &encoded[..])
-                                .context(StorageSnafu)?;
-
-                            // Update indexes
-                            IndexManager::add_to_obj_index(
-                                &mut obj_index,
-                                vault_id,
-                                resource,
-                                relation,
-                                subject,
-                            )?;
-                            IndexManager::add_to_subj_index(
-                                &mut subj_index,
-                                vault_id,
-                                resource,
-                                relation,
-                                subject,
-                            )?;
-
-                            dirty_keys.push(local_key.to_vec());
-                            WriteStatus::Created
-                        }
-                    }
-
-                    Operation::DeleteRelationship {
-                        resource,
-                        relation,
-                        subject,
-                    } => {
-                        let rel = Relationship::new(resource, relation, subject);
-                        let rel_key = rel.to_key();
-                        let local_key = rel_key.as_bytes();
-                        let storage_key = encode_storage_key(vault_id, local_key);
-
-                        let existed = relationships
-                            .remove(&storage_key[..])
-                            .context(StorageSnafu)?;
-
-                        if existed.is_some() {
-                            // Update indexes
-                            IndexManager::remove_from_obj_index(
-                                &mut obj_index,
-                                vault_id,
-                                resource,
-                                relation,
-                                subject,
-                            )?;
-                            IndexManager::remove_from_subj_index(
-                                &mut subj_index,
-                                vault_id,
-                                resource,
-                                relation,
-                                subject,
-                            )?;
-
-                            dirty_keys.push(local_key.to_vec());
-                            WriteStatus::Deleted
-                        } else {
-                            WriteStatus::NotFound
-                        }
-                    }
-                };
-
-                statuses.push(status);
-            }
+            statuses.push(status);
         }
 
-        txn.commit().context(CommitSnafu)?;
+        txn.commit().context(InkwellSnafu)?;
 
         // Mark dirty buckets
         let mut commitment = self.get_or_create_commitment(vault_id);
@@ -374,107 +311,90 @@ impl StateLayer {
     pub fn clear_vault(&self, vault_id: VaultId) -> Result<()> {
         use crate::keys::vault_prefix;
 
-        let txn = self.db.begin_write().context(TransactionSnafu)?;
+        let mut txn = self.db.write().context(InkwellSnafu)?;
         let prefix = vault_prefix(vault_id);
 
-        {
-            // Delete all entities for this vault
-            let mut entities = txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
-
-            // Collect keys to delete (can't modify while iterating)
-            let mut keys_to_delete = Vec::new();
-            for result in entities.range(&prefix[..]..).context(StorageSnafu)? {
-                let (key, _) = result.context(StorageSnafu)?;
-                let key_bytes = key.value();
-
-                // Check we're still in the same vault
-                if key_bytes.len() < 8 {
-                    break;
-                }
-                let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                if key_vault_id != vault_id {
-                    break;
-                }
-                keys_to_delete.push(key_bytes.to_vec());
+        // Delete all entities for this vault
+        let mut keys_to_delete = Vec::new();
+        for (key_bytes, _) in txn.iter::<tables::Entities>().context(InkwellSnafu)? {
+            // Check we're still in the same vault
+            if key_bytes.len() < 8 {
+                break;
             }
-
-            for key in keys_to_delete {
-                entities.remove(&key[..]).context(StorageSnafu)?;
+            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+            if key_vault_id < vault_id {
+                continue;
             }
+            if key_vault_id != vault_id {
+                break;
+            }
+            keys_to_delete.push(key_bytes);
         }
 
-        {
-            // Delete all relationships for this vault
-            let mut relationships = txn.open_table(Tables::RELATIONSHIPS).context(TableSnafu)?;
-
-            let mut keys_to_delete = Vec::new();
-            for result in relationships.range(&prefix[..]..).context(StorageSnafu)? {
-                let (key, _) = result.context(StorageSnafu)?;
-                let key_bytes = key.value();
-
-                if key_bytes.len() < 8 {
-                    break;
-                }
-                let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                if key_vault_id != vault_id {
-                    break;
-                }
-                keys_to_delete.push(key_bytes.to_vec());
-            }
-
-            for key in keys_to_delete {
-                relationships.remove(&key[..]).context(StorageSnafu)?;
-            }
+        for key in keys_to_delete {
+            txn.delete::<tables::Entities>(&key).context(InkwellSnafu)?;
         }
 
-        // Also clear indexes (obj_index and subj_index)
-        {
-            let mut obj_index = txn.open_table(Tables::OBJ_INDEX).context(TableSnafu)?;
-
-            let mut keys_to_delete = Vec::new();
-            for result in obj_index.range(&prefix[..]..).context(StorageSnafu)? {
-                let (key, _) = result.context(StorageSnafu)?;
-                let key_bytes = key.value();
-
-                if key_bytes.len() < 8 {
-                    break;
-                }
-                let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                if key_vault_id != vault_id {
-                    break;
-                }
-                keys_to_delete.push(key_bytes.to_vec());
+        // Delete all relationships for this vault
+        let mut keys_to_delete = Vec::new();
+        for (key_bytes, _) in txn.iter::<tables::Relationships>().context(InkwellSnafu)? {
+            if key_bytes.len() < 8 {
+                break;
             }
-
-            for key in keys_to_delete {
-                obj_index.remove(&key[..]).context(StorageSnafu)?;
+            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+            if key_vault_id < vault_id {
+                continue;
             }
+            if key_vault_id != vault_id {
+                break;
+            }
+            keys_to_delete.push(key_bytes);
         }
 
-        {
-            let mut subj_index = txn.open_table(Tables::SUBJ_INDEX).context(TableSnafu)?;
-
-            let mut keys_to_delete = Vec::new();
-            for result in subj_index.range(&prefix[..]..).context(StorageSnafu)? {
-                let (key, _) = result.context(StorageSnafu)?;
-                let key_bytes = key.value();
-
-                if key_bytes.len() < 8 {
-                    break;
-                }
-                let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                if key_vault_id != vault_id {
-                    break;
-                }
-                keys_to_delete.push(key_bytes.to_vec());
-            }
-
-            for key in keys_to_delete {
-                subj_index.remove(&key[..]).context(StorageSnafu)?;
-            }
+        for key in keys_to_delete {
+            txn.delete::<tables::Relationships>(&key)
+                .context(InkwellSnafu)?;
         }
 
-        txn.commit().context(CommitSnafu)?;
+        // Clear indexes
+        let mut keys_to_delete = Vec::new();
+        for (key_bytes, _) in txn.iter::<tables::ObjIndex>().context(InkwellSnafu)? {
+            if key_bytes.len() < 8 {
+                break;
+            }
+            if key_bytes[..8] < prefix[..] {
+                continue;
+            }
+            if key_bytes[..8] != prefix[..] {
+                break;
+            }
+            keys_to_delete.push(key_bytes);
+        }
+
+        for key in keys_to_delete {
+            txn.delete::<tables::ObjIndex>(&key).context(InkwellSnafu)?;
+        }
+
+        let mut keys_to_delete = Vec::new();
+        for (key_bytes, _) in txn.iter::<tables::SubjIndex>().context(InkwellSnafu)? {
+            if key_bytes.len() < 8 {
+                break;
+            }
+            if key_bytes[..8] < prefix[..] {
+                continue;
+            }
+            if key_bytes[..8] != prefix[..] {
+                break;
+            }
+            keys_to_delete.push(key_bytes);
+        }
+
+        for key in keys_to_delete {
+            txn.delete::<tables::SubjIndex>(&key)
+                .context(InkwellSnafu)?;
+        }
+
+        txn.commit().context(InkwellSnafu)?;
 
         // Reset commitment tracking for this vault
         self.vault_commitments.remove(&vault_id);
@@ -485,13 +405,15 @@ impl StateLayer {
     /// Get an entity by key.
     pub fn get_entity(&self, vault_id: VaultId, key: &[u8]) -> Result<Option<Entity>> {
         let storage_key = encode_storage_key(vault_id, key);
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
-        match table.get(&storage_key[..]).context(StorageSnafu)? {
+        match txn
+            .get::<tables::Entities>(&storage_key)
+            .context(InkwellSnafu)?
+        {
             Some(data) => {
                 let entity =
-                    postcard::from_bytes(data.value()).map_err(|e| StateError::Serialization {
+                    postcard::from_bytes(&data).map_err(|e| StateError::Serialization {
                         message: e.to_string(),
                     })?;
                 Ok(Some(entity))
@@ -512,10 +434,12 @@ impl StateLayer {
         let local_key = rel.to_key();
         let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
 
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::RELATIONSHIPS).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
-        Ok(table.get(&storage_key[..]).context(StorageSnafu)?.is_some())
+        Ok(txn
+            .get::<tables::Relationships>(&storage_key)
+            .context(InkwellSnafu)?
+            .is_some())
     }
 
     /// Compute state root for a vault, updating dirty bucket roots.
@@ -529,64 +453,44 @@ impl StateLayer {
             return Ok(commitment.compute_state_root());
         }
 
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
         // Recompute each dirty bucket
         let dirty_buckets: Vec<u8> = commitment.dirty_buckets().iter().copied().collect();
 
         for bucket in dirty_buckets {
-            let prefix = bucket_prefix(vault_id, bucket);
+            let _prefix = bucket_prefix(vault_id, bucket);
             let mut builder = BucketRootBuilder::new(bucket);
 
             // Scan all entities in this bucket
-            // Range: [prefix] to [prefix with next bucket]
-
-            // For bucket 255, we need to handle the wrap case
-            if bucket == 255 {
-                // Scan from bucket 255 prefix to end of vault's keyspace
-                for result in table.range(&prefix[..]..).context(StorageSnafu)? {
-                    let (key, value) = result.context(StorageSnafu)?;
-                    let key_bytes = key.value();
-
-                    // Check we're still in the same vault
-                    if key_bytes.len() < 9 {
-                        break;
-                    }
-                    let key_vault_id =
-                        i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                    if key_vault_id != vault_id {
-                        break;
-                    }
-                    // Check we're still in bucket 255
-                    if key_bytes[8] != 255 {
-                        break;
-                    }
-
-                    let entity: Entity = postcard::from_bytes(value.value()).map_err(|e| {
-                        StateError::Serialization {
-                            message: e.to_string(),
-                        }
-                    })?;
-                    builder.add_entity(&entity);
+            for (key_bytes, value) in txn.iter::<tables::Entities>().context(InkwellSnafu)? {
+                // Check we're still in the same vault
+                if key_bytes.len() < 9 {
+                    continue;
                 }
-            } else {
-                // Normal case: scan until next bucket
-                let mut range_end = prefix;
-                range_end[8] = bucket + 1;
-
-                for result in table
-                    .range(&prefix[..]..&range_end[..])
-                    .context(StorageSnafu)?
-                {
-                    let (_, value) = result.context(StorageSnafu)?;
-                    let entity: Entity = postcard::from_bytes(value.value()).map_err(|e| {
-                        StateError::Serialization {
-                            message: e.to_string(),
-                        }
-                    })?;
-                    builder.add_entity(&entity);
+                let key_vault_id =
+                    i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+                if key_vault_id < vault_id {
+                    continue;
                 }
+                if key_vault_id > vault_id {
+                    break;
+                }
+
+                // Check bucket
+                if key_bytes[8] < bucket {
+                    continue;
+                }
+                if key_bytes[8] > bucket {
+                    break;
+                }
+
+                let entity: Entity = postcard::from_bytes(&value).map_err(|e| {
+                    StateError::Serialization {
+                        message: e.to_string(),
+                    }
+                })?;
+                builder.add_entity(&entity);
             }
 
             let bucket_root = builder.finalize();
@@ -619,10 +523,8 @@ impl StateLayer {
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::OBJ_INDEX).context(TableSnafu)?;
-
-        IndexManager::get_subjects(&table, vault_id, resource, relation)
+        let txn = self.db.read().context(InkwellSnafu)?;
+        Ok(IndexManager::get_subjects(&txn, vault_id, resource, relation)?)
     }
 
     /// List resource-relation pairs for a given subject.
@@ -631,10 +533,8 @@ impl StateLayer {
         vault_id: VaultId,
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::SUBJ_INDEX).context(TableSnafu)?;
-
-        IndexManager::get_resources(&table, vault_id, subject)
+        let txn = self.db.read().context(InkwellSnafu)?;
+        Ok(IndexManager::get_resources(&txn, vault_id, subject)?)
     }
 
     /// List all entities in a vault with optional prefix filter.
@@ -649,8 +549,7 @@ impl StateLayer {
     ) -> Result<Vec<Entity>> {
         use crate::keys::vault_prefix;
 
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::ENTITIES).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
         let mut entities = Vec::with_capacity(limit.min(1000));
 
@@ -669,13 +568,15 @@ impl StateLayer {
             vault_prefix(vault_id).to_vec()
         };
 
-        for result in table.range(&start_key[..]..).context(StorageSnafu)? {
+        for (key_bytes, value) in txn.iter::<tables::Entities>().context(InkwellSnafu)? {
             if entities.len() >= limit {
                 break;
             }
 
-            let (key, value) = result.context(StorageSnafu)?;
-            let key_bytes = key.value();
+            // Skip until we reach the start key
+            if key_bytes < start_key {
+                continue;
+            }
 
             // Check we're still in the same vault (first 8 bytes)
             if key_bytes.len() < 9 {
@@ -697,7 +598,7 @@ impl StateLayer {
             }
 
             let entity: Entity =
-                postcard::from_bytes(value.value()).map_err(|e| StateError::Serialization {
+                postcard::from_bytes(&value).map_err(|e| StateError::Serialization {
                     message: e.to_string(),
                 })?;
 
@@ -716,8 +617,7 @@ impl StateLayer {
         start_after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Relationship>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::RELATIONSHIPS).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
         let mut relationships = Vec::with_capacity(limit.min(1000));
 
@@ -730,13 +630,15 @@ impl StateLayer {
             encode_storage_key(vault_id, &[])
         };
 
-        for result in table.range(&start_key[..]..).context(StorageSnafu)? {
+        for (key_bytes, value) in txn.iter::<tables::Relationships>().context(InkwellSnafu)? {
             if relationships.len() >= limit {
                 break;
             }
 
-            let (key, value) = result.context(StorageSnafu)?;
-            let key_bytes = key.value();
+            // Skip until we reach the start key
+            if key_bytes < start_key {
+                continue;
+            }
 
             // Check we're still in the same vault
             if key_bytes.len() < 9 {
@@ -748,7 +650,7 @@ impl StateLayer {
             }
 
             let rel: Relationship =
-                postcard::from_bytes(value.value()).map_err(|e| StateError::Serialization {
+                postcard::from_bytes(&value).map_err(|e| StateError::Serialization {
                     message: e.to_string(),
                 })?;
 
@@ -759,7 +661,7 @@ impl StateLayer {
     }
 }
 
-impl Clone for StateLayer {
+impl<B: StorageBackend> Clone for StateLayer<B> {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
@@ -777,10 +679,11 @@ impl Clone for StateLayer {
 )]
 mod tests {
     use super::*;
-    use crate::engine::StorageEngine;
+    use crate::engine::InMemoryStorageEngine;
+    use inkwell::InMemoryBackend;
 
-    fn create_test_state() -> StateLayer {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+    fn create_test_state() -> StateLayer<InMemoryBackend> {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         StateLayer::new(engine.db())
     }
 
@@ -1046,6 +949,118 @@ mod tests {
         let fresh_state = create_test_state();
         let expected_empty = fresh_state.compute_state_root(vault_id).unwrap();
         assert_eq!(empty_root, expected_empty);
+    }
+
+    /// Stress test: many sequential writes followed by verification
+    /// Simulates the pattern used by the server stress tests
+    #[test]
+    fn test_many_sequential_writes_then_verify() {
+        let state = create_test_state();
+        let vault_id = 1i64;
+
+        // Write 500 entities sequentially
+        let num_keys = 500;
+        for i in 0..num_keys {
+            let key = format!("stress-key-{}", i);
+            let value = format!("stress-value-{}", i).into_bytes();
+            let ops = vec![Operation::SetEntity {
+                key: key.clone(),
+                value: value.clone(),
+                condition: None,
+                expires_at: None,
+            }];
+
+            let statuses = state.apply_operations(vault_id, &ops, i as u64 + 1).unwrap();
+            assert_eq!(statuses, vec![WriteStatus::Created], "Failed to create key {}", i);
+        }
+
+        // Verify all keys are present
+        let mut missing = Vec::new();
+        for i in 0..num_keys {
+            let key = format!("stress-key-{}", i);
+            let expected = format!("stress-value-{}", i).into_bytes();
+            match state.get_entity(vault_id, key.as_bytes()).unwrap() {
+                Some(entity) => {
+                    assert_eq!(entity.value, expected, "Value mismatch for key {}", i);
+                }
+                None => {
+                    missing.push(i);
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "Missing {} keys out of {}: {:?}",
+            missing.len(),
+            num_keys,
+            &missing[..std::cmp::min(10, missing.len())]
+        );
+    }
+
+    /// Stress test with concurrent threads writing different keys
+    #[test]
+    fn test_concurrent_writes_from_threads() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let state = Arc::new(create_test_state());
+        let vault_id = 1i64;
+        let num_threads = 4;
+        let writes_per_thread = 50;
+
+        let mut handles = Vec::new();
+        for thread_id in 0..num_threads {
+            let state = Arc::clone(&state);
+            let handle = thread::spawn(move || {
+                for i in 0..writes_per_thread {
+                    let key = format!("key-{}-{}", thread_id, i);
+                    let value = format!("value-{}-{}", thread_id, i).into_bytes();
+                    let ops = vec![Operation::SetEntity {
+                        key,
+                        value,
+                        condition: None,
+                        expires_at: None,
+                    }];
+
+                    // Each write gets a unique block height
+                    let block_height = (thread_id * writes_per_thread + i + 1) as u64;
+                    state.apply_operations(vault_id, &ops, block_height).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify all keys are present
+        let mut missing = Vec::new();
+        for thread_id in 0..num_threads {
+            for i in 0..writes_per_thread {
+                let key = format!("key-{}-{}", thread_id, i);
+                let expected = format!("value-{}-{}", thread_id, i).into_bytes();
+                match state.get_entity(vault_id, key.as_bytes()).unwrap() {
+                    Some(entity) => {
+                        assert_eq!(entity.value, expected, "Value mismatch for key {}", key);
+                    }
+                    None => {
+                        missing.push(key);
+                    }
+                }
+            }
+        }
+
+        let expected_total = num_threads * writes_per_thread;
+        assert!(
+            missing.is_empty(),
+            "Missing {} keys out of {}: {:?}",
+            missing.len(),
+            expected_total,
+            &missing[..std::cmp::min(10, missing.len())]
+        );
     }
 
     // =========================================================================

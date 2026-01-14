@@ -24,13 +24,11 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use inkwell::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
-use redb::Database;
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{NamespaceId, ShardBlock, VaultId};
-
-use crate::tables::Tables;
 
 /// Key for compaction watermark in COMPACTION_META table.
 const COMPACTION_WATERMARK_KEY: &str = "compacted_before";
@@ -62,32 +60,11 @@ pub enum BlockArchiveError {
         message: String,
     },
 
-    /// Storage engine error from redb.
+    /// Storage engine error from inkwell.
     #[snafu(display("Storage error: {source}"))]
-    Storage {
+    Inkwell {
         /// The underlying storage error.
-        source: redb::StorageError,
-    },
-
-    /// Table access error from redb.
-    #[snafu(display("Table error: {source}"))]
-    Table {
-        /// The underlying table error.
-        source: redb::TableError,
-    },
-
-    /// Transaction error from redb.
-    #[snafu(display("Transaction error: {source}"))]
-    Transaction {
-        /// The underlying transaction error.
-        source: redb::TransactionError,
-    },
-
-    /// Commit error from redb.
-    #[snafu(display("Commit error: {source}"))]
-    Commit {
-        /// The underlying commit error.
-        source: redb::CommitError,
+        source: inkwell::Error,
     },
 }
 
@@ -132,12 +109,12 @@ struct SegmentWriter {
 
 /// Block archive for a shard.
 ///
-/// Uses redb for the primary block storage (Tables::BLOCKS) and maintains
+/// Uses inkwell for the primary block storage (tables::Blocks) and maintains
 /// a vault_block_index for looking up shard heights by vault/namespace/height.
 #[allow(clippy::result_large_err)]
-pub struct BlockArchive {
+pub struct BlockArchive<B: StorageBackend> {
     /// Database handle.
-    db: Arc<Database>,
+    db: Arc<Database<B>>,
     /// Directory for segment files (optional, for large deployments).
     blocks_dir: Option<PathBuf>,
     /// Cached segment indexes.
@@ -148,9 +125,9 @@ pub struct BlockArchive {
 }
 
 #[allow(clippy::result_large_err)]
-impl BlockArchive {
-    /// Create a new block archive backed by redb.
-    pub fn new(db: Arc<Database>) -> Self {
+impl<B: StorageBackend> BlockArchive<B> {
+    /// Create a new block archive backed by inkwell.
+    pub fn new(db: Arc<Database<B>>) -> Self {
         Self {
             db,
             blocks_dir: None,
@@ -161,8 +138,8 @@ impl BlockArchive {
 
     /// Create a block archive with file-based segment storage.
     ///
-    /// Use this for large deployments where blocks exceed redb's practical limits.
-    pub fn with_segment_files(db: Arc<Database>, blocks_dir: PathBuf) -> Result<Self> {
+    /// Use this for large deployments where blocks exceed inkwell's practical limits.
+    pub fn with_segment_files(db: Arc<Database<B>>, blocks_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&blocks_dir).context(IoSnafu)?;
         Ok(Self {
             db,
@@ -179,34 +156,25 @@ impl BlockArchive {
                 message: e.to_string(),
             })?;
 
-        // Store in redb
-        let txn = self.db.begin_write().context(TransactionSnafu)?;
+        // Store in inkwell
+        let mut txn = self.db.write().context(InkwellSnafu)?;
 
-        {
-            let mut blocks_table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
-            let mut index_table = txn
-                .open_table(Tables::VAULT_BLOCK_INDEX)
-                .context(TableSnafu)?;
+        // Store the block
+        txn.insert::<tables::Blocks>(&block.shard_height, &encoded)
+            .context(InkwellSnafu)?;
 
-            // Store the block
-            blocks_table
-                .insert(block.shard_height, &encoded[..])
-                .context(StorageSnafu)?;
-
-            // Update vault block index for each vault entry
-            for entry in &block.vault_entries {
-                let index_key = encode_vault_block_index_key(
-                    entry.namespace_id,
-                    entry.vault_id,
-                    entry.vault_height,
-                );
-                index_table
-                    .insert(&index_key[..], block.shard_height)
-                    .context(StorageSnafu)?;
-            }
+        // Update vault block index for each vault entry
+        for entry in &block.vault_entries {
+            let index_key = encode_vault_block_index_key(
+                entry.namespace_id,
+                entry.vault_id,
+                entry.vault_height,
+            );
+            txn.insert::<tables::VaultBlockIndex>(&index_key.to_vec(), &block.shard_height)
+                .context(InkwellSnafu)?;
         }
 
-        txn.commit().context(CommitSnafu)?;
+        txn.commit().context(InkwellSnafu)?;
 
         // Also write to segment files if configured
         if self.blocks_dir.is_some() {
@@ -271,12 +239,14 @@ impl BlockArchive {
 
     /// Read a block by shard height.
     pub fn read_block(&self, shard_height: u64) -> Result<ShardBlock> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
-        match table.get(shard_height).context(StorageSnafu)? {
+        match txn
+            .get::<tables::Blocks>(&shard_height)
+            .context(InkwellSnafu)?
+        {
             Some(data) => {
-                let block = postcard::from_bytes(data.value()).map_err(|e| {
+                let block = postcard::from_bytes(&data).map_err(|e| {
                     BlockArchiveError::Serialization {
                         message: e.to_string(),
                     }
@@ -296,67 +266,83 @@ impl BlockArchive {
         vault_id: VaultId,
         vault_height: u64,
     ) -> Result<Option<u64>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn
-            .open_table(Tables::VAULT_BLOCK_INDEX)
-            .context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
         let key = encode_vault_block_index_key(namespace_id, vault_id, vault_height);
 
-        match table.get(&key[..]).context(StorageSnafu)? {
-            Some(height) => Ok(Some(height.value())),
+        match txn
+            .get::<tables::VaultBlockIndex>(&key.to_vec())
+            .context(InkwellSnafu)?
+        {
+            Some(data) => {
+                // The value is a u64 encoded as big-endian bytes (by Value trait)
+                if data.len() == 8 {
+                    Ok(Some(u64::from_be_bytes(data.try_into().unwrap_or([0; 8]))))
+                } else {
+                    Ok(None)
+                }
+            }
             None => Ok(None),
         }
     }
 
     /// Get the latest shard height in the archive.
     pub fn latest_height(&self) -> Result<Option<u64>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
-        // redb tables iterate in key order, so we need to find the last entry
-        let mut latest = None;
-        for result in table.range(0u64..).context(StorageSnafu)? {
-            let (key, _) = result.context(StorageSnafu)?;
-            latest = Some(key.value());
+        // Get the last entry in the Blocks table
+        match txn.last::<tables::Blocks>().context(InkwellSnafu)? {
+            Some((key_bytes, _)) => {
+                // Key is u64 encoded as big-endian bytes
+                if key_bytes.len() == 8 {
+                    Ok(Some(u64::from_be_bytes(
+                        key_bytes.try_into().unwrap_or([0; 8]),
+                    )))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
         }
-
-        Ok(latest)
     }
 
     /// Get the range of heights in the archive.
     pub fn height_range(&self) -> Result<Option<(u64, u64)>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
-        let mut first = None;
-        let mut last = None;
-
-        for result in table.range(0u64..).context(StorageSnafu)? {
-            let (key, _) = result.context(StorageSnafu)?;
-            let height = key.value();
-            if first.is_none() {
-                first = Some(height);
-            }
-            last = Some(height);
-        }
+        let first = txn.first::<tables::Blocks>().context(InkwellSnafu)?;
+        let last = txn.last::<tables::Blocks>().context(InkwellSnafu)?;
 
         match (first, last) {
-            (Some(f), Some(l)) => Ok(Some((f, l))),
+            (Some((first_key, _)), Some((last_key, _))) => {
+                let first_height = u64::from_be_bytes(first_key.try_into().unwrap_or([0; 8]));
+                let last_height = u64::from_be_bytes(last_key.try_into().unwrap_or([0; 8]));
+                Ok(Some((first_height, last_height)))
+            }
             _ => Ok(None),
         }
     }
 
     /// Read blocks in a range.
     pub fn read_range(&self, start: u64, end: u64) -> Result<Vec<ShardBlock>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
-
+        let txn = self.db.read().context(InkwellSnafu)?;
         let mut blocks = Vec::new();
 
-        for result in table.range(start..=end).context(StorageSnafu)? {
-            let (_, data) = result.context(StorageSnafu)?;
-            let block = postcard::from_bytes(data.value()).map_err(|e| {
+        // Iterate over the range
+        for (key_bytes, value) in txn.iter::<tables::Blocks>().context(InkwellSnafu)? {
+            if key_bytes.len() != 8 {
+                continue;
+            }
+            let height = u64::from_be_bytes(key_bytes.try_into().unwrap_or([0; 8]));
+
+            if height < start {
+                continue;
+            }
+            if height > end {
+                break;
+            }
+
+            let block = postcard::from_bytes(&value).map_err(|e| {
                 BlockArchiveError::Serialization {
                     message: e.to_string(),
                 }
@@ -375,13 +361,20 @@ impl BlockArchive {
     ///
     /// All blocks with height < watermark have been compacted (transaction bodies removed).
     pub fn compaction_watermark(&self) -> Result<Option<u64>> {
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn
-            .open_table(Tables::COMPACTION_META)
-            .context(TableSnafu)?;
+        let txn = self.db.read().context(InkwellSnafu)?;
 
-        match table.get(COMPACTION_WATERMARK_KEY).context(StorageSnafu)? {
-            Some(height) => Ok(Some(height.value())),
+        match txn
+            .get::<tables::CompactionMeta>(&COMPACTION_WATERMARK_KEY.to_string())
+            .context(InkwellSnafu)?
+        {
+            Some(data) => {
+                // Value is u64 encoded as big-endian by Value trait
+                if data.len() == 8 {
+                    Ok(Some(u64::from_be_bytes(data.try_into().unwrap_or([0; 8]))))
+                } else {
+                    Ok(None)
+                }
+            }
             None => Ok(None),
         }
     }
@@ -417,20 +410,24 @@ impl BlockArchive {
         let mut compacted_count = 0u64;
 
         // Read blocks that need compaction
-        let txn = self.db.begin_read().context(TransactionSnafu)?;
-        let table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
-
+        let txn = self.db.read().context(InkwellSnafu)?;
         let mut blocks_to_compact = Vec::new();
 
-        for result in table
-            .range(current_watermark..before_height)
-            .context(StorageSnafu)?
-        {
-            let (key, data) = result.context(StorageSnafu)?;
-            let height = key.value();
+        for (key_bytes, value) in txn.iter::<tables::Blocks>().context(InkwellSnafu)? {
+            if key_bytes.len() != 8 {
+                continue;
+            }
+            let height = u64::from_be_bytes(key_bytes.try_into().unwrap_or([0; 8]));
+
+            if height < current_watermark {
+                continue;
+            }
+            if height >= before_height {
+                break;
+            }
 
             // Deserialize the block
-            let mut block: ShardBlock = postcard::from_bytes(data.value()).map_err(|e| {
+            let mut block: ShardBlock = postcard::from_bytes(&value).map_err(|e| {
                 BlockArchiveError::Serialization {
                     message: e.to_string(),
                 }
@@ -453,54 +450,42 @@ impl BlockArchive {
         }
 
         // Drop read transaction
-        drop(table);
         drop(txn);
 
         // Write compacted blocks back
         if !blocks_to_compact.is_empty() {
-            let txn = self.db.begin_write().context(TransactionSnafu)?;
+            let mut txn = self.db.write().context(InkwellSnafu)?;
 
-            {
-                let mut blocks_table = txn.open_table(Tables::BLOCKS).context(TableSnafu)?;
+            for (height, block) in &blocks_to_compact {
+                let encoded = postcard::to_allocvec(block).map_err(|e| {
+                    BlockArchiveError::Serialization {
+                        message: e.to_string(),
+                    }
+                })?;
 
-                for (height, block) in &blocks_to_compact {
-                    let encoded = postcard::to_allocvec(block).map_err(|e| {
-                        BlockArchiveError::Serialization {
-                            message: e.to_string(),
-                        }
-                    })?;
-
-                    blocks_table
-                        .insert(*height, &encoded[..])
-                        .context(StorageSnafu)?;
-                }
-
-                compacted_count = blocks_to_compact.len() as u64;
+                txn.insert::<tables::Blocks>(height, &encoded)
+                    .context(InkwellSnafu)?;
             }
+
+            compacted_count = blocks_to_compact.len() as u64;
 
             // Update watermark
-            {
-                let mut meta_table = txn
-                    .open_table(Tables::COMPACTION_META)
-                    .context(TableSnafu)?;
-                meta_table
-                    .insert(COMPACTION_WATERMARK_KEY, before_height)
-                    .context(StorageSnafu)?;
-            }
+            txn.insert::<tables::CompactionMeta>(
+                &COMPACTION_WATERMARK_KEY.to_string(),
+                &before_height,
+            )
+            .context(InkwellSnafu)?;
 
-            txn.commit().context(CommitSnafu)?;
+            txn.commit().context(InkwellSnafu)?;
         } else {
             // No blocks needed compaction, but still update watermark
-            let txn = self.db.begin_write().context(TransactionSnafu)?;
-            {
-                let mut meta_table = txn
-                    .open_table(Tables::COMPACTION_META)
-                    .context(TableSnafu)?;
-                meta_table
-                    .insert(COMPACTION_WATERMARK_KEY, before_height)
-                    .context(StorageSnafu)?;
-            }
-            txn.commit().context(CommitSnafu)?;
+            let mut txn = self.db.write().context(InkwellSnafu)?;
+            txn.insert::<tables::CompactionMeta>(
+                &COMPACTION_WATERMARK_KEY.to_string(),
+                &before_height,
+            )
+            .context(InkwellSnafu)?;
+            txn.commit().context(InkwellSnafu)?;
         }
 
         Ok(compacted_count)
@@ -563,7 +548,7 @@ fn encode_vault_block_index_key(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::engine::StorageEngine;
+    use crate::engine::InMemoryStorageEngine;
     use chrono::Utc;
     use ledger_types::VaultEntry;
 
@@ -590,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_append_and_read_block() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         let block = create_test_block(100);
@@ -603,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_vault_block_index() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         let block = create_test_block(100);
@@ -623,7 +608,7 @@ mod tests {
 
     #[test]
     fn test_read_range() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         // Append multiple blocks
@@ -642,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_height_range() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         // Empty archive
@@ -661,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_latest_height() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         assert!(archive.latest_height().expect("latest").is_none());
@@ -679,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_multiple_vaults_in_block() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         let mut block = create_test_block(100);
@@ -748,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_compaction_watermark_initially_none() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         assert!(
@@ -762,7 +747,7 @@ mod tests {
 
     #[test]
     fn test_compact_removes_transaction_bodies() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         // Add blocks with transactions
@@ -812,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_is_compacted() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         // Add blocks
@@ -836,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_compaction_stats() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         // Initial stats
@@ -871,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_compact_is_idempotent() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         for height in [100, 101, 102] {
@@ -896,7 +881,7 @@ mod tests {
 
     #[test]
     fn test_compact_preserves_vault_index() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
         // Add block with transactions

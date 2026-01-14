@@ -1,6 +1,6 @@
 [package]
 name = "ledger-storage"
-description = "Storage engine for InferaDB Ledger using redb"
+description = "Storage engine for InferaDB Ledger using inkwell"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ authors.workspace = true
 # Internal
 ledger-types.workspace = true
 
-# Storage
-redb.workspace = true
+# Storage (using inkwell B+ tree engine)
+inkwell.workspace = true
 
 # Crypto (for bucket hashing)
 sha2.workspace = true

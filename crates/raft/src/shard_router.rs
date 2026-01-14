@@ -48,6 +48,7 @@ use snafu::{ResultExt, Snafu};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
+use inkwell::{FileBackend, StorageBackend};
 use ledger_storage::system::{NamespaceStatus, SystemNamespaceService};
 use ledger_types::{NamespaceId, ShardId};
 
@@ -191,9 +192,9 @@ impl Default for RouterConfig {
 ///
 /// Maintains a cache of namespace → shard mappings and manages
 /// connections to shard leaders.
-pub struct ShardRouter {
+pub struct ShardRouter<B: StorageBackend + 'static = FileBackend> {
     /// System namespace service for namespace lookups.
-    system: Arc<SystemNamespaceService>,
+    system: Arc<SystemNamespaceService<B>>,
     /// Cached namespace → shard mappings.
     cache: RwLock<HashMap<NamespaceId, CacheEntry>>,
     /// Active shard connections.
@@ -202,14 +203,14 @@ pub struct ShardRouter {
     config: RouterConfig,
 }
 
-impl ShardRouter {
+impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Create a new shard router.
-    pub fn new(system: Arc<SystemNamespaceService>) -> Self {
+    pub fn new(system: Arc<SystemNamespaceService<B>>) -> Self {
         Self::with_config(system, RouterConfig::default())
     }
 
     /// Create a new shard router with custom configuration.
-    pub fn with_config(system: Arc<SystemNamespaceService>, config: RouterConfig) -> Self {
+    pub fn with_config(system: Arc<SystemNamespaceService<B>>, config: RouterConfig) -> Self {
         Self {
             system,
             cache: RwLock::new(HashMap::new()),
@@ -509,16 +510,22 @@ pub struct RouterStats {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use inkwell::{Database, FileBackend};
     use ledger_storage::StateLayer;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
-    fn create_test_router() -> (ShardRouter, Arc<StateLayer>) {
-        let engine = ledger_storage::StorageEngine::open_in_memory().expect("open storage engine");
-        let state = Arc::new(StateLayer::new(engine.db()));
+    fn create_test_router() -> (ShardRouter<FileBackend>, Arc<StateLayer<FileBackend>>, TempDir) {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let db = Arc::new(
+            Database::<FileBackend>::create(temp_dir.path().join("test.inkwell"))
+                .expect("create database"),
+        );
+        let state = Arc::new(StateLayer::new(db));
         let system = Arc::new(SystemNamespaceService::new(Arc::clone(&state)));
 
         let router = ShardRouter::new(system);
-        (router, state)
+        (router, state, temp_dir)
     }
 
     #[test]
@@ -548,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_resolve_node_address_socket_addr() {
-        let (router, _) = create_test_router();
+        let (router, _, _temp) = create_test_router();
 
         let addr = router
             .resolve_node_address("127.0.0.1:50051")
@@ -558,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_resolve_node_address_hostname() {
-        let (router, _) = create_test_router();
+        let (router, _, _temp) = create_test_router();
 
         let addr = router
             .resolve_node_address("127.0.0.1")
@@ -568,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_namespace_not_found() {
-        let (router, _) = create_test_router();
+        let (router, _, _temp) = create_test_router();
 
         let result = router.get_routing(999);
         assert!(matches!(
@@ -579,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_invalidate_cache() {
-        let (router, _) = create_test_router();
+        let (router, _, _temp) = create_test_router();
 
         // Manually insert a cache entry
         {
@@ -605,7 +612,7 @@ mod tests {
 
     #[test]
     fn test_router_stats() {
-        let (router, _) = create_test_router();
+        let (router, _, _temp) = create_test_router();
 
         let stats = router.stats();
         assert_eq!(stats.cached_namespaces, 0);
@@ -615,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_clear_caches() {
-        let (router, _) = create_test_router();
+        let (router, _, _temp) = create_test_router();
 
         // Add some entries
         {

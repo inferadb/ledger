@@ -26,7 +26,7 @@ ledger-raft.workspace = true
 openraft.workspace = true
 
 # Storage
-redb.workspace = true
+inkwell.workspace = true
 
 # Async runtime
 tokio.workspace = true

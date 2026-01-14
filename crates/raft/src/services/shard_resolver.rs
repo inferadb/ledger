@@ -35,6 +35,7 @@ use crate::multi_raft::MultiRaftManager;
 use crate::shard_router::{RoutingInfo, ShardRouter};
 use crate::types::LedgerTypeConfig;
 
+use inkwell::FileBackend;
 use ledger_storage::{BlockArchive, StateLayer};
 use ledger_types::{NamespaceId, ShardId};
 
@@ -45,9 +46,9 @@ pub struct ShardContext {
     /// The Raft instance for this shard.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer for this shard.
-    pub state: Arc<StateLayer>,
+    pub state: Arc<StateLayer<FileBackend>>,
     /// The block archive for this shard.
-    pub block_archive: Arc<BlockArchive>,
+    pub block_archive: Arc<BlockArchive<FileBackend>>,
     /// Applied state accessor for this shard.
     pub applied_state: AppliedStateAccessor,
 }
@@ -146,8 +147,8 @@ pub trait ShardResolver: Send + Sync {
 /// are handled by a single Raft group.
 pub struct SingleShardResolver {
     raft: Arc<Raft<LedgerTypeConfig>>,
-    state: Arc<StateLayer>,
-    block_archive: Arc<BlockArchive>,
+    state: Arc<StateLayer<FileBackend>>,
+    block_archive: Arc<BlockArchive<FileBackend>>,
     applied_state: AppliedStateAccessor,
 }
 
@@ -155,8 +156,8 @@ impl SingleShardResolver {
     /// Create a new single-shard resolver.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
-        block_archive: Arc<BlockArchive>,
+        state: Arc<StateLayer<FileBackend>>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {

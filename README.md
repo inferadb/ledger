@@ -60,7 +60,7 @@ Ledger is InferaDB's persistence layer — a blockchain database for authorizati
 │  ├─ Vault: prod [chain]       │  ├─ Vault: main [chain]     │
 │  └─ Vault: staging [chain]    │  └─ ...                     │
 ├─────────────────────────────────────────────────────────────┤
-│                   State Layer (redb)                        │
+│                  State Layer (inkwell)                      │
 │    Relationships │ Entities │ Indexes │ State Roots         │
 └─────────────────────────────────────────────────────────────┘
 ```

@@ -32,6 +32,7 @@ use crate::services::{
 };
 use crate::types::LedgerTypeConfig;
 
+use inkwell::FileBackend;
 use ledger_storage::{BlockArchive, StateLayer};
 
 /// The main Ledger gRPC server.
@@ -41,13 +42,13 @@ pub struct LedgerServer {
     /// The Raft consensus instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The shared state layer.
-    state: Arc<StateLayer>,
+    state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Block archive for historical block retrieval.
-    block_archive: Option<Arc<BlockArchive>>,
+    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Block announcement broadcast channel.
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Server address.
@@ -67,7 +68,7 @@ impl LedgerServer {
     /// Create a new Ledger server.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
         addr: SocketAddr,
     ) -> Self {
@@ -77,9 +78,9 @@ impl LedgerServer {
     /// Create a new Ledger server with block archive for GetBlock/GetBlockRange.
     pub fn with_block_archive(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
-        block_archive: Option<Arc<BlockArchive>>,
+        block_archive: Option<Arc<BlockArchive<FileBackend>>>,
         addr: SocketAddr,
     ) -> Self {
         // Create broadcast channel for block announcements (capacity 1000)
@@ -219,7 +220,7 @@ impl LedgerServer {
     }
 
     /// Get the state layer.
-    pub fn state(&self) -> &Arc<StateLayer> {
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
     }
 

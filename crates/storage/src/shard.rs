@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use inkwell::{Database, StorageBackend};
 use parking_lot::RwLock;
-use redb::Database;
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{
@@ -20,6 +20,7 @@ use ledger_types::{
 
 use crate::block_archive::BlockArchive;
 use crate::bucket::NUM_BUCKETS;
+use crate::entity::EntityStore;
 use crate::snapshot::{
     Snapshot, SnapshotChainParams, SnapshotManager, SnapshotStateData, VaultSnapshotMeta,
 };
@@ -40,6 +41,12 @@ pub enum ShardError {
     Snapshot {
         source: crate::snapshot::SnapshotError,
     },
+
+    #[snafu(display("Storage error: {source}"))]
+    Inkwell { source: inkwell::Error },
+
+    #[snafu(display("Entity store error: {source}"))]
+    Entity { source: crate::entity::EntityError },
 
     #[snafu(display("Vault {vault_id} not found"))]
     VaultNotFound { vault_id: VaultId },
@@ -87,15 +94,15 @@ pub struct VaultMeta {
 /// - Block processing and verification
 /// - Snapshot creation and restoration
 /// - Vault health tracking
-pub struct ShardManager {
+pub struct ShardManager<B: StorageBackend> {
     /// Shard identifier.
     shard_id: ShardId,
     /// Shared database.
-    db: Arc<Database>,
+    db: Arc<Database<B>>,
     /// State layer for K/V operations.
-    state: StateLayer,
+    state: StateLayer<B>,
     /// Block archive.
-    blocks: BlockArchive,
+    blocks: BlockArchive<B>,
     /// Snapshot manager.
     snapshots: SnapshotManager,
     /// Per-vault metadata.
@@ -107,11 +114,11 @@ pub struct ShardManager {
 }
 
 #[allow(clippy::result_large_err)]
-impl ShardManager {
+impl<B: StorageBackend> ShardManager<B> {
     /// Create a new shard manager.
     pub fn new(
         shard_id: ShardId,
-        db: Arc<Database>,
+        db: Arc<Database<B>>,
         snapshot_dir: PathBuf,
         max_snapshots: usize,
     ) -> Self {
@@ -156,12 +163,12 @@ impl ShardManager {
     }
 
     /// Access the state layer.
-    pub fn state(&self) -> &StateLayer {
+    pub fn state(&self) -> &StateLayer<B> {
         &self.state
     }
 
     /// Access the block archive.
-    pub fn blocks(&self) -> &BlockArchive {
+    pub fn blocks(&self) -> &BlockArchive<B> {
         &self.blocks
     }
 
@@ -297,22 +304,9 @@ impl ShardManager {
                 .unwrap_or([EMPTY_HASH; NUM_BUCKETS]);
 
             // Collect entities (this is expensive but necessary for snapshot)
-            let txn = self.db.begin_read().map_err(|e| ShardError::State {
-                source: crate::state::StateError::Transaction { source: e },
-            })?;
-            let table = txn
-                .open_table(crate::tables::Tables::ENTITIES)
-                .map_err(|e| ShardError::State {
-                    source: crate::state::StateError::Table { source: e },
-                })?;
-
-            let entities =
-                crate::entity::EntityStore::list_in_vault(&table, vault_id, usize::MAX, 0)
-                    .map_err(|e| ShardError::State {
-                        source: crate::state::StateError::Serialization {
-                            message: format!("{:?}", e),
-                        },
-                    })?;
+            let txn = self.db.read().context(InkwellSnafu)?;
+            let entities = EntityStore::list_in_vault(&txn, vault_id, usize::MAX, 0)
+                .context(EntitySnafu)?;
 
             vault_states.push(VaultSnapshotMeta::new(
                 vault_id,
@@ -435,33 +429,15 @@ impl ShardManager {
         }
 
         // Restore entities
-        let txn = self.db.begin_write().map_err(|e| ShardError::State {
-            source: crate::state::StateError::Transaction { source: e },
-        })?;
+        let mut txn = self.db.write().context(InkwellSnafu)?;
 
-        {
-            let mut table = txn
-                .open_table(crate::tables::Tables::ENTITIES)
-                .map_err(|e| ShardError::State {
-                    source: crate::state::StateError::Table { source: e },
-                })?;
-
-            for (&vault_id, entities) in &snapshot.state.vault_entities {
-                for entity in entities {
-                    crate::entity::EntityStore::set(&mut table, vault_id, entity).map_err(|e| {
-                        ShardError::State {
-                            source: crate::state::StateError::Serialization {
-                                message: format!("{:?}", e),
-                            },
-                        }
-                    })?;
-                }
+        for (&vault_id, entities) in &snapshot.state.vault_entities {
+            for entity in entities {
+                EntityStore::set(&mut txn, vault_id, entity).context(EntitySnafu)?;
             }
         }
 
-        txn.commit().map_err(|e| ShardError::State {
-            source: crate::state::StateError::Commit { source: e },
-        })?;
+        txn.commit().context(InkwellSnafu)?;
 
         // Update shard height
         *self.shard_height.write() = snapshot.header.shard_height;
@@ -493,13 +469,13 @@ impl ShardManager {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::engine::StorageEngine;
+    use crate::engine::InMemoryStorageEngine;
     use chrono::Utc;
     use ledger_types::{Operation, Transaction, VaultEntry};
     use tempfile::TempDir;
 
-    fn create_test_manager() -> (ShardManager, TempDir) {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+    fn create_test_manager() -> (ShardManager<inkwell::InMemoryBackend>, TempDir) {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TempDir::new().expect("create temp dir");
 
         let manager = ShardManager::new(1, engine.db(), temp.path().join("snapshots"), 3);
@@ -548,7 +524,7 @@ mod tests {
         let expected_root = manager.state.compute_state_root(1).expect("compute root");
 
         // Reset state and apply via block
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TempDir::new().expect("create temp dir");
         let manager = ShardManager::new(1, engine.db(), temp.path().join("snapshots"), 3);
         manager.register_vault(1, 1);
@@ -629,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_and_restore() {
-        let engine = StorageEngine::open_in_memory().expect("open engine");
+        let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TempDir::new().expect("create temp dir");
         let manager = ShardManager::new(1, engine.db(), temp.path().join("snapshots"), 3);
 
@@ -658,7 +634,7 @@ mod tests {
         assert!(snapshot_path.exists());
 
         // Create new manager and restore
-        let engine2 = StorageEngine::open_in_memory().expect("open engine");
+        let engine2 = InMemoryStorageEngine::open().expect("open engine");
         let manager2 = ShardManager::new(1, engine2.db(), temp.path().join("snapshots"), 3);
 
         let snapshot = Snapshot::read_from_file(&snapshot_path).expect("read snapshot");

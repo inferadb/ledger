@@ -22,6 +22,7 @@ use crate::proto::{
 use crate::rate_limit::NamespaceRateLimiter;
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
+use inkwell::FileBackend;
 use ledger_storage::BlockArchive;
 use ledger_types::SetCondition;
 
@@ -32,7 +33,7 @@ pub struct WriteServiceImpl {
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Block archive for proof generation (optional).
-    block_archive: Option<Arc<BlockArchive>>,
+    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Per-namespace rate limiter.
     rate_limiter: Option<Arc<NamespaceRateLimiter>>,
     /// Accessor for applied state (client sequences for gap detection).
@@ -56,7 +57,7 @@ impl WriteServiceImpl {
     pub fn with_block_archive(
         raft: Arc<Raft<LedgerTypeConfig>>,
         idempotency: Arc<IdempotencyCache>,
-        block_archive: Arc<BlockArchive>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
     ) -> Self {
         Self {
             raft,

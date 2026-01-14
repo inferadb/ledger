@@ -26,6 +26,7 @@ use snafu::GenerateImplicitData;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use inkwell::StorageBackend;
 use ledger_storage::StateLayer;
 use ledger_types::{Operation, Transaction};
 
@@ -49,25 +50,25 @@ const SYSTEM_NAMESPACE_ID: i64 = 0;
 ///
 /// Runs as a background task, periodically scanning for and removing
 /// membership records that reference deleted users.
-pub struct OrphanCleanupJob {
+pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer (internally thread-safe via redb MVCC).
-    state: Arc<StateLayer>,
+    /// The shared state layer (internally thread-safe via inkwell MVCC).
+    state: Arc<StateLayer<B>>,
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,
     /// Cleanup interval.
     interval: Duration,
 }
 
-impl OrphanCleanupJob {
+impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
     /// Create a new orphan cleanup job.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<B>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -98,7 +99,7 @@ impl OrphanCleanupJob {
     /// - User has deleted_at set
     /// - User has status = "DELETED" or "DELETING"
     fn get_deleted_user_ids(&self) -> HashSet<i64> {
-        // StateLayer is internally thread-safe via redb MVCC
+        // StateLayer is internally thread-safe via inkwell MVCC
 
         // List all user entities in _system (vault_id = 0)
         let entities = match self.state.list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10) {
@@ -142,7 +143,7 @@ impl OrphanCleanupJob {
             return Vec::new();
         }
 
-        // StateLayer is internally thread-safe via redb MVCC
+        // StateLayer is internally thread-safe via inkwell MVCC
         // Note: Namespace entities live in vault_id = 0 for the namespace
         // We need to list entities in the namespace, not vault 0 of _system
         // Actually, namespace-level entities (members, teams) are stored with the namespace

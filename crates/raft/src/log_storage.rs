@@ -1,4 +1,4 @@
-//! Raft storage implementation using redb.
+//! Raft storage implementation using Inkwell.
 //!
 //! This module provides the persistent storage for Raft log entries,
 //! vote state, committed log tracking, and state machine state.
@@ -8,7 +8,7 @@
 //! (`RaftLogStorage`, `RaftStateMachine`) are sealed in OpenRaft 0.9.
 //!
 //! Per DESIGN.md, each shard group has its own storage located at:
-//! `shards/{shard_id}/raft/log.redb`
+//! `shards/{shard_id}/raft/log.inkwell`
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -17,13 +17,13 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
+use inkwell::{Database, FileBackend, StorageBackend, tables};
 use openraft::storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
     StoredMembership, Vote,
 };
 use parking_lot::RwLock;
-use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use ledger_types::{Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root};
@@ -38,20 +38,10 @@ use ledger_storage::{BlockArchive, StateError, StateLayer};
 use ledger_storage::system::{NamespaceRegistry, NamespaceStatus, SystemKeys, SYSTEM_VAULT_ID};
 
 // ============================================================================
-// Table Definitions
+// Metadata Keys
 // ============================================================================
 
-/// Table storing Raft log entries.
-/// Key: log index (u64)
-/// Value: serialized Entry<LedgerTypeConfig>
-const LOG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_log");
-
-/// Table storing metadata.
-/// Key: metadata key (str)
-/// Value: serialized metadata value
-const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta");
-
-// Metadata keys
+// Metadata keys for RaftState table
 const KEY_VOTE: &str = "vote";
 #[allow(dead_code)] // Reserved for future use with save_committed/read_committed
 const KEY_COMMITTED: &str = "committed";
@@ -334,20 +324,23 @@ impl AppliedStateAccessor {
     }
 }
 
-/// Combined Raft storage backed by redb.
+/// Combined Raft storage backed by Inkwell.
 ///
 /// This implementation stores:
-/// - Log entries in a redb table indexed by log index
-/// - Vote state (term + voted_for) in metadata
+/// - Log entries in the RaftLog table indexed by log index
+/// - Vote state (term + voted_for) in RaftState metadata
 /// - Committed log ID for recovery
-/// - Applied state (state machine) in metadata
+/// - Applied state (state machine) in RaftState metadata
 ///
 /// Additionally, it integrates with:
 /// - StateLayer for entity/relationship storage and state root computation
 /// - BlockArchive for permanent block storage
-pub struct RaftLogStore {
-    /// redb database handle.
-    db: Arc<Database>,
+///
+/// The generic parameter `B` controls the storage backend for StateLayer and
+/// BlockArchive. The raft log itself always uses FileBackend for durability.
+pub struct RaftLogStore<B: StorageBackend = FileBackend> {
+    /// Inkwell database handle for raft log.
+    db: Arc<Database<FileBackend>>,
     /// Cached vote state.
     vote_cache: RwLock<Option<Vote<LedgerNodeId>>>,
     /// Cached last purged log ID.
@@ -355,9 +348,9 @@ pub struct RaftLogStore {
     /// Applied state (state machine) - shared with accessor.
     applied_state: Arc<RwLock<AppliedState>>,
     /// State layer for entity/relationship storage (shared with read service).
-    state_layer: Option<Arc<StateLayer>>,
+    state_layer: Option<Arc<StateLayer<B>>>,
     /// Block archive for permanent block storage.
-    block_archive: Option<Arc<BlockArchive>>,
+    block_archive: Option<Arc<BlockArchive<B>>>,
     /// Shard ID for this Raft group.
     shard_id: ShardId,
     /// Node ID for block metadata.
@@ -369,25 +362,20 @@ pub struct RaftLogStore {
 }
 
 #[allow(clippy::result_large_err)]
-impl RaftLogStore {
+impl<B: StorageBackend> RaftLogStore<B> {
     /// Open or create a new log store at the given path.
     ///
     /// This creates a basic log store without StateLayer or BlockArchive integration.
     /// Use `with_state_layer` and `with_block_archive` to add those capabilities.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError<LedgerNodeId>> {
-        let db = Database::create(path.as_ref()).map_err(|e| to_storage_error(&e))?;
+        // Try to open existing database, otherwise create new one
+        let db = if path.as_ref().exists() {
+            Database::open(path.as_ref()).map_err(|e| to_storage_error(&e))?
+        } else {
+            Database::create(path.as_ref()).map_err(|e| to_storage_error(&e))?
+        };
 
-        // Ensure tables exist
-        let write_txn = db.begin_write().map_err(|e| to_storage_error(&e))?;
-        {
-            let _log_table = write_txn
-                .open_table(LOG_TABLE)
-                .map_err(|e| to_storage_error(&e))?;
-            let _meta_table = write_txn
-                .open_table(META_TABLE)
-                .map_err(|e| to_storage_error(&e))?;
-        }
-        write_txn.commit().map_err(|e| to_storage_error(&e))?;
+        // Inkwell has fixed tables - no need to create them explicitly
 
         let store = Self {
             db: Arc::new(db),
@@ -412,13 +400,13 @@ impl RaftLogStore {
     }
 
     /// Configure the state layer for transaction application.
-    pub fn with_state_layer(mut self, state_layer: Arc<StateLayer>) -> Self {
+    pub fn with_state_layer(mut self, state_layer: Arc<StateLayer<B>>) -> Self {
         self.state_layer = Some(state_layer);
         self
     }
 
     /// Configure the block archive for permanent block storage.
-    pub fn with_block_archive(mut self, block_archive: Arc<BlockArchive>) -> Self {
+    pub fn with_block_archive(mut self, block_archive: Arc<BlockArchive<B>>) -> Self {
         self.block_archive = Some(block_archive);
         self
     }
@@ -436,12 +424,12 @@ impl RaftLogStore {
     }
 
     /// Get a reference to the state layer (if configured).
-    pub fn state_layer(&self) -> Option<&Arc<StateLayer>> {
+    pub fn state_layer(&self) -> Option<&Arc<StateLayer<B>>> {
         self.state_layer.as_ref()
     }
 
     /// Get a reference to the block archive (if configured).
-    pub fn block_archive(&self) -> Option<&Arc<BlockArchive>> {
+    pub fn block_archive(&self) -> Option<&Arc<BlockArchive<B>>> {
         self.block_archive.as_ref()
     }
 
@@ -457,35 +445,35 @@ impl RaftLogStore {
 
     /// Load metadata values into caches.
     fn load_caches(&self) -> Result<(), StorageError<LedgerNodeId>> {
-        let read_txn = self.db.begin_read().map_err(|e| to_storage_error(&e))?;
-        let meta_table = read_txn
-            .open_table(META_TABLE)
-            .map_err(|e| to_storage_error(&e))?;
+        let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
         // Load vote
-        if let Some(vote_data) = meta_table.get(KEY_VOTE).map_err(|e| to_storage_error(&e))? {
+        if let Some(vote_data) = read_txn
+            .get::<tables::RaftState>(&KEY_VOTE.to_string())
+            .map_err(|e| to_storage_error(&e))?
+        {
             let vote: Vote<LedgerNodeId> =
-                bincode::deserialize(vote_data.value()).map_err(|e| to_serde_error(&e))?;
+                bincode::deserialize(&vote_data).map_err(|e| to_serde_error(&e))?;
             *self.vote_cache.write() = Some(vote);
         }
 
         // Load last purged
-        if let Some(purged_data) = meta_table
-            .get(KEY_LAST_PURGED)
+        if let Some(purged_data) = read_txn
+            .get::<tables::RaftState>(&KEY_LAST_PURGED.to_string())
             .map_err(|e| to_storage_error(&e))?
         {
             let purged: LogId<LedgerNodeId> =
-                bincode::deserialize(purged_data.value()).map_err(|e| to_serde_error(&e))?;
+                bincode::deserialize(&purged_data).map_err(|e| to_serde_error(&e))?;
             *self.last_purged_cache.write() = Some(purged);
         }
 
         // Load applied state
-        if let Some(state_data) = meta_table
-            .get(KEY_APPLIED_STATE)
+        if let Some(state_data) = read_txn
+            .get::<tables::RaftState>(&KEY_APPLIED_STATE.to_string())
             .map_err(|e| to_storage_error(&e))?
         {
             let state: AppliedState =
-                bincode::deserialize(state_data.value()).map_err(|e| to_serde_error(&e))?;
+                bincode::deserialize(&state_data).map_err(|e| to_serde_error(&e))?;
             // Restore shard chain tracking from persisted state
             *self.shard_height.write() = state.shard_height;
             *self.previous_shard_hash.write() = state.previous_shard_hash;
@@ -499,14 +487,14 @@ impl RaftLogStore {
     fn get_last_entry(
         &self,
     ) -> Result<Option<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
-        let read_txn = self.db.begin_read().map_err(|e| to_storage_error(&e))?;
-        let log_table = read_txn
-            .open_table(LOG_TABLE)
-            .map_err(|e| to_storage_error(&e))?;
+        let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
-        if let Some((_, entry_data)) = log_table.last().map_err(|e| to_storage_error(&e))? {
+        if let Some((_, entry_data)) = read_txn
+            .last::<tables::RaftLog>()
+            .map_err(|e| to_storage_error(&e))?
+        {
             let entry: Entry<LedgerTypeConfig> =
-                bincode::deserialize(entry_data.value()).map_err(|e| to_serde_error(&e))?;
+                bincode::deserialize(&entry_data).map_err(|e| to_serde_error(&e))?;
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -560,7 +548,7 @@ impl RaftLogStore {
                         .flat_map(|tx| tx.operations.clone())
                         .collect();
 
-                    // Apply operations (StateLayer is internally thread-safe via redb MVCC)
+                    // Apply operations (StateLayer is internally thread-safe via inkwell MVCC)
                     if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
                         // Per DESIGN.md §6.1: On CAS failure, return current state for conflict resolution
                         return match e {
@@ -882,15 +870,10 @@ impl RaftLogStore {
     /// Persist the applied state.
     fn save_applied_state(&self, state: &AppliedState) -> Result<(), StorageError<LedgerNodeId>> {
         let state_data = bincode::serialize(state).map_err(|e| to_serde_error(&e))?;
-        let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
-        {
-            let mut meta_table = write_txn
-                .open_table(META_TABLE)
-                .map_err(|e| to_storage_error(&e))?;
-            meta_table
-                .insert(KEY_APPLIED_STATE, state_data.as_slice())
-                .map_err(|e| to_storage_error(&e))?;
-        }
+        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
+        write_txn
+            .insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &state_data)
+            .map_err(|e| to_storage_error(&e))?;
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
         Ok(())
     }
@@ -905,16 +888,34 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
-        let read_txn = self.db.begin_read().map_err(|e| to_storage_error(&e))?;
-        let log_table = read_txn
-            .open_table(LOG_TABLE)
+        use std::ops::Bound;
+
+        let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
+
+        // Convert RangeBounds to start/end indices
+        let start_idx = match range.start_bound() {
+            Bound::Included(&idx) => idx,
+            Bound::Excluded(&idx) => idx.saturating_add(1),
+            Bound::Unbounded => 0,
+        };
+        let end_idx = match range.end_bound() {
+            Bound::Included(&idx) => Some(idx.saturating_add(1)),
+            Bound::Excluded(&idx) => Some(idx),
+            Bound::Unbounded => None,
+        };
+
+        // Use range iteration from inkwell
+        let start_key = start_idx;
+        let end_key = end_idx.unwrap_or(u64::MAX);
+
+        let iter = read_txn
+            .range::<tables::RaftLog>(Some(&start_key), Some(&end_key))
             .map_err(|e| to_storage_error(&e))?;
 
         let mut entries = Vec::new();
-        for result in log_table.range(range).map_err(|e| to_storage_error(&e))? {
-            let (_, entry_data) = result.map_err(|e| to_storage_error(&e))?;
+        for (_, entry_data) in iter {
             let entry: Entry<LedgerTypeConfig> =
-                bincode::deserialize(entry_data.value()).map_err(|e| to_serde_error(&e))?;
+                bincode::deserialize(&entry_data).map_err(|e| to_serde_error(&e))?;
             entries.push(entry);
         }
 
@@ -1002,15 +1003,10 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     ) -> Result<(), StorageError<LedgerNodeId>> {
         let vote_data = bincode::serialize(vote).map_err(|e| to_serde_error(&e))?;
 
-        let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
-        {
-            let mut meta_table = write_txn
-                .open_table(META_TABLE)
-                .map_err(|e| to_storage_error(&e))?;
-            meta_table
-                .insert(KEY_VOTE, vote_data.as_slice())
-                .map_err(|e| to_storage_error(&e))?;
-        }
+        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
+        write_txn
+            .insert::<tables::RaftState>(&KEY_VOTE.to_string(), &vote_data)
+            .map_err(|e| to_storage_error(&e))?;
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
 
         *self.vote_cache.write() = Some(*vote);
@@ -1027,22 +1023,17 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     where
         I: IntoIterator<Item = Entry<LedgerTypeConfig>> + OptionalSend,
     {
-        let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
-        {
-            let mut log_table = write_txn
-                .open_table(LOG_TABLE)
+        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
+
+        for entry in entries {
+            let index = entry.log_id.index;
+            let entry_data = bincode::serialize(&entry).map_err(|e| to_serde_error(&e))?;
+            write_txn
+                .insert::<tables::RaftLog>(&index, &entry_data)
                 .map_err(|e| to_storage_error(&e))?;
-
-            for entry in entries {
-                let index = entry.log_id.index;
-                let entry_data = bincode::serialize(&entry).map_err(|e| to_serde_error(&e))?;
-                log_table
-                    .insert(index, entry_data.as_slice())
-                    .map_err(|e| to_storage_error(&e))?;
-            }
         }
-        write_txn.commit().map_err(|e| to_storage_error(&e))?;
 
+        write_txn.commit().map_err(|e| to_storage_error(&e))?;
         Ok(())
     }
 
@@ -1050,23 +1041,29 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         &mut self,
         log_id: LogId<LedgerNodeId>,
     ) -> Result<(), StorageError<LedgerNodeId>> {
-        let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
-        {
-            let mut log_table = write_txn
-                .open_table(LOG_TABLE)
+        // First, collect keys to remove using a read transaction
+        let keys_to_remove: Vec<u64> = {
+            let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
+            let mut keys = Vec::new();
+            let iter = read_txn
+                .range::<tables::RaftLog>(Some(&log_id.index), None)
                 .map_err(|e| to_storage_error(&e))?;
-
-            // Delete logs from log_id.index onwards (inclusive)
-            let keys_to_remove: Vec<u64> = log_table
-                .range(log_id.index..)
-                .map_err(|e| to_storage_error(&e))?
-                .map(|r| r.map(|(k, _)| k.value()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| to_storage_error(&e))?;
-
-            for key in keys_to_remove {
-                log_table.remove(key).map_err(|e| to_storage_error(&e))?;
+            for (key_bytes, _) in iter {
+                // Key is u64 encoded as big-endian
+                if key_bytes.len() == 8 {
+                    let key = u64::from_be_bytes(key_bytes.try_into().unwrap());
+                    keys.push(key);
+                }
             }
+            keys
+        };
+
+        // Then delete in a write transaction
+        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
+        for key in keys_to_remove {
+            write_txn
+                .delete::<tables::RaftLog>(&key)
+                .map_err(|e| to_storage_error(&e))?;
         }
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
 
@@ -1077,31 +1074,39 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         &mut self,
         log_id: LogId<LedgerNodeId>,
     ) -> Result<(), StorageError<LedgerNodeId>> {
-        let write_txn = self.db.begin_write().map_err(|e| to_storage_error(&e))?;
-        {
-            let mut log_table = write_txn
-                .open_table(LOG_TABLE)
+        // First, collect keys to remove using a read transaction
+        let keys_to_remove: Vec<u64> = {
+            let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
+            let mut keys = Vec::new();
+            // Inclusive end: range from 0 to log_id.index + 1 (exclusive)
+            let end_key = log_id.index.saturating_add(1);
+            let iter = read_txn
+                .range::<tables::RaftLog>(Some(&0u64), Some(&end_key))
                 .map_err(|e| to_storage_error(&e))?;
-            let mut meta_table = write_txn
-                .open_table(META_TABLE)
-                .map_err(|e| to_storage_error(&e))?;
-
-            let keys_to_remove: Vec<u64> = log_table
-                .range(..=log_id.index)
-                .map_err(|e| to_storage_error(&e))?
-                .map(|r| r.map(|(k, _)| k.value()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| to_storage_error(&e))?;
-
-            for key in keys_to_remove {
-                log_table.remove(key).map_err(|e| to_storage_error(&e))?;
+            for (key_bytes, _) in iter {
+                // Key is u64 encoded as big-endian
+                if key_bytes.len() == 8 {
+                    let key = u64::from_be_bytes(key_bytes.try_into().unwrap());
+                    keys.push(key);
+                }
             }
+            keys
+        };
 
-            let purged_data = bincode::serialize(&log_id).map_err(|e| to_serde_error(&e))?;
-            meta_table
-                .insert(KEY_LAST_PURGED, purged_data.as_slice())
+        // Then delete in a write transaction
+        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
+        for key in keys_to_remove {
+            write_txn
+                .delete::<tables::RaftLog>(&key)
                 .map_err(|e| to_storage_error(&e))?;
         }
+
+        // Save the last purged log ID
+        let purged_data = bincode::serialize(&log_id).map_err(|e| to_serde_error(&e))?;
+        write_txn
+            .insert::<tables::RaftState>(&KEY_LAST_PURGED.to_string(), &purged_data)
+            .map_err(|e| to_storage_error(&e))?;
+
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
 
         *self.last_purged_cache.write() = Some(log_id);
@@ -1290,7 +1295,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         // Collect entities from StateLayer if configured
-        // StateLayer is internally thread-safe via redb's MVCC, so no lock needed
+        // StateLayer is internally thread-safe via inkwell's MVCC, so no lock needed
         let vault_entities = if let Some(state_layer) = &self.state_layer {
             let mut entities_map = HashMap::new();
 
@@ -1379,6 +1384,7 @@ fn to_serde_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
 )]
 mod tests {
     use super::*;
+    use inkwell::FileBackend;
     use openraft::CommittedLeaderId;
     use tempfile::tempdir;
 
@@ -1391,22 +1397,25 @@ mod tests {
     #[tokio::test]
     async fn test_log_store_open() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        // Verify tables were created
-        let read_txn = store.db.begin_read().expect("begin read");
-        let _log_table = read_txn.open_table(LOG_TABLE).expect("open log table");
-        let _meta_table = read_txn.open_table(META_TABLE).expect("open meta table");
+        // Verify database can be read (tables exist in inkwell by default)
+        let read_txn = store.db.read().expect("begin read");
+        // Tables are fixed in inkwell - just verify we can get a transaction
+        let _ = read_txn.get::<tables::RaftLog>(&0u64).expect("query RaftLog");
+        let _ = read_txn
+            .get::<tables::RaftState>(&"test".to_string())
+            .expect("query RaftState");
     }
 
     #[tokio::test]
     async fn test_save_and_read_vote() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let mut store = RaftLogStore::open(&path).expect("open store");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
         let vote = Vote::new(1, 42);
         store.save_vote(&vote).await.expect("save vote");
@@ -1430,9 +1439,9 @@ mod tests {
     #[tokio::test]
     async fn test_apply_create_namespace() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
         let request = LedgerRequest::CreateNamespace {
@@ -1453,9 +1462,9 @@ mod tests {
     #[tokio::test]
     async fn test_apply_create_vault() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
         let request = LedgerRequest::CreateVault {
@@ -1478,9 +1487,9 @@ mod tests {
     #[tokio::test]
     async fn test_diverged_vault_rejects_writes() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
         // Mark vault as diverged
@@ -1512,9 +1521,9 @@ mod tests {
     #[tokio::test]
     async fn test_update_vault_health_to_healthy() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
         // Start with a diverged vault
@@ -1558,9 +1567,9 @@ mod tests {
     #[tokio::test]
     async fn test_update_vault_health_to_diverged() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
         // Start healthy
@@ -1607,9 +1616,9 @@ mod tests {
     #[tokio::test]
     async fn test_update_vault_health_to_recovering() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
         // Start with a diverged vault
@@ -1705,8 +1714,8 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::open(dir_a.path().join("raft_log.redb")).expect("open store a");
-        let store_b = RaftLogStore::open(dir_b.path().join("raft_log.redb")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
 
         // Same sequence of requests to apply
         let requests = vec![
@@ -1809,8 +1818,8 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::open(dir_a.path().join("raft_log.redb")).expect("open store a");
-        let store_b = RaftLogStore::open(dir_b.path().join("raft_log.redb")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
 
         // Apply same sequence on both nodes
         let mut state_a = store_a.applied_state.write();
@@ -1852,8 +1861,8 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::open(dir_a.path().join("raft_log.redb")).expect("open store a");
-        let store_b = RaftLogStore::open(dir_b.path().join("raft_log.redb")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
 
         // Same inputs must produce same hash
         let hash_a = store_a.compute_block_hash(1, 2, 3);
@@ -1877,8 +1886,8 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::open(dir_a.path().join("raft_log.redb")).expect("open store a");
-        let store_b = RaftLogStore::open(dir_b.path().join("raft_log.redb")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
 
         let mut state_a = store_a.applied_state.write();
         let mut state_b = store_b.applied_state.write();
@@ -1925,8 +1934,8 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::open(dir_a.path().join("raft_log.redb")).expect("open store a");
-        let store_b = RaftLogStore::open(dir_b.path().join("raft_log.redb")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
 
         let mut state_a = store_a.applied_state.write();
         let mut state_b = store_b.applied_state.write();
@@ -2070,9 +2079,9 @@ mod tests {
     #[tokio::test]
     async fn test_write_produces_vault_entry() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
         // Setup: create namespace and vault
@@ -2137,9 +2146,9 @@ mod tests {
     #[tokio::test]
     async fn test_shard_height_tracked_in_applied_state() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
         // Initial shard height should be 0
         assert_eq!(store.current_shard_height(), 0);
@@ -2233,9 +2242,9 @@ mod tests {
     #[tokio::test]
     async fn test_applied_state_accessor() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.redb");
+        let path = dir.path().join("raft_log.inkwell");
 
-        let store = RaftLogStore::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let accessor = store.accessor();
 
         // Setup some state
@@ -2346,7 +2355,7 @@ mod tests {
         // Create target store (simulating a new follower)
         let target_dir = tempdir().expect("create target dir");
         let mut target_store =
-            RaftLogStore::open(target_dir.path().join("raft.redb")).expect("open target");
+            RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.inkwell")).expect("open target");
 
         // Verify initial state is empty
         assert_eq!(target_store.current_shard_height(), 0);
@@ -2444,7 +2453,7 @@ mod tests {
 
         // Fresh node
         let dir = tempdir().expect("create dir");
-        let mut store = RaftLogStore::open(dir.path().join("raft.redb")).expect("open");
+        let mut store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.inkwell")).expect("open");
 
         // Verify initial state is empty
         assert_eq!(store.current_shard_height(), 0);
@@ -2469,5 +2478,62 @@ mod tests {
             store.applied_state.read().vault_heights.get(&(1, 1)),
             Some(&25)
         );
+    }
+
+    #[tokio::test]
+    async fn test_append_and_read_log_entries() {
+        // This test simulates what openraft does during replication
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.inkwell");
+
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Create 100 log entries (enough to cause multiple leaf nodes in the B-tree)
+        let entries: Vec<Entry<LedgerTypeConfig>> = (1..=100u64)
+            .map(|i| Entry {
+                log_id: make_log_id(1, i),
+                payload: EntryPayload::Normal(LedgerRequest::CreateNamespace {
+                    name: format!("ns-{}", i),
+                    shard_id: None,
+                }),
+            })
+            .collect();
+
+        // Append entries
+        store.append_to_log(entries).await.expect("append entries");
+
+        // Get log state
+        let log_state = store.get_log_state().await.expect("get log state");
+        assert_eq!(log_state.last_log_id.map(|id| id.index), Some(100));
+
+        // Read all entries back (what openraft does during replication)
+        let read_entries = store
+            .try_get_log_entries(1u64..=100u64)
+            .await
+            .expect("read entries");
+
+        assert_eq!(
+            read_entries.len(),
+            100,
+            "Expected 100 entries, got {}",
+            read_entries.len()
+        );
+
+        // Verify each entry exists and has correct index
+        for (i, entry) in read_entries.iter().enumerate() {
+            let expected_index = (i + 1) as u64;
+            assert_eq!(
+                entry.log_id.index, expected_index,
+                "Entry at position {} has wrong index: expected {}, got {}",
+                i, expected_index, entry.log_id.index
+            );
+        }
+
+        // Test partial range (what openraft does when replicating to a follower)
+        let partial = store
+            .try_get_log_entries(50u64..=75u64)
+            .await
+            .expect("read partial");
+        assert_eq!(partial.len(), 26, "Expected 26 entries, got {}", partial.len());
     }
 }

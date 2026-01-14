@@ -5,6 +5,7 @@ members = [
     "crates/storage",
     "crates/raft",
     "crates/server",
+    "crates/inkwell",
 ]
 
 [workspace.package]
@@ -28,9 +29,6 @@ tower = { version = "0.5", features = ["limit", "load-shed", "timeout"] }
 
 # Raft consensus
 openraft = { version = "0.9", features = ["serde", "tracing-log"] }
-
-# Storage
-redb = "2.4"
 
 # Crypto
 sha2 = "0.10"
@@ -106,6 +104,12 @@ async-stream = "0.3"
 ledger-types = { path = "crates/types" }
 ledger-storage = { path = "crates/storage" }
 ledger-raft = { path = "crates/raft" }
+inkwell = { path = "crates/inkwell" }
+
+# Hashing (for inkwell)
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
+byteorder = "1.5"
+memmap2 = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

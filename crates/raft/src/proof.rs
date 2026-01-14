@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use snafu::{ResultExt, Snafu};
 
+use inkwell::FileBackend;
 use ledger_storage::BlockArchive;
 use ledger_types::hash::{Hash, tx_hash};
 use ledger_types::merkle::{MerkleProof as InternalMerkleProof, MerkleTree};
@@ -101,7 +102,7 @@ pub struct WriteProof {
 /// It fetches the block, extracts the vault entry, and generates proofs.
 #[allow(clippy::result_large_err)] // ProofError contains BlockArchiveError (160+ bytes)
 pub fn generate_write_proof(
-    archive: &Arc<BlockArchive>,
+    archive: &Arc<BlockArchive<FileBackend>>,
     namespace_id: NamespaceId,
     vault_id: VaultId,
     vault_height: u64,

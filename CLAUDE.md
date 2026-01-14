@@ -75,7 +75,7 @@ cargo run -p ledger-server --release -- --config config.toml
 │   Raft via openraft │ Log storage │ Batching │ Idempotency  │
 ├─────────────────────────────────────────────────────────────┤
 │                 ledger-storage (state)                      │
-│   redb engine │ Entity/Relationship stores │ Indexes        │
+│   inkwell B+ tree │ Entity/Relationship stores │ Indexes    │
 ├─────────────────────────────────────────────────────────────┤
 │                 ledger-types (shared)                       │
 │   Hash primitives │ Merkle proofs │ Config │ Error types    │
@@ -85,13 +85,13 @@ cargo run -p ledger-server --release -- --config config.toml
 **Crates:**
 
 - `ledger-types` — Core types, SHA-256/seahash, merkle tree, snafu errors
-- `ledger-storage` — redb wrapper, entity/relationship CRUD, dual indexes, state root computation
+- `ledger-storage` — inkwell wrapper, entity/relationship CRUD, dual indexes, state root computation
 - `ledger-raft` — openraft integration, log storage, gRPC services, transaction batching
 - `ledger-server` — Main binary, bootstrap, config loading
 
 **Key abstractions:**
 
-- `StorageEngine` (storage/engine.rs) — redb database wrapper with transaction helpers
+- `StorageEngine` (storage/engine.rs) — inkwell database wrapper with transaction helpers
 - `StateLayer` (storage/state.rs) — Applies blocks, computes bucket-based state roots
 - `LedgerServer` (raft/server.rs) — gRPC server combining all services with Raft
 

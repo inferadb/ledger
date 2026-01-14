@@ -165,7 +165,7 @@ async fn test_learner_cache_initialization() {
 
     // All nodes should have the namespace replicated
     for node in cluster.nodes() {
-        // StateLayer is internally thread-safe via redb MVCC
+        // StateLayer is internally thread-safe via inkwell MVCC
         // Access it directly to verify it's available (doesn't panic)
         let _ = &*node.state;
     }

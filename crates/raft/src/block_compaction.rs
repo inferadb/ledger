@@ -17,6 +17,7 @@ use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use inkwell::StorageBackend;
 use ledger_storage::BlockArchive;
 
 use crate::log_storage::AppliedStateAccessor;
@@ -29,25 +30,25 @@ const COMPACTION_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 ///
 /// Runs as a background task, periodically checking vault retention policies
 /// and compacting old blocks to remove transaction bodies.
-pub struct BlockCompactor {
+pub struct BlockCompactor<B: StorageBackend + 'static> {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
     /// Block archive for compaction.
-    block_archive: Arc<BlockArchive>,
+    block_archive: Arc<BlockArchive<B>>,
     /// Accessor for applied state (vault registry and metadata).
     applied_state: AppliedStateAccessor,
     /// Compaction interval.
     interval: Duration,
 }
 
-impl BlockCompactor {
+impl<B: StorageBackend + 'static> BlockCompactor<B> {
     /// Create a new block compactor.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
-        block_archive: Arc<BlockArchive>,
+        block_archive: Arc<BlockArchive<B>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {

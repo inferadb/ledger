@@ -12,12 +12,10 @@ authors.workspace = true
 # Internal
 ledger-types.workspace = true
 ledger-storage.workspace = true
+inkwell.workspace = true
 
 # Raft consensus
 openraft.workspace = true
-
-# Storage (for raft log)
-redb.workspace = true
 
 # gRPC
 tonic.workspace = true
@@ -54,6 +52,7 @@ chrono.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 fs2.workspace = true
+tempfile.workspace = true
 
 # Metrics
 metrics.workspace = true
@@ -64,9 +63,6 @@ futures = "0.3"
 
 [build-dependencies]
 tonic-build.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

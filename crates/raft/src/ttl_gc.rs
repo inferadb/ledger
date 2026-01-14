@@ -17,6 +17,7 @@ use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use inkwell::StorageBackend;
 use ledger_storage::StateLayer;
 use ledger_types::{Operation, Transaction, VaultId};
 
@@ -36,13 +37,13 @@ const GC_ACTOR: &str = "system:gc";
 ///
 /// Runs as a background task, periodically scanning for and removing
 /// expired entities through Raft consensus.
-pub struct TtlGarbageCollector {
+pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer (internally thread-safe via redb MVCC).
-    state: Arc<StateLayer>,
+    /// The shared state layer (internally thread-safe via inkwell MVCC).
+    state: Arc<StateLayer<B>>,
     /// Accessor for applied state (vault registry).
     applied_state: AppliedStateAccessor,
     /// GC interval.
@@ -51,12 +52,12 @@ pub struct TtlGarbageCollector {
     max_batch_size: usize,
 }
 
-impl TtlGarbageCollector {
+impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
     /// Create a new garbage collector.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<B>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {
@@ -91,7 +92,7 @@ impl TtlGarbageCollector {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        // StateLayer is internally thread-safe via redb MVCC
+        // StateLayer is internally thread-safe via inkwell MVCC
         // List all entities including expired ones
         match self.state.list_entities(vault_id, None, None, self.max_batch_size * 2) {
             Ok(entities) => entities

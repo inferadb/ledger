@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
+use inkwell::StorageBackend;
 use ledger_storage::{BlockArchive, SnapshotManager, StateLayer};
 
 use crate::error::{
@@ -81,7 +82,7 @@ pub enum RecoveryResult {
 ///
 /// Runs as a background task, periodically scanning for vaults that need
 /// recovery and triggering the recovery process through Raft consensus.
-pub struct AutoRecoveryJob {
+pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     /// The Raft instance for proposing health updates.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
@@ -89,22 +90,22 @@ pub struct AutoRecoveryJob {
     /// Accessor for applied state (vault health).
     applied_state: AppliedStateAccessor,
     /// Block archive for replaying transactions.
-    block_archive: Option<Arc<BlockArchive>>,
+    block_archive: Option<Arc<BlockArchive<B>>>,
     /// Snapshot manager for finding recovery starting points.
     snapshot_manager: Option<Arc<SnapshotManager>>,
-    /// State layer for applying recovered state (internally thread-safe via redb MVCC).
-    state: Arc<StateLayer>,
+    /// State layer for applying recovered state (internally thread-safe via inkwell MVCC).
+    state: Arc<StateLayer<B>>,
     /// Configuration.
     config: AutoRecoveryConfig,
 }
 
-impl AutoRecoveryJob {
+impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Create a new auto-recovery job.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
         applied_state: AppliedStateAccessor,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<B>>,
     ) -> Self {
         Self {
             raft,
@@ -118,7 +119,7 @@ impl AutoRecoveryJob {
     }
 
     /// Add block archive for recovery.
-    pub fn with_block_archive(mut self, archive: Arc<BlockArchive>) -> Self {
+    pub fn with_block_archive(mut self, archive: Arc<BlockArchive<B>>) -> Self {
         self.block_archive = Some(archive);
         self
     }
@@ -370,7 +371,7 @@ impl AutoRecoveryJob {
 
             if let Some(entry) = vault_entry {
                 // Apply transactions and compute new state root
-                // StateLayer is internally thread-safe via redb MVCC
+                // StateLayer is internally thread-safe via inkwell MVCC
                 for tx in &entry.transactions {
                     self.state
                         .apply_operations(vault_id, &tx.operations, height)

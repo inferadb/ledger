@@ -12,6 +12,7 @@ use crate::proto::health_service_server::HealthService;
 use crate::proto::{HealthCheckRequest, HealthCheckResponse, HealthStatus};
 use crate::types::LedgerTypeConfig;
 
+use inkwell::FileBackend;
 use ledger_storage::StateLayer;
 
 /// Health service implementation.
@@ -19,7 +20,7 @@ pub struct HealthServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
-    state: Arc<StateLayer>,
+    state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
 }
@@ -28,7 +29,7 @@ impl HealthServiceImpl {
     /// Create a new health service.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
         Self {

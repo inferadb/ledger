@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use inkwell::StorageBackend;
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId};
@@ -62,14 +63,14 @@ pub type Result<T> = std::result::Result<T, SystemError>;
 /// Service for reading from and writing to the `_system` namespace.
 ///
 /// All _system data is stored in namespace_id=0, vault_id=0.
-/// StateLayer is internally thread-safe via redb's MVCC.
-pub struct SystemNamespaceService {
-    state: Arc<StateLayer>,
+/// StateLayer is internally thread-safe via inkwell's MVCC.
+pub struct SystemNamespaceService<B: StorageBackend> {
+    state: Arc<StateLayer<B>>,
 }
 
-impl SystemNamespaceService {
+impl<B: StorageBackend> SystemNamespaceService<B> {
     /// Create a new system namespace service.
-    pub fn new(state: Arc<StateLayer>) -> Self {
+    pub fn new(state: Arc<StateLayer<B>>) -> Self {
         Self { state }
     }
 
@@ -81,7 +82,7 @@ impl SystemNamespaceService {
     ///
     /// If the counter doesn't exist, initializes it to `start_value`.
     pub fn next_sequence(&self, key: &str, start_value: i64) -> Result<i64> {
-        // StateLayer is internally thread-safe via redb MVCC
+        // StateLayer is internally thread-safe via inkwell MVCC
         // Read current value
         let current = match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
@@ -364,15 +365,14 @@ mod tests {
 
     use chrono::Utc;
 
-    use crate::StorageEngine;
+    use crate::engine::InMemoryStorageEngine;
 
     use super::super::types::NodeRole;
     use super::*;
 
-    fn create_test_service() -> SystemNamespaceService {
-        // Use StorageEngine which initializes all tables
-        let engine = StorageEngine::open_in_memory().unwrap();
-        let state = Arc::new(StateLayer::new(engine.db().clone()));
+    fn create_test_service() -> SystemNamespaceService<inkwell::InMemoryBackend> {
+        let engine = InMemoryStorageEngine::open().unwrap();
+        let state = Arc::new(StateLayer::new(engine.db()));
         SystemNamespaceService::new(state)
     }
 

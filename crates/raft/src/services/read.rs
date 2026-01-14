@@ -33,7 +33,9 @@ use crate::proto::{
     VerifiedReadResponse, WatchBlocksRequest,
 };
 
-use ledger_storage::{BlockArchive, SnapshotManager, StateLayer, StorageEngine};
+use inkwell::{Database, FileBackend};
+use ledger_storage::{BlockArchive, SnapshotManager, StateLayer};
+use tempfile::TempDir;
 
 use crate::IdempotencyCache;
 use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus};
@@ -43,11 +45,11 @@ use crate::types::{LedgerNodeId, LedgerTypeConfig};
 /// Read service implementation.
 pub struct ReadServiceImpl {
     /// The state layer for reading data.
-    state: Arc<StateLayer>,
+    state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Block archive for retrieving stored blocks.
-    block_archive: Option<Arc<BlockArchive>>,
+    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Snapshot manager for historical reads optimization.
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// Block announcement broadcast channel.
@@ -65,7 +67,7 @@ pub struct ReadServiceImpl {
 impl ReadServiceImpl {
     /// Create a new read service.
     pub fn new(
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
     ) -> Self {
@@ -84,9 +86,9 @@ impl ReadServiceImpl {
 
     /// Create a read service with block archive access.
     pub fn with_block_archive(
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
-        block_archive: Arc<BlockArchive>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
     ) -> Self {
         Self {
@@ -104,9 +106,9 @@ impl ReadServiceImpl {
 
     /// Create a read service with block archive and snapshot manager.
     pub fn with_snapshots(
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
-        block_archive: Arc<BlockArchive>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
         snapshot_manager: Arc<SnapshotManager>,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
     ) -> Self {
@@ -125,9 +127,9 @@ impl ReadServiceImpl {
 
     /// Create a read service with full configuration.
     pub fn with_idempotency(
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
-        block_archive: Option<Arc<BlockArchive>>,
+        block_archive: Option<Arc<BlockArchive<FileBackend>>>,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
         idempotency: Arc<IdempotencyCache>,
     ) -> Self {
@@ -146,9 +148,9 @@ impl ReadServiceImpl {
 
     /// Create a read service with full configuration including snapshots.
     pub fn with_full_config(
-        state: Arc<StateLayer>,
+        state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
-        block_archive: Option<Arc<BlockArchive>>,
+        block_archive: Option<Arc<BlockArchive<FileBackend>>>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
         idempotency: Option<Arc<IdempotencyCache>>,
@@ -225,7 +227,7 @@ impl ReadServiceImpl {
     /// Returns None if the block is not found or archive is not available.
     fn get_block_header(
         &self,
-        archive: &BlockArchive,
+        archive: &BlockArchive<FileBackend>,
         namespace_id: i64,
         vault_id: i64,
         vault_height: u64,
@@ -283,7 +285,7 @@ impl ReadServiceImpl {
     /// Returns (block_hash, state_root) or (None, None) if not found.
     fn get_tip_hashes(
         &self,
-        archive: &BlockArchive,
+        archive: &BlockArchive<FileBackend>,
         namespace_id: i64,
         vault_id: i64,
         vault_height: u64,
@@ -338,7 +340,7 @@ impl ReadServiceImpl {
         &self,
         vault_id: i64,
         target_height: u64,
-        temp_state: &StateLayer,
+        temp_state: &StateLayer<FileBackend>,
     ) -> (u64, bool) {
         let snapshot_manager = match &self.snapshot_manager {
             Some(sm) => sm,
@@ -425,7 +427,7 @@ impl ReadServiceImpl {
     /// - Any block in the range is not found
     fn build_chain_proof(
         &self,
-        archive: &BlockArchive,
+        archive: &BlockArchive<FileBackend>,
         namespace_id: i64,
         vault_id: i64,
         trusted_height: u64,
@@ -818,10 +820,14 @@ impl ReadService for ReadServiceImpl {
             )));
         }
 
-        // Create in-memory state layer for replay
-        let temp_engine = StorageEngine::open_in_memory()
-            .map_err(|e| Status::internal(format!("Failed to create temporary state: {}", e)))?;
-        let temp_state = StateLayer::new(temp_engine.db());
+        // Create temporary state layer for replay using temp directory
+        let temp_dir = TempDir::new()
+            .map_err(|e| Status::internal(format!("Failed to create temp dir: {}", e)))?;
+        let temp_db = Arc::new(
+            Database::<FileBackend>::create(temp_dir.path().join("replay.inkwell"))
+                .map_err(|e| Status::internal(format!("Failed to create temp db: {}", e)))?,
+        );
+        let temp_state = StateLayer::new(temp_db);
 
         // Track block timestamp for expiration check
         let mut block_timestamp = chrono::Utc::now();
