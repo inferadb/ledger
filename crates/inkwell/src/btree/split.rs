@@ -4,9 +4,9 @@
 //! The middle key is promoted to the parent, and entries are
 //! distributed between the original and new node.
 
-use crate::error::{PageId, Result};
+use super::node::{BranchNode, BranchNodeRef, LeafNode, LeafNodeRef};
+use crate::error::{Error, PageId, Result};
 use crate::page::Page;
-use super::node::{LeafNode, BranchNode, LeafNodeRef, BranchNodeRef};
 
 /// Result of splitting a leaf node.
 #[derive(Debug)]
@@ -97,6 +97,151 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
         new_page_id: new_page.id,
         separator_key,
     })
+}
+
+/// Split a leaf node with awareness of the key being inserted.
+///
+/// This finds a split point that ensures the new key can fit in the correct
+/// side based on B-tree ordering (key < separator goes left, key >= separator goes right).
+///
+/// # Arguments
+/// * `original` - The original leaf page (will be modified to contain left half)
+/// * `new_page` - A new empty page to use for the right half
+/// * `new_key` - The key that will be inserted after the split
+/// * `new_value` - The value that will be inserted after the split
+///
+/// # Returns
+/// The separator key (first key of new node) and page ID of new node.
+pub fn split_leaf_for_key(
+    original: &mut Page,
+    new_page: &mut Page,
+    new_key: &[u8],
+    new_value: &[u8],
+) -> Result<LeafSplitResult> {
+    // Collect all entries from original
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    {
+        let node = LeafNode::from_page(original)?;
+        let count = node.cell_count() as usize;
+        for i in 0..count {
+            let (k, v) = node.get(i);
+            entries.push((k.to_vec(), v.to_vec()));
+        }
+    }
+
+    // Handle edge case: empty leaf
+    if entries.is_empty() {
+        LeafNode::init(original);
+        LeafNode::init(new_page);
+        return Ok(LeafSplitResult {
+            new_page_id: new_page.id,
+            separator_key: Vec::new(),
+        });
+    }
+
+    // Helper function to test if a split point works
+    let try_split = |split_at: usize,
+                     separator_key: &[u8],
+                     entries: &[(Vec<u8>, Vec<u8>)],
+                     original: &mut Page,
+                     new_page: &mut Page,
+                     new_key: &[u8],
+                     new_value: &[u8]|
+     -> Result<bool> {
+        let new_key_goes_left = new_key < separator_key;
+
+        // Re-initialize pages
+        LeafNode::init(original);
+        LeafNode::init(new_page);
+
+        // Try to insert left half (entries[..split_at])
+        {
+            let mut left = LeafNode::from_page(original)?;
+            for (i, (key, value)) in entries[..split_at].iter().enumerate() {
+                if !left.can_insert(key, value) {
+                    return Ok(false);
+                }
+                left.insert(i, key, value);
+            }
+            // Check if new key would fit in left (if it goes there)
+            if new_key_goes_left && !left.can_insert(new_key, new_value) {
+                return Ok(false);
+            }
+        }
+
+        // Try to insert right half (entries[split_at..])
+        {
+            let mut right = LeafNode::from_page(new_page)?;
+            for (i, (key, value)) in entries[split_at..].iter().enumerate() {
+                if !right.can_insert(key, value) {
+                    return Ok(false);
+                }
+                right.insert(i, key, value);
+            }
+            // Check if new key would fit in right (if it goes there)
+            if !new_key_goes_left && !right.can_insert(new_key, new_value) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    };
+
+    // Try different split points to find one where the new key fits on the correct side.
+    // Start from middle and work outward to prefer balanced splits.
+    let mid = entries.len() / 2;
+    let max_offset = entries.len();
+
+    for offset in 0..=max_offset {
+        // Try split points at mid-offset and mid+offset
+        let candidates = [
+            mid.saturating_sub(offset),
+            (mid + offset).min(entries.len()),
+        ];
+
+        for &split_at in &candidates {
+            // Determine separator key based on split point
+            let separator_key: Vec<u8> = if split_at == 0 {
+                // All existing entries go right; separator is first existing key
+                // new_key must be < separator to go left (into empty left page)
+                if new_key >= entries[0].0.as_slice() {
+                    // new_key would go right, not useful for this case
+                    continue;
+                }
+                entries[0].0.clone()
+            } else if split_at >= entries.len() {
+                // All existing entries go left; new_key goes right
+                // separator is new_key itself (keys >= new_key go right)
+                if new_key <= entries[entries.len() - 1].0.as_slice() {
+                    // new_key would go left, not useful for this case
+                    continue;
+                }
+                new_key.to_vec()
+            } else {
+                // Normal case: separator is first key of right half
+                entries[split_at].0.clone()
+            };
+
+            if try_split(
+                split_at,
+                &separator_key,
+                &entries,
+                original,
+                new_page,
+                new_key,
+                new_value,
+            )? {
+                return Ok(LeafSplitResult {
+                    new_page_id: new_page.id,
+                    separator_key,
+                });
+            }
+        }
+    }
+
+    // If we couldn't find a valid split point, return an error
+    // This can happen with very large values that don't fit even in an empty page
+    Err(Error::PageFull)
 }
 
 /// Split a branch node, moving roughly half the entries to the new node.

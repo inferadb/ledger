@@ -102,7 +102,10 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         // StateLayer is internally thread-safe via inkwell MVCC
 
         // List all user entities in _system (vault_id = 0)
-        let entities = match self.state.list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10) {
+        let entities = match self
+            .state
+            .list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10)
+        {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Failed to list users");
@@ -149,7 +152,10 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         // Actually, namespace-level entities (members, teams) are stored with the namespace
         // For this implementation, we assume entities are in vault_id = 0 per namespace
 
-        let entities = match self.state.list_entities(0, Some("member:"), None, MAX_BATCH_SIZE) {
+        let entities = match self
+            .state
+            .list_entities(0, Some("member:"), None, MAX_BATCH_SIZE)
+        {
             Ok(e) => e,
             Err(e) => {
                 warn!(namespace_id, error = %e, "Failed to list memberships");

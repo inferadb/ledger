@@ -29,9 +29,9 @@ use crate::types::{
 
 use inkwell::{Database, FileBackend};
 use ledger_storage::{BlockArchive, StateLayer};
-use tempfile::TempDir;
 use ledger_types::{VaultEntry, ZERO_HASH};
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
 /// Admin service implementation.
 pub struct AdminServiceImpl {
@@ -98,12 +98,13 @@ impl AdminService for AdminServiceImpl {
             .map_err(ServiceError::raft)?;
 
         match result.data {
-            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                Ok(Response::new(CreateNamespaceResponse {
-                    namespace_id: Some(NamespaceId { id: namespace_id }),
-                    shard_id: Some(ShardId { id: shard_id }),
-                }))
-            }
+            LedgerResponse::NamespaceCreated {
+                namespace_id,
+                shard_id,
+            } => Ok(Response::new(CreateNamespaceResponse {
+                namespace_id: Some(NamespaceId { id: namespace_id }),
+                shard_id: Some(ShardId { id: shard_id }),
+            })),
             LedgerResponse::Error { message } => Err(Status::internal(message)),
             _ => Err(Status::internal("Unexpected response type")),
         }

@@ -94,7 +94,10 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
         // StateLayer is internally thread-safe via inkwell MVCC
         // List all entities including expired ones
-        match self.state.list_entities(vault_id, None, None, self.max_batch_size * 2) {
+        match self
+            .state
+            .list_entities(vault_id, None, None, self.max_batch_size * 2)
+        {
             Ok(entities) => entities
                 .into_iter()
                 .filter(|e| e.expires_at > 0 && e.expires_at < now)

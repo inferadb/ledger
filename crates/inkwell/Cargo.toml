@@ -23,6 +23,9 @@ memmap2 = { workspace = true }
 # Parking lot for faster locks
 parking_lot = { workspace = true }
 
+# Lock-free atomic pointer swap for COW
+arc-swap = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 

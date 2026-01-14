@@ -6,9 +6,9 @@
 //! - Seeking to a specific key
 //! - Range queries
 
+use super::node::SearchResult;
 use crate::error::{PageId, Result};
 use crate::page::Page;
-use super::node::SearchResult;
 
 /// Stack entry for tracking position during tree traversal.
 #[derive(Debug, Clone)]
@@ -205,8 +205,8 @@ pub enum SeekResult {
 /// and page data provided externally. The actual B-tree struct will use
 /// these to implement cursor operations.
 pub mod cursor_ops {
-    use super::*;
     use super::super::node::LeafNodeRef;
+    use super::*;
 
     /// Move to the first entry in a leaf node.
     pub fn move_to_first_in_leaf(position: &mut CursorPosition, page: &Page) -> Result<bool> {
@@ -240,7 +240,11 @@ pub mod cursor_ops {
     }
 
     /// Seek to a key within a leaf node.
-    pub fn seek_in_leaf(position: &mut CursorPosition, page: &Page, key: &[u8]) -> Result<SeekResult> {
+    pub fn seek_in_leaf(
+        position: &mut CursorPosition,
+        page: &Page,
+        key: &[u8],
+    ) -> Result<SeekResult> {
         let leaf = LeafNodeRef::from_page(page)?;
 
         let count = leaf.cell_count();

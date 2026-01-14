@@ -169,11 +169,10 @@ impl<B: StorageBackend> StateLayer<B> {
                         version: block_height,
                     };
 
-                    let encoded = postcard::to_allocvec(&entity).map_err(|e| {
-                        StateError::Serialization {
+                    let encoded =
+                        postcard::to_allocvec(&entity).map_err(|e| StateError::Serialization {
                             message: e.to_string(),
-                        }
-                    })?;
+                        })?;
 
                     txn.insert::<tables::Entities>(&storage_key, &encoded)
                         .context(InkwellSnafu)?;
@@ -238,11 +237,10 @@ impl<B: StorageBackend> StateLayer<B> {
                     if already_exists {
                         WriteStatus::AlreadyExists
                     } else {
-                        let encoded = postcard::to_allocvec(&rel).map_err(|e| {
-                            StateError::Serialization {
+                        let encoded =
+                            postcard::to_allocvec(&rel).map_err(|e| StateError::Serialization {
                                 message: e.to_string(),
-                            }
-                        })?;
+                            })?;
 
                         txn.insert::<tables::Relationships>(&storage_key, &encoded)
                             .context(InkwellSnafu)?;
@@ -468,8 +466,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 if key_bytes.len() < 9 {
                     continue;
                 }
-                let key_vault_id =
-                    i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
+                let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
                 if key_vault_id < vault_id {
                     continue;
                 }
@@ -485,11 +482,10 @@ impl<B: StorageBackend> StateLayer<B> {
                     break;
                 }
 
-                let entity: Entity = postcard::from_bytes(&value).map_err(|e| {
-                    StateError::Serialization {
+                let entity: Entity =
+                    postcard::from_bytes(&value).map_err(|e| StateError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 builder.add_entity(&entity);
             }
 
@@ -524,7 +520,9 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
     ) -> Result<Vec<String>> {
         let txn = self.db.read().context(InkwellSnafu)?;
-        Ok(IndexManager::get_subjects(&txn, vault_id, resource, relation)?)
+        Ok(IndexManager::get_subjects(
+            &txn, vault_id, resource, relation,
+        )?)
     }
 
     /// List resource-relation pairs for a given subject.
@@ -970,8 +968,15 @@ mod tests {
                 expires_at: None,
             }];
 
-            let statuses = state.apply_operations(vault_id, &ops, i as u64 + 1).unwrap();
-            assert_eq!(statuses, vec![WriteStatus::Created], "Failed to create key {}", i);
+            let statuses = state
+                .apply_operations(vault_id, &ops, i as u64 + 1)
+                .unwrap();
+            assert_eq!(
+                statuses,
+                vec![WriteStatus::Created],
+                "Failed to create key {}",
+                i
+            );
         }
 
         // Verify all keys are present
@@ -1025,7 +1030,9 @@ mod tests {
 
                     // Each write gets a unique block height
                     let block_height = (thread_id * writes_per_thread + i + 1) as u64;
-                    state.apply_operations(vault_id, &ops, block_height).unwrap();
+                    state
+                        .apply_operations(vault_id, &ops, block_height)
+                        .unwrap();
                 }
             });
             handles.push(handle);

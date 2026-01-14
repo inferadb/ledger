@@ -109,7 +109,11 @@ impl StorageBackend for FileBackend {
     fn write_header(&self, header: &[u8]) -> Result<()> {
         if header.len() != HEADER_SIZE {
             return Err(Error::Corrupted {
-                reason: format!("Invalid header size: {} (expected {})", header.len(), HEADER_SIZE),
+                reason: format!(
+                    "Invalid header size: {} (expected {})",
+                    header.len(),
+                    HEADER_SIZE
+                ),
             });
         }
 

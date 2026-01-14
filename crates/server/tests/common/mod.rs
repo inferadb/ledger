@@ -25,13 +25,13 @@ use openraft::Raft;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+use inkwell::FileBackend;
 use ledger_raft::LedgerTypeConfig;
 use ledger_raft::proto::JoinClusterRequest;
 use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_raft::{
     MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig, ShardGroup,
 };
-use inkwell::FileBackend;
 use ledger_storage::StateLayer;
 
 /// A test node in a cluster.
@@ -594,8 +594,8 @@ impl MultiShardTestCluster {
             }
 
             // Create and start the multi-shard gRPC server
-            let server = MultiShardLedgerServer::new(manager.clone(), addr)
-                .with_rate_limit(1000, 30); // High concurrency for tests
+            let server =
+                MultiShardLedgerServer::new(manager.clone(), addr).with_rate_limit(1000, 30); // High concurrency for tests
 
             let server_handle = tokio::spawn(async move {
                 if let Err(e) = server.serve().await {

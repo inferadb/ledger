@@ -73,7 +73,11 @@ impl StorageBackend for InMemoryBackend {
     fn write_header(&self, header: &[u8]) -> Result<()> {
         if header.len() != HEADER_SIZE {
             return Err(Error::Corrupted {
-                reason: format!("Invalid header size: {} (expected {})", header.len(), HEADER_SIZE),
+                reason: format!(
+                    "Invalid header size: {} (expected {})",
+                    header.len(),
+                    HEADER_SIZE
+                ),
             });
         }
 
@@ -173,14 +177,18 @@ mod tests {
         assert_eq!(backend.file_size().unwrap(), HEADER_SIZE as u64);
 
         // Write page 0
-        backend.write_page(0, &vec![0u8; DEFAULT_PAGE_SIZE]).unwrap();
+        backend
+            .write_page(0, &vec![0u8; DEFAULT_PAGE_SIZE])
+            .unwrap();
         assert_eq!(
             backend.file_size().unwrap(),
             HEADER_SIZE as u64 + DEFAULT_PAGE_SIZE as u64
         );
 
         // Write page 10 (should extend)
-        backend.write_page(10, &vec![0u8; DEFAULT_PAGE_SIZE]).unwrap();
+        backend
+            .write_page(10, &vec![0u8; DEFAULT_PAGE_SIZE])
+            .unwrap();
         assert_eq!(
             backend.file_size().unwrap(),
             HEADER_SIZE as u64 + (11 * DEFAULT_PAGE_SIZE) as u64

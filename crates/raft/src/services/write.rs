@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use openraft::Raft;
+use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
@@ -38,6 +39,16 @@ pub struct WriteServiceImpl {
     rate_limiter: Option<Arc<NamespaceRateLimiter>>,
     /// Accessor for applied state (client sequences for gap detection).
     applied_state: Option<AppliedStateAccessor>,
+    /// Mutex to serialize Raft proposals.
+    ///
+    /// OpenRaft has a race condition when multiple concurrent proposals are
+    /// submitted - the replication logic may try to read log entries before
+    /// they are appended. Serializing proposals prevents this issue.
+    ///
+    /// This is a temporary workaround; proper solution is application-level
+    /// batching where multiple write requests are collected and submitted
+    /// as a single Raft entry.
+    proposal_mutex: Arc<Mutex<()>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -50,6 +61,7 @@ impl WriteServiceImpl {
             block_archive: None,
             rate_limiter: None,
             applied_state: None,
+            proposal_mutex: Arc::new(Mutex::new(())),
         }
     }
 
@@ -65,6 +77,7 @@ impl WriteServiceImpl {
             block_archive: Some(block_archive),
             rate_limiter: None,
             applied_state: None,
+            proposal_mutex: Arc::new(Mutex::new(())),
         }
     }
 
@@ -393,13 +406,15 @@ impl WriteService for WriteServiceImpl {
             sequence,
         )?;
 
-        // Submit to Raft
+        // Submit to Raft (serialized to prevent concurrent proposal race condition)
         metrics::record_raft_proposal();
+        let _guard = self.proposal_mutex.lock().await;
         let result = self.raft.client_write(ledger_request).await.map_err(|e| {
             warn!(error = %e, "Raft write failed");
             metrics::record_write(false, start.elapsed().as_secs_f64());
             Status::internal(format!("Raft error: {}", e))
         })?;
+        drop(_guard);
 
         // Extract response
         let response = result.data;
@@ -598,13 +613,15 @@ impl WriteService for WriteServiceImpl {
             sequence,
         )?;
 
-        // Submit to Raft
+        // Submit to Raft (serialized to prevent concurrent proposal race condition)
         metrics::record_raft_proposal();
+        let _guard = self.proposal_mutex.lock().await;
         let result = self.raft.client_write(ledger_request).await.map_err(|e| {
             warn!(error = %e, "Raft batch write failed");
             metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
             Status::internal(format!("Raft error: {}", e))
         })?;
+        drop(_guard);
 
         // Extract response
         let response = result.data;

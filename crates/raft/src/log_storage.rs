@@ -26,7 +26,9 @@ use openraft::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root};
+use ledger_types::{
+    Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root,
+};
 
 use crate::types::{
     BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
@@ -34,8 +36,8 @@ use crate::types::{
 };
 
 // Re-export storage types used in this module
+use ledger_storage::system::{NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys};
 use ledger_storage::{BlockArchive, StateError, StateLayer};
-use ledger_storage::system::{NamespaceRegistry, NamespaceStatus, SystemKeys, SYSTEM_VAULT_ID};
 
 // ============================================================================
 // Metadata Keys
@@ -664,7 +666,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         namespace_id,
                         name: name.clone(),
                         shard_id: assigned_shard,
-                        member_nodes: vec![],  // TODO: populate from cluster membership
+                        member_nodes: vec![], // TODO: populate from cluster membership
                         status: NamespaceStatus::Active,
                         config_version: 1,
                         created_at: chrono::Utc::now(),
@@ -921,6 +923,81 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
 
         Ok(entries)
     }
+
+    /// Get log entries for replication.
+    ///
+    /// OpenRaft contract: this must not return empty for non-empty range.
+    /// If entries are purged, return error to trigger snapshot replication.
+    /// If entries are not yet written (race condition), wait for them.
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
+        // Quick path: if range is empty, return empty
+        if start >= end {
+            return Ok(Vec::new());
+        }
+
+        // Retry loop for transient conditions (entries not yet visible)
+        // OpenRaft may try to replicate entries before they're fully appended,
+        // especially under high concurrent load. We retry with exponential backoff.
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 500; // 5 seconds max wait
+        const RETRY_DELAY_MS: u64 = 10;
+
+        loop {
+            let entries = self.try_get_log_entries(start..end).await?;
+
+            // Success: got entries
+            if !entries.is_empty() {
+                return Ok(entries);
+            }
+
+            // Empty result - check if purged
+            let last_purged = *self.last_purged_cache.read();
+            let purged_idx = last_purged.map(|l| l.index).unwrap_or(0);
+
+            // If entries were purged, return error (need snapshot replication)
+            if start <= purged_idx {
+                return Err(StorageError::IO {
+                    source: openraft::StorageIOError::read_logs(&openraft::AnyError::error(
+                        format!(
+                            "Log entries [{}, {}) purged (last_purged={}), need snapshot",
+                            start, end, purged_idx
+                        ),
+                    )),
+                });
+            }
+
+            // Not purged - might be a race condition, retry
+            attempts += 1;
+            if attempts >= MAX_ATTEMPTS {
+                // Give up and return error - something is seriously wrong
+                let last_idx = self
+                    .get_last_entry()
+                    .ok()
+                    .flatten()
+                    .map(|e| e.log_id.index)
+                    .unwrap_or(0);
+                return Err(StorageError::IO {
+                    source: openraft::StorageIOError::read_logs(&openraft::AnyError::error(
+                        format!(
+                            "Log entries [{}, {}) not found after {}ms (last={}, purged={})",
+                            start,
+                            end,
+                            attempts * RETRY_DELAY_MS as u32,
+                            last_idx,
+                            purged_idx
+                        ),
+                    )),
+                });
+            }
+
+            // Wait briefly for entries to appear
+            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+        }
+    }
 }
 
 // ============================================================================
@@ -1023,6 +1100,15 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     where
         I: IntoIterator<Item = Entry<LedgerTypeConfig>> + OptionalSend,
     {
+        let entries: Vec<_> = entries.into_iter().collect();
+        if entries.is_empty() {
+            tracing::debug!("append_to_log called with empty entries");
+            return Ok(());
+        }
+
+        let indices: Vec<u64> = entries.iter().map(|e| e.log_id.index).collect();
+        tracing::info!("append_to_log: appending entries {:?}", indices);
+
         let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
 
         for entry in entries {
@@ -1033,7 +1119,16 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 .map_err(|e| to_storage_error(&e))?;
         }
 
-        write_txn.commit().map_err(|e| to_storage_error(&e))?;
+        write_txn.commit().map_err(|e| {
+            tracing::error!(
+                "append_to_log: commit failed for entries {:?}: {:?}",
+                indices,
+                e
+            );
+            to_storage_error(&e)
+        })?;
+
+        tracing::info!("append_to_log: committed entries {:?}", indices);
         Ok(())
     }
 
@@ -1404,7 +1499,9 @@ mod tests {
         // Verify database can be read (tables exist in inkwell by default)
         let read_txn = store.db.read().expect("begin read");
         // Tables are fixed in inkwell - just verify we can get a transaction
-        let _ = read_txn.get::<tables::RaftLog>(&0u64).expect("query RaftLog");
+        let _ = read_txn
+            .get::<tables::RaftLog>(&0u64)
+            .expect("query RaftLog");
         let _ = read_txn
             .get::<tables::RaftState>(&"test".to_string())
             .expect("query RaftState");
@@ -1714,8 +1811,10 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+            .expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+            .expect("open store b");
 
         // Same sequence of requests to apply
         let requests = vec![
@@ -1818,8 +1917,10 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+            .expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+            .expect("open store b");
 
         // Apply same sequence on both nodes
         let mut state_a = store_a.applied_state.write();
@@ -1861,8 +1962,10 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+            .expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+            .expect("open store b");
 
         // Same inputs must produce same hash
         let hash_a = store_a.compute_block_hash(1, 2, 3);
@@ -1886,8 +1989,10 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+            .expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+            .expect("open store b");
 
         let mut state_a = store_a.applied_state.write();
         let mut state_b = store_b.applied_state.write();
@@ -1934,8 +2039,10 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell")).expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell")).expect("open store b");
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+            .expect("open store a");
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+            .expect("open store b");
 
         let mut state_a = store_a.applied_state.write();
         let mut state_b = store_b.applied_state.write();
@@ -2355,7 +2462,8 @@ mod tests {
         // Create target store (simulating a new follower)
         let target_dir = tempdir().expect("create target dir");
         let mut target_store =
-            RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.inkwell")).expect("open target");
+            RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.inkwell"))
+                .expect("open target");
 
         // Verify initial state is empty
         assert_eq!(target_store.current_shard_height(), 0);
@@ -2453,7 +2561,8 @@ mod tests {
 
         // Fresh node
         let dir = tempdir().expect("create dir");
-        let mut store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.inkwell")).expect("open");
+        let mut store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft.inkwell")).expect("open");
 
         // Verify initial state is empty
         assert_eq!(store.current_shard_height(), 0);
@@ -2534,6 +2643,11 @@ mod tests {
             .try_get_log_entries(50u64..=75u64)
             .await
             .expect("read partial");
-        assert_eq!(partial.len(), 26, "Expected 26 entries, got {}", partial.len());
+        assert_eq!(
+            partial.len(),
+            26,
+            "Expected 26 entries, got {}",
+            partial.len()
+        );
     }
 }

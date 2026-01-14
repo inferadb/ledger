@@ -121,7 +121,8 @@ struct CacheEntry {
     member_nodes: Vec<String>,
     /// Hint for current leader (may be stale).
     leader_hint: Option<String>,
-    /// Configuration version for invalidation.
+    /// Configuration version for invalidation (reserved for future use).
+    #[allow(dead_code)]
     config_version: u64,
     /// When this entry was cached.
     cached_at: Instant,
@@ -515,7 +516,11 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn create_test_router() -> (ShardRouter<FileBackend>, Arc<StateLayer<FileBackend>>, TempDir) {
+    fn create_test_router() -> (
+        ShardRouter<FileBackend>,
+        Arc<StateLayer<FileBackend>>,
+        TempDir,
+    ) {
         let temp_dir = TempDir::new().expect("create temp dir");
         let db = Arc::new(
             Database::<FileBackend>::create(temp_dir.path().join("test.inkwell"))

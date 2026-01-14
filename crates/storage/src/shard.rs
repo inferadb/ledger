@@ -305,8 +305,8 @@ impl<B: StorageBackend> ShardManager<B> {
 
             // Collect entities (this is expensive but necessary for snapshot)
             let txn = self.db.read().context(InkwellSnafu)?;
-            let entities = EntityStore::list_in_vault(&txn, vault_id, usize::MAX, 0)
-                .context(EntitySnafu)?;
+            let entities =
+                EntityStore::list_in_vault(&txn, vault_id, usize::MAX, 0).context(EntitySnafu)?;
 
             vault_states.push(VaultSnapshotMeta::new(
                 vault_id,

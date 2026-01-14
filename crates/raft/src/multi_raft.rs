@@ -554,7 +554,11 @@ impl MultiRaftManager {
         &self,
         shard_id: ShardId,
         shard_dir: &PathBuf,
-    ) -> Result<(Arc<StateLayer<FileBackend>>, Arc<BlockArchive<FileBackend>>, RaftLogStore<FileBackend>)> {
+    ) -> Result<(
+        Arc<StateLayer<FileBackend>>,
+        Arc<BlockArchive<FileBackend>>,
+        RaftLogStore<FileBackend>,
+    )> {
         // Open or create state database using inkwell
         let state_db_path = shard_dir.join("state.inkwell");
         let state_db = if state_db_path.exists() {

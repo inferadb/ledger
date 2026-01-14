@@ -99,7 +99,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         // StateLayer is internally thread-safe via inkwell MVCC
 
         // List all entities with saga: prefix in _system (vault_id=0)
-        let entities = match self.state.list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000) {
+        let entities = match self
+            .state
+            .list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000)
+        {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Failed to list sagas");
@@ -284,12 +287,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 let user_key = format!("user:{}", saga.input.user_id);
 
                 // Read current user value (StateLayer is internally thread-safe)
-                let user_entity = self
-                    .state
-                    .get_entity(0, user_key.as_bytes())
-                    .context(StateReadSnafu {
-                        entity_type: "User".to_string(),
-                    })?;
+                let user_entity =
+                    self.state
+                        .get_entity(0, user_key.as_bytes())
+                        .context(StateReadSnafu {
+                            entity_type: "User".to_string(),
+                        })?;
 
                 if let Some(entity) = user_entity {
                     let mut user_data: serde_json::Value = serde_json::from_slice(&entity.value)

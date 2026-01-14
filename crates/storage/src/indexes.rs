@@ -268,14 +268,8 @@ mod tests {
         {
             let mut txn = db.write().expect("begin write");
 
-            IndexManager::add_to_obj_index(
-                &mut txn,
-                vault_id,
-                "doc:123",
-                "viewer",
-                "user:alice",
-            )
-            .expect("add");
+            IndexManager::add_to_obj_index(&mut txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("add");
             IndexManager::add_to_obj_index(&mut txn, vault_id, "doc:123", "viewer", "user:bob")
                 .expect("add");
             txn.commit().expect("commit");
@@ -328,22 +322,10 @@ mod tests {
         {
             let mut txn = db.write().expect("begin write");
 
-            IndexManager::add_to_subj_index(
-                &mut txn,
-                vault_id,
-                "doc:123",
-                "viewer",
-                "user:alice",
-            )
-            .expect("add");
-            IndexManager::add_to_subj_index(
-                &mut txn,
-                vault_id,
-                "doc:456",
-                "editor",
-                "user:alice",
-            )
-            .expect("add");
+            IndexManager::add_to_subj_index(&mut txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("add");
+            IndexManager::add_to_subj_index(&mut txn, vault_id, "doc:456", "editor", "user:alice")
+                .expect("add");
             txn.commit().expect("commit");
         }
 
@@ -351,8 +333,7 @@ mod tests {
         {
             let txn = db.read().expect("begin read");
 
-            let resources =
-                IndexManager::get_resources(&txn, vault_id, "user:alice").expect("get");
+            let resources = IndexManager::get_resources(&txn, vault_id, "user:alice").expect("get");
             assert_eq!(resources.len(), 2);
             assert!(resources.contains(&("doc:123".to_string(), "viewer".to_string())));
             assert!(resources.contains(&("doc:456".to_string(), "editor".to_string())));
@@ -377,8 +358,7 @@ mod tests {
         {
             let txn = db.read().expect("begin read");
 
-            let resources =
-                IndexManager::get_resources(&txn, vault_id, "user:alice").expect("get");
+            let resources = IndexManager::get_resources(&txn, vault_id, "user:alice").expect("get");
             assert_eq!(resources.len(), 1);
             assert!(resources.contains(&("doc:456".to_string(), "editor".to_string())));
         }
@@ -417,22 +397,10 @@ mod tests {
         {
             let mut txn = db.write().expect("begin write");
 
-            IndexManager::add_to_obj_index(
-                &mut txn,
-                vault_id,
-                "doc:123",
-                "viewer",
-                "user:alice",
-            )
-            .expect("add");
-            IndexManager::add_to_obj_index(
-                &mut txn,
-                vault_id,
-                "doc:123",
-                "viewer",
-                "user:alice",
-            )
-            .expect("add");
+            IndexManager::add_to_obj_index(&mut txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("add");
+            IndexManager::add_to_obj_index(&mut txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("add");
             txn.commit().expect("commit");
         }
 

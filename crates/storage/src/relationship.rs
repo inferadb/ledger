@@ -44,11 +44,10 @@ impl RelationshipStore {
             .context(StorageSnafu)?
         {
             Some(data) => {
-                let relationship = postcard::from_bytes(&data).map_err(|e| {
-                    RelationshipError::Serialization {
+                let relationship =
+                    postcard::from_bytes(&data).map_err(|e| RelationshipError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 Ok(Some(relationship))
             }
             None => Ok(None),
@@ -154,11 +153,10 @@ impl RelationshipStore {
                 if relationships.len() >= limit {
                     break;
                 }
-                let rel = postcard::from_bytes(&value).map_err(|e| {
-                    RelationshipError::Serialization {
+                let rel =
+                    postcard::from_bytes(&value).map_err(|e| RelationshipError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 relationships.push(rel);
             }
             count += 1;
@@ -219,11 +217,10 @@ impl RelationshipStore {
 
             // Check if it matches our resource prefix
             if local_key.starts_with(rel_prefix.as_bytes()) {
-                let rel = postcard::from_bytes(&value).map_err(|e| {
-                    RelationshipError::Serialization {
+                let rel =
+                    postcard::from_bytes(&value).map_err(|e| RelationshipError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 relationships.push(rel);
 
                 if relationships.len() >= limit {

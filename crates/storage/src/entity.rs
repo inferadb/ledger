@@ -35,7 +35,10 @@ impl EntityStore {
     ) -> Result<Option<Entity>> {
         let storage_key = encode_storage_key(vault_id, key);
 
-        match txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)? {
+        match txn
+            .get::<tables::Entities>(&storage_key)
+            .context(StorageSnafu)?
+        {
             Some(data) => {
                 let entity =
                     postcard::from_bytes(&data).map_err(|e| EntityError::Serialization {
@@ -102,9 +105,7 @@ impl EntityStore {
         let mut entities = Vec::new();
 
         // Iterate over all entries in the Entities table
-        let iter = txn
-            .iter::<tables::Entities>()
-            .context(StorageSnafu)?;
+        let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
 
         let mut count = 0;
         for (key_bytes, value) in iter {
@@ -124,11 +125,10 @@ impl EntityStore {
                 if entities.len() >= limit {
                     break;
                 }
-                let entity = postcard::from_bytes(&value).map_err(|e| {
-                    EntityError::Serialization {
+                let entity =
+                    postcard::from_bytes(&value).map_err(|e| EntityError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 entities.push(entity);
             }
             count += 1;
@@ -148,9 +148,7 @@ impl EntityStore {
         let _prefix = bucket_prefix(vault_id, bucket_id);
         let mut entities = Vec::new();
 
-        let iter = txn
-            .iter::<tables::Entities>()
-            .context(StorageSnafu)?;
+        let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
 
         for (key_bytes, value) in iter {
             // Check we're in the right vault and bucket
@@ -175,10 +173,8 @@ impl EntityStore {
                 break;
             }
 
-            let entity = postcard::from_bytes(&value).map_err(|e| {
-                EntityError::Serialization {
-                    message: e.to_string(),
-                }
+            let entity = postcard::from_bytes(&value).map_err(|e| EntityError::Serialization {
+                message: e.to_string(),
             })?;
             entities.push(entity);
         }
@@ -194,9 +190,7 @@ impl EntityStore {
         let prefix = vault_prefix(vault_id);
         let mut count = 0;
 
-        let iter = txn
-            .iter::<tables::Entities>()
-            .context(StorageSnafu)?;
+        let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
 
         for (key_bytes, _) in iter {
             if key_bytes.len() < 8 || key_bytes[..8] != prefix[..] {
@@ -221,9 +215,7 @@ impl EntityStore {
         let prefix = vault_prefix(vault_id);
         let mut entities = Vec::new();
 
-        let iter = txn
-            .iter::<tables::Entities>()
-            .context(StorageSnafu)?;
+        let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
 
         for (key_bytes, value) in iter {
             // Check we're still in the same vault
@@ -242,11 +234,10 @@ impl EntityStore {
 
             // Check prefix match
             if local_key.starts_with(key_prefix) {
-                let entity = postcard::from_bytes(&value).map_err(|e| {
-                    EntityError::Serialization {
+                let entity =
+                    postcard::from_bytes(&value).map_err(|e| EntityError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 entities.push(entity);
 
                 if entities.len() >= limit {
@@ -308,8 +299,7 @@ mod tests {
         {
             let mut txn = db.write().expect("begin write");
 
-            let deleted =
-                EntityStore::delete(&mut txn, vault_id, b"test_key").expect("delete");
+            let deleted = EntityStore::delete(&mut txn, vault_id, b"test_key").expect("delete");
             assert!(deleted);
             txn.commit().expect("commit");
         }

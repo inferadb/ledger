@@ -246,11 +246,10 @@ impl<B: StorageBackend> BlockArchive<B> {
             .context(InkwellSnafu)?
         {
             Some(data) => {
-                let block = postcard::from_bytes(&data).map_err(|e| {
-                    BlockArchiveError::Serialization {
+                let block =
+                    postcard::from_bytes(&data).map_err(|e| BlockArchiveError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 Ok(block)
             }
             None => Err(BlockArchiveError::BlockNotFound {
@@ -342,11 +341,10 @@ impl<B: StorageBackend> BlockArchive<B> {
                 break;
             }
 
-            let block = postcard::from_bytes(&value).map_err(|e| {
-                BlockArchiveError::Serialization {
+            let block =
+                postcard::from_bytes(&value).map_err(|e| BlockArchiveError::Serialization {
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             blocks.push(block);
         }
 
@@ -427,11 +425,10 @@ impl<B: StorageBackend> BlockArchive<B> {
             }
 
             // Deserialize the block
-            let mut block: ShardBlock = postcard::from_bytes(&value).map_err(|e| {
-                BlockArchiveError::Serialization {
+            let mut block: ShardBlock =
+                postcard::from_bytes(&value).map_err(|e| BlockArchiveError::Serialization {
                     message: e.to_string(),
-                }
-            })?;
+                })?;
 
             // Check if it needs compaction (has non-empty transactions)
             let needs_compaction = block
@@ -457,11 +454,10 @@ impl<B: StorageBackend> BlockArchive<B> {
             let mut txn = self.db.write().context(InkwellSnafu)?;
 
             for (height, block) in &blocks_to_compact {
-                let encoded = postcard::to_allocvec(block).map_err(|e| {
-                    BlockArchiveError::Serialization {
+                let encoded =
+                    postcard::to_allocvec(block).map_err(|e| BlockArchiveError::Serialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
 
                 txn.insert::<tables::Blocks>(height, &encoded)
                     .context(InkwellSnafu)?;

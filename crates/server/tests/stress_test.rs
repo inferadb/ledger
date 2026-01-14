@@ -53,8 +53,8 @@ mod common;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{MultiShardTestCluster, TestCluster};
@@ -93,7 +93,7 @@ impl Default for StressConfig {
             read_workers: 16,
             duration: Duration::from_secs(30),
             batch_size: 10,
-            read_batch_size: 50,  // BatchRead for higher throughput
+            read_batch_size: 50, // BatchRead for higher throughput
             namespace_id: 1,
             vault_id: 1,
             max_concurrent_writes: 50,
@@ -168,7 +168,10 @@ struct StressMetrics {
 ///
 /// For namespace_id=0 (system namespace), the namespace already exists,
 /// so we only create the vault. For other namespaces, we create both.
-async fn setup_namespace_and_vault(leader_addr: SocketAddr, config: &StressConfig) -> Result<(), String> {
+async fn setup_namespace_and_vault(
+    leader_addr: SocketAddr,
+    config: &StressConfig,
+) -> Result<(), String> {
     let endpoint = format!("http://{}", leader_addr);
     let mut admin_client =
         ledger_raft::proto::admin_service_client::AdminServiceClient::connect(endpoint.clone())
@@ -189,7 +192,9 @@ async fn setup_namespace_and_vault(leader_addr: SocketAddr, config: &StressConfi
 
     // Create vault (replication_factor=1 for test simplicity)
     let vault_request = ledger_raft::proto::CreateVaultRequest {
-        namespace_id: Some(ledger_raft::proto::NamespaceId { id: config.namespace_id }),
+        namespace_id: Some(ledger_raft::proto::NamespaceId {
+            id: config.namespace_id,
+        }),
         replication_factor: 1,
         initial_nodes: vec![],
         retention_policy: None,
@@ -260,7 +265,12 @@ async fn setup_multi_shard_namespaces(
         let vault_response = admin_client
             .create_vault(vault_request)
             .await
-            .map_err(|e| format!("Failed to create vault in namespace {}: {}", namespace_id, e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to create vault in namespace {}: {}",
+                    namespace_id, e
+                )
+            })?;
 
         let vault_id = vault_response
             .into_inner()
@@ -285,9 +295,7 @@ impl StressMetrics {
 
     fn record_write(&self, latency: Duration, key: String, value: Vec<u8>) {
         self.write_count.fetch_add(1, Ordering::Relaxed);
-        self.write_latencies
-            .lock()
-            .push(latency.as_micros() as u64);
+        self.write_latencies.lock().push(latency.as_micros() as u64);
         self.written_values.lock().insert(key, value);
     }
 
@@ -301,9 +309,7 @@ impl StressMetrics {
         vault_id: i64,
     ) {
         self.write_count.fetch_add(1, Ordering::Relaxed);
-        self.write_latencies
-            .lock()
-            .push(latency.as_micros() as u64);
+        self.write_latencies.lock().push(latency.as_micros() as u64);
         self.written_values_with_location.lock().insert(
             key,
             WrittenValue {
@@ -359,7 +365,10 @@ impl StressMetrics {
         println!("\n╔══════════════════════════════════════════════════════════════╗");
         println!("║                    STRESS TEST RESULTS                       ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║ Duration: {:>10.2}s                                       ║", secs);
+        println!(
+            "║ Duration: {:>10.2}s                                       ║",
+            secs
+        );
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║                         WRITES                               ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
@@ -381,7 +390,10 @@ impl StressMetrics {
             "║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║",
             w_p50, w_p95, w_p99
         );
-        println!("║   max: {:>8}                                              ║", w_max);
+        println!(
+            "║   max: {:>8}                                              ║",
+            w_max
+        );
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║                          READS                               ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
@@ -403,7 +415,10 @@ impl StressMetrics {
             "║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║",
             r_p50, r_p95, r_p99
         );
-        println!("║   max: {:>8}                                              ║", r_max);
+        println!(
+            "║   max: {:>8}                                              ║",
+            r_max
+        );
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║                    DESIGN.md TARGETS                         ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
@@ -419,12 +434,20 @@ impl StressMetrics {
         println!(
             "║ Write p99 <50ms:   {:>5}ms  │  Target: 50ms    │  {}  ║",
             w_p99 / 1000,
-            if write_latency_pass { "✅ PASS" } else { "❌ FAIL" }
+            if write_latency_pass {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            }
         );
         println!(
             "║ Read p99 <2ms:     {:>5}ms  │  Target: 2ms     │  {}  ║",
             r_p99 / 1000,
-            if read_latency_pass { "✅ PASS" } else { "❌ FAIL" }
+            if read_latency_pass {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            }
         );
         println!(
             "║ Write throughput:  {:>5.0}/s  │  Target: 5000/s  │  {}  ║",
@@ -512,19 +535,17 @@ async fn write_worker(
             // Build BatchWriteRequest with operations grouped
             let operations: Vec<ledger_raft::proto::BatchWriteOperation> = keys_and_values
                 .iter()
-                .map(|(key, value)| {
-                    ledger_raft::proto::BatchWriteOperation {
-                        operations: vec![ledger_raft::proto::Operation {
-                            op: Some(ledger_raft::proto::operation::Op::SetEntity(
-                                ledger_raft::proto::SetEntity {
-                                    key: key.clone(),
-                                    value: value.clone(),
-                                    expires_at: None,
-                                    condition: None,
-                                },
-                            )),
-                        }],
-                    }
+                .map(|(key, value)| ledger_raft::proto::BatchWriteOperation {
+                    operations: vec![ledger_raft::proto::Operation {
+                        op: Some(ledger_raft::proto::operation::Op::SetEntity(
+                            ledger_raft::proto::SetEntity {
+                                key: key.clone(),
+                                value: value.clone(),
+                                expires_at: None,
+                                condition: None,
+                            },
+                        )),
+                    }],
                 })
                 .collect();
 
@@ -551,9 +572,8 @@ async fn write_worker(
                         Some(ledger_raft::proto::batch_write_response::Result::Success(_)) => {
                             // Record all operations in the batch with amortized latency.
                             // The batch latency divided by batch_size gives per-operation latency.
-                            let per_op_latency = Duration::from_nanos(
-                                latency.as_nanos() as u64 / batch_size as u64
-                            );
+                            let per_op_latency =
+                                Duration::from_nanos(latency.as_nanos() as u64 / batch_size as u64);
                             for (key, value) in keys_and_values {
                                 if config.track_write_locations {
                                     metrics.record_write_with_location(
@@ -800,9 +820,8 @@ async fn read_worker(
                     let latency = start.elapsed();
                     let batch_size = response.into_inner().results.len();
                     // Record amortized latency per read
-                    let per_read_latency = Duration::from_nanos(
-                        latency.as_nanos() as u64 / batch_size.max(1) as u64
-                    );
+                    let per_read_latency =
+                        Duration::from_nanos(latency.as_nanos() as u64 / batch_size.max(1) as u64);
                     for _ in 0..batch_size {
                         metrics.record_read(per_read_latency);
                     }
@@ -817,7 +836,7 @@ async fn read_worker(
                         // NOT_FOUND counts as successful reads
                         let latency = start.elapsed();
                         let per_read_latency = Duration::from_nanos(
-                            latency.as_nanos() as u64 / read_batch_size as u64
+                            latency.as_nanos() as u64 / read_batch_size as u64,
                         );
                         for _ in 0..read_batch_size {
                             metrics.record_read(per_read_latency);
@@ -871,10 +890,9 @@ async fn verify_consistency(
     println!("\n🔍 Verifying consistency of written values...");
 
     let endpoint = format!("http://{}", leader_addr);
-    let mut client =
-        ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint)
-            .await
-            .map_err(|e| format!("Failed to connect for verification: {}", e))?;
+    let mut client = ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint)
+        .await
+        .map_err(|e| format!("Failed to connect for verification: {}", e))?;
 
     let written = metrics.written_values.lock().clone();
     let total = written.len();
@@ -957,7 +975,10 @@ async fn verify_consistency(
             mismatches, sample_size
         ))
     } else {
-        println!("  ✅ All {} sampled keys verified successfully", sample_size);
+        println!(
+            "  ✅ All {} sampled keys verified successfully",
+            sample_size
+        );
         Ok(())
     }
 }
@@ -973,10 +994,9 @@ async fn verify_multi_shard_consistency(
     println!("\n🔍 Verifying consistency across all shards...");
 
     let endpoint = format!("http://{}", leader_addr);
-    let mut client =
-        ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint)
-            .await
-            .map_err(|e| format!("Failed to connect for verification: {}", e))?;
+    let mut client = ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint)
+        .await
+        .map_err(|e| format!("Failed to connect for verification: {}", e))?;
 
     let written = metrics.written_values_with_location.lock().clone();
     let total = written.len();
@@ -1064,7 +1084,10 @@ async fn verify_multi_shard_consistency(
         }
     }
 
-    println!("\r  Verified {}/{} keys ({} from {} total)       ", verified, sample_size, sample_size, total);
+    println!(
+        "\r  Verified {}/{} keys ({} from {} total)       ",
+        verified, sample_size, sample_size, total
+    );
 
     if mismatches > 0 {
         Err(format!(
@@ -1072,7 +1095,10 @@ async fn verify_multi_shard_consistency(
             mismatches, sample_size
         ))
     } else {
-        println!("  ✅ All {} sampled keys verified successfully across all shards", sample_size);
+        println!(
+            "  ✅ All {} sampled keys verified successfully across all shards",
+            sample_size
+        );
         Ok(())
     }
 }
@@ -1114,7 +1140,10 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, config: StressCo
         eprintln!("   ⚠️ Setup failed (may already exist): {}", e);
         // Continue anyway - they might already exist
     } else {
-        println!("   ✅ Namespace {} and vault {} created", config.namespace_id, config.vault_id);
+        println!(
+            "   ✅ Namespace {} and vault {} created",
+            config.namespace_id, config.vault_id
+        );
     }
 
     // Metrics and control
@@ -1242,8 +1271,8 @@ async fn test_stress_single_node() {
     run_stress_test_with_cluster_size(
         1, // Single node - no replication
         StressConfig {
-            write_workers: 2,  // Multiple writers now that RwLock contention is fixed
-            read_workers: 4,   // Multiple readers - StateLayer is internally thread-safe via inkwell MVCC
+            write_workers: 2, // Multiple writers now that RwLock contention is fixed
+            read_workers: 4, // Multiple readers - StateLayer is internally thread-safe via inkwell MVCC
             duration: Duration::from_secs(10),
             batch_size: 1,
             max_concurrent_writes: 20,
@@ -1271,10 +1300,10 @@ async fn test_stress_batched() {
     run_stress_test_with_cluster_size(
         3, // 3-node cluster for realistic Raft consensus
         StressConfig {
-            write_workers: 4,   // Multiple writers
-            read_workers: 8,    // Multiple readers
+            write_workers: 4, // Multiple writers
+            read_workers: 8,  // Multiple readers
             duration: Duration::from_secs(10),
-            batch_size: 50,     // 50 operations per batch - amortizes consensus overhead
+            batch_size: 50, // 50 operations per batch - amortizes consensus overhead
             max_concurrent_writes: 50,
             max_concurrent_reads: 500,
             ..Default::default()
@@ -1290,10 +1319,10 @@ async fn test_stress_read_throughput() {
     run_stress_test_with_cluster_size(
         3, // 3-node cluster - reads distributed across all nodes
         StressConfig {
-            write_workers: 2,    // Minimal writers (just to have data)
-            read_workers: 32,    // Many read workers to saturate
+            write_workers: 2, // Minimal writers (just to have data)
+            read_workers: 32, // Many read workers to saturate
             duration: Duration::from_secs(10),
-            batch_size: 10,      // Batch writes to create data quickly
+            batch_size: 10, // Batch writes to create data quickly
             max_concurrent_writes: 20,
             max_concurrent_reads: 2000, // Very high read concurrency
             ..Default::default()
@@ -1388,14 +1417,21 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     println!("\n🚀 Starting Multi-Shard Stress Test (PARALLEL WRITES)");
     println!("   Nodes: {}", num_nodes);
     println!("   Data shards: {}", num_shards);
-    println!("   Write workers: {} ({} per shard)", config.write_workers, config.write_workers / num_shards.max(1));
+    println!(
+        "   Write workers: {} ({} per shard)",
+        config.write_workers,
+        config.write_workers / num_shards.max(1)
+    );
     println!("   Read workers: {}", config.read_workers);
     println!("   Duration: {:?}", config.duration);
     println!("   Batch size: {}", config.batch_size);
     println!();
 
     // Start multi-shard cluster
-    println!("📦 Creating {}-node, {}-shard cluster...", num_nodes, num_shards);
+    println!(
+        "📦 Creating {}-node, {}-shard cluster...",
+        num_nodes, num_shards
+    );
     let cluster = MultiShardTestCluster::new(num_nodes, num_shards).await;
 
     // Wait for all shards to have leaders
@@ -1438,7 +1474,10 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 
     // Spawn write workers - DISTRIBUTED ACROSS SHARDS
     // Each worker is assigned to a specific shard to enable parallel consensus
-    println!("🔥 Spawning {} write workers across {} shards...", config.write_workers, num_shards);
+    println!(
+        "🔥 Spawning {} write workers across {} shards...",
+        config.write_workers, num_shards
+    );
     let mut handles = Vec::new();
     for i in 0..config.write_workers {
         // Distribute workers round-robin across shards
@@ -1512,7 +1551,10 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 
     // Report metrics - reuse existing report() for detailed output
     let actual_duration = start.elapsed();
-    println!("\n📊 Multi-Shard Stress Test Results ({} nodes, {} shards)", num_nodes, num_shards);
+    println!(
+        "\n📊 Multi-Shard Stress Test Results ({} nodes, {} shards)",
+        num_nodes, num_shards
+    );
     metrics.report(actual_duration);
 
     // Verify consistency across all shards - reads from each key's recorded namespace/vault
@@ -1544,11 +1586,18 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     // Report multi-shard specific summary
     println!("\n🎯 Multi-Shard Summary:");
     println!("   Shards: {} data shards + 1 system shard", num_shards);
-    println!("   Per-shard throughput: {:.0} ops/sec", ops_per_sec / num_shards as f64);
+    println!(
+        "   Per-shard throughput: {:.0} ops/sec",
+        ops_per_sec / num_shards as f64
+    );
     println!("   Total throughput: {:.0} ops/sec", ops_per_sec);
     println!(
         "   Target (5000 ops/sec): {}",
-        if ops_per_sec >= 5000.0 { "✅ PASS" } else { "❌ FAIL" }
+        if ops_per_sec >= 5000.0 {
+            "✅ PASS"
+        } else {
+            "❌ FAIL"
+        }
     );
 }
 
@@ -1561,14 +1610,14 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_stress_multi_shard_quick() {
     run_multi_shard_stress_test(
-        1,  // Single node for speed
-        2,  // 2 data shards (system shard handles namespace_id=0)
+        1, // Single node for speed
+        2, // 2 data shards (system shard handles namespace_id=0)
         StressConfig {
             write_workers: 4,
             read_workers: 8,
             duration: Duration::from_secs(5),
             batch_size: 10,
-            namespace_id: 0,  // System namespace - routes to system shard
+            namespace_id: 0, // System namespace - routes to system shard
             vault_id: 1,
             max_concurrent_writes: 50,
             max_concurrent_reads: 200,
@@ -1587,15 +1636,15 @@ async fn test_stress_multi_shard_quick() {
 #[ignore] // Slower to start, run manually
 async fn test_stress_multi_shard() {
     run_multi_shard_stress_test(
-        1,  // Single node
-        4,  // 4 data shards (not yet used for writes)
+        1, // Single node
+        4, // 4 data shards (not yet used for writes)
         StressConfig {
             write_workers: 16,
             read_workers: 32,
             duration: Duration::from_secs(30),
             batch_size: 20,
             read_batch_size: 100,
-            namespace_id: 0,  // System namespace for now
+            namespace_id: 0, // System namespace for now
             vault_id: 1,
             max_concurrent_writes: 200,
             max_concurrent_reads: 1000,
@@ -1620,18 +1669,144 @@ async fn test_stress_multi_shard_target() {
     // Current: All writes to system shard (~1000 ops/sec with batching)
     // Future: Distribute namespaces across shards for parallel writes
     run_multi_shard_stress_test(
-        1,   // Single node (multi-node adds network latency)
-        8,   // 8 data shards (for future parallel writes)
+        1, // Single node (multi-node adds network latency)
+        8, // 8 data shards (for future parallel writes)
         StressConfig {
             write_workers: 32,
             read_workers: 64,
             duration: Duration::from_secs(60),
-            batch_size: 50,      // Large batches to amortize consensus
+            batch_size: 50, // Large batches to amortize consensus
             read_batch_size: 100,
-            namespace_id: 0,     // System namespace for now
+            namespace_id: 0, // System namespace for now
             vault_id: 1,
             max_concurrent_writes: 400,
             max_concurrent_reads: 2000,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Debug test for batch_write issue - single worker
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_stress_batch_single_worker() {
+    run_stress_test_with_cluster_size(
+        3, // 3-node cluster
+        StressConfig {
+            write_workers: 1, // Single writer to isolate issue
+            read_workers: 1,
+            duration: Duration::from_secs(5),
+            batch_size: 10,           // Small batch
+            max_concurrent_writes: 1, // One at a time
+            max_concurrent_reads: 10,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Test batch_write with multiple workers but serialized (one at a time)
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_stress_batch_serialized() {
+    run_stress_test_with_cluster_size(
+        3, // 3-node cluster
+        StressConfig {
+            write_workers: 4, // Multiple writers
+            read_workers: 4,
+            duration: Duration::from_secs(5),
+            batch_size: 10,           // Batch of 10 ops
+            max_concurrent_writes: 1, // But only ONE write at a time
+            max_concurrent_reads: 50,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Test batch_write with smaller batch size
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_stress_batch_small() {
+    run_stress_test_with_cluster_size(
+        3, // 3-node cluster
+        StressConfig {
+            write_workers: 4,
+            read_workers: 4,
+            duration: Duration::from_secs(5),
+            batch_size: 5, // Small batch - 5 ops per Raft entry
+            max_concurrent_writes: 10,
+            max_concurrent_reads: 50,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Test batch_write with medium batch size (10)
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_stress_batch_medium_10() {
+    run_stress_test_with_cluster_size(
+        3,
+        StressConfig {
+            write_workers: 4,
+            read_workers: 4,
+            duration: Duration::from_secs(5),
+            batch_size: 10,
+            max_concurrent_writes: 10,
+            max_concurrent_reads: 50,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Test batch_write with medium batch size (14)
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_stress_batch_medium_14() {
+    run_stress_test_with_cluster_size(
+        3,
+        StressConfig {
+            write_workers: 4,
+            read_workers: 4,
+            duration: Duration::from_secs(5),
+            batch_size: 14,
+            max_concurrent_writes: 10,
+            max_concurrent_reads: 50,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Test batch_write with medium batch size (15)
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_stress_batch_medium_15() {
+    run_stress_test_with_cluster_size(
+        3,
+        StressConfig {
+            write_workers: 4,
+            read_workers: 4,
+            duration: Duration::from_secs(5),
+            batch_size: 15,
+            max_concurrent_writes: 10,
+            max_concurrent_reads: 50,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Test batch_write with medium batch size (20)
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_stress_batch_medium_20() {
+    run_stress_test_with_cluster_size(
+        3,
+        StressConfig {
+            write_workers: 4,
+            read_workers: 4,
+            duration: Duration::from_secs(5),
+            batch_size: 20,
+            max_concurrent_writes: 10,
+            max_concurrent_reads: 50,
             ..Default::default()
         },
     )

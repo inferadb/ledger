@@ -18,9 +18,9 @@ pub mod split;
 
 use crate::error::{Error, PageId, PageType, Result};
 use crate::page::Page;
-use cursor::{Range, RangeIterState, SeekResult, cursor_ops};
+use cursor::{cursor_ops, Range, RangeIterState, SeekResult};
 use node::{BranchNode, LeafNode, SearchResult};
-use split::{split_leaf, split_branch};
+use split::{split_branch, split_leaf_for_key};
 
 /// Trait for providing page operations to the B-tree.
 ///
@@ -207,7 +207,8 @@ impl<P: PageProvider> BTree<P> {
                             } else {
                                 // Need to split
                                 drop(leaf);
-                                return self.insert_and_split_leaf(&mut page, key, value, old_value);
+                                return self
+                                    .insert_and_split_leaf(&mut page, key, value, old_value);
                             }
                         }
                         drop(leaf);
@@ -276,7 +277,13 @@ impl<P: PageProvider> BTree<P> {
                     } else {
                         // Branch is full, need to split
                         drop(branch);
-                        self.insert_and_split_branch(&mut page, &sep_key, child_page_id, new_child, old_value)
+                        self.insert_and_split_branch(
+                            &mut page,
+                            &sep_key,
+                            child_page_id,
+                            new_child,
+                            old_value,
+                        )
                     }
                 } else {
                     // No split needed
@@ -291,6 +298,9 @@ impl<P: PageProvider> BTree<P> {
     }
 
     /// Insert into leaf and split if necessary.
+    ///
+    /// This uses a key-aware split strategy: we find a split point that ensures
+    /// the new key can fit in the correct side (based on ordering).
     fn insert_and_split_leaf(
         &mut self,
         page: &mut Page,
@@ -301,48 +311,27 @@ impl<P: PageProvider> BTree<P> {
         // Allocate new page for right half
         let mut new_page = self.new_leaf_page();
 
-        // Do the split
-        let split_result = split_leaf(page, &mut new_page)?;
+        // Use key-aware split that ensures the new key will fit
+        let split_result = split_leaf_for_key(page, &mut new_page, key, value)?;
 
-        // Now insert the new key into the appropriate half
-        // Prefer the side based on key ordering, but fall back to the other side if needed
-        let prefer_left = key < split_result.separator_key.as_slice();
+        // Now insert the new key into the appropriate half based on ordering
+        let insert_left = key < split_result.separator_key.as_slice();
 
-        // Try preferred side first, fall back to other side if no space
-        let (target_page, fallback_page) = if prefer_left {
-            (page as &mut Page, &mut new_page as &mut Page)
+        if insert_left {
+            let mut leaf = LeafNode::from_page(page)?;
+            match leaf.search(key) {
+                SearchResult::NotFound(idx) => {
+                    leaf.insert(idx, key, value);
+                }
+                SearchResult::Found(_) => {}
+            }
         } else {
-            (&mut new_page as &mut Page, page as &mut Page)
-        };
-
-        // Check if preferred side has space
-        {
-            let leaf = LeafNode::from_page(target_page)?;
-            if leaf.can_insert(key, value) {
-                drop(leaf);
-                let mut leaf = LeafNode::from_page(target_page)?;
-                match leaf.search(key) {
-                    SearchResult::NotFound(idx) => {
-                        leaf.insert(idx, key, value);
-                    }
-                    SearchResult::Found(_) => {}
+            let mut leaf = LeafNode::from_page(&mut new_page)?;
+            match leaf.search(key) {
+                SearchResult::NotFound(idx) => {
+                    leaf.insert(idx, key, value);
                 }
-            } else {
-                // Try fallback side
-                drop(leaf);
-                let mut leaf = LeafNode::from_page(fallback_page)?;
-                if leaf.can_insert(key, value) {
-                    match leaf.search(key) {
-                        SearchResult::NotFound(idx) => {
-                            leaf.insert(idx, key, value);
-                        }
-                        SearchResult::Found(_) => {}
-                    }
-                } else {
-                    // Neither side has space - this shouldn't happen with proper splitting
-                    // but handle gracefully by returning an error
-                    return Err(Error::PageFull);
-                }
+                SearchResult::Found(_) => {}
             }
         }
 
@@ -350,7 +339,10 @@ impl<P: PageProvider> BTree<P> {
         self.provider.write_page(page.clone());
         self.provider.write_page(new_page);
 
-        Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
+        Ok((
+            Some((split_result.separator_key, split_result.new_page_id)),
+            old_value,
+        ))
     }
 
     /// Insert into branch and split if necessary.
@@ -421,7 +413,10 @@ impl<P: PageProvider> BTree<P> {
         self.provider.write_page(page.clone());
         self.provider.write_page(new_page);
 
-        Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
+        Ok((
+            Some((split_result.separator_key, split_result.new_page_id)),
+            old_value,
+        ))
     }
 
     /// Delete a key from the tree.
@@ -632,7 +627,9 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             let result = cursor_ops::seek_in_leaf(&mut self.state.position, page, key)?;
 
             // If excluded bound, advance past it
-            if matches!(&self.state.range.start, cursor::Bound::Excluded(_)) && result == SeekResult::Found {
+            if matches!(&self.state.range.start, cursor::Bound::Excluded(_))
+                && result == SeekResult::Found
+            {
                 self.advance()?;
             }
         } else {
@@ -773,7 +770,10 @@ mod tests {
 
     impl PageProvider for TestPageProvider {
         fn read_page(&self, page_id: PageId) -> Result<Page> {
-            self.pages.get(&page_id).cloned().ok_or(Error::PageNotFound { page_id })
+            self.pages
+                .get(&page_id)
+                .cloned()
+                .ok_or(Error::PageNotFound { page_id })
         }
 
         fn write_page(&mut self, page: Page) {
@@ -886,8 +886,8 @@ mod tests {
 
     #[test]
     fn test_range_iteration_cross_leaf() {
-        use byteorder::{BigEndian, ByteOrder};
         use super::cursor::Range;
+        use byteorder::{BigEndian, ByteOrder};
 
         let mut tree = make_tree();
 
