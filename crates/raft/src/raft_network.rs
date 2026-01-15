@@ -3,11 +3,12 @@
 //! This module implements the `RaftNetwork` trait for OpenRaft, enabling
 //! inter-node communication for vote requests, log replication, and snapshots.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use openraft::error::{Fatal, RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable};
+use parking_lot::RwLock;
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
@@ -38,14 +39,14 @@ impl std::error::Error for NetworkError {}
 #[derive(Clone)]
 pub struct GrpcRaftNetwork {
     /// Cached gRPC clients for peer nodes.
-    clients: Arc<DashMap<LedgerNodeId, RaftServiceClient<Channel>>>,
+    clients: Arc<RwLock<HashMap<LedgerNodeId, RaftServiceClient<Channel>>>>,
 }
 
 impl GrpcRaftNetwork {
     /// Create a new gRPC Raft network.
     pub fn new() -> Self {
         Self {
-            clients: Arc::new(DashMap::new()),
+            clients: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -55,12 +56,12 @@ impl GrpcRaftNetwork {
         target: LedgerNodeId,
         node: &BasicNode,
     ) -> Result<RaftServiceClient<Channel>, NetworkError> {
-        // Check cache first
-        if let Some(client) = self.clients.get(&target) {
-            return Ok(client.clone());
+        // Check cache first (brief read lock)
+        if let Some(client) = self.clients.read().get(&target).cloned() {
+            return Ok(client);
         }
 
-        // Create new connection
+        // Create new connection (outside lock)
         let endpoint = format!("http://{}", node.addr);
         let channel = Channel::from_shared(endpoint.clone())
             .map_err(|e| NetworkError(format!("Invalid endpoint: {}", e)))?
@@ -69,7 +70,7 @@ impl GrpcRaftNetwork {
             .map_err(|e| NetworkError(format!("Connection failed: {}", e)))?;
 
         let client = RaftServiceClient::new(channel);
-        self.clients.insert(target, client.clone());
+        self.clients.write().insert(target, client.clone());
         Ok(client)
     }
 }
@@ -196,7 +197,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         let entries: Vec<Vec<u8>> = rpc
             .entries
             .iter()
-            .map(|e| bincode::serialize(e).unwrap_or_default())
+            .map(|e| postcard::to_allocvec(e).unwrap_or_default())
             .collect();
 
         let request = crate::proto::RaftAppendEntriesRequest {

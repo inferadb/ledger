@@ -198,8 +198,8 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let bytes = bincode::serialize(&user).unwrap();
-        let deserialized: User = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&user).unwrap();
+        let deserialized: User = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(user.id, deserialized.id);
         assert_eq!(user.name, deserialized.name);
     }
@@ -216,8 +216,8 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let bytes = bincode::serialize(&registry).unwrap();
-        let deserialized: NamespaceRegistry = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&registry).unwrap();
+        let deserialized: NamespaceRegistry = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(registry.namespace_id, deserialized.namespace_id);
         assert_eq!(registry.name, deserialized.name);
     }

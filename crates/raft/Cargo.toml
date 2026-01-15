@@ -27,13 +27,12 @@ tower.workspace = true
 tokio.workspace = true
 
 # Concurrency
-dashmap.workspace = true
 parking_lot.workspace = true
+moka.workspace = true
 
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-bincode.workspace = true
 postcard.workspace = true
 
 # Error handling

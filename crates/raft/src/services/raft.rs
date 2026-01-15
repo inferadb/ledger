@@ -110,7 +110,7 @@ impl RaftService for RaftServiceImpl {
         let entries: Vec<_> = req
             .entries
             .iter()
-            .filter_map(|bytes| bincode::deserialize(bytes).ok())
+            .filter_map(|bytes| postcard::from_bytes(bytes).ok())
             .collect();
 
         // Convert proto to OpenRaft types

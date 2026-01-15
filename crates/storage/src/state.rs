@@ -7,10 +7,11 @@
 //!
 //! Per DESIGN.md: State layer separates commitment (merkleized) from storage (fast K/V).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use inkwell::{Database, StorageBackend, tables};
+use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus};
@@ -81,7 +82,7 @@ pub struct StateLayer<B: StorageBackend> {
     /// Shared database handle.
     db: Arc<Database<B>>,
     /// Per-vault commitment tracking.
-    vault_commitments: DashMap<VaultId, VaultCommitment>,
+    vault_commitments: RwLock<HashMap<VaultId, VaultCommitment>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -90,16 +91,20 @@ impl<B: StorageBackend> StateLayer<B> {
     pub fn new(db: Arc<Database<B>>) -> Self {
         Self {
             db,
-            vault_commitments: DashMap::new(),
+            vault_commitments: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Get or create commitment tracking for a vault.
-    fn get_or_create_commitment(
-        &self,
-        vault_id: VaultId,
-    ) -> dashmap::mapref::one::RefMut<'_, VaultId, VaultCommitment> {
-        self.vault_commitments.entry(vault_id).or_default()
+    /// Execute a function with mutable access to a vault's commitment.
+    ///
+    /// Creates the commitment if it doesn't exist.
+    fn with_commitment<F, R>(&self, vault_id: VaultId, f: F) -> R
+    where
+        F: FnOnce(&mut VaultCommitment) -> R,
+    {
+        let mut map = self.vault_commitments.write();
+        let commitment = map.entry(vault_id).or_default();
+        f(commitment)
     }
 
     /// Apply a batch of operations to a vault's state.
@@ -295,10 +300,11 @@ impl<B: StorageBackend> StateLayer<B> {
         txn.commit().context(InkwellSnafu)?;
 
         // Mark dirty buckets
-        let mut commitment = self.get_or_create_commitment(vault_id);
-        for key in dirty_keys {
-            commitment.mark_dirty_by_key(&key);
-        }
+        self.with_commitment(vault_id, |commitment| {
+            for key in &dirty_keys {
+                commitment.mark_dirty_by_key(key);
+            }
+        });
 
         Ok(statuses)
     }
@@ -395,7 +401,7 @@ impl<B: StorageBackend> StateLayer<B> {
         txn.commit().context(InkwellSnafu)?;
 
         // Reset commitment tracking for this vault
-        self.vault_commitments.remove(&vault_id);
+        self.vault_commitments.write().remove(&vault_id);
 
         Ok(())
     }
@@ -445,16 +451,28 @@ impl<B: StorageBackend> StateLayer<B> {
     /// This scans only the dirty buckets and recomputes their roots,
     /// then returns SHA-256(bucket_roots[0..256]).
     pub fn compute_state_root(&self, vault_id: VaultId) -> Result<Hash> {
-        let mut commitment = self.get_or_create_commitment(vault_id);
+        // First check if dirty and get the dirty buckets list (brief read lock)
+        let dirty_buckets: Vec<u8> = {
+            let map = self.vault_commitments.read();
+            match map.get(&vault_id) {
+                Some(commitment) if commitment.is_dirty() => {
+                    commitment.dirty_buckets().iter().copied().collect()
+                }
+                Some(commitment) => {
+                    // Not dirty, return cached state root
+                    return Ok(commitment.compute_state_root());
+                }
+                None => {
+                    // No commitment yet, create default and return its state root
+                    drop(map);
+                    return Ok(self.with_commitment(vault_id, |c| c.compute_state_root()));
+                }
+            }
+        };
 
-        if !commitment.is_dirty() {
-            return Ok(commitment.compute_state_root());
-        }
-
+        // Compute bucket roots outside the commitment lock
         let txn = self.db.read().context(InkwellSnafu)?;
-
-        // Recompute each dirty bucket
-        let dirty_buckets: Vec<u8> = commitment.dirty_buckets().iter().copied().collect();
+        let mut bucket_roots: Vec<(u8, Hash)> = Vec::with_capacity(dirty_buckets.len());
 
         for bucket in dirty_buckets {
             let _prefix = bucket_prefix(vault_id, bucket);
@@ -489,12 +507,17 @@ impl<B: StorageBackend> StateLayer<B> {
                 builder.add_entity(&entity);
             }
 
-            let bucket_root = builder.finalize();
-            commitment.set_bucket_root(bucket, bucket_root);
+            bucket_roots.push((bucket, builder.finalize()));
         }
 
-        commitment.clear_dirty();
-        Ok(commitment.compute_state_root())
+        // Update commitment with computed bucket roots (brief write lock)
+        Ok(self.with_commitment(vault_id, |commitment| {
+            for (bucket, root) in bucket_roots {
+                commitment.set_bucket_root(bucket, root);
+            }
+            commitment.clear_dirty();
+            commitment.compute_state_root()
+        }))
     }
 
     /// Load bucket roots from stored vault metadata.
@@ -502,12 +525,14 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Called during startup/recovery to restore commitment state.
     pub fn load_vault_commitment(&self, vault_id: VaultId, bucket_roots: [Hash; NUM_BUCKETS]) {
         self.vault_commitments
+            .write()
             .insert(vault_id, VaultCommitment::from_bucket_roots(bucket_roots));
     }
 
     /// Get the current bucket roots for a vault (for persistence).
     pub fn get_bucket_roots(&self, vault_id: VaultId) -> Option<[Hash; NUM_BUCKETS]> {
         self.vault_commitments
+            .read()
             .get(&vault_id)
             .map(|c| *c.bucket_roots())
     }
@@ -663,7 +688,7 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
-            vault_commitments: DashMap::new(), // Each clone starts fresh
+            vault_commitments: RwLock::new(HashMap::new()), // Each clone starts fresh
         }
     }
 }

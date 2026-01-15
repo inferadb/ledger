@@ -397,8 +397,8 @@ pub fn record_learner_voter_error(voter_id: u64, error_type: &str) {
 
 // Metric names for serialization timing
 const SERIALIZATION_PROTO_DECODE: &str = "ledger_serialization_proto_decode_seconds";
-const SERIALIZATION_BINCODE_ENCODE: &str = "ledger_serialization_bincode_encode_seconds";
-const SERIALIZATION_BINCODE_DECODE: &str = "ledger_serialization_bincode_decode_seconds";
+const SERIALIZATION_POSTCARD_ENCODE: &str = "ledger_serialization_postcard_encode_seconds";
+const SERIALIZATION_POSTCARD_DECODE: &str = "ledger_serialization_postcard_decode_seconds";
 const SERIALIZATION_BYTES: &str = "ledger_serialization_bytes";
 
 /// Record proto decoding latency (gRPC request → internal types).
@@ -411,24 +411,24 @@ pub fn record_proto_decode(latency_secs: f64, operation: &str) {
         .record(latency_secs);
 }
 
-/// Record bincode encoding latency (internal types → Raft log).
+/// Record postcard encoding latency (internal types → Raft log).
 ///
 /// This measures serialization time when appending entries to the Raft log.
-/// Per DESIGN.md architecture: internal types are bincode-serialized for
+/// Per DESIGN.md architecture: internal types are postcard-serialized for
 /// efficient storage in Inkwell.
 #[inline]
-pub fn record_bincode_encode(latency_secs: f64, entry_type: &str) {
-    histogram!(SERIALIZATION_BINCODE_ENCODE, "entry_type" => entry_type.to_string())
+pub fn record_postcard_encode(latency_secs: f64, entry_type: &str) {
+    histogram!(SERIALIZATION_POSTCARD_ENCODE, "entry_type" => entry_type.to_string())
         .record(latency_secs);
 }
 
-/// Record bincode decoding latency (Raft log → internal types).
+/// Record postcard decoding latency (Raft log → internal types).
 ///
 /// This measures deserialization time when reading entries from the Raft log,
 /// used during log replay and snapshot restoration.
 #[inline]
-pub fn record_bincode_decode(latency_secs: f64, entry_type: &str) {
-    histogram!(SERIALIZATION_BINCODE_DECODE, "entry_type" => entry_type.to_string())
+pub fn record_postcard_decode(latency_secs: f64, entry_type: &str) {
+    histogram!(SERIALIZATION_POSTCARD_DECODE, "entry_type" => entry_type.to_string())
         .record(latency_secs);
 }
 

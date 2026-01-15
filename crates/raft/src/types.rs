@@ -363,8 +363,8 @@ mod tests {
             shard_id: Some(1),
         };
 
-        let bytes = bincode::serialize(&request).expect("serialize");
-        let deserialized: LedgerRequest = bincode::deserialize(&bytes).expect("deserialize");
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
             LedgerRequest::CreateNamespace { name, shard_id } => {
@@ -391,8 +391,8 @@ mod tests {
             email: "alice@example.com".to_string(),
         };
 
-        let bytes = bincode::serialize(&request).expect("serialize");
-        let deserialized: SystemRequest = bincode::deserialize(&bytes).expect("deserialize");
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
             SystemRequest::CreateUser { name, email } => {

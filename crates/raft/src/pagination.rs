@@ -78,7 +78,7 @@ impl PageTokenCodec {
     pub fn encode(&self, token: &PageToken) -> String {
         // Serialize the token
         let token_bytes =
-            bincode::serialize(token).expect("PageToken serialization should not fail");
+            postcard::to_allocvec(token).expect("PageToken serialization should not fail");
 
         // Compute HMAC
         let mut mac =
@@ -99,7 +99,7 @@ impl PageTokenCodec {
 
         // Serialize and base64 encode
         let bytes =
-            bincode::serialize(&encoded).expect("EncodedToken serialization should not fail");
+            postcard::to_allocvec(&encoded).expect("EncodedToken serialization should not fail");
         URL_SAFE_NO_PAD.encode(&bytes)
     }
 
@@ -117,11 +117,11 @@ impl PageTokenCodec {
 
         // Deserialize
         let encoded_token: EncodedToken =
-            bincode::deserialize(&bytes).map_err(|_| PageTokenError::InvalidFormat)?;
+            postcard::from_bytes(&bytes).map_err(|_| PageTokenError::InvalidFormat)?;
 
         // Verify HMAC
         let token_bytes =
-            bincode::serialize(&encoded_token.token).map_err(|_| PageTokenError::InvalidFormat)?;
+            postcard::to_allocvec(&encoded_token.token).map_err(|_| PageTokenError::InvalidFormat)?;
 
         let mut mac =
             <Hmac<Sha256>>::new_from_slice(&self.key).expect("HMAC key length should be valid");

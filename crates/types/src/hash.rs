@@ -316,40 +316,16 @@ pub fn bucket_id(key: &[u8]) -> u8 {
 ///
 /// Per DESIGN.md: binary merkle tree where each leaf is SHA-256(tx).
 /// Returns EMPTY_HASH for an empty transaction list.
+///
+/// Uses the same rs_merkle implementation as other merkle operations
+/// for consistency across the codebase.
 pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
     if transactions.is_empty() {
         return EMPTY_HASH;
     }
 
     let leaves: Vec<Hash> = transactions.iter().map(tx_hash).collect();
-    merkle_root(&leaves)
-}
-
-/// Compute a binary Merkle root from a list of hashes.
-///
-/// Uses Bitcoin-style padding: if odd number of nodes, duplicate the last one.
-fn merkle_root(hashes: &[Hash]) -> Hash {
-    debug_assert!(!hashes.is_empty(), "merkle_root called with empty hashes");
-
-    if hashes.len() == 1 {
-        return hashes[0];
-    }
-
-    // Pad to even length by duplicating last hash
-    let mut level = hashes.to_vec();
-    if level.len() % 2 == 1 {
-        // Safety: We returned early above if len == 1, so len >= 2 here, thus last() is Some
-        #[allow(clippy::expect_used)]
-        level.push(*level.last().expect("non-empty: len >= 2"));
-    }
-
-    // Compute parent level: each pair becomes SHA-256(left || right)
-    let parents: Vec<Hash> = level
-        .chunks(2)
-        .map(|pair| sha256_concat(&[pair[0], pair[1]]))
-        .collect();
-
-    merkle_root(&parents)
+    crate::merkle::merkle_root(&leaves)
 }
 
 /// Compute a deterministic hash for a vault entry's cryptographic commitments.
@@ -596,8 +572,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_merkle_root_three_pads() {
-        // Three txs should pad to 4 by duplicating the last one
+    fn test_tx_merkle_root_three_consistent_with_merkle_module() {
+        // Verify tx merkle root uses the same implementation as merkle.rs
         let tx1 = Transaction {
             id: [1u8; 16],
             client_id: "c".to_string(),
@@ -625,15 +601,11 @@ mod tests {
 
         let root = compute_tx_merkle_root(&[tx1.clone(), tx2.clone(), tx3.clone()]);
 
-        // Level 0: [h1, h2, h3, h3] (padded)
-        // Level 1: [SHA(h1||h2), SHA(h3||h3)]
-        // Level 2: SHA(level1[0] || level1[1])
+        // Should be consistent with merkle.rs implementation
         let h1 = tx_hash(&tx1);
         let h2 = tx_hash(&tx2);
         let h3 = tx_hash(&tx3);
-        let l1_0 = sha256_concat(&[h1, h2]);
-        let l1_1 = sha256_concat(&[h3, h3]);
-        let expected = sha256_concat(&[l1_0, l1_1]);
+        let expected = crate::merkle::merkle_root(&[h1, h2, h3]);
 
         assert_eq!(root, expected);
     }

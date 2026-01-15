@@ -23,7 +23,6 @@ seahash.workspace = true
 zstd.workspace = true
 
 # Concurrency
-dashmap.workspace = true
 parking_lot.workspace = true
 
 # Caching
@@ -32,7 +31,6 @@ lru.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-bincode.workspace = true
 postcard.workspace = true
 
 # Error handling

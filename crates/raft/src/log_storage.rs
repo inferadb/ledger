@@ -373,7 +373,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Page size for Raft log storage.
     ///
     /// Using 16KB pages (vs default 4KB) to allow larger batch sizes.
-    /// A batch of 100 operations typically serializes to ~8-12KB with bincode.
+    /// A batch of 100 operations typically serializes to ~8-12KB with postcard.
     /// Max supported: 64KB. Minimum: 512 bytes (must be power of 2).
     pub const RAFT_PAGE_SIZE: usize = 16 * 1024; // 16KB
 
@@ -473,7 +473,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let vote: Vote<LedgerNodeId> =
-                bincode::deserialize(&vote_data).map_err(|e| to_serde_error(&e))?;
+                postcard::from_bytes(&vote_data).map_err(|e| to_serde_error(&e))?;
             *self.vote_cache.write() = Some(vote);
         }
 
@@ -483,7 +483,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let purged: LogId<LedgerNodeId> =
-                bincode::deserialize(&purged_data).map_err(|e| to_serde_error(&e))?;
+                postcard::from_bytes(&purged_data).map_err(|e| to_serde_error(&e))?;
             *self.last_purged_cache.write() = Some(purged);
         }
 
@@ -493,7 +493,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let state: AppliedState =
-                bincode::deserialize(&state_data).map_err(|e| to_serde_error(&e))?;
+                postcard::from_bytes(&state_data).map_err(|e| to_serde_error(&e))?;
             // Restore shard chain tracking from persisted state
             *self.shard_height.write() = state.shard_height;
             *self.previous_shard_hash.write() = state.previous_shard_hash;
@@ -514,7 +514,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let entry: Entry<LedgerTypeConfig> =
-                bincode::deserialize(&entry_data).map_err(|e| to_serde_error(&e))?;
+                postcard::from_bytes(&entry_data).map_err(|e| to_serde_error(&e))?;
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -910,7 +910,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
     /// Persist the applied state.
     fn save_applied_state(&self, state: &AppliedState) -> Result<(), StorageError<LedgerNodeId>> {
-        let state_data = bincode::serialize(state).map_err(|e| to_serde_error(&e))?;
+        let state_data = postcard::to_allocvec(state).map_err(|e| to_serde_error(&e))?;
         let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
         write_txn
             .insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &state_data)
@@ -960,7 +960,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
         for (_, entry_data) in iter {
             total_bytes += entry_data.len();
             let entry: Entry<LedgerTypeConfig> =
-                bincode::deserialize(&entry_data).map_err(|e| to_serde_error(&e))?;
+                postcard::from_bytes(&entry_data).map_err(|e| to_serde_error(&e))?;
             entries.push(entry);
         }
 
@@ -969,7 +969,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             let deserialize_secs = deserialize_start.elapsed().as_secs_f64();
             // Record per-entry average to make metrics comparable to encode path
             let per_entry_secs = deserialize_secs / entries.len() as f64;
-            metrics::record_bincode_decode(per_entry_secs, "raft_entry");
+            metrics::record_postcard_decode(per_entry_secs, "raft_entry");
             metrics::record_serialization_bytes(total_bytes / entries.len(), "decode", "raft_entry");
         }
 
@@ -1066,7 +1066,7 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
     async fn build_snapshot(
         &mut self,
     ) -> Result<Snapshot<LedgerTypeConfig>, StorageError<LedgerNodeId>> {
-        let data = bincode::serialize(&self.state).map_err(|e| to_serde_error(&e))?;
+        let data = postcard::to_allocvec(&self.state).map_err(|e| to_serde_error(&e))?;
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
@@ -1130,7 +1130,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         &mut self,
         vote: &Vote<LedgerNodeId>,
     ) -> Result<(), StorageError<LedgerNodeId>> {
-        let vote_data = bincode::serialize(vote).map_err(|e| to_serde_error(&e))?;
+        let vote_data = postcard::to_allocvec(vote).map_err(|e| to_serde_error(&e))?;
 
         let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
         write_txn
@@ -1166,13 +1166,13 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         for entry in entries {
             let index = entry.log_id.index;
 
-            // Time bincode serialization (write path hot loop)
+            // Time postcard serialization (write path hot loop)
             let serialize_start = std::time::Instant::now();
-            let entry_data = bincode::serialize(&entry).map_err(|e| to_serde_error(&e))?;
+            let entry_data = postcard::to_allocvec(&entry).map_err(|e| to_serde_error(&e))?;
             let serialize_secs = serialize_start.elapsed().as_secs_f64();
 
             // Record serialization metrics
-            metrics::record_bincode_encode(serialize_secs, "raft_entry");
+            metrics::record_postcard_encode(serialize_secs, "raft_entry");
             metrics::record_serialization_bytes(entry_data.len(), "encode", "raft_entry");
 
             write_txn
@@ -1258,7 +1258,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         // Save the last purged log ID
-        let purged_data = bincode::serialize(&log_id).map_err(|e| to_serde_error(&e))?;
+        let purged_data = postcard::to_allocvec(&log_id).map_err(|e| to_serde_error(&e))?;
         write_txn
             .insert::<tables::RaftState>(&KEY_LAST_PURGED.to_string(), &purged_data)
             .map_err(|e| to_storage_error(&e))?;
@@ -1396,7 +1396,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         // Try to deserialize as CombinedSnapshot first (new format)
         let combined: CombinedSnapshot =
-            bincode::deserialize(&data).map_err(|e| to_serde_error(&e))?;
+            postcard::from_bytes(&data).map_err(|e| to_serde_error(&e))?;
 
         // Restore AppliedState
         *self.applied_state.write() = combined.applied_state.clone();
@@ -1492,7 +1492,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             vault_entities,
         };
 
-        let data = bincode::serialize(&combined).map_err(|e| to_serde_error(&e))?;
+        let data = postcard::to_allocvec(&combined).map_err(|e| to_serde_error(&e))?;
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
@@ -2206,14 +2206,14 @@ mod tests {
         state_b.vault_heights.insert((1, 1), 42);
 
         // Serialize both
-        let bytes_a = bincode::serialize(&state_a).expect("serialize a");
-        let bytes_b = bincode::serialize(&state_b).expect("serialize b");
+        let bytes_a = postcard::to_allocvec(&state_a).expect("serialize a");
+        let bytes_b = postcard::to_allocvec(&state_b).expect("serialize b");
 
         assert_eq!(bytes_a, bytes_b, "Serialized state must be identical");
 
         // Deserialize and verify
-        let restored_a: AppliedState = bincode::deserialize(&bytes_a).expect("deserialize a");
-        let restored_b: AppliedState = bincode::deserialize(&bytes_b).expect("deserialize b");
+        let restored_a: AppliedState = postcard::from_bytes(&bytes_a).expect("deserialize a");
+        let restored_b: AppliedState = postcard::from_bytes(&bytes_b).expect("deserialize b");
 
         assert_eq!(restored_a.sequences, restored_b.sequences);
         assert_eq!(restored_a.vault_heights, restored_b.vault_heights);
@@ -2383,8 +2383,8 @@ mod tests {
         );
 
         // Serialize and deserialize
-        let bytes = bincode::serialize(&original).expect("serialize");
-        let restored: AppliedState = bincode::deserialize(&bytes).expect("deserialize");
+        let bytes = postcard::to_allocvec(&original).expect("serialize");
+        let restored: AppliedState = postcard::from_bytes(&bytes).expect("deserialize");
 
         // Verify key fields restored
         assert_eq!(restored.sequences, original.sequences);
@@ -2518,7 +2518,7 @@ mod tests {
             vault_entities: HashMap::new(),
         };
 
-        let snapshot_data = bincode::serialize(&combined).expect("serialize snapshot");
+        let snapshot_data = postcard::to_allocvec(&combined).expect("serialize snapshot");
 
         // Create target store (simulating a new follower)
         let target_dir = tempdir().expect("create target dir");
@@ -2618,7 +2618,7 @@ mod tests {
             vault_entities: HashMap::new(),
         };
 
-        let snapshot_data = bincode::serialize(&combined).expect("serialize snapshot");
+        let snapshot_data = postcard::to_allocvec(&combined).expect("serialize snapshot");
 
         // Fresh node
         let dir = tempdir().expect("create dir");
