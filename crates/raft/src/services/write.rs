@@ -116,7 +116,8 @@ impl WriteServiceImpl {
                     }
                     Err(e) => Err(format!("Raft error: {}", e)),
                 }
-            }) as futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
+            })
+                as futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
         };
 
         let writer = BatchWriter::new(config, submit_fn);

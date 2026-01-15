@@ -12,10 +12,10 @@ use snafu::{ResultExt, Snafu};
 use inkwell::FileBackend;
 use ledger_storage::BlockArchive;
 use ledger_types::hash::{Hash, tx_hash};
-use ledger_types::merkle::{MerkleProof as InternalMerkleProof, MerkleTree};
+use ledger_types::merkle::MerkleTree;
 use ledger_types::{NamespaceId, Transaction, VaultId};
 
-use crate::proto::{self, Direction, MerkleSibling};
+use crate::proto;
 
 // ============================================================================
 // Error Types
@@ -188,43 +188,6 @@ pub fn generate_write_proof(
 // Low-Level Proof Utilities
 // ============================================================================
 
-/// Convert an internal MerkleProof to a proto MerkleProof.
-///
-/// The internal format stores raw sibling hashes with the leaf_index to
-/// determine direction. The proto format explicitly encodes direction for
-/// each sibling.
-pub fn internal_to_proto_proof(internal: &InternalMerkleProof) -> proto::MerkleProof {
-    let mut index = internal.leaf_index;
-    let mut siblings = Vec::with_capacity(internal.proof_hashes.len());
-
-    for hash in &internal.proof_hashes {
-        // If current index is even (left child), sibling is on the right
-        // If current index is odd (right child), sibling is on the left
-        let direction = if index % 2 == 0 {
-            Direction::Right // sibling is right, so we do hash(current || sibling)
-        } else {
-            Direction::Left // sibling is left, so we do hash(sibling || current)
-        };
-
-        siblings.push(MerkleSibling {
-            hash: Some(proto::Hash {
-                value: hash.to_vec(),
-            }),
-            direction: direction.into(),
-        });
-
-        // Move up to parent index
-        index /= 2;
-    }
-
-    proto::MerkleProof {
-        leaf_hash: Some(proto::Hash {
-            value: internal.leaf_hash.to_vec(),
-        }),
-        siblings,
-    }
-}
-
 /// Generate a merkle proof for a transaction at the given index.
 ///
 /// Returns `None` if the index is out of bounds or the transaction list is empty.
@@ -243,7 +206,7 @@ pub fn generate_tx_proof(
     let tree = MerkleTree::from_leaves(&leaves);
     let internal_proof = tree.proof(tx_index)?;
 
-    Some(internal_to_proto_proof(&internal_proof))
+    Some((&internal_proof).into())
 }
 
 /// Generate a merkle proof for a transaction by its ID.
@@ -408,6 +371,7 @@ pub fn verify_state_proof(
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use crate::proto::Direction;
     use chrono::Utc;
 
     fn make_tx(id: u8) -> Transaction {

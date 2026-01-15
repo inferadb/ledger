@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use ledger_types::encode;
 use openraft::error::{Fatal, RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable};
-use parking_lot::RwLock;
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     SnapshotResponse, VoteRequest, VoteResponse,
 };
 use openraft::{BasicNode, Snapshot, Vote};
+use parking_lot::RwLock;
 use tonic::transport::Channel;
 
 use crate::proto::raft_service_client::RaftServiceClient;
@@ -121,15 +121,6 @@ pub struct GrpcRaftNetworkConnection {
     network: GrpcRaftNetwork,
 }
 
-/// Convert proto vote to OpenRaft Vote.
-fn proto_to_vote(proto: &crate::proto::RaftVote) -> Vote<LedgerNodeId> {
-    if proto.committed {
-        Vote::new_committed(proto.term, proto.node_id)
-    } else {
-        Vote::new(proto.term, proto.node_id)
-    }
-}
-
 impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
     async fn vote(
         &mut self,
@@ -147,11 +138,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
 
         // Convert to proto types
         let request = crate::proto::RaftVoteRequest {
-            vote: Some(crate::proto::RaftVote {
-                term: rpc.vote.leader_id.term,
-                node_id: rpc.vote.leader_id.node_id,
-                committed: rpc.vote.committed,
-            }),
+            vote: Some((&rpc.vote).into()),
             last_log_id: rpc.last_log_id.map(|id| crate::proto::RaftLogId {
                 term: id.leader_id.term,
                 index: id.index,
@@ -172,7 +159,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         })?;
 
         Ok(VoteResponse {
-            vote: proto_to_vote(&vote),
+            vote: (&vote).into(),
             vote_granted: response.vote_granted,
             last_log_id: response.last_log_id.map(|id| {
                 openraft::LogId::new(openraft::CommittedLeaderId::new(id.term, 0), id.index)
@@ -202,11 +189,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .collect();
 
         let request = crate::proto::RaftAppendEntriesRequest {
-            vote: Some(crate::proto::RaftVote {
-                term: rpc.vote.leader_id.term,
-                node_id: rpc.vote.leader_id.node_id,
-                committed: rpc.vote.committed,
-            }),
+            vote: Some((&rpc.vote).into()),
             prev_log_id: rpc.prev_log_id.map(|id| crate::proto::RaftLogId {
                 term: id.leader_id.term,
                 index: id.index,
@@ -231,7 +214,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             Ok(AppendEntriesResponse::Conflict)
         } else if let Some(vote) = response.vote {
             // Higher vote received
-            Ok(AppendEntriesResponse::HigherVote(proto_to_vote(&vote)))
+            Ok(AppendEntriesResponse::HigherVote((&vote).into()))
         } else {
             Ok(AppendEntriesResponse::Conflict)
         }
@@ -256,11 +239,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
         let request = crate::proto::RaftInstallSnapshotRequest {
-            vote: Some(crate::proto::RaftVote {
-                term: rpc.vote.leader_id.term,
-                node_id: rpc.vote.leader_id.node_id,
-                committed: rpc.vote.committed,
-            }),
+            vote: Some((&rpc.vote).into()),
             meta: Some(crate::proto::RaftSnapshotMeta {
                 last_log_id: rpc.meta.last_log_id.map(|id| crate::proto::RaftLogId {
                     term: id.leader_id.term,
@@ -297,7 +276,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         })?;
 
         Ok(InstallSnapshotResponse {
-            vote: proto_to_vote(&vote),
+            vote: (&vote).into(),
         })
     }
 

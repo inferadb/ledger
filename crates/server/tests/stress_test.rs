@@ -1638,15 +1638,15 @@ async fn test_stress_multi_shard_quick() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn test_stress_multi_shard_batched() {
     run_multi_shard_stress_test(
-        1,  // Single node
-        4,  // 4 data shards for parallel writes
+        1, // Single node
+        4, // 4 data shards for parallel writes
         StressConfig {
-            write_workers: 8,    // 2 workers per shard
+            write_workers: 8, // 2 workers per shard
             read_workers: 16,
             duration: Duration::from_secs(10),
-            batch_size: 50,      // Match batched test
+            batch_size: 50, // Match batched test
             read_batch_size: 50,
-            namespace_id: 0,     // Overridden per-worker by shard assignments
+            namespace_id: 0, // Overridden per-worker by shard assignments
             vault_id: 1,
             max_concurrent_writes: 100,
             max_concurrent_reads: 500,
@@ -1703,7 +1703,7 @@ async fn test_stress_multi_shard_target() {
             write_workers: 16, // 2 workers per shard
             read_workers: 16,
             duration: Duration::from_secs(15),
-            batch_size: 100,   // 16KB pages support larger batches
+            batch_size: 100, // 16KB pages support larger batches
             read_batch_size: 100,
             namespace_id: 0, // Overridden per-worker by shard assignments
             vault_id: 1,

@@ -503,8 +503,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .get::<tables::RaftState>(&KEY_VOTE.to_string())
             .map_err(|e| to_storage_error(&e))?
         {
-            let vote: Vote<LedgerNodeId> =
-                decode(&vote_data).map_err(|e| to_serde_error(&e))?;
+            let vote: Vote<LedgerNodeId> = decode(&vote_data).map_err(|e| to_serde_error(&e))?;
             *self.vote_cache.write() = Some(vote);
         }
 
@@ -523,8 +522,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .get::<tables::RaftState>(&KEY_APPLIED_STATE.to_string())
             .map_err(|e| to_storage_error(&e))?
         {
-            let state: AppliedState =
-                decode(&state_data).map_err(|e| to_serde_error(&e))?;
+            let state: AppliedState = decode(&state_data).map_err(|e| to_serde_error(&e))?;
             // Restore shard chain tracking from persisted state (single lock)
             *self.shard_chain.write() = ShardChainState {
                 height: state.shard_height,
@@ -908,10 +906,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 }
 
-                (
-                    LedgerResponse::BatchWrite { responses },
-                    last_vault_entry,
-                )
+                (LedgerResponse::BatchWrite { responses }, last_vault_entry)
             }
         }
     }
@@ -1003,7 +998,11 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             // Record per-entry average to make metrics comparable to encode path
             let per_entry_secs = deserialize_secs / entries.len() as f64;
             metrics::record_postcard_decode(per_entry_secs, "raft_entry");
-            metrics::record_serialization_bytes(total_bytes / entries.len(), "decode", "raft_entry");
+            metrics::record_serialization_bytes(
+                total_bytes / entries.len(),
+                "decode",
+                "raft_entry",
+            );
         }
 
         Ok(entries)
@@ -1391,8 +1390,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             }
 
             // Update shard chain tracking (single lock acquisition)
-            let shard_hash =
-                ledger_types::sha256(&encode(&shard_block).unwrap_or_default());
+            let shard_hash = ledger_types::sha256(&encode(&shard_block).unwrap_or_default());
             *self.shard_chain.write() = ShardChainState {
                 height: new_shard_height,
                 previous_hash: shard_hash,
@@ -1431,8 +1429,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let data = snapshot.into_inner();
 
         // Try to deserialize as CombinedSnapshot first (new format)
-        let combined: CombinedSnapshot =
-            decode(&data).map_err(|e| to_serde_error(&e))?;
+        let combined: CombinedSnapshot = decode(&data).map_err(|e| to_serde_error(&e))?;
 
         // Restore AppliedState
         *self.applied_state.write() = combined.applied_state.clone();

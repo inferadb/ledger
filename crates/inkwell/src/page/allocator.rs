@@ -127,9 +127,9 @@ mod tests {
         let allocator = PageAllocator::new(4096, 0);
 
         // Allocate some pages
-        let p0 = allocator.allocate();
+        let _p0 = allocator.allocate();
         let p1 = allocator.allocate();
-        let p2 = allocator.allocate();
+        let _p2 = allocator.allocate();
 
         // Free one
         allocator.free(p1);

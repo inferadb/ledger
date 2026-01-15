@@ -17,6 +17,7 @@ use tonic::transport::Server;
 use tower::ServiceBuilder;
 
 use crate::IdempotencyCache;
+use crate::batching::BatchConfig;
 use crate::log_storage::AppliedStateAccessor;
 use crate::proto::BlockAnnouncement;
 use crate::proto::admin_service_server::AdminServiceServer;
@@ -26,7 +27,6 @@ use crate::proto::read_service_server::ReadServiceServer;
 use crate::proto::system_discovery_service_server::SystemDiscoveryServiceServer;
 use crate::proto::write_service_server::WriteServiceServer;
 use crate::rate_limit::NamespaceRateLimiter;
-use crate::batching::BatchConfig;
 use crate::services::{
     AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl, ReadServiceImpl,
     WriteServiceImpl,

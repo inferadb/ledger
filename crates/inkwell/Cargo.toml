@@ -12,7 +12,7 @@ authors.workspace = true
 xxhash-rust = { workspace = true }
 
 # Error handling
-thiserror = { workspace = true }
+snafu = { workspace = true }
 
 # Serialization for key/value encoding
 byteorder = { workspace = true }

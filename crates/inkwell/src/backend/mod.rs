@@ -296,14 +296,16 @@ impl DatabaseHeader {
         }
 
         // Parse slots
-        let slot0 = CommitSlot::from_bytes(&buf[16..16 + CommitSlot::SIZE])
-            .ok_or_else(|| Error::Corrupted {
+        let slot0 = CommitSlot::from_bytes(&buf[16..16 + CommitSlot::SIZE]).ok_or_else(|| {
+            Error::Corrupted {
                 reason: "Failed to parse commit slot 0".to_string(),
-            })?;
-        let slot1 = CommitSlot::from_bytes(&buf[80..80 + CommitSlot::SIZE])
-            .ok_or_else(|| Error::Corrupted {
+            }
+        })?;
+        let slot1 = CommitSlot::from_bytes(&buf[80..80 + CommitSlot::SIZE]).ok_or_else(|| {
+            Error::Corrupted {
                 reason: "Failed to parse commit slot 1".to_string(),
-            })?;
+            }
+        })?;
 
         Ok(Self {
             magic,
@@ -471,7 +473,7 @@ mod tests {
         let mut bytes = header.to_bytes();
 
         // Corrupt both slot checksums
-        bytes[56] ^= 0xFF;  // Slot 0 checksum
+        bytes[56] ^= 0xFF; // Slot 0 checksum
         bytes[120] ^= 0xFF; // Slot 1 checksum
 
         let header = DatabaseHeader::from_bytes(&bytes).unwrap();

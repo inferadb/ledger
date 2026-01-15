@@ -167,8 +167,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
 
     /// Configure time-travel indexing for a vault.
     pub fn configure_vault(&self, vault_id: u64, config: TimeTravelConfig) -> Result<()> {
-        let serialized =
-            encode(&config).context(CodecSnafu)?;
+        let serialized = encode(&config).context(CodecSnafu)?;
 
         let mut txn = self.db.write().context(StorageSnafu)?;
         txn.insert::<tables::TimeTravelConfig>(&vault_id, &serialized)
@@ -196,8 +195,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
             .context(StorageSnafu)?
         {
             Some(data) => {
-                let config: TimeTravelConfig =
-                    decode(&data).context(CodecSnafu)?;
+                let config: TimeTravelConfig = decode(&data).context(CodecSnafu)?;
                 self.config_cache.write().insert(vault_id, config.clone());
                 Ok(Some(config))
             }
@@ -233,8 +231,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
             version,
         };
 
-        let serialized =
-            encode(&entry).context(CodecSnafu)?;
+        let serialized = encode(&entry).context(CodecSnafu)?;
 
         let index_key = make_index_key(vault_id, key, height);
 
@@ -275,8 +272,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
                 }
 
                 // Found an entry at or before requested height
-                let entry: TimeTravelEntry =
-                    decode(&v).context(CodecSnafu)?;
+                let entry: TimeTravelEntry = decode(&v).context(CodecSnafu)?;
                 return Ok(Some(entry));
             }
         }
@@ -313,8 +309,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
                     break;
                 }
 
-                let entry: TimeTravelEntry =
-                    decode(&v).context(CodecSnafu)?;
+                let entry: TimeTravelEntry = decode(&v).context(CodecSnafu)?;
                 entries.push(entry);
             }
         }

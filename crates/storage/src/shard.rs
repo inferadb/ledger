@@ -471,14 +471,14 @@ mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
     use chrono::Utc;
+    use ledger_test_utils::TestDir;
     use ledger_types::{Operation, Transaction, VaultEntry};
-    use tempfile::TempDir;
 
-    fn create_test_manager() -> (ShardManager<inkwell::InMemoryBackend>, TempDir) {
+    fn create_test_manager() -> (ShardManager<inkwell::InMemoryBackend>, TestDir) {
         let engine = InMemoryStorageEngine::open().expect("open engine");
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
 
-        let manager = ShardManager::new(1, engine.db(), temp.path().join("snapshots"), 3);
+        let manager = ShardManager::new(1, engine.db(), temp.join("snapshots"), 3);
 
         (manager, temp)
     }
@@ -525,8 +525,8 @@ mod tests {
 
         // Reset state and apply via block
         let engine = InMemoryStorageEngine::open().expect("open engine");
-        let temp = TempDir::new().expect("create temp dir");
-        let manager = ShardManager::new(1, engine.db(), temp.path().join("snapshots"), 3);
+        let temp = TestDir::new();
+        let manager = ShardManager::new(1, engine.db(), temp.join("snapshots"), 3);
         manager.register_vault(1, 1);
 
         let block = ShardBlock {
@@ -606,8 +606,8 @@ mod tests {
     #[test]
     fn test_snapshot_and_restore() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
-        let temp = TempDir::new().expect("create temp dir");
-        let manager = ShardManager::new(1, engine.db(), temp.path().join("snapshots"), 3);
+        let temp = TestDir::new();
+        let manager = ShardManager::new(1, engine.db(), temp.join("snapshots"), 3);
 
         manager.register_vault(1, 1);
 

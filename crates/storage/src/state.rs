@@ -14,7 +14,9 @@ use inkwell::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode};
+use ledger_types::{
+    Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
+};
 
 use crate::bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment};
 use crate::indexes::{IndexError, IndexManager};
@@ -174,8 +176,7 @@ impl<B: StorageBackend> StateLayer<B> {
                         version: block_height,
                     };
 
-                    let encoded =
-                        encode(&entity).context(CodecSnafu)?;
+                    let encoded = encode(&entity).context(CodecSnafu)?;
 
                     txn.insert::<tables::Entities>(&storage_key, &encoded)
                         .context(InkwellSnafu)?;
@@ -240,8 +241,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     if already_exists {
                         WriteStatus::AlreadyExists
                     } else {
-                        let encoded =
-                            encode(&rel).context(CodecSnafu)?;
+                        let encoded = encode(&rel).context(CodecSnafu)?;
 
                         txn.insert::<tables::Relationships>(&storage_key, &encoded)
                             .context(InkwellSnafu)?;
@@ -412,8 +412,7 @@ impl<B: StorageBackend> StateLayer<B> {
             .context(InkwellSnafu)?
         {
             Some(data) => {
-                let entity =
-                    decode(&data).context(CodecSnafu)?;
+                let entity = decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -494,8 +493,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     break;
                 }
 
-                let entity: Entity =
-                    decode(&value).context(CodecSnafu)?;
+                let entity: Entity = decode(&value).context(CodecSnafu)?;
                 builder.add_entity(&entity);
             }
 
@@ -1288,11 +1286,99 @@ mod tests {
                 // We allow the rare collision by not asserting inequality.
                 // Instead, we verify that SOME operation sequences produce
                 // different roots (which the previous tests implicitly do).
-                if root1 == root2 {
+                                if root1 == root2 {
                     // Log for debugging, but don't fail - could be hash collision
                     // or operations that cancel out (e.g., set then delete same key)
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // Error conversion chain tests (Task 2: Consolidate Error Types)
+    // =========================================================================
+
+    // Test StateError Display implementations for all variants
+    #[test]
+    fn test_state_error_display() {
+        use std::error::Error;
+
+        // Test Codec variant display
+        let codec_err = ledger_types::CodecError::Decode {
+            source: postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).expect_err("should fail"),
+        };
+        let state_err = StateError::Codec { source: codec_err };
+        let display = format!("{state_err}");
+
+        assert!(
+            display.starts_with("Codec error:"),
+            "Expected 'Codec error:', got: {display}"
+        );
+
+        // Verify source chain is preserved
+        assert!(
+            state_err.source().is_some(),
+            "StateError::Codec should have a source"
+        );
+    }
+
+    // Test error conversion: CodecError -> StateError (via context)
+    #[test]
+    fn test_state_error_from_codec_error() {
+        use snafu::ResultExt;
+
+        // Simulate codec failure during state operation
+        fn simulate_codec_failure() -> std::result::Result<(), StateError> {
+            let malformed: &[u8] = &[0xFF, 0xFF];
+            let _: u64 = ledger_types::decode(malformed).context(CodecSnafu)?;
+            Ok(())
+        }
+
+        let result = simulate_codec_failure();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, StateError::Codec { .. }),
+            "Should be StateError::Codec variant"
+        );
+    }
+
+    // Test the full error chain: CodecError -> IndexError -> StateError
+    #[test]
+    fn test_state_error_chain_from_index() {
+        use crate::indexes::IndexError;
+
+        // IndexError with Codec source
+        let codec_err = ledger_types::CodecError::Decode {
+            source: postcard::from_bytes::<u64>(&[0xFF]).expect_err("should fail"),
+        };
+        let index_err = IndexError::Codec { source: codec_err };
+
+        // Convert IndexError -> StateError
+        let state_err = StateError::Index { source: index_err };
+
+        let display = format!("{state_err}");
+        assert!(
+            display.contains("Index error"),
+            "StateError::Index should mention 'Index error': {display}"
+        );
+    }
+
+    // Test PreconditionFailed variant display (special case with optional fields)
+    #[test]
+    fn test_state_error_precondition_failed_display() {
+        let err = StateError::PreconditionFailed {
+            key: "test_key".to_string(),
+            current_version: Some(5),
+            current_value: Some(b"old_value".to_vec()),
+            failed_condition: None,
+        };
+
+        let display = format!("{err}");
+        assert!(
+            display.contains("test_key"),
+            "PreconditionFailed should mention the key: {display}"
+        );
     }
 }

@@ -151,8 +151,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Append a block to the archive.
     pub fn append_block(&self, block: &ShardBlock) -> Result<()> {
-        let encoded =
-            encode(block).context(CodecSnafu)?;
+        let encoded = encode(block).context(CodecSnafu)?;
 
         // Store in inkwell
         let mut txn = self.db.write().context(InkwellSnafu)?;
@@ -244,8 +243,7 @@ impl<B: StorageBackend> BlockArchive<B> {
             .context(InkwellSnafu)?
         {
             Some(data) => {
-                let block =
-                    decode(&data).context(CodecSnafu)?;
+                let block = decode(&data).context(CodecSnafu)?;
                 Ok(block)
             }
             None => Err(BlockArchiveError::BlockNotFound {
@@ -337,8 +335,7 @@ impl<B: StorageBackend> BlockArchive<B> {
                 break;
             }
 
-            let block =
-                decode(&value).context(CodecSnafu)?;
+            let block = decode(&value).context(CodecSnafu)?;
             blocks.push(block);
         }
 
@@ -419,8 +416,7 @@ impl<B: StorageBackend> BlockArchive<B> {
             }
 
             // Deserialize the block
-            let mut block: ShardBlock =
-                decode(&value).context(CodecSnafu)?;
+            let mut block: ShardBlock = decode(&value).context(CodecSnafu)?;
 
             // Check if it needs compaction (has non-empty transactions)
             let needs_compaction = block

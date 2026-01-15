@@ -513,17 +513,17 @@ mod tests {
     use super::*;
     use inkwell::{Database, FileBackend};
     use ledger_storage::StateLayer;
+    use ledger_test_utils::TestDir;
     use std::sync::Arc;
-    use tempfile::TempDir;
 
     fn create_test_router() -> (
         ShardRouter<FileBackend>,
         Arc<StateLayer<FileBackend>>,
-        TempDir,
+        TestDir,
     ) {
-        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_dir = TestDir::new();
         let db = Arc::new(
-            Database::<FileBackend>::create(temp_dir.path().join("test.inkwell"))
+            Database::<FileBackend>::create(temp_dir.join("test.inkwell"))
                 .expect("create database"),
         );
         let state = Arc::new(StateLayer::new(db));

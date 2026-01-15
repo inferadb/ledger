@@ -190,12 +190,12 @@ impl Drop for DataDirLock {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use ledger_test_utils::TestDir;
 
     #[test]
     fn test_acquire_lock_creates_directory() {
-        let temp = TempDir::new().unwrap();
-        let data_dir = temp.path().join("new_data_dir");
+        let temp = TestDir::new();
+        let data_dir = temp.join("new_data_dir");
 
         assert!(!data_dir.exists());
 
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_acquire_lock_existing_directory() {
-        let temp = TempDir::new().unwrap();
+        let temp = TestDir::new();
         let data_dir = temp.path();
 
         let lock = DataDirLock::acquire(data_dir).unwrap();
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_double_lock_fails() {
-        let temp = TempDir::new().unwrap();
+        let temp = TestDir::new();
         let data_dir = temp.path();
 
         let lock1 = DataDirLock::acquire(data_dir).unwrap();
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_lock_released_on_drop() {
-        let temp = TempDir::new().unwrap();
+        let temp = TestDir::new();
         let data_dir = temp.path();
 
         {

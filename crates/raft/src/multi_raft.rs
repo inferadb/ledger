@@ -719,15 +719,15 @@ pub struct MultiRaftStats {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use ledger_test_utils::TestDir;
 
-    fn create_test_config(temp_dir: &TempDir) -> MultiRaftConfig {
+    fn create_test_config(temp_dir: &TestDir) -> MultiRaftConfig {
         MultiRaftConfig::new(temp_dir.path().to_path_buf(), 1)
     }
 
     #[test]
     fn test_config_shard_dir() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
 
         // System shard directory
@@ -764,7 +764,7 @@ mod tests {
 
     #[test]
     fn test_manager_creation() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_manager_stats_empty() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -786,7 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_system_shard_required() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -799,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_system_shard() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -820,7 +820,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_multiple_shards() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -845,7 +845,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_shard_error() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -866,7 +866,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_shard() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -887,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_shard() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -934,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shard_with_background_jobs_disabled() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -958,7 +958,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shard_with_background_jobs_enabled() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
@@ -988,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_shard_aborts_background_jobs() {
-        let temp = TempDir::new().expect("create temp dir");
+        let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 

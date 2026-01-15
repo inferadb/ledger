@@ -33,6 +33,7 @@ pub mod pagination;
 pub mod peer_maintenance;
 pub mod peer_tracker;
 pub mod proof;
+pub mod proto_convert;
 mod raft_network;
 mod rate_limit;
 mod saga_orchestrator;

@@ -15,7 +15,7 @@ use tonic::{Request, Response, Status};
 use crate::proto::raft_service_server::RaftService;
 use crate::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
-    RaftInstallSnapshotResponse, RaftLogId, RaftVote, RaftVoteRequest, RaftVoteResponse,
+    RaftInstallSnapshotResponse, RaftLogId, RaftVoteRequest, RaftVoteResponse,
 };
 use crate::types::{LedgerNodeId, LedgerTypeConfig};
 
@@ -32,24 +32,6 @@ impl RaftServiceImpl {
     }
 }
 
-/// Convert a proto RaftVote to an OpenRaft Vote.
-fn proto_to_vote(proto: &RaftVote) -> Vote<LedgerNodeId> {
-    if proto.committed {
-        Vote::new_committed(proto.term, proto.node_id)
-    } else {
-        Vote::new(proto.term, proto.node_id)
-    }
-}
-
-/// Convert an OpenRaft Vote to a proto RaftVote.
-fn vote_to_proto(vote: &Vote<LedgerNodeId>) -> RaftVote {
-    RaftVote {
-        term: vote.leader_id.term,
-        node_id: vote.leader_id.node_id,
-        committed: vote.committed,
-    }
-}
-
 #[tonic::async_trait]
 impl RaftService for RaftServiceImpl {
     async fn vote(
@@ -63,8 +45,8 @@ impl RaftService for RaftServiceImpl {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
 
-        // Convert proto to OpenRaft types
-        let raft_vote = proto_to_vote(vote);
+        // Convert proto to OpenRaft types (using From impl in proto_convert)
+        let raft_vote: Vote<LedgerNodeId> = vote.into();
         // Use the vote's node_id for the CommittedLeaderId - this identifies who committed the log entry
         let last_log_id = req.last_log_id.map(|id| {
             openraft::LogId::new(
@@ -87,7 +69,7 @@ impl RaftService for RaftServiceImpl {
 
         // Convert response back to proto
         Ok(Response::new(RaftVoteResponse {
-            vote: Some(vote_to_proto(&response.vote)),
+            vote: Some((&response.vote).into()),
             vote_granted: response.vote_granted,
             last_log_id: response.last_log_id.map(|id| RaftLogId {
                 term: id.leader_id.term,
@@ -114,8 +96,8 @@ impl RaftService for RaftServiceImpl {
             .filter_map(|bytes| decode(bytes).ok())
             .collect();
 
-        // Convert proto to OpenRaft types
-        let raft_vote = proto_to_vote(vote);
+        // Convert proto to OpenRaft types (using From impl in proto_convert)
+        let raft_vote: Vote<LedgerNodeId> = vote.into();
         // Use the vote's node_id (the leader) for the CommittedLeaderId
         let leader_node_id = vote.node_id;
         let prev_log_id = req.prev_log_id.map(|id| {
@@ -150,7 +132,7 @@ impl RaftService for RaftServiceImpl {
         let (success, conflict, higher_vote) = match response {
             Success => (true, false, None),
             Conflict => (false, true, None),
-            HigherVote(v) => (false, false, Some(vote_to_proto(&v))),
+            HigherVote(v) => (false, false, Some((&v).into())),
             PartialSuccess(_) => (true, false, None), // Treat partial as success
         };
 
@@ -217,7 +199,7 @@ impl RaftService for RaftServiceImpl {
         };
 
         let install_request = openraft::raft::InstallSnapshotRequest {
-            vote: proto_to_vote(vote),
+            vote: vote.into(),
             meta: snapshot_meta,
             offset: req.offset,
             data: req.data,
@@ -232,7 +214,7 @@ impl RaftService for RaftServiceImpl {
             .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
 
         Ok(Response::new(RaftInstallSnapshotResponse {
-            vote: Some(vote_to_proto(&response.vote)),
+            vote: Some((&response.vote).into()),
         }))
     }
 }

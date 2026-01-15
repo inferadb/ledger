@@ -78,8 +78,7 @@ impl PageTokenCodec {
     /// Encode a page token to an opaque string.
     pub fn encode(&self, token: &PageToken) -> String {
         // Serialize the token
-        let token_bytes =
-            encode(token).expect("PageToken serialization should not fail");
+        let token_bytes = encode(token).expect("PageToken serialization should not fail");
 
         // Compute HMAC
         let mut mac =
@@ -99,8 +98,7 @@ impl PageTokenCodec {
         };
 
         // Serialize and base64 encode
-        let bytes =
-            encode(&encoded).expect("EncodedToken serialization should not fail");
+        let bytes = encode(&encoded).expect("EncodedToken serialization should not fail");
         URL_SAFE_NO_PAD.encode(&bytes)
     }
 

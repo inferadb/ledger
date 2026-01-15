@@ -1,0 +1,29 @@
+[package]
+name = "ledger-test-utils"
+description = "Shared test utilities for InferaDB Ledger crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# File system
+tempfile.workspace = true
+
+# Async runtime (for assert_eventually)
+tokio = { workspace = true, features = ["time", "sync"] }
+
+# Time utilities
+chrono.workspace = true
+
+# Configuration types (for test config helpers)
+ledger-types = { workspace = true }
+
+[dev-dependencies]
+# For testing the test utilities themselves
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

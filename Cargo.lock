@@ -1513,8 +1513,8 @@ dependencies = [
  "parking_lot",
  "proptest",
  "rand 0.8.5",
+ "snafu",
  "tempfile",
- "thiserror 2.0.17",
  "tracing",
  "xxhash-rust",
 ]
@@ -1646,6 +1646,7 @@ dependencies = [
  "hmac",
  "inkwell",
  "ledger-storage",
+ "ledger-test-utils",
  "ledger-types",
  "metrics",
  "moka",
@@ -1684,6 +1685,7 @@ dependencies = [
  "inkwell",
  "ledger-raft",
  "ledger-storage",
+ "ledger-test-utils",
  "ledger-types",
  "metrics",
  "metrics-exporter-prometheus",
@@ -1713,6 +1715,7 @@ dependencies = [
  "chrono",
  "futures",
  "inkwell",
+ "ledger-test-utils",
  "ledger-types",
  "lru",
  "object_store",
@@ -1730,6 +1733,16 @@ dependencies = [
  "tracing",
  "url",
  "zstd",
+]
+
+[[package]]
+name = "ledger-test-utils"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ledger-types",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

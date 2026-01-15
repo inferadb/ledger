@@ -21,8 +21,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ledger_test_utils::TestDir;
 use openraft::Raft;
-use tempfile::TempDir;
 use tokio::time::timeout;
 
 use inkwell::FileBackend;
@@ -45,7 +45,7 @@ pub struct TestNode {
     /// The state layer (internally thread-safe via inkwell MVCC).
     pub state: Arc<StateLayer<FileBackend>>,
     /// Temporary directory for node data.
-    _temp_dir: TempDir,
+    _temp_dir: TestDir,
     /// Server task handle for cleanup.
     _server_handle: tokio::task::JoinHandle<()>,
 }
@@ -100,7 +100,7 @@ impl TestCluster {
         // This allows it to immediately become leader, then we dynamically add nodes
         let node_id = 1u64;
         let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = TestDir::new();
 
         // Bootstrap node has NO PEERS - starts as single-node cluster
         let config = ledger_server::config::Config {
@@ -160,7 +160,7 @@ impl TestCluster {
         for i in 1..size {
             let node_id = (i + 1) as u64;
             let port = base_port + i as u16;
-            let temp_dir = tempfile::tempdir().expect("create temp dir");
+            let temp_dir = TestDir::new();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
             // Non-bootstrap nodes: peers list is just for networking, not initial membership
@@ -468,7 +468,7 @@ pub struct MultiShardTestNode {
     /// The multi-raft manager containing all shards.
     pub manager: Arc<MultiRaftManager>,
     /// Temporary directory for node data.
-    _temp_dir: TempDir,
+    _temp_dir: TestDir,
     /// Server task handle for cleanup.
     _server_handle: tokio::task::JoinHandle<()>,
 }
@@ -561,7 +561,7 @@ impl MultiShardTestCluster {
             let node_id = (i + 1) as u64;
             let port = base_port + i as u16;
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-            let temp_dir = tempfile::tempdir().expect("create temp dir");
+            let temp_dir = TestDir::new();
 
             // Create MultiRaftManager config
             let config = MultiRaftConfig::new(temp_dir.path().to_path_buf(), node_id);

@@ -63,5 +63,8 @@ futures = "0.3"
 [build-dependencies]
 tonic-build.workspace = true
 
+[dev-dependencies]
+ledger-test-utils.workspace = true
+
 [lints]
 workspace = true

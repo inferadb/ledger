@@ -202,8 +202,8 @@ impl<B: StorageBackend> Database<B> {
         // Recovery is required if:
         // 1. The recovery flag was set (unclean shutdown), OR
         // 2. We had to fall back to the secondary slot (crash during commit)
-        let recovery_required = header.recovery_required()
-            || valid_slot_index != header.primary_slot_index();
+        let recovery_required =
+            header.recovery_required() || valid_slot_index != header.primary_slot_index();
 
         let mut table_roots = [0; TableId::COUNT];
         let snapshot_id = SnapshotId::new(slot.last_txn_id);
@@ -588,14 +588,6 @@ impl<B: StorageBackend> Database<B> {
             self.cache.mark_clean(page.id);
         }
 
-        Ok(())
-    }
-
-    /// Sync all buffered writes to durable storage.
-    fn sync(&self) -> Result<()> {
-        if self.config.sync_on_commit {
-            self.backend.write().sync()?;
-        }
         Ok(())
     }
 }
