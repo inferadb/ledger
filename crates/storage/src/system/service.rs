@@ -12,7 +12,7 @@ use std::sync::Arc;
 use inkwell::StorageBackend;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId};
+use ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId, decode, encode};
 
 use crate::state::{StateError, StateLayer};
 
@@ -36,11 +36,11 @@ pub enum SystemError {
         source: Box<StateError>,
     },
 
-    /// Serialization or deserialization failed.
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization {
-        /// Description of the serialization failure.
-        message: String,
+    /// Codec error during serialization/deserialization.
+    #[snafu(display("Codec error: {source}"))]
+    Codec {
+        /// The underlying codec error.
+        source: ledger_types::CodecError,
     },
 
     /// Requested entity was not found.
@@ -131,9 +131,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     /// Register a node in the cluster.
     pub fn register_node(&self, node: &NodeInfo) -> Result<()> {
         let key = SystemKeys::node_key(&node.node_id);
-        let value = postcard::to_allocvec(node).map_err(|e| SystemError::Serialization {
-            message: e.to_string(),
-        })?;
+        let value = encode(node).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity {
             key,
@@ -155,11 +153,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
 
         match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
-                let node: NodeInfo = postcard::from_bytes(&entity.value).map_err(|e| {
-                    SystemError::Serialization {
-                        message: e.to_string(),
-                    }
-                })?;
+                let node: NodeInfo = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(node))
             }
             Ok(None) => Ok(None),
@@ -178,7 +172,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
 
         let mut nodes = Vec::new();
         for entity in entities {
-            if let Ok(node) = postcard::from_bytes::<NodeInfo>(&entity.value) {
+            if let Ok(node) = decode::<NodeInfo>(&entity.value) {
                 nodes.push(node);
             }
         }
@@ -209,9 +203,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     /// Register a new namespace.
     pub fn register_namespace(&self, registry: &NamespaceRegistry) -> Result<()> {
         let key = SystemKeys::namespace_key(registry.namespace_id);
-        let value = postcard::to_allocvec(registry).map_err(|e| SystemError::Serialization {
-            message: e.to_string(),
-        })?;
+        let value = encode(registry).context(CodecSnafu)?;
 
         // Also create the name index
         let name_index_key = SystemKeys::namespace_name_index_key(&registry.name);
@@ -245,12 +237,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
 
         match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
-                let registry: NamespaceRegistry =
-                    postcard::from_bytes(&entity.value).map_err(|e| {
-                        SystemError::Serialization {
-                            message: e.to_string(),
-                        }
-                    })?;
+                let registry: NamespaceRegistry = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(registry))
             }
             Ok(None) => Ok(None),
@@ -298,7 +285,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
 
         let mut namespaces = Vec::new();
         for entity in entities {
-            if let Ok(registry) = postcard::from_bytes::<NamespaceRegistry>(&entity.value) {
+            if let Ok(registry) = decode::<NamespaceRegistry>(&entity.value) {
                 namespaces.push(registry);
             }
         }

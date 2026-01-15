@@ -6,7 +6,7 @@
 use inkwell::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{Relationship, VaultId};
+use ledger_types::{CodecError, Relationship, VaultId, decode, encode};
 
 use crate::keys::{encode_storage_key, vault_prefix};
 
@@ -16,8 +16,8 @@ pub enum RelationshipError {
     #[snafu(display("Storage error: {source}"))]
     Storage { source: inkwell::Error },
 
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization { message: String },
+    #[snafu(display("Codec error: {source}"))]
+    Codec { source: CodecError },
 }
 
 /// Result type for relationship operations.
@@ -44,10 +44,7 @@ impl RelationshipStore {
             .context(StorageSnafu)?
         {
             Some(data) => {
-                let relationship =
-                    postcard::from_bytes(&data).map_err(|e| RelationshipError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let relationship = decode(&data).context(CodecSnafu)?;
                 Ok(Some(relationship))
             }
             None => Ok(None),
@@ -95,10 +92,7 @@ impl RelationshipStore {
             return Ok(false);
         }
 
-        let encoded =
-            postcard::to_allocvec(&rel).map_err(|e| RelationshipError::Serialization {
-                message: e.to_string(),
-            })?;
+        let encoded = encode(&rel).context(CodecSnafu)?;
 
         txn.insert::<tables::Relationships>(&storage_key, &encoded)
             .context(StorageSnafu)?;
@@ -153,10 +147,7 @@ impl RelationshipStore {
                 if relationships.len() >= limit {
                     break;
                 }
-                let rel =
-                    postcard::from_bytes(&value).map_err(|e| RelationshipError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let rel = decode(&value).context(CodecSnafu)?;
                 relationships.push(rel);
             }
             count += 1;
@@ -217,10 +208,7 @@ impl RelationshipStore {
 
             // Check if it matches our resource prefix
             if local_key.starts_with(rel_prefix.as_bytes()) {
-                let rel =
-                    postcard::from_bytes(&value).map_err(|e| RelationshipError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let rel: Relationship = decode(&value).context(CodecSnafu)?;
                 relationships.push(rel);
 
                 if relationships.len() >= limit {

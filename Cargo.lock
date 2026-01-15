@@ -1739,6 +1739,7 @@ dependencies = [
  "bytes",
  "chrono",
  "humantime",
+ "postcard",
  "rs_merkle",
  "seahash",
  "serde",

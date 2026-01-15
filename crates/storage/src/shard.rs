@@ -15,7 +15,7 @@ use snafu::{ResultExt, Snafu};
 
 use ledger_types::{
     EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultHealth, VaultId, ZERO_HASH,
-    compute_chain_commitment,
+    compute_chain_commitment, encode,
 };
 
 use crate::block_archive::BlockArchive;
@@ -68,7 +68,7 @@ pub type Result<T> = std::result::Result<T, ShardError>;
 ///
 /// Used to link snapshots together in a verifiable chain.
 fn compute_snapshot_header_hash(header: &crate::snapshot::SnapshotHeader) -> Hash {
-    let bytes = postcard::to_allocvec(header).unwrap_or_default();
+    let bytes = encode(header).unwrap_or_default();
     ledger_types::sha256(&bytes)
 }
 

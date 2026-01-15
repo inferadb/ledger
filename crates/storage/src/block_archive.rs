@@ -28,7 +28,7 @@ use inkwell::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{NamespaceId, ShardBlock, VaultId};
+use ledger_types::{NamespaceId, ShardBlock, VaultId, decode, encode};
 
 /// Key for compaction watermark in COMPACTION_META table.
 const COMPACTION_WATERMARK_KEY: &str = "compacted_before";
@@ -53,11 +53,11 @@ pub enum BlockArchiveError {
         height: u64,
     },
 
-    /// Serialization or deserialization error.
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization {
-        /// Error message describing the serialization failure.
-        message: String,
+    /// Codec error during serialization/deserialization.
+    #[snafu(display("Codec error: {source}"))]
+    Codec {
+        /// The underlying codec error.
+        source: ledger_types::CodecError,
     },
 
     /// Storage engine error from inkwell.
@@ -152,9 +152,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// Append a block to the archive.
     pub fn append_block(&self, block: &ShardBlock) -> Result<()> {
         let encoded =
-            postcard::to_allocvec(block).map_err(|e| BlockArchiveError::Serialization {
-                message: e.to_string(),
-            })?;
+            encode(block).context(CodecSnafu)?;
 
         // Store in inkwell
         let mut txn = self.db.write().context(InkwellSnafu)?;
@@ -247,9 +245,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         {
             Some(data) => {
                 let block =
-                    postcard::from_bytes(&data).map_err(|e| BlockArchiveError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                    decode(&data).context(CodecSnafu)?;
                 Ok(block)
             }
             None => Err(BlockArchiveError::BlockNotFound {
@@ -342,9 +338,7 @@ impl<B: StorageBackend> BlockArchive<B> {
             }
 
             let block =
-                postcard::from_bytes(&value).map_err(|e| BlockArchiveError::Serialization {
-                    message: e.to_string(),
-                })?;
+                decode(&value).context(CodecSnafu)?;
             blocks.push(block);
         }
 
@@ -426,9 +420,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
             // Deserialize the block
             let mut block: ShardBlock =
-                postcard::from_bytes(&value).map_err(|e| BlockArchiveError::Serialization {
-                    message: e.to_string(),
-                })?;
+                decode(&value).context(CodecSnafu)?;
 
             // Check if it needs compaction (has non-empty transactions)
             let needs_compaction = block
@@ -454,10 +446,7 @@ impl<B: StorageBackend> BlockArchive<B> {
             let mut txn = self.db.write().context(InkwellSnafu)?;
 
             for (height, block) in &blocks_to_compact {
-                let encoded =
-                    postcard::to_allocvec(block).map_err(|e| BlockArchiveError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let encoded = encode(block).context(CodecSnafu)?;
 
                 txn.insert::<tables::Blocks>(height, &encoded)
                     .context(InkwellSnafu)?;

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use snafu::{ResultExt, Snafu};
 use zstd::stream::{Decoder, Encoder};
 
-use ledger_types::{ChainCommitment, Entity, Hash, ShardId, VaultId};
+use ledger_types::{ChainCommitment, Entity, Hash, ShardId, VaultId, decode, encode};
 
 use crate::bucket::NUM_BUCKETS;
 
@@ -40,8 +40,8 @@ pub enum SnapshotError {
     #[snafu(display("Checksum mismatch: expected {expected:?}, got {actual:?}"))]
     ChecksumMismatch { expected: Hash, actual: Hash },
 
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization { message: String },
+    #[snafu(display("Codec error: {source}"))]
+    Codec { source: ledger_types::CodecError },
 
     #[snafu(display("Snapshot not found: {path}"))]
     NotFound { path: String },
@@ -186,10 +186,7 @@ impl Snapshot {
         chain_params: SnapshotChainParams,
     ) -> Result<Self> {
         // Compute checksum of state data
-        let state_bytes =
-            postcard::to_allocvec(&state).map_err(|e| SnapshotError::Serialization {
-                message: e.to_string(),
-            })?;
+        let state_bytes = encode(&state).context(CodecSnafu)?;
         let checksum = ledger_types::sha256(&state_bytes);
 
         let header = SnapshotHeader {
@@ -251,10 +248,7 @@ impl Snapshot {
         let mut writer = BufWriter::new(file);
 
         // Serialize and compress state data
-        let state_bytes =
-            postcard::to_allocvec(&self.state).map_err(|e| SnapshotError::Serialization {
-                message: e.to_string(),
-            })?;
+        let state_bytes = encode(&self.state).context(CodecSnafu)?;
 
         let mut compressed = Vec::new();
         {
@@ -264,10 +258,7 @@ impl Snapshot {
         }
 
         // Write header (uncompressed)
-        let header_bytes =
-            postcard::to_allocvec(&self.header).map_err(|e| SnapshotError::Serialization {
-                message: e.to_string(),
-            })?;
+        let header_bytes = encode(&self.header).context(CodecSnafu)?;
 
         // Length-prefixed header
         writer
@@ -302,10 +293,7 @@ impl Snapshot {
         let mut header_bytes = vec![0u8; header_len];
         reader.read_exact(&mut header_bytes).context(IoSnafu)?;
 
-        let header: SnapshotHeader =
-            postcard::from_bytes(&header_bytes).map_err(|e| SnapshotError::Serialization {
-                message: e.to_string(),
-            })?;
+        let header: SnapshotHeader = decode(&header_bytes).context(CodecSnafu)?;
 
         // Validate magic
         if header.magic != SNAPSHOT_MAGIC {
@@ -337,10 +325,7 @@ impl Snapshot {
         }
 
         // Deserialize state
-        let state: SnapshotStateData =
-            postcard::from_bytes(&state_bytes).map_err(|e| SnapshotError::Serialization {
-                message: e.to_string(),
-            })?;
+        let state: SnapshotStateData = decode(&state_bytes).context(CodecSnafu)?;
 
         Ok(Self { header, state })
     }

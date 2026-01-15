@@ -7,6 +7,7 @@
 //! - Merkle tree implementation
 //! - Error types using snafu
 
+pub mod codec;
 pub mod config;
 pub mod error;
 pub mod hash;
@@ -14,6 +15,7 @@ pub mod merkle;
 pub mod types;
 
 // Re-export commonly used types at crate root
+pub use codec::{CodecError, decode, encode};
 pub use error::{LedgerError, Result};
 pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,

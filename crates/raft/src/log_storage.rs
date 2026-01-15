@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use ledger_types::{
     Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root,
+    decode, encode,
 };
 
 use crate::metrics;
@@ -503,7 +504,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let vote: Vote<LedgerNodeId> =
-                postcard::from_bytes(&vote_data).map_err(|e| to_serde_error(&e))?;
+                decode(&vote_data).map_err(|e| to_serde_error(&e))?;
             *self.vote_cache.write() = Some(vote);
         }
 
@@ -513,7 +514,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let purged: LogId<LedgerNodeId> =
-                postcard::from_bytes(&purged_data).map_err(|e| to_serde_error(&e))?;
+                decode(&purged_data).map_err(|e| to_serde_error(&e))?;
             *self.last_purged_cache.write() = Some(purged);
         }
 
@@ -523,7 +524,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let state: AppliedState =
-                postcard::from_bytes(&state_data).map_err(|e| to_serde_error(&e))?;
+                decode(&state_data).map_err(|e| to_serde_error(&e))?;
             // Restore shard chain tracking from persisted state (single lock)
             *self.shard_chain.write() = ShardChainState {
                 height: state.shard_height,
@@ -546,7 +547,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .map_err(|e| to_storage_error(&e))?
         {
             let entry: Entry<LedgerTypeConfig> =
-                postcard::from_bytes(&entry_data).map_err(|e| to_serde_error(&e))?;
+                decode(&entry_data).map_err(|e| to_serde_error(&e))?;
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -723,7 +724,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     };
 
                     // Serialize and write to StateLayer
-                    if let Ok(value) = postcard::to_allocvec(&registry) {
+                    if let Ok(value) = encode(&registry) {
                         let key = SystemKeys::namespace_key(namespace_id);
                         let name_index_key = SystemKeys::namespace_name_index_key(name);
                         let ops = vec![
@@ -942,7 +943,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
     /// Persist the applied state.
     fn save_applied_state(&self, state: &AppliedState) -> Result<(), StorageError<LedgerNodeId>> {
-        let state_data = postcard::to_allocvec(state).map_err(|e| to_serde_error(&e))?;
+        let state_data = encode(state).map_err(|e| to_serde_error(&e))?;
         let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
         write_txn
             .insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &state_data)
@@ -992,7 +993,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
         for (_, entry_data) in iter {
             total_bytes += entry_data.len();
             let entry: Entry<LedgerTypeConfig> =
-                postcard::from_bytes(&entry_data).map_err(|e| to_serde_error(&e))?;
+                decode(&entry_data).map_err(|e| to_serde_error(&e))?;
             entries.push(entry);
         }
 
@@ -1098,7 +1099,7 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
     async fn build_snapshot(
         &mut self,
     ) -> Result<Snapshot<LedgerTypeConfig>, StorageError<LedgerNodeId>> {
-        let data = postcard::to_allocvec(&self.state).map_err(|e| to_serde_error(&e))?;
+        let data = encode(&self.state).map_err(|e| to_serde_error(&e))?;
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
@@ -1161,7 +1162,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         &mut self,
         vote: &Vote<LedgerNodeId>,
     ) -> Result<(), StorageError<LedgerNodeId>> {
-        let vote_data = postcard::to_allocvec(vote).map_err(|e| to_serde_error(&e))?;
+        let vote_data = encode(vote).map_err(|e| to_serde_error(&e))?;
 
         let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
         write_txn
@@ -1199,7 +1200,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             // Time postcard serialization (write path hot loop)
             let serialize_start = std::time::Instant::now();
-            let entry_data = postcard::to_allocvec(&entry).map_err(|e| to_serde_error(&e))?;
+            let entry_data = encode(&entry).map_err(|e| to_serde_error(&e))?;
             let serialize_secs = serialize_start.elapsed().as_secs_f64();
 
             // Record serialization metrics
@@ -1289,7 +1290,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         // Save the last purged log ID
-        let purged_data = postcard::to_allocvec(&log_id).map_err(|e| to_serde_error(&e))?;
+        let purged_data = encode(&log_id).map_err(|e| to_serde_error(&e))?;
         write_txn
             .insert::<tables::RaftState>(&KEY_LAST_PURGED.to_string(), &purged_data)
             .map_err(|e| to_storage_error(&e))?;
@@ -1391,7 +1392,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             // Update shard chain tracking (single lock acquisition)
             let shard_hash =
-                ledger_types::sha256(&postcard::to_allocvec(&shard_block).unwrap_or_default());
+                ledger_types::sha256(&encode(&shard_block).unwrap_or_default());
             *self.shard_chain.write() = ShardChainState {
                 height: new_shard_height,
                 previous_hash: shard_hash,
@@ -1431,7 +1432,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         // Try to deserialize as CombinedSnapshot first (new format)
         let combined: CombinedSnapshot =
-            postcard::from_bytes(&data).map_err(|e| to_serde_error(&e))?;
+            decode(&data).map_err(|e| to_serde_error(&e))?;
 
         // Restore AppliedState
         *self.applied_state.write() = combined.applied_state.clone();
@@ -1529,7 +1530,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             vault_entities,
         };
 
-        let data = postcard::to_allocvec(&combined).map_err(|e| to_serde_error(&e))?;
+        let data = encode(&combined).map_err(|e| to_serde_error(&e))?;
 
         let snapshot_id = format!(
             "snapshot-{}-{}",

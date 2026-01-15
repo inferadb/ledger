@@ -8,6 +8,7 @@
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
+use ledger_types::{decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -78,7 +79,7 @@ impl PageTokenCodec {
     pub fn encode(&self, token: &PageToken) -> String {
         // Serialize the token
         let token_bytes =
-            postcard::to_allocvec(token).expect("PageToken serialization should not fail");
+            encode(token).expect("PageToken serialization should not fail");
 
         // Compute HMAC
         let mut mac =
@@ -99,7 +100,7 @@ impl PageTokenCodec {
 
         // Serialize and base64 encode
         let bytes =
-            postcard::to_allocvec(&encoded).expect("EncodedToken serialization should not fail");
+            encode(&encoded).expect("EncodedToken serialization should not fail");
         URL_SAFE_NO_PAD.encode(&bytes)
     }
 
@@ -117,11 +118,11 @@ impl PageTokenCodec {
 
         // Deserialize
         let encoded_token: EncodedToken =
-            postcard::from_bytes(&bytes).map_err(|_| PageTokenError::InvalidFormat)?;
+            decode(&bytes).map_err(|_| PageTokenError::InvalidFormat)?;
 
         // Verify HMAC
         let token_bytes =
-            postcard::to_allocvec(&encoded_token.token).map_err(|_| PageTokenError::InvalidFormat)?;
+            encode(&encoded_token.token).map_err(|_| PageTokenError::InvalidFormat)?;
 
         let mut mac =
             <Hmac<Sha256>>::new_from_slice(&self.key).expect("HMAC key length should be valid");

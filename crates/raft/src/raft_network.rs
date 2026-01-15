@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
+use ledger_types::encode;
 use openraft::error::{Fatal, RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable};
 use parking_lot::RwLock;
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
@@ -197,7 +198,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         let entries: Vec<Vec<u8>> = rpc
             .entries
             .iter()
-            .map(|e| postcard::to_allocvec(e).unwrap_or_default())
+            .map(|e| encode(e).unwrap_or_default())
             .collect();
 
         let request = crate::proto::RaftAppendEntriesRequest {

@@ -6,7 +6,7 @@
 use inkwell::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{Entity, VaultId};
+use ledger_types::{CodecError, Entity, VaultId, decode, encode};
 
 use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 
@@ -16,8 +16,8 @@ pub enum EntityError {
     #[snafu(display("Storage error: {source}"))]
     Storage { source: inkwell::Error },
 
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization { message: String },
+    #[snafu(display("Codec error: {source}"))]
+    Codec { source: CodecError },
 }
 
 /// Result type for entity operations.
@@ -40,10 +40,7 @@ impl EntityStore {
             .context(StorageSnafu)?
         {
             Some(data) => {
-                let entity =
-                    postcard::from_bytes(&data).map_err(|e| EntityError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let entity = decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -57,9 +54,7 @@ impl EntityStore {
         entity: &Entity,
     ) -> Result<()> {
         let storage_key = encode_storage_key(vault_id, &entity.key);
-        let encoded = postcard::to_allocvec(entity).map_err(|e| EntityError::Serialization {
-            message: e.to_string(),
-        })?;
+        let encoded = encode(entity).context(CodecSnafu)?;
 
         txn.insert::<tables::Entities>(&storage_key, &encoded)
             .context(StorageSnafu)?;
@@ -125,10 +120,7 @@ impl EntityStore {
                 if entities.len() >= limit {
                     break;
                 }
-                let entity =
-                    postcard::from_bytes(&value).map_err(|e| EntityError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let entity = decode(&value).context(CodecSnafu)?;
                 entities.push(entity);
             }
             count += 1;
@@ -173,9 +165,7 @@ impl EntityStore {
                 break;
             }
 
-            let entity = postcard::from_bytes(&value).map_err(|e| EntityError::Serialization {
-                message: e.to_string(),
-            })?;
+            let entity = decode(&value).context(CodecSnafu)?;
             entities.push(entity);
         }
 
@@ -234,10 +224,7 @@ impl EntityStore {
 
             // Check prefix match
             if local_key.starts_with(key_prefix) {
-                let entity =
-                    postcard::from_bytes(&value).map_err(|e| EntityError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let entity = decode(&value).context(CodecSnafu)?;
                 entities.push(entity);
 
                 if entities.len() >= limit {

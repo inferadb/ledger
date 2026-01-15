@@ -9,7 +9,7 @@
 use inkwell::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::VaultId;
+use ledger_types::{VaultId, decode, encode};
 
 use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_key};
 
@@ -20,8 +20,8 @@ pub enum IndexError {
     #[snafu(display("Storage error: {source}"))]
     Storage { source: inkwell::Error },
 
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization { message: String },
+    #[snafu(display("Codec error: {source}"))]
+    Codec { source: ledger_types::CodecError },
 }
 
 /// Result type for index operations.
@@ -61,7 +61,7 @@ impl IndexManager {
 
         // Get existing set
         let mut set: SubjectSet = match txn.get::<tables::ObjIndex>(&storage_key) {
-            Ok(Some(data)) => postcard::from_bytes(&data).unwrap_or_default(),
+            Ok(Some(data)) => decode(&data).unwrap_or_default(),
             _ => SubjectSet::default(),
         };
 
@@ -72,9 +72,7 @@ impl IndexManager {
         }
 
         // Store updated set
-        let encoded = postcard::to_allocvec(&set).map_err(|e| IndexError::Serialization {
-            message: e.to_string(),
-        })?;
+        let encoded = encode(&set).context(CodecSnafu)?;
 
         txn.insert::<tables::ObjIndex>(&storage_key, &encoded)
             .context(StorageSnafu)?;
@@ -95,7 +93,7 @@ impl IndexManager {
 
         // Get existing set
         let existing_set: Option<SubjectSet> = match txn.get::<tables::ObjIndex>(&storage_key) {
-            Ok(Some(data)) => Some(postcard::from_bytes(&data).unwrap_or_default()),
+            Ok(Some(data)) => Some(decode(&data).unwrap_or_default()),
             _ => None,
         };
 
@@ -111,9 +109,7 @@ impl IndexManager {
             let _ = txn.delete::<tables::ObjIndex>(&storage_key);
         } else {
             // Store updated set
-            let encoded = postcard::to_allocvec(&set).map_err(|e| IndexError::Serialization {
-                message: e.to_string(),
-            })?;
+            let encoded = encode(&set).context(CodecSnafu)?;
 
             txn.insert::<tables::ObjIndex>(&storage_key, &encoded)
                 .context(StorageSnafu)?;
@@ -138,7 +134,7 @@ impl IndexManager {
 
         // Get existing set
         let mut set: ResourceRelationSet = match txn.get::<tables::SubjIndex>(&storage_key) {
-            Ok(Some(data)) => postcard::from_bytes(&data).unwrap_or_default(),
+            Ok(Some(data)) => decode(&data).unwrap_or_default(),
             _ => ResourceRelationSet::default(),
         };
 
@@ -149,9 +145,7 @@ impl IndexManager {
         }
 
         // Store updated set
-        let encoded = postcard::to_allocvec(&set).map_err(|e| IndexError::Serialization {
-            message: e.to_string(),
-        })?;
+        let encoded = encode(&set).context(CodecSnafu)?;
 
         txn.insert::<tables::SubjIndex>(&storage_key, &encoded)
             .context(StorageSnafu)?;
@@ -173,7 +167,7 @@ impl IndexManager {
         // Get existing set
         let existing_set: Option<ResourceRelationSet> =
             match txn.get::<tables::SubjIndex>(&storage_key) {
-                Ok(Some(data)) => Some(postcard::from_bytes(&data).unwrap_or_default()),
+                Ok(Some(data)) => Some(decode(&data).unwrap_or_default()),
                 _ => None,
             };
 
@@ -190,9 +184,7 @@ impl IndexManager {
             let _ = txn.delete::<tables::SubjIndex>(&storage_key);
         } else {
             // Store updated set
-            let encoded = postcard::to_allocvec(&set).map_err(|e| IndexError::Serialization {
-                message: e.to_string(),
-            })?;
+            let encoded = encode(&set).context(CodecSnafu)?;
 
             txn.insert::<tables::SubjIndex>(&storage_key, &encoded)
                 .context(StorageSnafu)?;
@@ -213,10 +205,7 @@ impl IndexManager {
 
         match txn.get::<tables::ObjIndex>(&storage_key) {
             Ok(Some(data)) => {
-                let set: SubjectSet =
-                    postcard::from_bytes(&data).map_err(|e| IndexError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let set: SubjectSet = decode(&data).context(CodecSnafu)?;
                 Ok(set.subjects)
             }
             Ok(None) => Ok(Vec::new()),
@@ -235,10 +224,7 @@ impl IndexManager {
 
         match txn.get::<tables::SubjIndex>(&storage_key) {
             Ok(Some(data)) => {
-                let set: ResourceRelationSet =
-                    postcard::from_bytes(&data).map_err(|e| IndexError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                let set: ResourceRelationSet = decode(&data).context(CodecSnafu)?;
                 Ok(set.pairs)
             }
             Ok(None) => Ok(Vec::new()),

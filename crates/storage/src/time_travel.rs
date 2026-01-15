@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use inkwell::{Database, StorageBackend, tables};
+use ledger_types::{decode, encode};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
@@ -34,11 +35,11 @@ pub enum TimeTravelError {
         source: inkwell::Error,
     },
 
-    /// Serialization error.
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization {
-        /// Description of the serialization error.
-        message: String,
+    /// Codec error.
+    #[snafu(display("Codec error: {source}"))]
+    Codec {
+        /// The underlying codec error.
+        source: ledger_types::CodecError,
     },
 
     /// The vault is not configured for time-travel indexing.
@@ -167,9 +168,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     /// Configure time-travel indexing for a vault.
     pub fn configure_vault(&self, vault_id: u64, config: TimeTravelConfig) -> Result<()> {
         let serialized =
-            postcard::to_allocvec(&config).map_err(|e| TimeTravelError::Serialization {
-                message: e.to_string(),
-            })?;
+            encode(&config).context(CodecSnafu)?;
 
         let mut txn = self.db.write().context(StorageSnafu)?;
         txn.insert::<tables::TimeTravelConfig>(&vault_id, &serialized)
@@ -198,9 +197,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         {
             Some(data) => {
                 let config: TimeTravelConfig =
-                    postcard::from_bytes(&data).map_err(|e| TimeTravelError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                    decode(&data).context(CodecSnafu)?;
                 self.config_cache.write().insert(vault_id, config.clone());
                 Ok(Some(config))
             }
@@ -237,9 +234,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         };
 
         let serialized =
-            postcard::to_allocvec(&entry).map_err(|e| TimeTravelError::Serialization {
-                message: e.to_string(),
-            })?;
+            encode(&entry).context(CodecSnafu)?;
 
         let index_key = make_index_key(vault_id, key, height);
 
@@ -281,9 +276,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
 
                 // Found an entry at or before requested height
                 let entry: TimeTravelEntry =
-                    postcard::from_bytes(&v).map_err(|e| TimeTravelError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                    decode(&v).context(CodecSnafu)?;
                 return Ok(Some(entry));
             }
         }
@@ -321,9 +314,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
                 }
 
                 let entry: TimeTravelEntry =
-                    postcard::from_bytes(&v).map_err(|e| TimeTravelError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                    decode(&v).context(CodecSnafu)?;
                 entries.push(entry);
             }
         }

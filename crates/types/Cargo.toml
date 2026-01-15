@@ -18,6 +18,7 @@ zeroize.workspace = true
 
 # Serialization
 serde.workspace = true
+postcard.workspace = true
 
 # Error handling
 snafu.workspace = true

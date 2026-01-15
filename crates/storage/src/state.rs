@@ -14,7 +14,7 @@ use inkwell::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus};
+use ledger_types::{Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode};
 
 use crate::bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment};
 use crate::indexes::{IndexError, IndexManager};
@@ -37,11 +37,11 @@ pub enum StateError {
         source: IndexError,
     },
 
-    /// Serialization/deserialization failed.
-    #[snafu(display("Serialization error: {message}"))]
-    Serialization {
-        /// Description of the serialization error.
-        message: String,
+    /// Codec error during serialization/deserialization.
+    #[snafu(display("Codec error: {source}"))]
+    Codec {
+        /// The underlying codec error.
+        source: ledger_types::CodecError,
     },
 
     /// Conditional write precondition failed.
@@ -141,7 +141,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let is_update = existing.is_some();
                     let entity_data = existing
                         .as_ref()
-                        .and_then(|data| postcard::from_bytes::<Entity>(data).ok());
+                        .and_then(|data| decode::<Entity>(data).ok());
 
                     let condition_met = match condition {
                         None => true,
@@ -175,9 +175,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     };
 
                     let encoded =
-                        postcard::to_allocvec(&entity).map_err(|e| StateError::Serialization {
-                            message: e.to_string(),
-                        })?;
+                        encode(&entity).context(CodecSnafu)?;
 
                     txn.insert::<tables::Entities>(&storage_key, &encoded)
                         .context(InkwellSnafu)?;
@@ -243,9 +241,7 @@ impl<B: StorageBackend> StateLayer<B> {
                         WriteStatus::AlreadyExists
                     } else {
                         let encoded =
-                            postcard::to_allocvec(&rel).map_err(|e| StateError::Serialization {
-                                message: e.to_string(),
-                            })?;
+                            encode(&rel).context(CodecSnafu)?;
 
                         txn.insert::<tables::Relationships>(&storage_key, &encoded)
                             .context(InkwellSnafu)?;
@@ -417,9 +413,7 @@ impl<B: StorageBackend> StateLayer<B> {
         {
             Some(data) => {
                 let entity =
-                    postcard::from_bytes(&data).map_err(|e| StateError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                    decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -501,9 +495,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 }
 
                 let entity: Entity =
-                    postcard::from_bytes(&value).map_err(|e| StateError::Serialization {
-                        message: e.to_string(),
-                    })?;
+                    decode(&value).context(CodecSnafu)?;
                 builder.add_entity(&entity);
             }
 
@@ -620,10 +612,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 }
             }
 
-            let entity: Entity =
-                postcard::from_bytes(&value).map_err(|e| StateError::Serialization {
-                    message: e.to_string(),
-                })?;
+            let entity: Entity = decode(&value).context(CodecSnafu)?;
 
             entities.push(entity);
         }
@@ -672,10 +661,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
 
-            let rel: Relationship =
-                postcard::from_bytes(&value).map_err(|e| StateError::Serialization {
-                    message: e.to_string(),
-                })?;
+            let rel: Relationship = decode(&value).context(CodecSnafu)?;
 
             relationships.push(rel);
         }
