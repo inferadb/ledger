@@ -9,6 +9,17 @@
 //!
 //! Per DESIGN.md, each shard group has its own storage located at:
 //! `shards/{shard_id}/raft/log.inkwell`
+//!
+//! # Lock Ordering Convention
+//!
+//! To prevent deadlocks, locks in this module must be acquired in the following order:
+//!
+//! 1. `applied_state` - Raft state machine state
+//! 2. `shard_chain` - Shard chain tracking (height + previous hash)
+//! 3. `vote_cache`, `last_purged_cache` - Caches (independent, no ordering requirement)
+//!
+//! The `shard_chain` lock consolidates `shard_height` and `previous_shard_hash`
+//! into a single lock to eliminate internal ordering issues.
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -50,6 +61,22 @@ const KEY_VOTE: &str = "vote";
 const KEY_COMMITTED: &str = "committed";
 const KEY_LAST_PURGED: &str = "last_purged";
 const KEY_APPLIED_STATE: &str = "applied_state";
+
+// ============================================================================
+// Shard Chain State (Lock Consolidated)
+// ============================================================================
+
+/// Shard chain tracking state.
+///
+/// These fields are grouped into a single lock to avoid lock ordering issues.
+/// They track the shard-level blockchain state for creating ShardBlocks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShardChainState {
+    /// Current shard height for block creation.
+    pub height: u64,
+    /// Previous shard hash for chain continuity.
+    pub previous_hash: Hash,
+}
 
 // ============================================================================
 // Applied State (State Machine)
@@ -358,10 +385,11 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     shard_id: ShardId,
     /// Node ID for block metadata.
     node_id: String,
-    /// Current shard height (for block creation).
-    shard_height: RwLock<u64>,
-    /// Previous shard hash (for chaining).
-    previous_shard_hash: RwLock<Hash>,
+    /// Shard chain state (height and previous hash).
+    ///
+    /// Consolidated into single lock to avoid lock ordering issues.
+    /// See: apply_to_state_machine, restore_from_db
+    shard_chain: RwLock<ShardChainState>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -409,8 +437,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
             block_archive: None,
             shard_id: 0,
             node_id: String::new(),
-            shard_height: RwLock::new(0),
-            previous_shard_hash: RwLock::new(ledger_types::ZERO_HASH),
+            shard_chain: RwLock::new(ShardChainState {
+                height: 0,
+                previous_hash: ledger_types::ZERO_HASH,
+            }),
         };
 
         // Load cached values
@@ -440,7 +470,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
     /// Get the current shard height.
     pub fn current_shard_height(&self) -> u64 {
-        *self.shard_height.read()
+        self.shard_chain.read().height
     }
 
     /// Get a reference to the state layer (if configured).
@@ -494,9 +524,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
         {
             let state: AppliedState =
                 postcard::from_bytes(&state_data).map_err(|e| to_serde_error(&e))?;
-            // Restore shard chain tracking from persisted state
-            *self.shard_height.write() = state.shard_height;
-            *self.previous_shard_hash.write() = state.previous_shard_hash;
+            // Restore shard chain tracking from persisted state (single lock)
+            *self.shard_chain.write() = ShardChainState {
+                height: state.shard_height,
+                previous_hash: state.previous_shard_hash,
+            };
             *self.applied_state.write() = state;
         }
 
@@ -1121,8 +1153,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             block_archive: self.block_archive.clone(),
             shard_id: self.shard_id,
             node_id: self.node_id.clone(),
-            shard_height: RwLock::new(*self.shard_height.read()),
-            previous_shard_hash: RwLock::new(*self.previous_shard_hash.read()),
+            shard_chain: RwLock::new(*self.shard_chain.read()),
         }
     }
 
@@ -1322,13 +1353,15 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         // Create and store ShardBlock if we have vault entries
         if !vault_entries.is_empty() {
             let timestamp = chrono::Utc::now();
-            let new_shard_height = *self.shard_height.read() + 1;
-            let previous_shard_hash = *self.previous_shard_hash.read();
+
+            // Read shard chain state (single lock acquisition)
+            let chain_state = *self.shard_chain.read();
+            let new_shard_height = chain_state.height + 1;
 
             let shard_block = ShardBlock {
                 shard_id: self.shard_id,
                 shard_height: new_shard_height,
-                previous_shard_hash,
+                previous_shard_hash: chain_state.previous_hash,
                 vault_entries: vault_entries.clone(),
                 timestamp,
                 leader_id: self.node_id.clone(),
@@ -1356,11 +1389,13 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 }
             }
 
-            // Update shard chain tracking
+            // Update shard chain tracking (single lock acquisition)
             let shard_hash =
                 ledger_types::sha256(&postcard::to_allocvec(&shard_block).unwrap_or_default());
-            *self.shard_height.write() = new_shard_height;
-            *self.previous_shard_hash.write() = shard_hash;
+            *self.shard_chain.write() = ShardChainState {
+                height: new_shard_height,
+                previous_hash: shard_hash,
+            };
 
             // Also update AppliedState for snapshot persistence
             state.shard_height = new_shard_height;
@@ -1402,9 +1437,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         *self.applied_state.write() = combined.applied_state.clone();
         self.save_applied_state(&combined.applied_state)?;
 
-        // Restore shard chain tracking from snapshot
-        *self.shard_height.write() = combined.applied_state.shard_height;
-        *self.previous_shard_hash.write() = combined.applied_state.previous_shard_hash;
+        // Restore shard chain tracking from snapshot (single lock)
+        *self.shard_chain.write() = ShardChainState {
+            height: combined.applied_state.shard_height,
+            previous_hash: combined.applied_state.previous_shard_hash,
+        };
 
         // Restore StateLayer entities if StateLayer is configured
         if let Some(state_layer) = &self.state_layer {
