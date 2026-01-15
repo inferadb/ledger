@@ -384,10 +384,18 @@ impl WriteServiceImpl {
         sequence: u64,
     ) -> Result<LedgerRequest, Status> {
         // Convert proto operations to internal Operations
+        // Time the proto → internal type conversion
+        let convert_start = std::time::Instant::now();
         let internal_ops: Vec<ledger_types::Operation> = operations
             .iter()
             .map(Self::convert_operation)
             .collect::<Result<Vec<_>, Status>>()?;
+        let convert_secs = convert_start.elapsed().as_secs_f64();
+
+        // Record proto decode metrics (per operation average for consistency)
+        if !operations.is_empty() {
+            metrics::record_proto_decode(convert_secs / operations.len() as f64, "write_operation");
+        }
 
         // Create a single transaction with all operations
         let transaction = ledger_types::Transaction {

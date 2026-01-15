@@ -390,6 +390,62 @@ pub fn record_learner_voter_error(voter_id: u64, error_type: &str) {
     .increment(1);
 }
 
+
+// =============================================================================
+// Serialization Metrics
+// =============================================================================
+
+// Metric names for serialization timing
+const SERIALIZATION_PROTO_DECODE: &str = "ledger_serialization_proto_decode_seconds";
+const SERIALIZATION_BINCODE_ENCODE: &str = "ledger_serialization_bincode_encode_seconds";
+const SERIALIZATION_BINCODE_DECODE: &str = "ledger_serialization_bincode_decode_seconds";
+const SERIALIZATION_BYTES: &str = "ledger_serialization_bytes";
+
+/// Record proto decoding latency (gRPC request → internal types).
+///
+/// This measures the time to convert protobuf messages to internal Rust types,
+/// which is part of the write path hot loop.
+#[inline]
+pub fn record_proto_decode(latency_secs: f64, operation: &str) {
+    histogram!(SERIALIZATION_PROTO_DECODE, "operation" => operation.to_string())
+        .record(latency_secs);
+}
+
+/// Record bincode encoding latency (internal types → Raft log).
+///
+/// This measures serialization time when appending entries to the Raft log.
+/// Per DESIGN.md architecture: internal types are bincode-serialized for
+/// efficient storage in Inkwell.
+#[inline]
+pub fn record_bincode_encode(latency_secs: f64, entry_type: &str) {
+    histogram!(SERIALIZATION_BINCODE_ENCODE, "entry_type" => entry_type.to_string())
+        .record(latency_secs);
+}
+
+/// Record bincode decoding latency (Raft log → internal types).
+///
+/// This measures deserialization time when reading entries from the Raft log,
+/// used during log replay and snapshot restoration.
+#[inline]
+pub fn record_bincode_decode(latency_secs: f64, entry_type: &str) {
+    histogram!(SERIALIZATION_BINCODE_DECODE, "entry_type" => entry_type.to_string())
+        .record(latency_secs);
+}
+
+/// Record serialization size in bytes.
+///
+/// Useful for correlating latency with payload size and detecting
+/// unexpectedly large serialized payloads.
+#[inline]
+pub fn record_serialization_bytes(bytes: usize, direction: &str, entry_type: &str) {
+    histogram!(
+        SERIALIZATION_BYTES,
+        "direction" => direction.to_string(),
+        "entry_type" => entry_type.to_string()
+    )
+    .record(bytes as f64);
+}
+
 // =============================================================================
 // Timer Helper
 // =============================================================================

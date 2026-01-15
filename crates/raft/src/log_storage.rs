@@ -30,6 +30,7 @@ use ledger_types::{
     Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root,
 };
 
+use crate::metrics;
 use crate::types::{
     BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
     SystemRequest,
@@ -953,10 +954,23 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             .map_err(|e| to_storage_error(&e))?;
 
         let mut entries = Vec::new();
+        let mut total_bytes = 0usize;
+        let deserialize_start = std::time::Instant::now();
+
         for (_, entry_data) in iter {
+            total_bytes += entry_data.len();
             let entry: Entry<LedgerTypeConfig> =
                 bincode::deserialize(&entry_data).map_err(|e| to_serde_error(&e))?;
             entries.push(entry);
+        }
+
+        // Record batch deserialization metrics
+        if !entries.is_empty() {
+            let deserialize_secs = deserialize_start.elapsed().as_secs_f64();
+            // Record per-entry average to make metrics comparable to encode path
+            let per_entry_secs = deserialize_secs / entries.len() as f64;
+            metrics::record_bincode_decode(per_entry_secs, "raft_entry");
+            metrics::record_serialization_bytes(total_bytes / entries.len(), "decode", "raft_entry");
         }
 
         Ok(entries)
@@ -1151,7 +1165,16 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         for entry in entries {
             let index = entry.log_id.index;
+
+            // Time bincode serialization (write path hot loop)
+            let serialize_start = std::time::Instant::now();
             let entry_data = bincode::serialize(&entry).map_err(|e| to_serde_error(&e))?;
+            let serialize_secs = serialize_start.elapsed().as_secs_f64();
+
+            // Record serialization metrics
+            metrics::record_bincode_encode(serialize_secs, "raft_entry");
+            metrics::record_serialization_bytes(entry_data.len(), "encode", "raft_entry");
+
             write_txn
                 .insert::<tables::RaftLog>(&index, &entry_data)
                 .map_err(|e| to_storage_error(&e))?;
