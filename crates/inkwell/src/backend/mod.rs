@@ -5,7 +5,7 @@
 //!
 //! # Crash Safety: Dual-Slot Commit
 //!
-//! Inkwell uses a dual-slot commit mechanism inspired by Redb for crash safety:
+//! Inkwell uses a dual-slot commit mechanism for crash safety:
 //! - The header contains TWO commit slots (primary and secondary)
 //! - A "god byte" indicates which slot is currently active
 //! - Commits write to the INACTIVE slot, then atomically flip the god byte

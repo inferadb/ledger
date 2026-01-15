@@ -95,7 +95,7 @@ initial_prompt: |
   - **Shard**: Multiple namespaces share a Raft group for efficiency. Vaults within a shard have independent cryptographic chains.
 
   ## Architecture Highlights
-  - Hybrid storage: State commitment (merkleized) is separate from state storage (fast K/V in redb) to avoid write amplification.
+  - Hybrid storage: State commitment (merkleized) is separate from state storage (fast K/V in Inkwell) to avoid write amplification.
   - Bucket-based state roots: 256 buckets with incremental hashing, O(k) complexity where k = dirty keys.
   - Per-vault failure isolation: Divergence in one vault doesn't cascade to other vaults in the same shard.
   - Leader-assigned sequential IDs: Deterministic for Raft replay (NamespaceId, VaultId, UserId are all int64).
@@ -103,7 +103,7 @@ initial_prompt: |
   ## Key Design Decisions
   - All operations are idempotent, resolved by Raft total ordering.
   - SHA-256 for all cryptographic commitments; seahash for bucket assignment.
-  - redb as the embedded storage backend (single-file, ACID, zero-copy reads).
+  - Inkwell as the embedded storage backend (single-file, ACID, COW B-trees).
   - Pagination tokens are opaque, HMAC-signed, and include height for consistent reads.
 
   See DESIGN.md for full specifications.

@@ -170,7 +170,8 @@ impl<B: StorageBackend> Database<B> {
         // This prevents unbounded file growth after crashes.
         if recovery_required {
             tracing::warn!("Recovery required - rebuilding free list from B-tree walk");
-            let state = db.committed_state.load();
+            // Use load_full() to avoid holding a Guard during the potentially long B-tree walk
+            let state = db.committed_state.load_full();
             db.rebuild_free_list(&state.table_roots, next_page)?;
         }
 
@@ -258,7 +259,7 @@ impl<B: StorageBackend> Database<B> {
     ///
     /// # Dual-Slot Commit Protocol
     ///
-    /// This implements a crash-safe commit sequence inspired by Redb:
+    /// This implements a crash-safe commit sequence:
     ///
     /// 1. Write table directory page (contains all table roots)
     /// 2. Read current header to get existing slots
@@ -449,7 +450,8 @@ impl<B: StorageBackend> Database<B> {
     /// writers create new page copies, never modifying pages readers might see.
     pub fn read(&self) -> Result<ReadTransaction<'_, B>> {
         // Load current committed state (atomic, lock-free)
-        let snapshot = self.committed_state.load();
+        // Use load_full() to get Arc directly - avoids Guard which blocks writers
+        let snapshot = self.committed_state.load_full();
         let snapshot_id = snapshot.snapshot_id;
 
         // Register with tracker to prevent page cleanup while we're reading
@@ -457,7 +459,7 @@ impl<B: StorageBackend> Database<B> {
 
         Ok(ReadTransaction {
             db: self,
-            snapshot: (**snapshot).clone(),
+            snapshot: (*snapshot).clone(),
             snapshot_id,
             page_cache: RefCell::new(HashMap::new()),
         })
@@ -476,7 +478,8 @@ impl<B: StorageBackend> Database<B> {
         let snapshot_id = self.tracker.start_write_transaction();
 
         // Start from current committed state
-        let current = self.committed_state.load();
+        // Use load_full() to get Arc directly - avoids Guard which blocks writers
+        let current = self.committed_state.load_full();
         let table_roots = current.table_roots;
 
         Ok(WriteTransaction {

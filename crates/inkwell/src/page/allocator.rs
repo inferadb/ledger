@@ -1,6 +1,6 @@
 //! Simple free-list page allocator.
 //!
-//! Unlike redb's buddy allocator, Inkwell uses a simple free list because:
+//! Inkwell uses a simple free list rather than a buddy allocator because:
 //! - All pages are the same size (no variable allocation orders)
 //! - Single-writer model simplifies state management
 //! - Free list can be rebuilt from B-tree scan on recovery

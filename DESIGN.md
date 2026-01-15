@@ -2886,7 +2886,7 @@ impl Node {
             let shard_id = parse_shard_id(&shard_dir.file_name())?;
 
             // 3. Recover Raft state
-            let raft_storage = RedbLogStorage::open(shard_dir.join("raft/log.inkwell"))?;
+            let raft_storage = RaftLogStore::open(shard_dir.join("raft/log.inkwell"))?;
             let vote = raft_storage.read_vote().await?;
             let log_state = raft_storage.get_log_state().await?;
 
