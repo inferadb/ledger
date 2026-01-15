@@ -17,7 +17,7 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
-use inkwell::{Database, FileBackend, StorageBackend, tables};
+use inkwell::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
 use openraft::storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
@@ -369,12 +369,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ///
     /// This creates a basic log store without StateLayer or BlockArchive integration.
     /// Use `with_state_layer` and `with_block_archive` to add those capabilities.
+    /// Page size for Raft log storage.
+    ///
+    /// Using 16KB pages (vs default 4KB) to allow larger batch sizes.
+    /// A batch of 100 operations typically serializes to ~8-12KB with bincode.
+    /// Max supported: 64KB. Minimum: 512 bytes (must be power of 2).
+    pub const RAFT_PAGE_SIZE: usize = 16 * 1024; // 16KB
+
+    /// Open or create a Raft log storage database.
+    ///
+    /// New databases are created with 16KB pages to support larger batch sizes.
+    /// Existing databases retain their original page size for backwards compatibility.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError<LedgerNodeId>> {
-        // Try to open existing database, otherwise create new one
+        // Try to open existing database, otherwise create new one with larger pages
         let db = if path.as_ref().exists() {
+            // Existing database - use whatever page size it was created with
             Database::open(path.as_ref()).map_err(|e| to_storage_error(&e))?
         } else {
-            Database::create(path.as_ref()).map_err(|e| to_storage_error(&e))?
+            // New database - use larger pages for bigger batch sizes
+            let config = DatabaseConfig {
+                page_size: Self::RAFT_PAGE_SIZE,
+                ..Default::default()
+            };
+            Database::create_with_config(path.as_ref(), config).map_err(|e| to_storage_error(&e))?
         };
 
         // Inkwell has fixed tables - no need to create them explicitly

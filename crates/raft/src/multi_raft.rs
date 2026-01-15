@@ -53,7 +53,7 @@ use snafu::Snafu;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use inkwell::{Database, FileBackend};
+use inkwell::{Database, DatabaseConfig, FileBackend};
 use ledger_storage::system::SystemNamespaceService;
 use ledger_storage::{BlockArchive, StateLayer};
 use ledger_types::{NamespaceId, ShardId};
@@ -559,12 +559,20 @@ impl MultiRaftManager {
         Arc<BlockArchive<FileBackend>>,
         RaftLogStore<FileBackend>,
     )> {
-        // Open or create state database using inkwell
+        // Use larger pages for all databases to support larger batch sizes
+        // This matches RAFT_PAGE_SIZE in RaftLogStore
+        const SHARD_PAGE_SIZE: usize = 16 * 1024; // 16KB
+
+        // Open or create state database using inkwell with 16KB pages
         let state_db_path = shard_dir.join("state.inkwell");
         let state_db = if state_db_path.exists() {
             Database::<FileBackend>::open(&state_db_path)
         } else {
-            Database::<FileBackend>::create(&state_db_path)
+            let config = DatabaseConfig {
+                page_size: SHARD_PAGE_SIZE,
+                ..Default::default()
+            };
+            Database::<FileBackend>::create_with_config(&state_db_path, config)
         }
         .map_err(|e| MultiRaftError::Storage {
             shard_id,
@@ -572,12 +580,16 @@ impl MultiRaftManager {
         })?;
         let state = Arc::new(StateLayer::new(Arc::new(state_db)));
 
-        // Open or create block archive database using inkwell
+        // Open or create block archive database using inkwell with 16KB pages
         let blocks_db_path = shard_dir.join("blocks.inkwell");
         let blocks_db = if blocks_db_path.exists() {
             Database::<FileBackend>::open(&blocks_db_path)
         } else {
-            Database::<FileBackend>::create(&blocks_db_path)
+            let config = DatabaseConfig {
+                page_size: SHARD_PAGE_SIZE,
+                ..Default::default()
+            };
+            Database::<FileBackend>::create_with_config(&blocks_db_path, config)
         }
         .map_err(|e| MultiRaftError::Storage {
             shard_id,
