@@ -841,6 +841,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 };
                 (response, None)
             }
+
+            LedgerRequest::BatchWrite { requests } => {
+                // Process each request in the batch sequentially, collecting responses.
+                // Vault entries are collected and the last one is returned (batches typically
+                // target the same vault, so the final block includes all transactions).
+                let mut responses = Vec::with_capacity(requests.len());
+                let mut last_vault_entry = None;
+
+                for inner_request in requests {
+                    let (response, vault_entry) = self.apply_request(inner_request, state);
+                    responses.push(response);
+                    if vault_entry.is_some() {
+                        last_vault_entry = vault_entry;
+                    }
+                }
+
+                (
+                    LedgerResponse::BatchWrite { responses },
+                    last_vault_entry,
+                )
+            }
         }
     }
 

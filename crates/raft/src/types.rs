@@ -168,6 +168,19 @@ pub enum LedgerRequest {
 
     /// System operation (user management, node membership, etc.).
     System(SystemRequest),
+
+    /// Batch of requests to apply atomically in a single Raft entry.
+    ///
+    /// Per DESIGN.md §6.3: Application-level batching coalesces multiple
+    /// write requests into a single Raft proposal to reduce consensus
+    /// round-trips and improve throughput.
+    ///
+    /// Each inner request is processed sequentially, and responses are
+    /// returned in the same order via `LedgerResponse::BatchWrite`.
+    BatchWrite {
+        /// The requests to process.
+        requests: Vec<LedgerRequest>,
+    },
 }
 
 /// System-level requests that modify `_system` namespace.
@@ -277,6 +290,15 @@ pub enum LedgerResponse {
         /// The condition that failed (for specific error code mapping).
         failed_condition: Option<SetCondition>,
     },
+
+    /// Batch of responses from a BatchWrite request.
+    ///
+    /// Responses are in the same order as the requests in the corresponding
+    /// `LedgerRequest::BatchWrite`.
+    BatchWrite {
+        /// Responses for each request in the batch.
+        responses: Vec<LedgerResponse>,
+    },
 }
 
 impl fmt::Display for LedgerResponse {
@@ -316,6 +338,9 @@ impl fmt::Display for LedgerResponse {
             }
             LedgerResponse::PreconditionFailed { key, .. } => {
                 write!(f, "PreconditionFailed(key={})", key)
+            }
+            LedgerResponse::BatchWrite { responses } => {
+                write!(f, "BatchWrite(count={})", responses.len())
             }
         }
     }

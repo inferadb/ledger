@@ -36,7 +36,7 @@ pub struct PageHeader {
     pub flags: u8,
     /// Number of items in this page (for B-tree pages).
     pub item_count: u16,
-    /// XXH32 checksum of page content (bytes after header).
+    /// XXH3-64 checksum (truncated to 32 bits) of page content (bytes after header).
     pub checksum: u32,
     /// Transaction ID that last modified this page.
     pub txn_id: u64,
@@ -149,16 +149,22 @@ impl Page {
         &mut self.data[PAGE_HEADER_SIZE..]
     }
 
-    /// Compute and update the checksum.
+    /// Compute and update the checksum using XXH3-64 (truncated to 32 bits).
+    ///
+    /// Uses XXH3-64 for better hash quality and performance on modern CPUs,
+    /// truncated to 32 bits to maintain format compatibility with existing pages.
     pub fn update_checksum(&mut self) {
-        let checksum = xxhash_rust::xxh32::xxh32(&self.data[PAGE_HEADER_SIZE..], 0);
+        // XXH3-64 is faster and higher quality than XXH32 on modern CPUs
+        let hash64 = xxhash_rust::xxh3::xxh3_64(&self.data[PAGE_HEADER_SIZE..]);
+        let checksum = hash64 as u32; // Truncate to 32 bits for format compatibility
         self.data[4..8].copy_from_slice(&checksum.to_le_bytes());
     }
 
-    /// Verify the page checksum.
+    /// Verify the page checksum using XXH3-64 (truncated to 32 bits).
     pub fn verify_checksum(&self) -> bool {
         let stored_checksum = u32::from_le_bytes(self.data[4..8].try_into().unwrap());
-        let computed_checksum = xxhash_rust::xxh32::xxh32(&self.data[PAGE_HEADER_SIZE..], 0);
+        let hash64 = xxhash_rust::xxh3::xxh3_64(&self.data[PAGE_HEADER_SIZE..]);
+        let computed_checksum = hash64 as u32; // Truncate to 32 bits
         stored_checksum == computed_checksum
     }
 

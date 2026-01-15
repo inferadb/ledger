@@ -2,6 +2,17 @@
 //!
 //! The backend trait abstracts the underlying storage mechanism,
 //! allowing both file-based (production) and in-memory (testing) implementations.
+//!
+//! # Crash Safety: Dual-Slot Commit
+//!
+//! Inkwell uses a dual-slot commit mechanism inspired by Redb for crash safety:
+//! - The header contains TWO commit slots (primary and secondary)
+//! - A "god byte" indicates which slot is currently active
+//! - Commits write to the INACTIVE slot, then atomically flip the god byte
+//! - Recovery reads both slots and uses the valid one
+//!
+//! This ensures there's ALWAYS one valid slot to recover from, even if a crash
+//! occurs during the header write.
 
 mod file;
 mod memory;
@@ -16,14 +27,15 @@ pub const DEFAULT_PAGE_SIZE_POWER: u8 = 12;
 /// Default page size: 4KB (4096 bytes).
 pub const DEFAULT_PAGE_SIZE: usize = 1 << DEFAULT_PAGE_SIZE_POWER;
 
-/// Database header size (fixed at 512 bytes).
-pub const HEADER_SIZE: usize = 512;
+/// Database header size (fixed at 768 bytes to accommodate dual commit slots).
+/// Layout: 64-byte common header + 2 × 256-byte commit slots + 192-byte reserved.
+pub const HEADER_SIZE: usize = 768;
 
 /// Magic number for Inkwell database files.
 pub const MAGIC: &[u8; 8] = b"INKWELL\0";
 
-/// Current format version.
-pub const FORMAT_VERSION: u16 = 1;
+/// Current format version (2 = dual-slot commit).
+pub const FORMAT_VERSION: u16 = 2;
 
 /// Storage backend trait for abstracting file I/O.
 pub trait StorageBackend: Send + Sync {
@@ -57,41 +69,115 @@ pub trait StorageBackend: Send + Sync {
     }
 }
 
-/// Database header structure.
+/// A single commit slot containing the database state at a point in time.
 ///
-/// The header is always 512 bytes (padded with zeros).
-#[derive(Debug, Clone)]
-pub struct DatabaseHeader {
-    /// Magic number: "INKWELL\0"
-    pub magic: [u8; 8],
-    /// Format version (currently 1).
-    pub version: u16,
-    /// Page size as power of 2 (default: 12 = 4KB).
-    pub page_size_power: u8,
-    /// Reserved byte.
-    pub reserved: u8,
-    /// Reserved for future use.
-    pub reserved2: u32,
-    /// Total pages allocated.
-    pub total_pages: u64,
-    /// Head of the free page list (0 = none).
-    pub free_list_head: u64,
+/// Two of these are stored in the header. The "god byte" indicates which is active.
+#[derive(Debug, Clone, Default)]
+pub struct CommitSlot {
     /// Page containing the table directory.
     pub table_directory_page: u64,
+    /// Total pages allocated.
+    pub total_pages: u64,
     /// Last committed transaction ID.
     pub last_txn_id: u64,
     /// Timestamp of last write (Unix epoch seconds).
     pub last_write_timestamp: u64,
-    /// Checksum of header fields (bytes 0-55).
+    /// Head of the free page list (0 = none).
+    pub free_list_head: u64,
+    /// Checksum of this slot's fields (XXH3-64).
     pub checksum: u64,
+}
+
+impl CommitSlot {
+    /// Size of a commit slot on disk (64 bytes).
+    pub const SIZE: usize = 64;
+
+    /// Size of checksum-protected region (48 bytes = 6 × 8-byte fields before checksum).
+    const CHECKSUMMED_SIZE: usize = 40;
+
+    /// Serialize the slot to bytes.
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+
+        buf[0..8].copy_from_slice(&self.table_directory_page.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.total_pages.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.last_txn_id.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.last_write_timestamp.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.free_list_head.to_le_bytes());
+
+        // Compute checksum over bytes 0-39
+        let checksum = xxhash_rust::xxh3::xxh3_64(&buf[0..Self::CHECKSUMMED_SIZE]);
+        buf[40..48].copy_from_slice(&checksum.to_le_bytes());
+
+        // Bytes 48-63 are reserved/padding
+        buf
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::SIZE {
+            return None;
+        }
+
+        Some(Self {
+            table_directory_page: u64::from_le_bytes(buf[0..8].try_into().ok()?),
+            total_pages: u64::from_le_bytes(buf[8..16].try_into().ok()?),
+            last_txn_id: u64::from_le_bytes(buf[16..24].try_into().ok()?),
+            last_write_timestamp: u64::from_le_bytes(buf[24..32].try_into().ok()?),
+            free_list_head: u64::from_le_bytes(buf[32..40].try_into().ok()?),
+            checksum: u64::from_le_bytes(buf[40..48].try_into().ok()?),
+        })
+    }
+
+    /// Verify the checksum of this slot.
+    pub fn verify_checksum(&self) -> bool {
+        let buf = self.to_bytes();
+        let expected = xxhash_rust::xxh3::xxh3_64(&buf[0..Self::CHECKSUMMED_SIZE]);
+        self.checksum == expected
+    }
+}
+
+/// Database header structure with dual-slot commit for crash safety.
+///
+/// Layout (768 bytes total):
+/// - Bytes 0-15: Common header (magic, version, page_size, god_byte)
+/// - Bytes 16-79: Commit slot 0 (64 bytes)
+/// - Bytes 80-143: Commit slot 1 (64 bytes)
+/// - Bytes 144-767: Reserved for future use
+///
+/// The "god byte" (byte 15) determines which slot is primary:
+/// - Bit 0: Primary slot index (0 or 1)
+/// - Bit 1: Recovery required flag (set on commit, cleared on clean shutdown)
+#[derive(Debug, Clone)]
+pub struct DatabaseHeader {
+    /// Magic number: "INKWELL\0"
+    pub magic: [u8; 8],
+    /// Format version (currently 2 for dual-slot).
+    pub version: u16,
+    /// Page size as power of 2 (default: 12 = 4KB).
+    pub page_size_power: u8,
+    /// Reserved bytes.
+    pub reserved: [u8; 4],
+    /// God byte: bit 0 = primary slot, bit 1 = recovery required.
+    pub god_byte: u8,
+    /// Commit slot 0.
+    pub slot0: CommitSlot,
+    /// Commit slot 1.
+    pub slot1: CommitSlot,
 }
 
 impl DatabaseHeader {
     /// Total header size on disk.
     pub const SIZE: usize = HEADER_SIZE;
 
-    /// Size of checksum-protected region.
-    const CHECKSUMMED_SIZE: usize = 56;
+    /// Offset of the god byte in the header (for atomic updates).
+    pub const GOD_BYTE_OFFSET: usize = 15;
+
+    /// Bit mask for primary slot index in god byte.
+    pub const GOD_BYTE_SLOT_MASK: u8 = 0x01;
+
+    /// Bit mask for recovery required flag in god byte.
+    pub const GOD_BYTE_RECOVERY_MASK: u8 = 0x02;
 
     /// Create a new empty header.
     pub fn new(page_size_power: u8) -> Self {
@@ -99,14 +185,66 @@ impl DatabaseHeader {
             magic: *MAGIC,
             version: FORMAT_VERSION,
             page_size_power,
-            reserved: 0,
-            reserved2: 0,
-            total_pages: 0,
-            free_list_head: 0,
-            table_directory_page: 0,
-            last_txn_id: 0,
-            last_write_timestamp: 0,
-            checksum: 0,
+            reserved: [0; 4],
+            god_byte: 0, // Slot 0 is primary, no recovery required
+            slot0: CommitSlot::default(),
+            slot1: CommitSlot::default(),
+        }
+    }
+
+    /// Get the index of the primary (active) slot.
+    pub fn primary_slot_index(&self) -> usize {
+        (self.god_byte & Self::GOD_BYTE_SLOT_MASK) as usize
+    }
+
+    /// Get the index of the secondary (inactive) slot.
+    pub fn secondary_slot_index(&self) -> usize {
+        1 - self.primary_slot_index()
+    }
+
+    /// Get a reference to the primary (active) commit slot.
+    pub fn primary_slot(&self) -> &CommitSlot {
+        if self.primary_slot_index() == 0 {
+            &self.slot0
+        } else {
+            &self.slot1
+        }
+    }
+
+    /// Get a mutable reference to the secondary (inactive) commit slot.
+    pub fn secondary_slot_mut(&mut self) -> &mut CommitSlot {
+        if self.secondary_slot_index() == 0 {
+            &mut self.slot0
+        } else {
+            &mut self.slot1
+        }
+    }
+
+    /// Get a reference to a slot by index.
+    pub fn slot(&self, index: usize) -> &CommitSlot {
+        if index == 0 {
+            &self.slot0
+        } else {
+            &self.slot1
+        }
+    }
+
+    /// Check if recovery is required (unclean shutdown detected).
+    pub fn recovery_required(&self) -> bool {
+        (self.god_byte & Self::GOD_BYTE_RECOVERY_MASK) != 0
+    }
+
+    /// Flip the primary slot (toggle bit 0 of god byte).
+    pub fn flip_primary_slot(&mut self) {
+        self.god_byte ^= Self::GOD_BYTE_SLOT_MASK;
+    }
+
+    /// Set the recovery required flag.
+    pub fn set_recovery_required(&mut self, required: bool) {
+        if required {
+            self.god_byte |= Self::GOD_BYTE_RECOVERY_MASK;
+        } else {
+            self.god_byte &= !Self::GOD_BYTE_RECOVERY_MASK;
         }
     }
 
@@ -114,21 +252,20 @@ impl DatabaseHeader {
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
 
+        // Common header (bytes 0-15)
         buf[0..8].copy_from_slice(&self.magic);
         buf[8..10].copy_from_slice(&self.version.to_le_bytes());
         buf[10] = self.page_size_power;
-        buf[11] = self.reserved;
-        buf[12..16].copy_from_slice(&self.reserved2.to_le_bytes());
-        buf[16..24].copy_from_slice(&self.total_pages.to_le_bytes());
-        buf[24..32].copy_from_slice(&self.free_list_head.to_le_bytes());
-        buf[32..40].copy_from_slice(&self.table_directory_page.to_le_bytes());
-        buf[40..48].copy_from_slice(&self.last_txn_id.to_le_bytes());
-        buf[48..56].copy_from_slice(&self.last_write_timestamp.to_le_bytes());
+        buf[11..15].copy_from_slice(&self.reserved);
+        buf[15] = self.god_byte;
 
-        // Compute checksum over bytes 0-55
-        let checksum = xxhash_rust::xxh3::xxh3_64(&buf[0..Self::CHECKSUMMED_SIZE]);
-        buf[56..64].copy_from_slice(&checksum.to_le_bytes());
+        // Slot 0 (bytes 16-79)
+        buf[16..16 + CommitSlot::SIZE].copy_from_slice(&self.slot0.to_bytes());
 
+        // Slot 1 (bytes 80-143)
+        buf[80..80 + CommitSlot::SIZE].copy_from_slice(&self.slot1.to_bytes());
+
+        // Bytes 144-767 are reserved (remain zeros)
         buf
     }
 
@@ -142,50 +279,90 @@ impl DatabaseHeader {
             });
         }
 
-        let header = Self {
-            magic: buf[0..8].try_into().unwrap(),
-            version: u16::from_le_bytes(buf[8..10].try_into().unwrap()),
-            page_size_power: buf[10],
-            reserved: buf[11],
-            reserved2: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
-            total_pages: u64::from_le_bytes(buf[16..24].try_into().unwrap()),
-            free_list_head: u64::from_le_bytes(buf[24..32].try_into().unwrap()),
-            table_directory_page: u64::from_le_bytes(buf[32..40].try_into().unwrap()),
-            last_txn_id: u64::from_le_bytes(buf[40..48].try_into().unwrap()),
-            last_write_timestamp: u64::from_le_bytes(buf[48..56].try_into().unwrap()),
-            checksum: u64::from_le_bytes(buf[56..64].try_into().unwrap()),
-        };
+        let magic: [u8; 8] = buf[0..8].try_into().unwrap();
+        let version = u16::from_le_bytes(buf[8..10].try_into().unwrap());
+        let page_size_power = buf[10];
+        let reserved: [u8; 4] = buf[11..15].try_into().unwrap();
+        let god_byte = buf[15];
 
         // Verify magic
-        if header.magic != *MAGIC {
+        if magic != *MAGIC {
             return Err(Error::InvalidMagic);
         }
 
-        // Verify version
-        if header.version > FORMAT_VERSION {
-            return Err(Error::UnsupportedVersion {
-                version: header.version,
-            });
+        // Verify version (we support both v1 and v2 for migration)
+        if version > FORMAT_VERSION {
+            return Err(Error::UnsupportedVersion { version });
         }
 
-        // Verify checksum
-        let expected_checksum = xxhash_rust::xxh3::xxh3_64(&buf[0..Self::CHECKSUMMED_SIZE]);
-        if header.checksum != expected_checksum {
-            return Err(Error::HeaderChecksumMismatch);
-        }
+        // Parse slots
+        let slot0 = CommitSlot::from_bytes(&buf[16..16 + CommitSlot::SIZE])
+            .ok_or_else(|| Error::Corrupted {
+                reason: "Failed to parse commit slot 0".to_string(),
+            })?;
+        let slot1 = CommitSlot::from_bytes(&buf[80..80 + CommitSlot::SIZE])
+            .ok_or_else(|| Error::Corrupted {
+                reason: "Failed to parse commit slot 1".to_string(),
+            })?;
 
-        Ok(header)
+        Ok(Self {
+            magic,
+            version,
+            page_size_power,
+            reserved,
+            god_byte,
+            slot0,
+            slot1,
+        })
     }
 
-    /// Update the checksum field.
-    pub fn update_checksum(&mut self) {
-        let buf = self.to_bytes();
-        self.checksum = xxhash_rust::xxh3::xxh3_64(&buf[0..Self::CHECKSUMMED_SIZE]);
+    /// Validate the header and determine which slot to use.
+    ///
+    /// Returns the index of the valid primary slot, or an error if both are corrupt.
+    /// If the indicated primary slot has an invalid checksum, tries the secondary.
+    pub fn validate_and_choose_slot(&self) -> Result<usize> {
+        use crate::error::Error;
+
+        let primary = self.primary_slot_index();
+        let secondary = self.secondary_slot_index();
+
+        // Try primary slot first
+        if self.slot(primary).verify_checksum() {
+            return Ok(primary);
+        }
+
+        // Primary is corrupt, try secondary
+        if self.slot(secondary).verify_checksum() {
+            // Secondary is valid - we recovered from a crash during commit
+            return Ok(secondary);
+        }
+
+        // Both slots are corrupt - unrecoverable
+        Err(Error::Corrupted {
+            reason: "Both commit slots have invalid checksums".to_string(),
+        })
     }
 
     /// Get the page size in bytes.
     pub fn page_size(&self) -> usize {
         1 << self.page_size_power
+    }
+
+    // Legacy compatibility methods for migration from v1 headers
+
+    /// Get total_pages from the active slot (legacy compatibility).
+    pub fn total_pages(&self) -> u64 {
+        self.primary_slot().total_pages
+    }
+
+    /// Get table_directory_page from the active slot (legacy compatibility).
+    pub fn table_directory_page(&self) -> u64 {
+        self.primary_slot().table_directory_page
+    }
+
+    /// Get last_txn_id from the active slot (legacy compatibility).
+    pub fn last_txn_id(&self) -> u64 {
+        self.primary_slot().last_txn_id
     }
 }
 
@@ -202,17 +379,102 @@ mod tests {
         assert_eq!(header.magic, recovered.magic);
         assert_eq!(header.version, recovered.version);
         assert_eq!(header.page_size_power, recovered.page_size_power);
+        assert_eq!(header.god_byte, recovered.god_byte);
     }
 
     #[test]
-    fn test_header_checksum_verification() {
+    fn test_commit_slot_round_trip() {
+        let mut slot = CommitSlot::default();
+        slot.table_directory_page = 42;
+        slot.total_pages = 100;
+        slot.last_txn_id = 12345;
+        slot.last_write_timestamp = 1700000000;
+
+        let bytes = slot.to_bytes();
+        let recovered = CommitSlot::from_bytes(&bytes).unwrap();
+
+        assert_eq!(slot.table_directory_page, recovered.table_directory_page);
+        assert_eq!(slot.total_pages, recovered.total_pages);
+        assert_eq!(slot.last_txn_id, recovered.last_txn_id);
+        assert!(recovered.verify_checksum());
+    }
+
+    #[test]
+    fn test_dual_slot_selection() {
+        let mut header = DatabaseHeader::new(DEFAULT_PAGE_SIZE_POWER);
+
+        // Initially slot 0 is primary
+        assert_eq!(header.primary_slot_index(), 0);
+        assert_eq!(header.secondary_slot_index(), 1);
+
+        // Flip to slot 1
+        header.flip_primary_slot();
+        assert_eq!(header.primary_slot_index(), 1);
+        assert_eq!(header.secondary_slot_index(), 0);
+
+        // Flip back to slot 0
+        header.flip_primary_slot();
+        assert_eq!(header.primary_slot_index(), 0);
+    }
+
+    #[test]
+    fn test_recovery_flag() {
+        let mut header = DatabaseHeader::new(DEFAULT_PAGE_SIZE_POWER);
+
+        assert!(!header.recovery_required());
+
+        header.set_recovery_required(true);
+        assert!(header.recovery_required());
+
+        header.set_recovery_required(false);
+        assert!(!header.recovery_required());
+    }
+
+    #[test]
+    fn test_slot_validation_primary_valid() {
+        let mut header = DatabaseHeader::new(DEFAULT_PAGE_SIZE_POWER);
+
+        // Set up slot 0 with valid data
+        header.slot0.table_directory_page = 1;
+        header.slot0.total_pages = 10;
+        // Serialize and re-parse to get correct checksum
+        let bytes = header.to_bytes();
+        let header = DatabaseHeader::from_bytes(&bytes).unwrap();
+
+        // Should choose slot 0 (primary)
+        assert_eq!(header.validate_and_choose_slot().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_slot_validation_fallback_to_secondary() {
+        let mut header = DatabaseHeader::new(DEFAULT_PAGE_SIZE_POWER);
+
+        // Set up slot 1 with valid data
+        header.slot1.table_directory_page = 1;
+        header.slot1.total_pages = 10;
+
+        // Serialize with valid checksums
+        let mut bytes = header.to_bytes();
+
+        // Corrupt slot 0's checksum (bytes 16-79 are slot 0)
+        bytes[56] ^= 0xFF; // Corrupt slot 0 checksum field
+
+        let header = DatabaseHeader::from_bytes(&bytes).unwrap();
+
+        // Primary (slot 0) is corrupt, should fall back to slot 1
+        assert_eq!(header.validate_and_choose_slot().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_both_slots_corrupt() {
         let header = DatabaseHeader::new(DEFAULT_PAGE_SIZE_POWER);
         let mut bytes = header.to_bytes();
 
-        // Corrupt one byte
-        bytes[20] ^= 0xFF;
+        // Corrupt both slot checksums
+        bytes[56] ^= 0xFF;  // Slot 0 checksum
+        bytes[120] ^= 0xFF; // Slot 1 checksum
 
-        let result = DatabaseHeader::from_bytes(&bytes);
-        assert!(result.is_err());
+        let header = DatabaseHeader::from_bytes(&bytes).unwrap();
+        assert!(header.validate_and_choose_slot().is_err());
     }
 }

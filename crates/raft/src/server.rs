@@ -26,6 +26,7 @@ use crate::proto::read_service_server::ReadServiceServer;
 use crate::proto::system_discovery_service_server::SystemDiscoveryServiceServer;
 use crate::proto::write_service_server::WriteServiceServer;
 use crate::rate_limit::NamespaceRateLimiter;
+use crate::batching::BatchConfig;
 use crate::services::{
     AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl, ReadServiceImpl,
     WriteServiceImpl,
@@ -154,22 +155,35 @@ impl LedgerServer {
             self.block_announcements.clone(),
             self.idempotency.clone(),
         );
-        let write_service = {
-            let base = match &self.block_archive {
-                Some(archive) => WriteServiceImpl::with_block_archive(
-                    self.raft.clone(),
-                    self.idempotency.clone(),
-                    archive.clone(),
-                ),
-                None => WriteServiceImpl::new(self.raft.clone(), self.idempotency.clone()),
-            }
-            // Add applied state for sequence gap detection
-            .with_applied_state(self.applied_state.clone());
-            // Add per-namespace rate limiting if configured
-            match &self.namespace_rate_limiter {
-                Some(limiter) => base.with_rate_limiter(limiter.clone()),
-                None => base,
-            }
+        // Create write service with batching enabled for high throughput.
+        // Per DESIGN.md §6.3: Server-level batching coalesces individual Write RPCs
+        // into single Raft proposals. This improves throughput when clients can't
+        // or don't use BatchWrite RPC.
+        let batch_config = BatchConfig::default();
+        let write_service = if let Some(archive) = &self.block_archive {
+            let (service, task) = WriteServiceImpl::with_block_archive_and_batching(
+                self.raft.clone(),
+                self.idempotency.clone(),
+                archive.clone(),
+                batch_config,
+            );
+            tokio::spawn(task);
+            service
+        } else {
+            let (service, task) = WriteServiceImpl::new_with_batching(
+                self.raft.clone(),
+                self.idempotency.clone(),
+                batch_config,
+            );
+            tokio::spawn(task);
+            service
+        };
+        // Add applied state for sequence gap detection
+        let write_service = write_service.with_applied_state(self.applied_state.clone());
+        // Add per-namespace rate limiting if configured
+        let write_service = match &self.namespace_rate_limiter {
+            Some(limiter) => write_service.with_rate_limiter(limiter.clone()),
+            None => write_service,
         };
         let admin_service = match &self.block_archive {
             Some(archive) => AdminServiceImpl::with_block_archive(

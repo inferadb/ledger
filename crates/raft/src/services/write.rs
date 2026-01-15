@@ -1,6 +1,10 @@
 //! Write service implementation.
 //!
 //! Handles transaction submission through Raft consensus.
+//!
+//! Per DESIGN.md §6.3: Uses application-level batching to coalesce multiple
+//! write requests into single Raft proposals, improving throughput by reducing
+//! consensus round-trips.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,6 +16,7 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::IdempotencyCache;
+use crate::batching::{BatchConfig, BatchWriter, BatchWriterHandle};
 use crate::log_storage::AppliedStateAccessor;
 use crate::metrics;
 use crate::proof::{self, ProofError};
@@ -39,21 +44,23 @@ pub struct WriteServiceImpl {
     rate_limiter: Option<Arc<NamespaceRateLimiter>>,
     /// Accessor for applied state (client sequences for gap detection).
     applied_state: Option<AppliedStateAccessor>,
-    /// Mutex to serialize Raft proposals.
+    /// Handle for submitting writes to the batch writer.
     ///
-    /// OpenRaft has a race condition when multiple concurrent proposals are
-    /// submitted - the replication logic may try to read log entries before
-    /// they are appended. Serializing proposals prevents this issue.
+    /// Per DESIGN.md §6.3: Writes are coalesced into batches and submitted
+    /// as single Raft proposals for improved throughput.
+    batch_handle: Option<BatchWriterHandle>,
+    /// Mutex to serialize Raft proposals (fallback when batching disabled).
     ///
-    /// This is a temporary workaround; proper solution is application-level
-    /// batching where multiple write requests are collected and submitted
-    /// as a single Raft entry.
+    /// Used for BatchWriteRequest which bypasses the batch writer, or
+    /// when batch_handle is None.
     proposal_mutex: Arc<Mutex<()>>,
 }
 
 #[allow(clippy::result_large_err)]
 impl WriteServiceImpl {
-    /// Create a new write service.
+    /// Create a new write service (without batching).
+    ///
+    /// For high-throughput scenarios, use `new_with_batching` instead.
     pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, idempotency: Arc<IdempotencyCache>) -> Self {
         Self {
             raft,
@@ -61,8 +68,72 @@ impl WriteServiceImpl {
             block_archive: None,
             rate_limiter: None,
             applied_state: None,
+            batch_handle: None,
             proposal_mutex: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Create a write service with batching enabled.
+    ///
+    /// Per DESIGN.md §6.3: Batching coalesces multiple writes into single
+    /// Raft proposals for improved throughput.
+    ///
+    /// Returns the service and a task handle for the batch writer background loop.
+    /// The caller must spawn or await the returned task.
+    pub fn new_with_batching(
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        idempotency: Arc<IdempotencyCache>,
+        config: BatchConfig,
+    ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
+        let raft_clone = raft.clone();
+        let proposal_mutex = Arc::new(Mutex::new(()));
+        let mutex_clone = proposal_mutex.clone();
+
+        // Create the submit function that wraps requests into BatchWrite
+        let submit_fn = move |requests: Vec<LedgerRequest>| {
+            let raft = raft_clone.clone();
+            let mutex = mutex_clone.clone();
+
+            Box::pin(async move {
+                // Wrap multiple requests into a single BatchWrite
+                let batch_request = LedgerRequest::BatchWrite { requests };
+
+                // Acquire mutex and submit to Raft
+                let _guard = mutex.lock().await;
+                let result = raft.client_write(batch_request).await;
+                drop(_guard);
+
+                match result {
+                    Ok(response) => {
+                        // Unwrap the BatchWrite response
+                        match response.data {
+                            LedgerResponse::BatchWrite { responses } => Ok(responses),
+                            other => {
+                                // Single request case - shouldn't happen but handle it
+                                Ok(vec![other])
+                            }
+                        }
+                    }
+                    Err(e) => Err(format!("Raft error: {}", e)),
+                }
+            }) as futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
+        };
+
+        let writer = BatchWriter::new(config, submit_fn);
+        let handle = writer.handle();
+        let run_future = writer.run();
+
+        let service = Self {
+            raft,
+            idempotency,
+            block_archive: None,
+            rate_limiter: None,
+            applied_state: None,
+            batch_handle: Some(handle),
+            proposal_mutex,
+        };
+
+        (service, run_future)
     }
 
     /// Create a write service with block archive access for proof generation.
@@ -77,8 +148,21 @@ impl WriteServiceImpl {
             block_archive: Some(block_archive),
             rate_limiter: None,
             applied_state: None,
+            batch_handle: None,
             proposal_mutex: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Create a write service with block archive and batching enabled.
+    pub fn with_block_archive_and_batching(
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        idempotency: Arc<IdempotencyCache>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
+        config: BatchConfig,
+    ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
+        let (mut service, run_future) = Self::new_with_batching(raft, idempotency, config);
+        service.block_archive = Some(block_archive);
+        (service, run_future)
     }
 
     /// Create a write service with per-namespace rate limiting.
@@ -406,18 +490,35 @@ impl WriteService for WriteServiceImpl {
             sequence,
         )?;
 
-        // Submit to Raft (serialized to prevent concurrent proposal race condition)
+        // Submit to Raft via batch writer (if enabled) or direct proposal
         metrics::record_raft_proposal();
-        let _guard = self.proposal_mutex.lock().await;
-        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
-            warn!(error = %e, "Raft write failed");
-            metrics::record_write(false, start.elapsed().as_secs_f64());
-            Status::internal(format!("Raft error: {}", e))
-        })?;
-        drop(_guard);
-
-        // Extract response
-        let response = result.data;
+        let response = if let Some(ref batch_handle) = self.batch_handle {
+            // Submit through batch writer for coalesced proposals
+            let rx = batch_handle.submit(ledger_request);
+            match rx.await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(batch_err)) => {
+                    warn!(error = %batch_err, "Batch write failed");
+                    metrics::record_write(false, start.elapsed().as_secs_f64());
+                    return Err(Status::internal(format!("Batch error: {}", batch_err)));
+                }
+                Err(_recv_err) => {
+                    warn!("Batch writer channel closed");
+                    metrics::record_write(false, start.elapsed().as_secs_f64());
+                    return Err(Status::internal("Batch writer unavailable"));
+                }
+            }
+        } else {
+            // Fallback: direct Raft proposal with mutex serialization
+            let _guard = self.proposal_mutex.lock().await;
+            let result = self.raft.client_write(ledger_request).await.map_err(|e| {
+                warn!(error = %e, "Raft write failed");
+                metrics::record_write(false, start.elapsed().as_secs_f64());
+                Status::internal(format!("Raft error: {}", e))
+            })?;
+            drop(_guard);
+            result.data
+        };
         let latency = start.elapsed().as_secs_f64();
 
         match response {
