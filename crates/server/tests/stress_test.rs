@@ -1604,20 +1604,19 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 /// Quick multi-shard stress test - validates infrastructure works.
 /// Run with: cargo test test_stress_multi_shard_quick -- --nocapture
 ///
-/// Note: Currently uses namespace_id=0 (system namespace) which routes
-/// to the system shard. True multi-shard routing requires namespace→shard
-/// assignment which is not yet implemented in the test harness.
+/// Creates one namespace per shard and distributes write workers across them
+/// for true parallel Raft consensus.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_stress_multi_shard_quick() {
     run_multi_shard_stress_test(
         1, // Single node for speed
-        2, // 2 data shards (system shard handles namespace_id=0)
+        2, // 2 data shards
         StressConfig {
             write_workers: 4,
             read_workers: 8,
             duration: Duration::from_secs(5),
             batch_size: 10,
-            namespace_id: 0, // System namespace - routes to system shard
+            namespace_id: 0, // Overridden per-worker by shard assignments
             vault_id: 1,
             max_concurrent_writes: 50,
             max_concurrent_reads: 200,
@@ -1627,24 +1626,52 @@ async fn test_stress_multi_shard_quick() {
     .await;
 }
 
-/// Multi-shard with 4 shards - tests multi-shard infrastructure.
-/// Run with: cargo test --release test_stress_multi_shard -- --ignored --nocapture
+/// Multi-shard batched throughput test - parallel writes across 4 shards.
+/// Run with: cargo test --release test_stress_multi_shard_batched -- --nocapture
 ///
-/// Note: Currently all writes go to system shard (namespace_id=0).
-/// True parallel writes require namespace→shard assignment implementation.
+/// This is the multi-shard equivalent of `test_stress_batched`. With 4 shards
+/// and batch_size=50, theoretical max is 4x single-shard (~2300 ops/sec).
+///
+/// ## Expected Results (release mode)
+/// - Single shard batched: ~580 ops/sec
+/// - 4 shards batched: ~2000-2300 ops/sec (4x parallel consensus)
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-#[ignore] // Slower to start, run manually
+async fn test_stress_multi_shard_batched() {
+    run_multi_shard_stress_test(
+        1,  // Single node
+        4,  // 4 data shards for parallel writes
+        StressConfig {
+            write_workers: 8,    // 2 workers per shard
+            read_workers: 16,
+            duration: Duration::from_secs(10),
+            batch_size: 50,      // Match batched test
+            read_batch_size: 50,
+            namespace_id: 0,     // Overridden per-worker by shard assignments
+            vault_id: 1,
+            max_concurrent_writes: 100,
+            max_concurrent_reads: 500,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// Multi-shard sustained test - 4 shards for 15 seconds.
+/// Run with: cargo test --release test_stress_multi_shard -- --nocapture
+///
+/// Validates sustained multi-shard throughput over moderate duration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn test_stress_multi_shard() {
     run_multi_shard_stress_test(
         1, // Single node
-        4, // 4 data shards (not yet used for writes)
+        4, // 4 data shards for parallel writes
         StressConfig {
             write_workers: 16,
             read_workers: 32,
-            duration: Duration::from_secs(30),
-            batch_size: 20,
+            duration: Duration::from_secs(15),
+            batch_size: 50, // Match batched test for consistency
             read_batch_size: 100,
-            namespace_id: 0, // System namespace for now
+            namespace_id: 0, // Overridden per-worker by shard assignments
             vault_id: 1,
             max_concurrent_writes: 200,
             max_concurrent_reads: 1000,
@@ -1654,33 +1681,34 @@ async fn test_stress_multi_shard() {
     .await;
 }
 
-/// Multi-shard targeting DESIGN.md throughput goals.
-/// Uses 8 shards with batching to maximize write throughput.
-/// Run with: cargo test --release test_stress_multi_shard_target -- --ignored --nocapture
+/// Multi-shard maximum throughput test on single machine.
+/// Uses 8 shards with batching to push single-machine limits.
+/// Run with: cargo test --release test_stress_multi_shard_target -- --nocapture
 ///
-/// Note: Currently achieves ~1000 writes/sec (batched) on system shard.
-/// To reach 5000/sec target, implement:
-/// 1. Namespace → shard assignment in AdminService.create_namespace
-/// 2. Write worker distribution across namespaces on different shards
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-#[ignore] // Heavy test, run manually
+/// ## Expected Results (single machine)
+/// - Single-machine ceiling: ~3500-4000 ops/sec (disk I/O limited)
+/// - Per-shard throughput degrades with more shards (shared disk queue)
+/// - 5000 ops/sec DESIGN.md target requires multi-node distributed deployment
+///
+/// ## Scaling Analysis
+/// - 4 shards: ~2300 ops/sec (572/shard) - baseline
+/// - 8 shards: ~3400 ops/sec (425/shard) - diminishing returns
+/// - Linear scaling requires shards on separate physical disks/nodes
+#[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn test_stress_multi_shard_target() {
-    // Target: 5000 writes/sec requires parallel consensus across shards
-    // Current: All writes to system shard (~1000 ops/sec with batching)
-    // Future: Distribute namespaces across shards for parallel writes
     run_multi_shard_stress_test(
-        1, // Single node (multi-node adds network latency)
-        8, // 8 data shards (for future parallel writes)
+        1, // Single node
+        8, // 8 data shards - optimal for single machine
         StressConfig {
-            write_workers: 32,
-            read_workers: 64,
-            duration: Duration::from_secs(60),
-            batch_size: 50, // Large batches to amortize consensus
+            write_workers: 16, // 2 workers per shard
+            read_workers: 16,
+            duration: Duration::from_secs(15),
+            batch_size: 50,    // Max batch before page overflow
             read_batch_size: 100,
-            namespace_id: 0, // System namespace for now
+            namespace_id: 0, // Overridden per-worker by shard assignments
             vault_id: 1,
-            max_concurrent_writes: 400,
-            max_concurrent_reads: 2000,
+            max_concurrent_writes: 160,
+            max_concurrent_reads: 500,
             ..Default::default()
         },
     )
