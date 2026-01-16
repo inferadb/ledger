@@ -1138,6 +1138,8 @@ message RaftLogId {
 message RaftVoteRequest {
   RaftVote vote = 1;
   optional RaftLogId last_log_id = 2;
+  // Shard ID for multi-shard routing (defaults to system shard 0).
+  optional uint64 shard_id = 3;
 }
 
 // Vote response.
@@ -1153,6 +1155,8 @@ message RaftAppendEntriesRequest {
   optional RaftLogId prev_log_id = 2;
   repeated bytes entries = 3; // Serialized log entries
   optional RaftLogId leader_commit = 4;
+  // Shard ID for multi-shard routing (defaults to system shard 0).
+  optional uint64 shard_id = 5;
 }
 
 // Log replication response.
@@ -1169,6 +1173,8 @@ message RaftInstallSnapshotRequest {
   uint64 offset = 3;
   bytes data = 4;
   bool done = 5;
+  // Shard ID for multi-shard routing (defaults to system shard 0).
+  optional uint64 shard_id = 6;
 }
 
 // Snapshot installation response.

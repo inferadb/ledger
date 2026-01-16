@@ -715,7 +715,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         namespace_id,
                         name: name.clone(),
                         shard_id: assigned_shard,
-                        member_nodes: vec![], // TODO: populate from cluster membership
+                        member_nodes: state
+                            .membership
+                            .membership()
+                            .nodes()
+                            .map(|(id, _)| id.to_string())
+                            .collect(),
                         status: NamespaceStatus::Active,
                         config_version: 1,
                         created_at: chrono::Utc::now(),

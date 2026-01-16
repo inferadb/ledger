@@ -35,8 +35,8 @@ use crate::proto::system_discovery_service_server::SystemDiscoveryServiceServer;
 use crate::proto::write_service_server::WriteServiceServer;
 use crate::rate_limit::NamespaceRateLimiter;
 use crate::services::{
-    AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, MultiShardReadService,
-    MultiShardResolver, MultiShardWriteService, RaftServiceImpl,
+    AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, MultiShardRaftService,
+    MultiShardReadService, MultiShardResolver, MultiShardWriteService,
 };
 
 /// Multi-shard Ledger gRPC server.
@@ -154,9 +154,8 @@ impl MultiShardLedgerServer {
             system_shard.applied_state().clone(),
         );
 
-        // RaftService for the system shard handles inter-node Raft RPCs
-        // TODO: Multi-shard Raft service would need to route to correct shard
-        let raft_service = RaftServiceImpl::new(system_shard.raft().clone());
+        // Multi-shard Raft service routes inter-node RPCs to the correct shard
+        let raft_service = MultiShardRaftService::new(self.manager.clone());
 
         tracing::info!(
             addr = %self.addr,

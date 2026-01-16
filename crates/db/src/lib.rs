@@ -57,9 +57,9 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-// ledger-db predates the workspace disallowed_methods lint (for Raft determinism).
-// Most unwraps here are safe slice conversions (try_into().unwrap() with known sizes).
-// TODO: Refactor to use proper error handling when time permits.
+// All unwraps in this crate are infallible:
+// - try_into().unwrap() on slices with pre-validated sizes (e.g., u16::from_le_bytes)
+// - write_all().unwrap() on growable Vec<u8> buffers
 #![allow(clippy::disallowed_methods)]
 // Explicit drops used for clarity in COW page management (releasing borrows)
 #![allow(clippy::drop_non_drop)]

@@ -172,6 +172,7 @@ fn test_network_partition_blocks_communication() {
             let vote_req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
 
             client1
@@ -206,6 +207,7 @@ fn test_network_partition_blocks_communication() {
                     let vote_req = RaftVoteRequest {
                         vote: None,
                         last_log_id: None,
+                        shard_id: None,
                     };
                     let vote_result = client.vote(vote_req).await;
                     // The connection or RPC should fail due to partition
@@ -226,6 +228,7 @@ fn test_network_partition_blocks_communication() {
             let vote_req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
             client1
                 .vote(vote_req)
@@ -252,6 +255,7 @@ fn test_network_partition_blocks_communication() {
             let vote_req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
             client3
                 .vote(vote_req)
@@ -383,6 +387,7 @@ fn test_majority_partition_continues_operating() {
                         prev_log_id: None,
                         entries: vec![],
                         leader_commit: None,
+                        shard_id: None,
                     };
                     client.append_entries(req).await.is_ok()
                 }
@@ -498,6 +503,7 @@ fn test_message_hold_and_release() {
             let vote_req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
             let resp = client.vote(vote_req).await;
             assert!(resp.is_ok(), "initial request should succeed");
@@ -513,6 +519,7 @@ fn test_message_hold_and_release() {
                     let vote_req = RaftVoteRequest {
                         vote: None,
                         last_log_id: None,
+                        shard_id: None,
                     };
                     client.vote(vote_req).await.map(|_| ()).map_err(|_| ())
                 }
@@ -536,6 +543,7 @@ fn test_message_hold_and_release() {
             let vote_req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
             let resp = client.vote(vote_req).await;
             assert!(resp.is_ok(), "request after repair should succeed");
@@ -635,6 +643,7 @@ fn test_intermittent_connectivity() {
                         let vote_req = RaftVoteRequest {
                             vote: None,
                             last_log_id: None,
+                            shard_id: None,
                         };
                         client.vote(vote_req).await.map(|_| ()).map_err(|_| ())
                     }
@@ -669,6 +678,7 @@ fn test_intermittent_connectivity() {
                     let vote_req = RaftVoteRequest {
                         vote: None,
                         last_log_id: None,
+                        shard_id: None,
                     };
                     client.vote(vote_req).await.map(|_| ()).map_err(|_| ())
                 }
@@ -743,6 +753,7 @@ fn test_asymmetric_partition() {
             let vote_req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
 
             c1.vote(vote_req).await.expect("vote to node1");
@@ -761,6 +772,7 @@ fn test_asymmetric_partition() {
                 let vote_req = RaftVoteRequest {
                     vote: None,
                     last_log_id: None,
+                    shard_id: None,
                 };
                 assert!(
                     client.vote(vote_req).await.is_err(),
@@ -777,6 +789,7 @@ fn test_asymmetric_partition() {
         let vote_req = RaftVoteRequest {
             vote: None,
             last_log_id: None,
+            shard_id: None,
         };
         c2.vote(vote_req)
             .await
@@ -792,6 +805,7 @@ fn test_asymmetric_partition() {
         let vote_req = RaftVoteRequest {
             vote: None,
             last_log_id: None,
+            shard_id: None,
         };
         c1.vote(vote_req)
             .await
@@ -831,6 +845,7 @@ fn test_connection_timeout_handling() {
             let vote_req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
             client.vote(vote_req).await.expect("initial vote");
         }
@@ -847,6 +862,7 @@ fn test_connection_timeout_handling() {
                     let vote_req = RaftVoteRequest {
                         vote: None,
                         last_log_id: None,
+                        shard_id: None,
                     };
                     client.vote(vote_req).await
                 }
@@ -881,6 +897,7 @@ fn test_connection_timeout_handling() {
                         let vote_req = RaftVoteRequest {
                             vote: None,
                             last_log_id: None,
+                            shard_id: None,
                         };
                         client.vote(vote_req).await
                     }

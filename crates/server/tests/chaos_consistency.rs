@@ -283,6 +283,7 @@ fn test_minority_cannot_elect_leader() {
         let vote_req = RaftVoteRequest {
             vote: None,
             last_log_id: None,
+            shard_id: None,
         };
         client3
             .vote(vote_req)
@@ -438,6 +439,7 @@ fn test_write_fails_in_minority_partition() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
+                shard_id: None,
             };
             let resp = client.append_entries(req).await.expect("should succeed");
             assert!(
@@ -461,6 +463,7 @@ fn test_write_fails_in_minority_partition() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
+                shard_id: None,
             };
             let resp = client
                 .append_entries(req)
@@ -487,6 +490,7 @@ fn test_write_fails_in_minority_partition() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
+                shard_id: None,
             };
             let resp = client.append_entries(req).await.expect("should succeed");
             assert!(resp.into_inner().success, "write after heal should succeed");
@@ -609,6 +613,7 @@ fn test_consistency_after_partition_heals() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
+                shard_id: None,
             };
             client.append_entries(req).await.expect("initial write");
         }
@@ -629,6 +634,7 @@ fn test_consistency_after_partition_heals() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
+                shard_id: None,
             };
             client
                 .append_entries(req)
@@ -655,6 +661,7 @@ fn test_consistency_after_partition_heals() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
+                shard_id: None,
             };
             client
                 .append_entries(req)
@@ -1024,6 +1031,7 @@ fn test_network_delay_request_completion() {
             let req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
             client.vote(req).await.expect("fast node should respond");
         }
@@ -1038,6 +1046,7 @@ fn test_network_delay_request_completion() {
             let req = RaftVoteRequest {
                 vote: None,
                 last_log_id: None,
+                shard_id: None,
             };
             client
                 .vote(req)

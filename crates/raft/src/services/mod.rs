@@ -30,7 +30,7 @@ pub use forward_client::ForwardClient;
 pub use health::HealthServiceImpl;
 pub use multi_shard_read::MultiShardReadService;
 pub use multi_shard_write::MultiShardWriteService;
-pub use raft::RaftServiceImpl;
+pub use raft::{MultiShardRaftService, RaftServiceImpl};
 pub use read::ReadServiceImpl;
 pub use shard_resolver::{
     MultiShardResolver, RemoteShardInfo, ResolveResult, ShardContext, ShardResolver,

@@ -218,3 +218,221 @@ impl RaftService for RaftServiceImpl {
         }))
     }
 }
+
+// ============================================================================
+// Multi-Shard Raft Service
+// ============================================================================
+
+use crate::multi_raft::MultiRaftManager;
+
+/// Multi-shard Raft service that routes RPCs to the correct shard.
+///
+/// Extracts `shard_id` from incoming requests and forwards to the corresponding
+/// shard's Raft instance. Defaults to shard 0 (system shard) for backward
+/// compatibility with clients that don't specify a shard.
+pub struct MultiShardRaftService {
+    /// Multi-raft manager for shard resolution.
+    manager: Arc<MultiRaftManager>,
+}
+
+impl MultiShardRaftService {
+    /// Create a new multi-shard Raft service.
+    pub fn new(manager: Arc<MultiRaftManager>) -> Self {
+        Self { manager }
+    }
+
+    /// Resolve shard ID to a Raft instance.
+    fn resolve_shard(&self, shard_id: Option<u64>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
+        let shard_id = shard_id.unwrap_or(0) as u32;
+        self.manager
+            .get_shard(shard_id)
+            .map(|shard| shard.raft().clone())
+            .map_err(|_| Status::not_found(format!("shard {} not found", shard_id)))
+    }
+}
+
+#[tonic::async_trait]
+impl RaftService for MultiShardRaftService {
+    async fn vote(
+        &self,
+        request: Request<RaftVoteRequest>,
+    ) -> Result<Response<RaftVoteResponse>, Status> {
+        let req = request.into_inner();
+
+        // Resolve shard from request
+        let raft = self.resolve_shard(req.shard_id)?;
+
+        let vote = req
+            .vote
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
+
+        // Convert proto to OpenRaft types
+        let raft_vote: Vote<LedgerNodeId> = vote.into();
+        let last_log_id = req.last_log_id.map(|id| {
+            openraft::LogId::new(
+                openraft::CommittedLeaderId::new(id.term, vote.node_id),
+                id.index,
+            )
+        });
+
+        let vote_request = openraft::raft::VoteRequest {
+            vote: raft_vote,
+            last_log_id,
+        };
+
+        // Forward to the shard's Raft instance
+        let response = raft
+            .vote(vote_request)
+            .await
+            .map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
+
+        Ok(Response::new(RaftVoteResponse {
+            vote: Some((&response.vote).into()),
+            vote_granted: response.vote_granted,
+            last_log_id: response.last_log_id.map(|id| RaftLogId {
+                term: id.leader_id.term,
+                index: id.index,
+            }),
+        }))
+    }
+
+    async fn append_entries(
+        &self,
+        request: Request<RaftAppendEntriesRequest>,
+    ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
+        let req = request.into_inner();
+
+        // Resolve shard from request
+        let raft = self.resolve_shard(req.shard_id)?;
+
+        let vote = req
+            .vote
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
+
+        // Deserialize log entries
+        let entries: Vec<_> = req
+            .entries
+            .iter()
+            .filter_map(|bytes| decode(bytes).ok())
+            .collect();
+
+        // Convert proto to OpenRaft types
+        let raft_vote: Vote<LedgerNodeId> = vote.into();
+        let leader_node_id = vote.node_id;
+        let prev_log_id = req.prev_log_id.map(|id| {
+            openraft::LogId::new(
+                openraft::CommittedLeaderId::new(id.term, leader_node_id),
+                id.index,
+            )
+        });
+        let leader_commit = req.leader_commit.map(|id| {
+            openraft::LogId::new(
+                openraft::CommittedLeaderId::new(id.term, leader_node_id),
+                id.index,
+            )
+        });
+
+        let append_request: AppendEntriesRequest<LedgerTypeConfig> = AppendEntriesRequest {
+            vote: raft_vote,
+            prev_log_id,
+            entries,
+            leader_commit,
+        };
+
+        // Forward to the shard's Raft instance
+        let response = raft
+            .append_entries(append_request)
+            .await
+            .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
+
+        // Convert response to proto
+        use openraft::raft::AppendEntriesResponse::*;
+        let (success, conflict, higher_vote) = match response {
+            Success => (true, false, None),
+            Conflict => (false, true, None),
+            HigherVote(v) => (false, false, Some((&v).into())),
+            PartialSuccess(_) => (true, false, None),
+        };
+
+        Ok(Response::new(RaftAppendEntriesResponse {
+            success,
+            conflict,
+            vote: higher_vote,
+        }))
+    }
+
+    async fn install_snapshot(
+        &self,
+        request: Request<RaftInstallSnapshotRequest>,
+    ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
+        let req = request.into_inner();
+
+        // Resolve shard from request
+        let raft = self.resolve_shard(req.shard_id)?;
+
+        let vote = req
+            .vote
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
+
+        let meta = req
+            .meta
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Missing meta field"))?;
+
+        // Build snapshot metadata
+        let leader_node_id = vote.node_id;
+        let last_log_id = meta.last_log_id.as_ref().map(|id| {
+            openraft::LogId::new(
+                openraft::CommittedLeaderId::new(id.term, leader_node_id),
+                id.index,
+            )
+        });
+
+        // Convert membership
+        let membership_proto = meta
+            .last_membership
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Missing last_membership"))?;
+
+        use openraft::BasicNode;
+        use std::collections::BTreeMap;
+
+        let mut all_nodes: BTreeMap<u64, BasicNode> = BTreeMap::new();
+        for config in &membership_proto.configs {
+            for (node_id, addr) in &config.members {
+                all_nodes.insert(*node_id, BasicNode { addr: addr.clone() });
+            }
+        }
+
+        let voter_ids: std::collections::BTreeSet<u64> = all_nodes.keys().copied().collect();
+        let membership = openraft::Membership::new(vec![voter_ids], all_nodes);
+        let stored_membership = openraft::StoredMembership::new(last_log_id, membership);
+
+        let snapshot_meta = openraft::SnapshotMeta {
+            last_log_id,
+            last_membership: stored_membership,
+            snapshot_id: meta.snapshot_id.clone(),
+        };
+
+        let install_request = openraft::raft::InstallSnapshotRequest {
+            vote: vote.into(),
+            meta: snapshot_meta,
+            offset: req.offset,
+            data: req.data,
+            done: req.done,
+        };
+
+        // Forward to the shard's Raft instance
+        let response = raft
+            .install_snapshot(install_request)
+            .await
+            .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
+
+        Ok(Response::new(RaftInstallSnapshotResponse {
+            vote: Some((&response.vote).into()),
+        }))
+    }
+}
