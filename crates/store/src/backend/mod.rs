@@ -222,11 +222,7 @@ impl DatabaseHeader {
 
     /// Get a reference to a slot by index.
     pub fn slot(&self, index: usize) -> &CommitSlot {
-        if index == 0 {
-            &self.slot0
-        } else {
-            &self.slot1
-        }
+        if index == 0 { &self.slot0 } else { &self.slot1 }
     }
 
     /// Check if recovery is required (unclean shutdown detected).

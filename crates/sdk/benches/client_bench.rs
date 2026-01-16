@@ -24,10 +24,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use inferadb_ledger_sdk::{
     ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker, mock::MockLedgerServer,
 };
+use std::hint::black_box;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 

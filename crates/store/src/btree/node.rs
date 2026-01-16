@@ -27,7 +27,7 @@
 //! ```
 
 use crate::error::{Error, PageId, PageType, Result};
-use crate::page::{Page, PAGE_HEADER_SIZE};
+use crate::page::{PAGE_HEADER_SIZE, Page};
 use std::cmp::Ordering;
 
 /// Node header size (after page header).

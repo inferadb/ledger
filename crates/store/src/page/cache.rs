@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(cache.len(), 3);
         assert!(cache.contains(0)); // Dirty page preserved
         assert!(cache.contains(3)); // New page added
-                                    // One of pages 1 or 2 was evicted
+        // One of pages 1 or 2 was evicted
         let clean_remaining = [1, 2].iter().filter(|&&id| cache.contains(id)).count();
         assert_eq!(clean_remaining, 1);
     }

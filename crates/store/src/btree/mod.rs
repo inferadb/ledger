@@ -18,7 +18,7 @@ pub mod split;
 
 use crate::error::{Error, PageId, PageType, Result};
 use crate::page::Page;
-use cursor::{cursor_ops, Range, RangeIterState, SeekResult};
+use cursor::{Range, RangeIterState, SeekResult, cursor_ops};
 use node::{BranchNode, LeafNode, SearchResult};
 use split::{split_branch, split_leaf_for_key};
 
@@ -132,7 +132,7 @@ impl<P: PageProvider> BTree<P> {
                     return Err(Error::PageTypeMismatch {
                         expected: PageType::BTreeLeaf,
                         found: page_type,
-                    })
+                    });
                 }
             }
         }
@@ -513,7 +513,7 @@ impl<P: PageProvider> BTree<P> {
                     return Err(Error::PageTypeMismatch {
                         expected: PageType::BTreeLeaf,
                         found: pt,
-                    })
+                    });
                 }
             }
         }
@@ -537,7 +537,7 @@ impl<P: PageProvider> BTree<P> {
                     return Err(Error::PageTypeMismatch {
                         expected: PageType::BTreeLeaf,
                         found: pt,
-                    })
+                    });
                 }
             }
         }

@@ -1,6 +1,6 @@
 //! File-based storage backend using memory-mapped I/O.
 
-use super::{DatabaseHeader, StorageBackend, HEADER_SIZE};
+use super::{DatabaseHeader, HEADER_SIZE, StorageBackend};
 use crate::error::{Error, PageId, Result};
 use parking_lot::RwLock;
 use std::fs::{File, OpenOptions};

@@ -34,8 +34,8 @@ use arc_swap::ArcSwap;
 use parking_lot::{Mutex, RwLock};
 
 use crate::backend::{
-    CommitSlot, DatabaseHeader, FileBackend, InMemoryBackend, StorageBackend, DEFAULT_PAGE_SIZE,
-    HEADER_SIZE,
+    CommitSlot, DEFAULT_PAGE_SIZE, DatabaseHeader, FileBackend, HEADER_SIZE, InMemoryBackend,
+    StorageBackend,
 };
 use crate::btree::{BTree, PageProvider};
 use crate::error::{Error, PageId, PageType, Result};
@@ -1367,10 +1367,11 @@ mod tests {
         {
             let txn = db.read().unwrap();
             assert!(txn.get::<tables::RaftLog>(&1u64).unwrap().is_some());
-            assert!(txn
-                .get::<tables::RaftState>(&"term".to_string())
-                .unwrap()
-                .is_some());
+            assert!(
+                txn.get::<tables::RaftState>(&"term".to_string())
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 

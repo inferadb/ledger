@@ -1,6 +1,6 @@
 //! In-memory storage backend for testing.
 
-use super::{DatabaseHeader, StorageBackend, DEFAULT_PAGE_SIZE, HEADER_SIZE};
+use super::{DEFAULT_PAGE_SIZE, DatabaseHeader, HEADER_SIZE, StorageBackend};
 use crate::error::{Error, PageId, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
