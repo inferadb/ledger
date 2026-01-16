@@ -26,7 +26,7 @@ tokio-util = "0.7"
 
 # gRPC
 tonic = { version = "0.12", features = ["gzip", "zstd", "tls", "tls-native-roots"] }
-tonic-build = "0.12"
+tonic-build = "0.14"
 prost = "0.13"
 prost-types = "0.13"
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout"] }
