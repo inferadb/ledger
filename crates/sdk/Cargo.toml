@@ -52,6 +52,11 @@ ledger-server = { workspace = true }
 ledger-test-utils = { workspace = true }
 openraft = { workspace = true }
 serial_test = "3.2"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "client_bench"
+harness = false
 
 [lints]
 workspace = true

@@ -1721,6 +1721,7 @@ version = "0.1.0"
 dependencies = [
  "backon",
  "chrono",
+ "criterion",
  "dirs",
  "futures",
  "ledger-raft",
