@@ -36,7 +36,7 @@ pub fn sha256(data: &[u8]) -> Hash {
 
 /// Compute SHA-256 hash by concatenating multiple hash inputs.
 ///
-/// Used for state root computation: SHA-256(bucket_root[0] || ... || bucket_root[255]).
+/// Used for state root computation: SHA-256(bucket_root\[0\] || ... || bucket_root\[255\]).
 pub fn sha256_concat(hashes: &[Hash]) -> Hash {
     let mut hasher = Sha256::new();
     for h in hashes {
