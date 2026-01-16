@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use inkwell::{Database, StorageBackend, tables};
+use ledger_db::{Database, StorageBackend, tables};
 use ledger_types::{decode, encode};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -31,8 +31,8 @@ pub enum TimeTravelError {
     /// Error from storage operations.
     #[snafu(display("Storage error: {source}"))]
     Storage {
-        /// The underlying inkwell error.
-        source: inkwell::Error,
+        /// The underlying ledger-db error.
+        source: ledger_db::Error,
     },
 
     /// Codec error.
@@ -421,7 +421,7 @@ mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
 
-    fn create_test_index() -> TimeTravelIndex<inkwell::InMemoryBackend> {
+    fn create_test_index() -> TimeTravelIndex<ledger_db::InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         TimeTravelIndex::new(engine.db())
     }

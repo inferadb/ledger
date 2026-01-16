@@ -1272,7 +1272,7 @@ async fn test_stress_single_node() {
         1, // Single node - no replication
         StressConfig {
             write_workers: 2, // Multiple writers now that RwLock contention is fixed
-            read_workers: 4, // Multiple readers - StateLayer is internally thread-safe via inkwell MVCC
+            read_workers: 4, // Multiple readers - StateLayer is internally thread-safe via ledger-db MVCC
             duration: Duration::from_secs(10),
             batch_size: 1,
             max_concurrent_writes: 20,

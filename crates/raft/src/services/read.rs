@@ -33,8 +33,8 @@ use crate::proto::{
     VerifiedReadResponse, WatchBlocksRequest,
 };
 
-use inkwell::{Database, FileBackend};
-use ledger_storage::{BlockArchive, SnapshotManager, StateLayer};
+use ledger_db::{Database, FileBackend};
+use ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use tempfile::TempDir;
 
 use crate::IdempotencyCache;
@@ -825,7 +825,7 @@ impl ReadService for ReadServiceImpl {
         let temp_dir = TempDir::new()
             .map_err(|e| Status::internal(format!("Failed to create temp dir: {}", e)))?;
         let temp_db = Arc::new(
-            Database::<FileBackend>::create(temp_dir.path().join("replay.inkwell"))
+            Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
                 .map_err(|e| Status::internal(format!("Failed to create temp db: {}", e)))?,
         );
         let temp_state = StateLayer::new(temp_db);

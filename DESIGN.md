@@ -82,7 +82,7 @@ org namespace (per-organization)
 - [Durability & Finality Model](#durability--finality-model)
 - [Persistent Storage Architecture](#persistent-storage-architecture)
   - [Directory Layout](#directory-layout)
-  - [Storage Backend: inkwell](#storage-backend-inkwell)
+  - [Storage Backend: ledger-db](#storage-backend-ledger-db)
   - [Block Archive Format](#block-archive-format)
   - [Snapshot Format](#snapshot-format)
   - [Crash Recovery](#crash-recovery)
@@ -193,7 +193,7 @@ Client Request
     ↓
 [3] LedgerRequest → Bincode (Raft log serialization)
     ↓
-[4] Bincode → Disk (Inkwell B-tree write)
+[4] Bincode → Disk (LedgerDb B-tree write)
 ```
 
 **Why bincode for storage**: Proto is optimized for wire transmission (extensible, schema-aware) while bincode is optimized for in-process speed (no schema overhead, minimal allocation). Storing as bincode avoids proto parsing on every log replay.
@@ -459,7 +459,7 @@ graph TD
 
 **What's NOT merkleized per-write:**
 
-- Individual index entries (stored in inkwell for O(1) lookup)
+- Individual index entries (stored in ledger-db for O(1) lookup)
 - Dual indexes for relationship traversal
 
 **Verification approach:**
@@ -470,7 +470,7 @@ graph TD
 
 ```rust
 struct StateLayer {
-    // Fast K/V storage for queries (inkwell)
+    // Fast K/V storage for queries (ledger-db)
     kv: Database,
 
     // Indexes for relationship traversal
@@ -615,7 +615,7 @@ fn decode_storage_key(storage_key: &[u8]) -> (VaultId, u8, &[u8]) {
 
 #### Per-Vault Bucket Structure
 
-Each vault maintains independent bucket tracking. Vaults in the same shard share an inkwell database but compute separate `state_root` values.
+Each vault maintains independent bucket tracking. Vaults in the same shard share an ledger-db database but compute separate `state_root` values.
 
 ```rust
 struct ShardState {
@@ -720,7 +720,7 @@ impl ShardState {
 State root computation must be identical on all nodes:
 
 1. **Hash function**: seahash for bucket assignment, SHA-256 for roots
-2. **Iteration order**: inkwell guarantees lexicographic key order within range
+2. **Iteration order**: ledger-db guarantees lexicographic key order within range
 3. **Key-value encoding**: Length-prefixed (prevents ambiguous concatenation)
 4. **Empty bucket**: Hash of empty input → `SHA-256("")`
 
@@ -1655,7 +1655,7 @@ Scaling dimensions:
 
 | Metric             | Target          | Measurement                    | Rationale                         |
 | ------------------ | --------------- | ------------------------------ | --------------------------------- |
-| Read (p50)         | <0.5ms          | Single key, no proof, follower | inkwell lookup + gRPC             |
+| Read (p50)         | <0.5ms          | Single key, no proof, follower | ledger-db lookup + gRPC             |
 | Read (p99)         | <2ms            | Single key, no proof, follower | Tail latency from GC/compaction   |
 | Read + proof (p99) | <10ms           | With merkle proof generation   | Bucket-based O(k) proof           |
 | Write (p50)        | <10ms           | Single tx, quorum commit       | Raft RTT + fsync                  |
@@ -1665,7 +1665,7 @@ Scaling dimensions:
 
 **Why these targets are achievable:**
 
-- **Read p99 <2ms**: Follower reads bypass Raft consensus. inkwell B+ tree lookup is O(log n). etcd achieves ~2ms p99 for serializable reads.
+- **Read p99 <2ms**: Follower reads bypass Raft consensus. ledger-db B+ tree lookup is O(log n). etcd achieves ~2ms p99 for serializable reads.
 - **Write p99 <50ms**: Aggressive for blockchain but achievable because:
   - Bucket-based state root: O(k) where k = dirty keys, not O(n) full tree
   - Single Raft RTT: ~1-2ms same datacenter
@@ -2648,17 +2648,17 @@ Each node uses a single data directory with subdirectories per concern:
 ├── shards/
 │   ├── _system/                 # System Raft group
 │   │   ├── raft/                # Openraft storage
-│   │   │   ├── log.inkwell         # Raft log entries
+│   │   │   ├── log.db         # Raft log entries
 │   │   │   └── vote             # Current term + voted_for
-│   │   ├── state.inkwell           # State machine (system registry)
+│   │   ├── state.db           # State machine (system registry)
 │   │   └── snapshots/
 │   │       ├── 000001000.snap   # Snapshot at height 1000
 │   │       └── 000002000.snap   # Snapshot at height 2000
 │   ├── shard_0001/              # User shard group
 │   │   ├── raft/
-│   │   │   ├── log.inkwell
+│   │   │   ├── log.db
 │   │   │   └── vote
-│   │   ├── state.inkwell           # State for all vaults in shard
+│   │   ├── state.db           # State for all vaults in shard
 │   │   ├── blocks/
 │   │   │   ├── segment_000000.blk   # Blocks 0-9999
 │   │   │   ├── segment_000001.blk   # Blocks 10000-19999
@@ -2675,26 +2675,26 @@ Each node uses a single data directory with subdirectories per concern:
 | Decision                      | Rationale                                                  |
 | ----------------------------- | ---------------------------------------------------------- |
 | Per-shard directories         | Matches Raft group boundaries; independent failure domains |
-| Separate raft/ and state.inkwell | Raft log is append-heavy; state is random-access heavy     |
+| Separate raft/ and state.db | Raft log is append-heavy; state is random-access heavy     |
 | Block segments                | Append-only writes; easy archival of old segments          |
 | Snapshots by height           | Predictable naming; simple retention policy                |
 
-### Storage Backend: inkwell
+### Storage Backend: ledger-db
 
-inkwell is our custom B+ tree storage engine providing ACID transactions with MVCC. Each shard uses two inkwell databases:
+ledger-db is our custom B+ tree storage engine providing ACID transactions with MVCC. Each shard uses two ledger-db databases:
 
-**raft/log.inkwell** — Raft log storage:
+**raft/log.db** — Raft log storage:
 
 ```rust
-// Tables in log.inkwell
+// Tables in log.db
 const LOG_ENTRIES: TableDefinition<u64, &[u8]> = TableDefinition::new("log");
 const LOG_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
-struct InkwellLogStorage {
+struct LedgerDbLogStorage {
     db: Database,
 }
 
-impl RaftLogStorage<TypeConfig> for InkwellLogStorage {
+impl RaftLogStorage<TypeConfig> for LedgerDbLogStorage {
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(LOG_META)?;
@@ -2777,10 +2777,10 @@ impl RaftLogStorage<TypeConfig> for InkwellLogStorage {
 }
 ```
 
-**state.inkwell** — State machine storage:
+**state.db** — State machine storage:
 
 ```rust
-// B+ tree tables in state.inkwell (per shard, contains all vaults)
+// B+ tree tables in state.db (per shard, contains all vaults)
 const RELATIONSHIPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rel");
 const ENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("ent");
 const OBJ_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("obj_idx");
@@ -2795,7 +2795,7 @@ fn make_key(vault_id: VaultId, key: &[u8]) -> Vec<u8> {
 }
 ```
 
-**Per-shard isolation**: All vaults in a shard share a single inkwell database. Keys are prefixed with `vault_id` for isolation. This reduces file handle count and enables cross-vault operations within a shard if needed.
+**Per-shard isolation**: All vaults in a shard share a single ledger-db database. Keys are prefixed with `vault_id` for isolation. This reduces file handle count and enables cross-vault operations within a shard if needed.
 
 ### Block Archive Format
 
@@ -2951,7 +2951,7 @@ impl Node {
             let shard_id = parse_shard_id(&shard_dir.file_name())?;
 
             // 3. Recover Raft state
-            let raft_storage = RaftLogStore::open(shard_dir.join("raft/log.inkwell"))?;
+            let raft_storage = RaftLogStore::open(shard_dir.join("raft/log.db"))?;
             let vote = raft_storage.read_vote().await?;
             let log_state = raft_storage.get_log_state().await?;
 
@@ -3001,7 +3001,7 @@ impl Node {
 | Failure Mode         | Recovery Action                               |
 | -------------------- | --------------------------------------------- |
 | Clean shutdown       | Replay from last snapshot + committed log     |
-| Crash during write   | Incomplete inkwell txn rolled back automatically |
+| Crash during write   | Incomplete ledger-db txn rolled back automatically |
 | Corrupted snapshot   | Skip to older snapshot, replay more log       |
 | Corrupted log entry  | Fetch from peer, or rebuild from snapshot     |
 | Missing segment file | Fetch from peer (block archive is replicated) |
@@ -3027,7 +3027,7 @@ impl Node {
 ### Storage Invariants
 
 30. **Raft log durability**: Log entries are fsync'd before Raft acknowledgment
-31. **State consistency**: `state.inkwell` reflects all applied log entries up to `applied_index`
+31. **State consistency**: `state.db` reflects all applied log entries up to `applied_index`
 32. **Block archive append-only**: Segment files are never modified after creation (only new segments appended)
 33. **Snapshot validity**: Snapshot `state_root` matches block header at `shard_height`
 

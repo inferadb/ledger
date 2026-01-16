@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use inkwell::{Database, StorageBackend};
+use ledger_db::{Database, StorageBackend};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
@@ -43,7 +43,7 @@ pub enum ShardError {
     },
 
     #[snafu(display("Storage error: {source}"))]
-    Inkwell { source: inkwell::Error },
+    Inkwell { source: ledger_db::Error },
 
     #[snafu(display("Entity store error: {source}"))]
     Entity { source: crate::entity::EntityError },
@@ -474,7 +474,7 @@ mod tests {
     use ledger_test_utils::TestDir;
     use ledger_types::{Operation, Transaction, VaultEntry};
 
-    fn create_test_manager() -> (ShardManager<inkwell::InMemoryBackend>, TestDir) {
+    fn create_test_manager() -> (ShardManager<ledger_db::InMemoryBackend>, TestDir) {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
 

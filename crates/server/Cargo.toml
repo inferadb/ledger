@@ -19,14 +19,14 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 ledger-types.workspace = true
-ledger-storage.workspace = true
+ledger-state.workspace = true
 ledger-raft.workspace = true
 
 # Raft consensus
 openraft.workspace = true
 
 # Storage
-inkwell.workspace = true
+ledger-db.workspace = true
 
 # Async runtime
 tokio.workspace = true

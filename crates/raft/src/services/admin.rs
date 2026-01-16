@@ -27,8 +27,8 @@ use crate::types::{
     BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
 };
 
-use inkwell::{Database, FileBackend};
-use ledger_storage::{BlockArchive, StateLayer};
+use ledger_db::{Database, FileBackend};
+use ledger_state::{BlockArchive, StateLayer};
 use ledger_types::{VaultEntry, ZERO_HASH};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -493,7 +493,7 @@ impl AdminService for AdminServiceImpl {
                     }
                 };
                 let temp_db =
-                    match Database::<FileBackend>::create(temp_dir.path().join("verify.inkwell")) {
+                    match Database::<FileBackend>::create(temp_dir.path().join("verify.db")) {
                         Ok(db) => Arc::new(db),
                         Err(e) => {
                             issues.push(IntegrityIssue {

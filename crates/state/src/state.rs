@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use inkwell::{Database, StorageBackend, tables};
+use ledger_db::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
@@ -28,8 +28,8 @@ pub enum StateError {
     /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
     Inkwell {
-        /// The underlying inkwell storage error.
-        source: inkwell::Error,
+        /// The underlying ledger-db storage error.
+        source: ledger_db::Error,
     },
 
     /// Index operation failed.
@@ -687,7 +687,7 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
 mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
-    use inkwell::InMemoryBackend;
+    use ledger_db::InMemoryBackend;
 
     fn create_test_state() -> StateLayer<InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().expect("open engine");

@@ -793,7 +793,7 @@ fn test_corrupted_entity_detected_on_rehash() {
 
     // Compute original bucket root
     let original_root =
-        ledger_storage::VaultCommitment::compute_bucket_root_from_entities(&entities_original);
+        ledger_state::VaultCommitment::compute_bucket_root_from_entities(&entities_original);
 
     // Corrupt one entity's value
     let entities_corrupted = vec![
@@ -813,7 +813,7 @@ fn test_corrupted_entity_detected_on_rehash() {
 
     // Recompute bucket root with corrupted data
     let corrupted_root =
-        ledger_storage::VaultCommitment::compute_bucket_root_from_entities(&entities_corrupted);
+        ledger_state::VaultCommitment::compute_bucket_root_from_entities(&entities_corrupted);
 
     // Corruption should be detected
     assert_ne!(

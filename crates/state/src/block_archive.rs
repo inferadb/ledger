@@ -24,7 +24,7 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use inkwell::{Database, StorageBackend, tables};
+use ledger_db::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
@@ -60,11 +60,11 @@ pub enum BlockArchiveError {
         source: ledger_types::CodecError,
     },
 
-    /// Storage engine error from inkwell.
+    /// Storage engine error from ledger-db.
     #[snafu(display("Storage error: {source}"))]
     Inkwell {
         /// The underlying storage error.
-        source: inkwell::Error,
+        source: ledger_db::Error,
     },
 }
 
@@ -109,7 +109,7 @@ struct SegmentWriter {
 
 /// Block archive for a shard.
 ///
-/// Uses inkwell for the primary block storage (tables::Blocks) and maintains
+/// Uses ledger-db for the primary block storage (tables::Blocks) and maintains
 /// a vault_block_index for looking up shard heights by vault/namespace/height.
 #[allow(clippy::result_large_err)]
 pub struct BlockArchive<B: StorageBackend> {
@@ -126,7 +126,7 @@ pub struct BlockArchive<B: StorageBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> BlockArchive<B> {
-    /// Create a new block archive backed by inkwell.
+    /// Create a new block archive backed by ledger-db.
     pub fn new(db: Arc<Database<B>>) -> Self {
         Self {
             db,
@@ -138,7 +138,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Create a block archive with file-based segment storage.
     ///
-    /// Use this for large deployments where blocks exceed inkwell's practical limits.
+    /// Use this for large deployments where blocks exceed ledger-db's practical limits.
     pub fn with_segment_files(db: Arc<Database<B>>, blocks_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&blocks_dir).context(IoSnafu)?;
         Ok(Self {
@@ -153,7 +153,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     pub fn append_block(&self, block: &ShardBlock) -> Result<()> {
         let encoded = encode(block).context(CodecSnafu)?;
 
-        // Store in inkwell
+        // Store in ledger-db
         let mut txn = self.db.write().context(InkwellSnafu)?;
 
         // Store the block

@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     "crates/types",
-    "crates/storage",
+    "crates/state",
     "crates/raft",
     "crates/server",
-    "crates/inkwell",
+    "crates/db",
     "crates/test-utils",
 ]
 
@@ -103,12 +103,12 @@ async-stream = "0.3"
 
 # Internal crates
 ledger-types = { path = "crates/types" }
-ledger-storage = { path = "crates/storage" }
+ledger-state = { path = "crates/state" }
 ledger-raft = { path = "crates/raft" }
-inkwell = { path = "crates/inkwell" }
+ledger-db = { path = "crates/db" }
 ledger-test-utils = { path = "crates/test-utils" }
 
-# Hashing (for inkwell)
+# Hashing (for ledger-db)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
 byteorder = "1.5"
 memmap2 = "0.9"

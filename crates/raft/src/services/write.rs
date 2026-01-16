@@ -28,8 +28,8 @@ use crate::proto::{
 use crate::rate_limit::NamespaceRateLimiter;
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
-use inkwell::FileBackend;
-use ledger_storage::BlockArchive;
+use ledger_db::FileBackend;
+use ledger_state::BlockArchive;
 use ledger_types::SetCondition;
 
 /// Write service implementation.

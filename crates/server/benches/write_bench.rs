@@ -14,13 +14,13 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
-use inkwell::{Database, FileBackend};
-use ledger_storage::StateLayer;
+use ledger_db::{Database, FileBackend};
+use ledger_state::StateLayer;
 use ledger_types::Operation;
 
 /// Create a test state layer.
 fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
-    let db = Database::<FileBackend>::create(temp_dir.path().join("test.inkwell"))
+    let db = Database::<FileBackend>::create(temp_dir.path().join("test.db"))
         .expect("create database");
     StateLayer::new(Arc::new(db))
 }

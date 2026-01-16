@@ -22,8 +22,8 @@ use crate::proto::{
 };
 use crate::types::LedgerTypeConfig;
 
-use inkwell::FileBackend;
-use ledger_storage::StateLayer;
+use ledger_db::FileBackend;
+use ledger_state::StateLayer;
 
 // =============================================================================
 // IP Address Validation

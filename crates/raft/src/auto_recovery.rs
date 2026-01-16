@@ -22,8 +22,8 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use inkwell::StorageBackend;
-use ledger_storage::{BlockArchive, SnapshotManager, StateLayer};
+use ledger_db::StorageBackend;
+use ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 
 use crate::error::{
     ApplyOperationsSnafu, BlockArchiveNotConfiguredSnafu, BlockReadSnafu, IndexLookupSnafu,
@@ -93,7 +93,7 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     block_archive: Option<Arc<BlockArchive<B>>>,
     /// Snapshot manager for finding recovery starting points.
     snapshot_manager: Option<Arc<SnapshotManager>>,
-    /// State layer for applying recovered state (internally thread-safe via inkwell MVCC).
+    /// State layer for applying recovered state (internally thread-safe via ledger-db MVCC).
     state: Arc<StateLayer<B>>,
     /// Configuration.
     config: AutoRecoveryConfig,
@@ -371,7 +371,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
 
             if let Some(entry) = vault_entry {
                 // Apply transactions and compute new state root
-                // StateLayer is internally thread-safe via inkwell MVCC
+                // StateLayer is internally thread-safe via ledger-db MVCC
                 for tx in &entry.transactions {
                     self.state
                         .apply_operations(vault_id, &tx.operations, height)

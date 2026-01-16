@@ -21,7 +21,7 @@ impl SystemKeys {
     ///
     /// # Example
     /// ```
-    /// use ledger_storage::system::SystemKeys;
+    /// use ledger_state::system::SystemKeys;
     /// assert_eq!(SystemKeys::user_key(123), "user:123");
     /// ```
     pub fn user_key(user_id: UserId) -> String {

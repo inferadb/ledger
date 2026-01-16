@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use snafu::{ResultExt, Snafu};
 
-use inkwell::FileBackend;
-use ledger_storage::BlockArchive;
+use ledger_db::FileBackend;
+use ledger_state::BlockArchive;
 use ledger_types::hash::{Hash, tx_hash};
 use ledger_types::merkle::MerkleTree;
 use ledger_types::{NamespaceId, Transaction, VaultId};
@@ -46,7 +46,7 @@ pub enum ProofError {
     #[snafu(display("failed to find shard height: {source}"))]
     FindShardHeight {
         /// The underlying block archive error.
-        source: ledger_storage::BlockArchiveError,
+        source: ledger_state::BlockArchiveError,
     },
 
     /// Failed to read block from archive.
@@ -55,7 +55,7 @@ pub enum ProofError {
         /// The shard height that failed to read.
         shard_height: u64,
         /// The underlying block archive error.
-        source: ledger_storage::BlockArchiveError,
+        source: ledger_state::BlockArchiveError,
     },
 
     /// Vault entry not found in the block.

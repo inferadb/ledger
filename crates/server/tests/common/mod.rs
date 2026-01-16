@@ -25,14 +25,14 @@ use ledger_test_utils::TestDir;
 use openraft::Raft;
 use tokio::time::timeout;
 
-use inkwell::FileBackend;
+use ledger_db::FileBackend;
 use ledger_raft::LedgerTypeConfig;
 use ledger_raft::proto::JoinClusterRequest;
 use ledger_raft::proto::admin_service_client::AdminServiceClient;
 use ledger_raft::{
     MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig, ShardGroup,
 };
-use ledger_storage::StateLayer;
+use ledger_state::StateLayer;
 
 /// A test node in a cluster.
 pub struct TestNode {
@@ -42,7 +42,7 @@ pub struct TestNode {
     pub addr: SocketAddr,
     /// The Raft instance.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer (internally thread-safe via inkwell MVCC).
+    /// The state layer (internally thread-safe via ledger-db MVCC).
     pub state: Arc<StateLayer<FileBackend>>,
     /// Temporary directory for node data.
     _temp_dir: TestDir,

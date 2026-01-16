@@ -1,6 +1,6 @@
-//! Inkwell: A purpose-built embedded storage engine for InferaDB.
+//! ledger-db: A purpose-built embedded storage engine for InferaDB.
 //!
-//! Inkwell is a simplified B+ tree storage engine designed for InferaDB's
+//! ledger-db is a simplified B+ tree storage engine designed for InferaDB's
 //! specific requirements:
 //!
 //! - **Fixed schema**: 13 tables known at compile time
@@ -40,7 +40,7 @@
 //! ## Quick Start
 //!
 //! ```ignore
-//! use inkwell::{Database, DatabaseConfig};
+//! use ledger_db::{Database, DatabaseConfig};
 //!
 //! // Open or create a database
 //! let db = Database::open("my.db", DatabaseConfig::default())?;

@@ -17,8 +17,8 @@ use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use inkwell::StorageBackend;
-use ledger_storage::BlockArchive;
+use ledger_db::StorageBackend;
+use ledger_state::BlockArchive;
 
 use crate::log_storage::AppliedStateAccessor;
 use crate::types::{BlockRetentionMode, LedgerNodeId, LedgerTypeConfig};

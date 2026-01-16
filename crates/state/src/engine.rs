@@ -1,13 +1,13 @@
-//! inkwell storage engine wrapper.
+//! ledger-db storage engine wrapper.
 //!
-//! Provides a thin wrapper around inkwell with:
+//! Provides a thin wrapper around ledger-db with:
 //! - Database lifecycle management
 //! - Convenient constructors
 
 use std::path::Path;
 use std::sync::Arc;
 
-use inkwell::{Database, FileBackend, InMemoryBackend};
+use ledger_db::{Database, FileBackend, InMemoryBackend};
 use snafu::Snafu;
 
 /// Error context for storage operations.
@@ -17,16 +17,16 @@ pub enum EngineError {
     #[snafu(display("Failed to open database at {path}: {source}"))]
     Open {
         path: String,
-        source: inkwell::Error,
+        source: ledger_db::Error,
     },
 
     #[snafu(display("Storage operation failed: {source}"))]
-    Storage { source: inkwell::Error },
+    Storage { source: ledger_db::Error },
 }
 
-/// Storage engine backed by inkwell (file-based).
+/// Storage engine backed by ledger-db (file-based).
 ///
-/// Wraps an inkwell Database with a FileBackend for persistent storage.
+/// Wraps an ledger-db Database with a FileBackend for persistent storage.
 pub struct StorageEngine {
     db: Arc<Database<FileBackend>>,
 }
@@ -65,7 +65,7 @@ impl Clone for StorageEngine {
 
 /// In-memory storage engine for testing.
 ///
-/// Wraps an inkwell Database with an InMemoryBackend.
+/// Wraps an ledger-db Database with an InMemoryBackend.
 pub struct InMemoryStorageEngine {
     db: Arc<Database<InMemoryBackend>>,
 }
@@ -105,7 +105,7 @@ impl Clone for InMemoryStorageEngine {
 )]
 mod tests {
     use super::*;
-    use inkwell::tables;
+    use ledger_db::tables;
 
     #[test]
     fn test_open_in_memory() {

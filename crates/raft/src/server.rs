@@ -33,8 +33,8 @@ use crate::services::{
 };
 use crate::types::LedgerTypeConfig;
 
-use inkwell::FileBackend;
-use ledger_storage::{BlockArchive, StateLayer};
+use ledger_db::FileBackend;
+use ledger_state::{BlockArchive, StateLayer};
 
 /// The main Ledger gRPC server.
 ///

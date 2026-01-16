@@ -23,7 +23,7 @@
 //!
 //! Each shard group is fully isolated:
 //! - Separate Raft consensus (independent elections, log replication)
-//! - Separate storage files (state.inkwell, blocks.inkwell, raft.inkwell per shard)
+//! - Separate storage files (state.db, blocks.db, raft.db per shard)
 //! - Separate background jobs (GC, compaction, recovery)
 //!
 //! ## Usage
@@ -53,9 +53,9 @@ use snafu::Snafu;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use inkwell::{Database, DatabaseConfig, FileBackend};
-use ledger_storage::system::SystemNamespaceService;
-use ledger_storage::{BlockArchive, StateLayer};
+use ledger_db::{Database, DatabaseConfig, FileBackend};
+use ledger_state::system::SystemNamespaceService;
+use ledger_state::{BlockArchive, StateLayer};
 use ledger_types::{NamespaceId, ShardId};
 
 use crate::auto_recovery::AutoRecoveryJob;
@@ -563,8 +563,8 @@ impl MultiRaftManager {
         // This matches RAFT_PAGE_SIZE in RaftLogStore
         const SHARD_PAGE_SIZE: usize = 16 * 1024; // 16KB
 
-        // Open or create state database using inkwell with 16KB pages
-        let state_db_path = shard_dir.join("state.inkwell");
+        // Open or create state database using ledger-db with 16KB pages
+        let state_db_path = shard_dir.join("state.db");
         let state_db = if state_db_path.exists() {
             Database::<FileBackend>::open(&state_db_path)
         } else {
@@ -580,8 +580,8 @@ impl MultiRaftManager {
         })?;
         let state = Arc::new(StateLayer::new(Arc::new(state_db)));
 
-        // Open or create block archive database using inkwell with 16KB pages
-        let blocks_db_path = shard_dir.join("blocks.inkwell");
+        // Open or create block archive database using ledger-db with 16KB pages
+        let blocks_db_path = shard_dir.join("blocks.db");
         let blocks_db = if blocks_db_path.exists() {
             Database::<FileBackend>::open(&blocks_db_path)
         } else {
@@ -597,8 +597,8 @@ impl MultiRaftManager {
         })?;
         let block_archive = Arc::new(BlockArchive::new(Arc::new(blocks_db)));
 
-        // Open Raft log store (uses inkwell storage - handles open/create internally)
-        let log_path = shard_dir.join("raft.inkwell");
+        // Open Raft log store (uses ledger-db storage - handles open/create internally)
+        let log_path = shard_dir.join("raft.db");
         let log_store = RaftLogStore::<FileBackend>::open(&log_path)
             .map_err(|e| MultiRaftError::Storage {
                 shard_id,

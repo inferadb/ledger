@@ -47,7 +47,7 @@ cargo build -p ledger-types         # Single crate
 
 # Test
 cargo test                          # All tests
-cargo test -p ledger-storage        # Single crate
+cargo test -p ledger-state          # Single crate
 cargo test test_name -- --nocapture # Single test with output
 
 # Lint & Format (nightly required for fmt)
@@ -74,8 +74,11 @@ cargo run -p ledger-server --release -- --config config.toml
 │                 ledger-raft (consensus)                     │
 │   Raft via openraft │ Log storage │ Batching │ Idempotency  │
 ├─────────────────────────────────────────────────────────────┤
-│                 ledger-storage (state)                      │
-│   inkwell B+ tree │ Entity/Relationship stores │ Indexes    │
+│                 ledger-state (domain)                       │
+│   Entity/Relationship stores │ State roots │ Indexes        │
+├─────────────────────────────────────────────────────────────┤
+│                 ledger-db (engine)                          │
+│   B+ tree │ Pages │ Transactions │ Backends                 │
 ├─────────────────────────────────────────────────────────────┤
 │                 ledger-types (shared)                       │
 │   Hash primitives │ Merkle proofs │ Config │ Error types    │
@@ -85,14 +88,15 @@ cargo run -p ledger-server --release -- --config config.toml
 **Crates:**
 
 - `ledger-types` — Core types, SHA-256/seahash, merkle tree, snafu errors
-- `ledger-storage` — inkwell wrapper, entity/relationship CRUD, dual indexes, state root computation
+- `ledger-db` — B+ tree database engine, page management, transactions, memory/file backends
+- `ledger-state` — Domain state management, entity/relationship CRUD, indexes, state root computation
 - `ledger-raft` — openraft integration, log storage, gRPC services, transaction batching
 - `ledger-server` — Main binary, bootstrap, config loading
 
 **Key abstractions:**
 
-- `StorageEngine` (storage/engine.rs) — inkwell database wrapper with transaction helpers
-- `StateLayer` (storage/state.rs) — Applies blocks, computes bucket-based state roots
+- `StorageEngine` (state/engine.rs) — ledger-db wrapper with transaction helpers
+- `StateLayer` (state/state.rs) — Applies blocks, computes bucket-based state roots
 - `LedgerServer` (raft/server.rs) — gRPC server combining all services with Raft
 
 **Data model:**

@@ -24,9 +24,9 @@ use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use inkwell::StorageBackend;
-use ledger_storage::StateLayer;
-use ledger_storage::system::{
+use ledger_db::StorageBackend;
+use ledger_state::StateLayer;
+use ledger_state::system::{
     CreateOrgSaga, CreateOrgSagaState, DeleteUserSaga, DeleteUserSagaState, SAGA_POLL_INTERVAL,
     Saga,
 };
@@ -54,7 +54,7 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer (internally thread-safe via inkwell MVCC).
+    /// The shared state layer (internally thread-safe via ledger-db MVCC).
     state: Arc<StateLayer<B>>,
     /// Accessor for applied state.
     /// Reserved for future saga state queries.
@@ -96,7 +96,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
     /// Load all pending sagas from _system namespace.
     fn load_pending_sagas(&self) -> Vec<Saga> {
-        // StateLayer is internally thread-safe via inkwell MVCC
+        // StateLayer is internally thread-safe via ledger-db MVCC
 
         // List all entities with saga: prefix in _system (vault_id=0)
         let entities = match self
@@ -630,7 +630,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 )]
 mod tests {
     use super::*;
-    use ledger_storage::system::{CreateOrgInput, DeleteUserInput};
+    use ledger_state::system::{CreateOrgInput, DeleteUserInput};
 
     #[test]
     fn test_saga_key_format() {

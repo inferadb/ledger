@@ -14,7 +14,7 @@
 
 use snafu::{Backtrace, GenerateImplicitData, Snafu};
 
-use ledger_storage::{BlockArchiveError, StateError};
+use ledger_state::{BlockArchiveError, StateError};
 
 // ============================================================================
 // Recovery Errors

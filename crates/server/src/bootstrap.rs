@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use inkwell::{Database, FileBackend};
+use ledger_db::{Database, FileBackend};
 use openraft::storage::Adaptor;
 use openraft::{BasicNode, Raft};
 use tonic::transport::Channel;
@@ -21,7 +21,7 @@ use ledger_raft::{
     AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
     LedgerServer, LedgerTypeConfig, RaftLogStore, TtlGarbageCollector,
 };
-use ledger_storage::{BlockArchive, SnapshotManager, StateLayer};
+use ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 
 use crate::config::Config;
 use crate::discovery::resolve_bootstrap_peers;
@@ -61,7 +61,7 @@ pub struct BootstrappedNode {
     /// The Raft instance.
     #[allow(dead_code)]
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The shared state layer (internally thread-safe via inkwell MVCC).
+    /// The shared state layer (internally thread-safe via ledger-db MVCC).
     #[allow(dead_code)]
     pub state: Arc<StateLayer<FileBackend>>,
     /// The configured Ledger server.
@@ -89,8 +89,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
 
-    // Open state database and initialize tables using inkwell
-    let state_db_path = config.data_dir.join("state.inkwell");
+    // Open state database and initialize tables using ledger-db
+    let state_db_path = config.data_dir.join("state.db");
     let state_db = Arc::new(
         Database::<FileBackend>::create(&state_db_path)
             .map_err(|e| BootstrapError::Database(format!("failed to create state db: {}", e)))?,
@@ -98,8 +98,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // StateLayer is internally thread-safe via MVCC - no external lock needed
     let state = Arc::new(StateLayer::new(state_db));
 
-    // Open block archive for historical block storage using inkwell
-    let blocks_db_path = config.data_dir.join("blocks.inkwell");
+    // Open block archive for historical block storage using ledger-db
+    let blocks_db_path = config.data_dir.join("blocks.db");
     let blocks_db = Arc::new(
         Database::<FileBackend>::create(&blocks_db_path)
             .map_err(|e| BootstrapError::Database(format!("failed to create blocks db: {}", e)))?,
@@ -107,7 +107,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     let block_archive = Arc::new(BlockArchive::new(blocks_db));
 
     // Open Raft log store and configure with dependencies
-    let log_path = config.data_dir.join("raft.inkwell");
+    let log_path = config.data_dir.join("raft.db");
     let log_store = RaftLogStore::open(&log_path)
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
         .with_state_layer(state.clone())

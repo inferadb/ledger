@@ -14,8 +14,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
-use inkwell::{Database, FileBackend};
-use ledger_storage::StateLayer;
+use ledger_db::{Database, FileBackend};
+use ledger_state::StateLayer;
 use ledger_types::Operation;
 
 /// Create a test state layer pre-populated with data.
@@ -24,7 +24,7 @@ fn create_populated_state_layer(
     vault_id: i64,
     entity_count: usize,
 ) -> StateLayer<FileBackend> {
-    let db = Database::<FileBackend>::create(temp_dir.path().join("test.inkwell"))
+    let db = Database::<FileBackend>::create(temp_dir.path().join("test.db"))
         .expect("create database");
     let state = StateLayer::new(Arc::new(db));
 
@@ -152,7 +152,7 @@ fn bench_multi_vault_reads(c: &mut Criterion) {
     group.throughput(Throughput::Elements(10)); // 10 vaults
 
     let temp_dir = TempDir::new().expect("create temp dir");
-    let db = Database::<FileBackend>::create(temp_dir.path().join("test.inkwell"))
+    let db = Database::<FileBackend>::create(temp_dir.path().join("test.db"))
         .expect("create database");
     let state = StateLayer::new(Arc::new(db));
 

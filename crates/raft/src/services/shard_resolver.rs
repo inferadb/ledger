@@ -35,8 +35,8 @@ use crate::multi_raft::MultiRaftManager;
 use crate::shard_router::{RoutingInfo, ShardRouter};
 use crate::types::LedgerTypeConfig;
 
-use inkwell::FileBackend;
-use ledger_storage::{BlockArchive, StateLayer};
+use ledger_db::FileBackend;
+use ledger_state::{BlockArchive, StateLayer};
 use ledger_types::{NamespaceId, ShardId};
 
 /// Resolved shard context for handling a request locally.

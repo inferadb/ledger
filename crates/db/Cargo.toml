@@ -1,8 +1,8 @@
 [package]
-name = "inkwell"
+name = "ledger-db"
 version.workspace = true
 edition = "2021"
-description = "Purpose-built embedded storage engine for InferaDB Ledger"
+description = "Embedded B+ tree database engine for InferaDB Ledger"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

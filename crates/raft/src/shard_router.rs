@@ -48,8 +48,8 @@ use snafu::{ResultExt, Snafu};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use inkwell::{FileBackend, StorageBackend};
-use ledger_storage::system::{NamespaceStatus, SystemNamespaceService};
+use ledger_db::{FileBackend, StorageBackend};
+use ledger_state::system::{NamespaceStatus, SystemNamespaceService};
 use ledger_types::{NamespaceId, ShardId};
 
 // ============================================================================
@@ -83,7 +83,7 @@ pub enum RoutingError {
     /// System service error during lookup.
     #[snafu(display("System lookup failed: {source}"))]
     SystemLookup {
-        source: ledger_storage::system::SystemError,
+        source: ledger_state::system::SystemError,
     },
 }
 
@@ -511,8 +511,8 @@ pub struct RouterStats {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use inkwell::{Database, FileBackend};
-    use ledger_storage::StateLayer;
+    use ledger_db::{Database, FileBackend};
+    use ledger_state::StateLayer;
     use ledger_test_utils::TestDir;
     use std::sync::Arc;
 
@@ -523,7 +523,7 @@ mod tests {
     ) {
         let temp_dir = TestDir::new();
         let db = Arc::new(
-            Database::<FileBackend>::create(temp_dir.join("test.inkwell"))
+            Database::<FileBackend>::create(temp_dir.join("test.db"))
                 .expect("create database"),
         );
         let state = Arc::new(StateLayer::new(db));

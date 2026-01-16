@@ -10,7 +10,7 @@ cargo build -p ledger-types    # Build specific crate
 ## Testing
 ```bash
 cargo test                     # Run all tests
-cargo test -p ledger-storage   # Test specific crate
+cargo test -p ledger-state     # Test specific crate
 cargo test -- --nocapture      # With output
 ```
 

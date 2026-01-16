@@ -1,4 +1,4 @@
-//! Raft storage implementation using Inkwell.
+//! Raft storage implementation using ledger-db.
 //!
 //! This module provides the persistent storage for Raft log entries,
 //! vote state, committed log tracking, and state machine state.
@@ -8,7 +8,7 @@
 //! (`RaftLogStorage`, `RaftStateMachine`) are sealed in OpenRaft 0.9.
 //!
 //! Per DESIGN.md, each shard group has its own storage located at:
-//! `shards/{shard_id}/raft/log.inkwell`
+//! `shards/{shard_id}/raft/log.db`
 //!
 //! # Lock Ordering Convention
 //!
@@ -28,7 +28,7 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
-use inkwell::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
+use ledger_db::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
 use openraft::storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
@@ -49,8 +49,8 @@ use crate::types::{
 };
 
 // Re-export storage types used in this module
-use ledger_storage::system::{NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys};
-use ledger_storage::{BlockArchive, StateError, StateLayer};
+use ledger_state::system::{NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys};
+use ledger_state::{BlockArchive, StateError, StateLayer};
 
 // ============================================================================
 // Metadata Keys
@@ -599,7 +599,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         .flat_map(|tx| tx.operations.clone())
                         .collect();
 
-                    // Apply operations (StateLayer is internally thread-safe via inkwell MVCC)
+                    // Apply operations (StateLayer is internally thread-safe via ledger-db MVCC)
                     if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
                         // Per DESIGN.md §6.1: On CAS failure, return current state for conflict resolution
                         return match e {
@@ -973,7 +973,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             Bound::Unbounded => None,
         };
 
-        // Use range iteration from inkwell
+        // Use range iteration from ledger-db
         let start_key = start_idx;
         let end_key = end_idx.unwrap_or(u64::MAX);
 
@@ -1486,7 +1486,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         // Collect entities from StateLayer if configured
-        // StateLayer is internally thread-safe via inkwell's MVCC, so no lock needed
+        // StateLayer is internally thread-safe via ledger-db's MVCC, so no lock needed
         let vault_entities = if let Some(state_layer) = &self.state_layer {
             let mut entities_map = HashMap::new();
 
@@ -1575,7 +1575,7 @@ fn to_serde_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
 )]
 mod tests {
     use super::*;
-    use inkwell::FileBackend;
+    use ledger_db::FileBackend;
     use openraft::CommittedLeaderId;
     use tempfile::tempdir;
 
@@ -1588,13 +1588,13 @@ mod tests {
     #[tokio::test]
     async fn test_log_store_open() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        // Verify database can be read (tables exist in inkwell by default)
+        // Verify database can be read (tables exist in ledger-db by default)
         let read_txn = store.db.read().expect("begin read");
-        // Tables are fixed in inkwell - just verify we can get a transaction
+        // Tables are fixed in ledger-db - just verify we can get a transaction
         let _ = read_txn
             .get::<tables::RaftLog>(&0u64)
             .expect("query RaftLog");
@@ -1606,7 +1606,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_read_vote() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
@@ -1632,7 +1632,7 @@ mod tests {
     #[tokio::test]
     async fn test_apply_create_namespace() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
@@ -1655,7 +1655,7 @@ mod tests {
     #[tokio::test]
     async fn test_apply_create_vault() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
@@ -1680,7 +1680,7 @@ mod tests {
     #[tokio::test]
     async fn test_diverged_vault_rejects_writes() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
@@ -1714,7 +1714,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_vault_health_to_healthy() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
@@ -1760,7 +1760,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_vault_health_to_diverged() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
@@ -1809,7 +1809,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_vault_health_to_recovering() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
@@ -1907,9 +1907,9 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
             .expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
         // Same sequence of requests to apply
@@ -2013,9 +2013,9 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
             .expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
         // Apply same sequence on both nodes
@@ -2058,9 +2058,9 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
             .expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
         // Same inputs must produce same hash
@@ -2085,9 +2085,9 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
             .expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
         let mut state_a = store_a.applied_state.write();
@@ -2135,9 +2135,9 @@ mod tests {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.inkwell"))
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
             .expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.inkwell"))
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
         let mut state_a = store_a.applied_state.write();
@@ -2282,7 +2282,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_produces_vault_entry() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
@@ -2349,7 +2349,7 @@ mod tests {
     #[tokio::test]
     async fn test_shard_height_tracked_in_applied_state() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
@@ -2445,7 +2445,7 @@ mod tests {
     #[tokio::test]
     async fn test_applied_state_accessor() {
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let accessor = store.accessor();
@@ -2558,7 +2558,7 @@ mod tests {
         // Create target store (simulating a new follower)
         let target_dir = tempdir().expect("create target dir");
         let mut target_store =
-            RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.inkwell"))
+            RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.db"))
                 .expect("open target");
 
         // Verify initial state is empty
@@ -2658,7 +2658,7 @@ mod tests {
         // Fresh node
         let dir = tempdir().expect("create dir");
         let mut store =
-            RaftLogStore::<FileBackend>::open(dir.path().join("raft.inkwell")).expect("open");
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).expect("open");
 
         // Verify initial state is empty
         assert_eq!(store.current_shard_height(), 0);
@@ -2689,7 +2689,7 @@ mod tests {
     async fn test_append_and_read_log_entries() {
         // This test simulates what openraft does during replication
         let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.inkwell");
+        let path = dir.path().join("raft_log.db");
 
         let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 

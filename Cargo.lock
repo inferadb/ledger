@@ -1504,22 +1504,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inkwell"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "byteorder",
- "memmap2",
- "parking_lot",
- "proptest",
- "rand 0.8.5",
- "snafu",
- "tempfile",
- "tracing",
- "xxhash-rust",
-]
-
-[[package]]
 name = "ipconfig"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1635,6 +1619,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "ledger-db"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "byteorder",
+ "memmap2",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.5",
+ "snafu",
+ "tempfile",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "ledger-raft"
 version = "0.1.0"
 dependencies = [
@@ -1644,8 +1644,8 @@ dependencies = [
  "fs2",
  "futures",
  "hmac",
- "inkwell",
- "ledger-storage",
+ "ledger-db",
+ "ledger-state",
  "ledger-test-utils",
  "ledger-types",
  "metrics",
@@ -1682,9 +1682,9 @@ dependencies = [
  "hickory-resolver",
  "hyper",
  "hyper-util",
- "inkwell",
+ "ledger-db",
  "ledger-raft",
- "ledger-storage",
+ "ledger-state",
  "ledger-test-utils",
  "ledger-types",
  "metrics",
@@ -1707,14 +1707,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "ledger-storage"
+name = "ledger-state"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
  "chrono",
  "futures",
- "inkwell",
+ "ledger-db",
  "ledger-test-utils",
  "ledger-types",
  "lru",

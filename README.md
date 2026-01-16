@@ -60,7 +60,7 @@ Ledger is InferaDB's persistence layer — a blockchain database for authorizati
 │  ├─ Vault: prod [chain]       │  ├─ Vault: main [chain]     │
 │  └─ Vault: staging [chain]    │  └─ ...                     │
 ├─────────────────────────────────────────────────────────────┤
-│                  State Layer (inkwell)                      │
+│                  State Layer (ledger-db)                    │
 │    Relationships │ Entities │ Indexes │ State Roots         │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -136,7 +136,8 @@ Environment variables override config file values using the `INFERADB__LEDGER__`
 | Crate            | Description                                    |
 | ---------------- | ---------------------------------------------- |
 | `ledger-types`   | Core types, hashing, and protobuf definitions  |
-| `ledger-storage` | Storage layer, state management, snapshots     |
+| `ledger-db`      | Embedded B+ tree database engine               |
+| `ledger-state`   | Domain state management, indexes, snapshots    |
 | `ledger-raft`    | Raft consensus, log storage, network transport |
 | `ledger-server`  | gRPC server, request routing, client handling  |
 

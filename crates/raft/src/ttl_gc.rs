@@ -17,8 +17,8 @@ use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use inkwell::StorageBackend;
-use ledger_storage::StateLayer;
+use ledger_db::StorageBackend;
+use ledger_state::StateLayer;
 use ledger_types::{Operation, Transaction, VaultId};
 
 use crate::log_storage::AppliedStateAccessor;
@@ -42,7 +42,7 @@ pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer (internally thread-safe via inkwell MVCC).
+    /// The shared state layer (internally thread-safe via ledger-db MVCC).
     state: Arc<StateLayer<B>>,
     /// Accessor for applied state (vault registry).
     applied_state: AppliedStateAccessor,
@@ -92,7 +92,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        // StateLayer is internally thread-safe via inkwell MVCC
+        // StateLayer is internally thread-safe via ledger-db MVCC
         // List all entities including expired ones
         match self
             .state

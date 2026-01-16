@@ -3,7 +3,7 @@
 //! Provides direct entity CRUD operations separate from the state layer.
 //! Used for lower-level access when the full state layer isn't needed.
 
-use inkwell::{ReadTransaction, StorageBackend, WriteTransaction, tables};
+use ledger_db::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use snafu::{ResultExt, Snafu};
 
 use ledger_types::{CodecError, Entity, VaultId, decode, encode};
@@ -14,7 +14,7 @@ use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 #[derive(Debug, Snafu)]
 pub enum EntityError {
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: inkwell::Error },
+    Storage { source: ledger_db::Error },
 
     #[snafu(display("Codec error: {source}"))]
     Codec { source: CodecError },
@@ -427,8 +427,8 @@ mod tests {
     // Test that Storage variant also works correctly
     #[test]
     fn test_entity_error_storage_display() {
-        // We can't easily create an inkwell::Error, but we can verify the
+        // We can't easily create an ledger_db::Error, but we can verify the
         // pattern compiles and the Display format is correct by checking the derive
-        let _: fn(inkwell::Error) -> EntityError = |source| EntityError::Storage { source };
+        let _: fn(ledger_db::Error) -> EntityError = |source| EntityError::Storage { source };
     }
 }
