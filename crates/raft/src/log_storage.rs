@@ -498,7 +498,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_caches(&self) -> Result<(), StorageError<LedgerNodeId>> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
-        // Load vote
         if let Some(vote_data) = read_txn
             .get::<tables::RaftState>(&KEY_VOTE.to_string())
             .map_err(|e| to_storage_error(&e))?
@@ -507,7 +506,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
             *self.vote_cache.write() = Some(vote);
         }
 
-        // Load last purged
         if let Some(purged_data) = read_txn
             .get::<tables::RaftState>(&KEY_LAST_PURGED.to_string())
             .map_err(|e| to_storage_error(&e))?
@@ -517,7 +515,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
             *self.last_purged_cache.write() = Some(purged);
         }
 
-        // Load applied state
         if let Some(state_data) = read_txn
             .get::<tables::RaftState>(&KEY_APPLIED_STATE.to_string())
             .map_err(|e| to_storage_error(&e))?

@@ -201,7 +201,6 @@ impl BatchWriterHandle {
             state.should_flush(&self.config)
         };
 
-        // If we should flush, notify the background task
         if should_flush {
             debug!("Batch threshold reached, flush will occur on next tick");
         }

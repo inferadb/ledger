@@ -442,7 +442,6 @@ impl MultiRaftManager {
         // Get accessor before log_store is consumed
         let applied_state = log_store.accessor();
 
-        // Create network factory
         let network = GrpcRaftNetworkFactory::new();
 
         // Build Raft config

@@ -57,12 +57,10 @@ impl GrpcRaftNetwork {
         target: LedgerNodeId,
         node: &BasicNode,
     ) -> Result<RaftServiceClient<Channel>, NetworkError> {
-        // Check cache first (brief read lock)
         if let Some(client) = self.clients.read().get(&target).cloned() {
             return Ok(client);
         }
 
-        // Create new connection (outside lock)
         let endpoint = format!("http://{}", node.addr);
         let channel = Channel::from_shared(endpoint.clone())
             .map_err(|e| NetworkError(format!("Invalid endpoint: {}", e)))?
@@ -136,7 +134,6 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-        // Convert to proto types
         let request = crate::proto::RaftVoteRequest {
             vote: Some((&rpc.vote).into()),
             last_log_id: rpc.last_log_id.map(|id| crate::proto::RaftLogId {
@@ -152,7 +149,6 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&NetworkError(e.to_string()))))?
             .into_inner();
 
-        // Convert back from proto types
         let vote = response.vote.ok_or_else(|| {
             RPCError::Unreachable(Unreachable::new(&NetworkError(
                 "Missing vote in response".to_string(),
@@ -182,7 +178,6 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-        // Serialize entries to bytes for transport
         let entries: Vec<Vec<u8>> = rpc
             .entries
             .iter()
@@ -209,7 +204,6 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&NetworkError(e.to_string()))))?
             .into_inner();
 
-        // Convert response: the proto has success/conflict booleans
         if response.success {
             Ok(AppendEntriesResponse::Success)
         } else if response.conflict {
