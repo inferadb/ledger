@@ -25,10 +25,12 @@ tokio-stream = "0.1"
 tokio-util = "0.7"
 
 # gRPC
-tonic = { version = "0.12", features = ["gzip", "zstd", "tls", "tls-native-roots"] }
-tonic-build = "0.12"
-prost = "0.13"
-prost-types = "0.13"
+tonic = { version = "0.14", features = ["gzip", "zstd", "tls-native-roots"] }
+tonic-build = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout"] }
 
 # Raft consensus
@@ -60,7 +62,7 @@ parking_lot = "0.12"
 arc-swap = "1.7"
 
 # Caching
-lru = "0.12"
+lru = "0.16"
 moka = { version = "0.12", features = ["sync"] }
 
 # Utilities
@@ -89,7 +91,7 @@ futures = "0.3"
 proptest = "1.4"
 
 # Benchmarking
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 # DNS resolver for SRV record discovery
 hickory-resolver = "0.24"

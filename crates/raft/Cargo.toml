@@ -19,6 +19,7 @@ openraft.workspace = true
 
 # gRPC
 tonic.workspace = true
+tonic-prost.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 tower.workspace = true
@@ -62,6 +63,7 @@ futures = "0.3"
 
 [build-dependencies]
 tonic-build.workspace = true
+tonic-prost-build.workspace = true
 
 [dev-dependencies]
 ledger-test-utils.workspace = true
