@@ -191,16 +191,16 @@ Client Request
     ↓
 [2] Internal Types → LedgerRequest (already in-memory)
     ↓
-[3] LedgerRequest → Bincode (Raft log serialization)
+[3] LedgerRequest → Postcard (Raft log serialization)
     ↓
-[4] Bincode → Disk (LedgerDb B-tree write)
+[4] Postcard → Disk (LedgerDb B-tree write)
 ```
 
-**Why bincode for storage**: Proto is optimized for wire transmission (extensible, schema-aware) while bincode is optimized for in-process speed (no schema overhead, minimal allocation). Storing as bincode avoids proto parsing on every log replay.
+**Why postcard for storage**: Proto is optimized for wire transmission (extensible, schema-aware) while postcard is optimized for in-process speed (no schema overhead, minimal allocation, no_std compatible). Storing as postcard avoids proto parsing on every log replay.
 
 **Measured overhead** (see serialization metrics in Observability):
 - Proto decode: ~1-5μs per operation (varies with payload size)
-- Bincode encode: ~2-10μs per Raft entry (varies with batch size)
+- Postcard encode: ~2-10μs per Raft entry (varies with batch size)
 - Total serialization: <1% of request latency at typical batch sizes
 
 #### Alternatives Considered
@@ -216,10 +216,10 @@ Client Request
 
 This is a net negative for systems targeting <100K ops/sec where developer and operator productivity dominates.
 
-**gRPC-only storage (no bincode)**: Would eliminate one serialization layer but:
-- Proto parsing is slower than bincode for repeated reads
+**gRPC-only storage (no postcard)**: Would eliminate one serialization layer but:
+- Proto parsing is slower than postcard for repeated reads
 - Proto schema evolution adds replay complexity
-- Bincode's deterministic serialization simplifies snapshot verification
+- Postcard's deterministic serialization simplifies snapshot verification
 
 #### When to Reconsider
 
@@ -1343,7 +1343,7 @@ struct PageToken {
 | `query_hash`   | Detects filter changes mid-pagination (reject with `INVALID_ARGUMENT`) |
 | `hmac`         | Prevents client tampering; keyed with node-local secret                |
 
-**Encoding**: `base64(bincode::serialize(PageToken))`
+**Encoding**: `base64(postcard::to_allocvec(PageToken))`
 
 **Validation on each request**:
 
@@ -4106,8 +4106,8 @@ Vault owners verify state without downloading the entire chain.
 **Serialization metrics** (see [Network Protocol Architecture](#network-protocol-architecture)):
 
 - `ledger_serialization_proto_decode_seconds`: Proto → internal type conversion latency
-- `ledger_serialization_bincode_encode_seconds`: Internal types → Raft log serialization
-- `ledger_serialization_bincode_decode_seconds`: Raft log → internal types deserialization
+- `ledger_serialization_postcard_encode_seconds`: Internal types → Raft log serialization
+- `ledger_serialization_postcard_decode_seconds`: Raft log → internal types deserialization
 - `ledger_serialization_bytes`: Payload size histogram by direction and entry type
 
 These metrics help identify if serialization becomes a bottleneck. At typical workloads, serialization should be <1% of request latency.
