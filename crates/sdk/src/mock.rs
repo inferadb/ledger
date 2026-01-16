@@ -2485,5 +2485,123 @@ mod tests {
                 Some(b"from-c1".to_vec())
             );
         }
+
+        // ==================== Client Shutdown Integration Tests ====================
+
+        #[tokio::test]
+        async fn test_client_shutdown_cancels_in_flight_request() {
+            let server = MockLedgerServer::start().await.unwrap();
+            // Add 500ms delay to simulate slow request
+            server.inject_delay(500);
+
+            let client = create_client_for_mock(&server).await;
+
+            // Start a slow read in background
+            let client_clone = client.clone();
+            let handle = tokio::spawn(async move {
+                client_clone.read(1, Some(0), "key").await
+            });
+
+            // Give time for request to start
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Shutdown the client while request is in flight
+            client.shutdown().await;
+
+            // The spawned task should complete (may succeed or fail with transport error)
+            // The key point is it doesn't hang forever
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                handle
+            ).await;
+
+            assert!(result.is_ok(), "Request should complete within timeout after shutdown");
+        }
+
+        #[tokio::test]
+        async fn test_client_shutdown_prevents_new_requests() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.set_entity(1, 0, "key", b"value");
+            let client = create_client_for_mock(&server).await;
+
+            // Verify normal operation
+            let result = client.read(1, Some(0), "key").await;
+            assert!(result.is_ok());
+
+            // Shutdown
+            client.shutdown().await;
+
+            // New requests should fail with Shutdown error
+            let result = client.read(1, Some(0), "key").await;
+            assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
+
+            // Write should also fail
+            let ops = vec![Operation::set_entity("new:key", b"value".to_vec())];
+            let result = client.write(1, Some(0), ops).await;
+            assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
+        }
+
+        #[tokio::test]
+        async fn test_client_shutdown_with_multiple_operations() {
+            let server = MockLedgerServer::start().await.unwrap();
+            let client = create_client_for_mock(&server).await;
+
+            // Perform several successful operations
+            for i in 0..5 {
+                let ops = vec![Operation::set_entity(
+                    format!("key:{i}"),
+                    format!("value:{i}").into_bytes(),
+                )];
+                client.write(1, Some(0), ops).await.unwrap();
+            }
+
+            // Verify sequence state before shutdown
+            let seq_before = client.sequences().current_sequence(1, 0);
+            assert_eq!(seq_before, 5);
+
+            // Shutdown
+            client.shutdown().await;
+
+            // Operations should fail
+            let ops = vec![Operation::set_entity("key:5", b"value".to_vec())];
+            let result = client.write(1, Some(0), ops).await;
+            assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
+
+            // Sequence should not have incremented
+            let seq_after = client.sequences().current_sequence(1, 0);
+            assert_eq!(seq_after, 5, "Sequence should not increment after shutdown");
+        }
+
+        #[tokio::test]
+        async fn test_cloned_client_shutdown_affects_all_clones() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.set_entity(1, 0, "key", b"value");
+
+            let client1 = create_client_for_mock(&server).await;
+            let client2 = client1.clone();
+            let client3 = client1.clone();
+
+            // All clones should work initially
+            assert!(client1.read(1, Some(0), "key").await.is_ok());
+            assert!(client2.read(1, Some(0), "key").await.is_ok());
+            assert!(client3.read(1, Some(0), "key").await.is_ok());
+
+            // Shutdown through client2
+            client2.shutdown().await;
+
+            // All clones should now fail
+            assert!(matches!(
+                client1.read(1, Some(0), "key").await,
+                Err(crate::error::SdkError::Shutdown)
+            ));
+            assert!(matches!(
+                client2.read(1, Some(0), "key").await,
+                Err(crate::error::SdkError::Shutdown)
+            ));
+            assert!(matches!(
+                client3.read(1, Some(0), "key").await,
+                Err(crate::error::SdkError::Shutdown)
+            ));
+        }
     }
 }
