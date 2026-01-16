@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let key = format!("stream-test:{i}");
             let value = format!("Value written at iteration {i}");
-            
+
             match writer_client
                 .write(
                     writer_ns,
@@ -101,10 +101,7 @@ async fn main() -> Result<()> {
                     );
 
                     // Print transaction count if available
-                    println!(
-                        "         block_hash: {:?}",
-                        hex_preview(&block.block_hash)
-                    );
+                    println!("         block_hash: {:?}", hex_preview(&block.block_hash));
                 }
                 Err(e) => {
                     println!("[Stream] Error: {}", e);

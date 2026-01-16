@@ -90,10 +90,7 @@ async fn main() -> Result<()> {
                 "  Leaf hash: {}",
                 hex_string(&verified.merkle_proof.leaf_hash)
             );
-            println!(
-                "  Sibling count: {}",
-                verified.merkle_proof.siblings.len()
-            );
+            println!("  Sibling count: {}", verified.merkle_proof.siblings.len());
             println!(
                 "  State root in header: {}",
                 hex_string(&verified.block_header.state_root)
@@ -116,10 +113,7 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    println!(
-        "Updated value at block {}\n",
-        result2.block_height
-    );
+    println!("Updated value at block {}\n", result2.block_height);
 
     // Read at the ORIGINAL block height (before the update)
     let opts = VerifyOpts::new().at_height(write_result.block_height);
@@ -129,14 +123,16 @@ async fn main() -> Result<()> {
 
     match historical {
         Some(verified) => {
-            let value_str = verified.value.as_ref()
+            let value_str = verified
+                .value
+                .as_ref()
                 .map(|v| String::from_utf8_lossy(v).to_string())
                 .unwrap_or_else(|| "none".to_string());
-            println!("Historical value (at block {}): {:?}", 
-                verified.block_height, 
-                value_str
+            println!(
+                "Historical value (at block {}): {:?}",
+                verified.block_height, value_str
             );
-            
+
             // Verify this historical proof
             match verified.verify() {
                 Ok(true) => println!("✓ Historical proof verified!"),
@@ -153,13 +149,14 @@ async fn main() -> Result<()> {
         .await?;
 
     if let Some(verified) = current {
-        let value_str = verified.value.as_ref()
+        let value_str = verified
+            .value
+            .as_ref()
             .map(|v| String::from_utf8_lossy(v).to_string())
             .unwrap_or_else(|| "none".to_string());
         println!(
             "Current value (at block {}): {:?}",
-            verified.block_height,
-            value_str
+            verified.block_height, value_str
         );
     }
 
@@ -167,7 +164,8 @@ async fn main() -> Result<()> {
     // 5. Understanding verification
     // -------------------------------------------------------------------------
     println!("\n=== How Verification Works ===");
-    println!("
+    println!(
+        "
 1. The server returns:
    - The entity value
    - A block header containing the state_root
@@ -187,7 +185,8 @@ async fn main() -> Result<()> {
    - Links block headers from trusted_height to current
    - Verifies blockchain continuity
    - Useful for light clients with checkpoint trust
-");
+"
+    );
 
     // -------------------------------------------------------------------------
     // Summary

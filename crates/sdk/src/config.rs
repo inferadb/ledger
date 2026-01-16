@@ -433,7 +433,6 @@ pub struct DiscoveryConfig {
     refresh_interval: Duration,
 }
 
-
 /// TLS configuration for secure connections.
 ///
 /// Supports both PEM and DER certificate formats. When using DER format,
@@ -1071,7 +1070,9 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("CA certificate") || err.to_string().contains("native roots"));
+        assert!(
+            err.to_string().contains("CA certificate") || err.to_string().contains("native roots")
+        );
     }
 
     #[test]

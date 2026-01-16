@@ -84,7 +84,10 @@ async fn main() -> Result<()> {
     match value {
         Some(bytes) => {
             let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");
-            println!("Read (eventual): {}", serde_json::to_string_pretty(&parsed).expect("format"));
+            println!(
+                "Read (eventual): {}",
+                serde_json::to_string_pretty(&parsed).expect("format")
+            );
         }
         None => println!("Key not found (eventual read)"),
     }

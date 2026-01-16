@@ -181,10 +181,7 @@ impl ConnectionPool {
     }
 
     /// Builds a tonic `ClientTlsConfig` from our SDK's `TlsConfig`.
-    fn build_tls_config(
-        &self,
-        tls: &crate::config::TlsConfig,
-    ) -> Result<ClientTlsConfig> {
+    fn build_tls_config(&self, tls: &crate::config::TlsConfig) -> Result<ClientTlsConfig> {
         let mut tls_config = ClientTlsConfig::new();
 
         // Add native roots if requested

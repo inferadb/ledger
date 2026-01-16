@@ -24,10 +24,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker,
-    mock::MockLedgerServer,
+    ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker, mock::MockLedgerServer,
 };
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -55,7 +54,9 @@ async fn create_client_for_mock(endpoint: &str) -> LedgerClient {
         .build()
         .expect("Failed to build config");
 
-    LedgerClient::new(config).await.expect("Failed to create client")
+    LedgerClient::new(config)
+        .await
+        .expect("Failed to create client")
 }
 
 // ============================================================================
@@ -70,9 +71,7 @@ fn bench_sequence_next(c: &mut Criterion) {
     let tracker = SequenceTracker::new("bench-client");
 
     c.bench_function("sequence_next", |b| {
-        b.iter(|| {
-            black_box(tracker.next_sequence(1, 0))
-        })
+        b.iter(|| black_box(tracker.next_sequence(1, 0)))
     });
 }
 
@@ -141,7 +140,9 @@ fn bench_read_single(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
+        let server = MockLedgerServer::start()
+            .await
+            .expect("Failed to start mock server");
         server.set_entity(1, 0, "test-key", b"test-value-data");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
@@ -149,7 +150,12 @@ fn bench_read_single(c: &mut Criterion) {
 
     c.bench_function("read_single_key", |b| {
         b.to_async(&rt).iter(|| async {
-            black_box(client.read(1, Some(0), "test-key").await.expect("read failed"))
+            black_box(
+                client
+                    .read(1, Some(0), "test-key")
+                    .await
+                    .expect("read failed"),
+            )
         })
     });
 }
@@ -162,11 +168,18 @@ fn bench_read_batch(c: &mut Criterion) {
 
     // Setup: start mock server with many keys
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
+        let server = MockLedgerServer::start()
+            .await
+            .expect("Failed to start mock server");
 
         // Pre-populate 100 keys
         for i in 0..100 {
-            server.set_entity(1, 0, &format!("key-{:03}", i), format!("value-{}", i).as_bytes());
+            server.set_entity(
+                1,
+                0,
+                &format!("key-{:03}", i),
+                format!("value-{}", i).as_bytes(),
+            );
         }
 
         let client = create_client_for_mock(server.endpoint()).await;
@@ -179,20 +192,16 @@ fn bench_read_batch(c: &mut Criterion) {
         let keys: Vec<String> = (0..batch_size).map(|i| format!("key-{:03}", i)).collect();
 
         group.throughput(Throughput::Elements(batch_size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &keys,
-            |b, keys| {
-                b.to_async(&rt).iter(|| async {
-                    black_box(
-                        client
-                            .batch_read(1, Some(0), keys.clone())
-                            .await
-                            .expect("batch_read failed"),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(batch_size), &keys, |b, keys| {
+            b.to_async(&rt).iter(|| async {
+                black_box(
+                    client
+                        .batch_read(1, Some(0), keys.clone())
+                        .await
+                        .expect("batch_read failed"),
+                )
+            })
+        });
     }
     group.finish();
 }
@@ -209,7 +218,9 @@ fn bench_write_single(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
+        let server = MockLedgerServer::start()
+            .await
+            .expect("Failed to start mock server");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
     });
@@ -222,9 +233,7 @@ fn bench_write_single(c: &mut Criterion) {
             let key = format!("bench-key-{}", key_counter);
             let ops = vec![Operation::set_entity(&key, b"bench-value".to_vec())];
 
-            async {
-                black_box(client.write(1, Some(0), ops).await.expect("write failed"))
-            }
+            async { black_box(client.write(1, Some(0), ops).await.expect("write failed")) }
         })
     });
 }
@@ -237,7 +246,9 @@ fn bench_write_multi_op(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
+        let server = MockLedgerServer::start()
+            .await
+            .expect("Failed to start mock server");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
     });
@@ -262,9 +273,7 @@ fn bench_write_multi_op(c: &mut Criterion) {
                         })
                         .collect();
 
-                    async {
-                        black_box(client.write(1, Some(0), ops).await.expect("write failed"))
-                    }
+                    async { black_box(client.write(1, Some(0), ops).await.expect("write failed")) }
                 })
             },
         );
@@ -280,7 +289,9 @@ fn bench_batch_write(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
+        let server = MockLedgerServer::start()
+            .await
+            .expect("Failed to start mock server");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
     });
@@ -330,7 +341,9 @@ fn bench_mixed_read_heavy(c: &mut Criterion) {
 
     // Setup: start mock server with some data
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
+        let server = MockLedgerServer::start()
+            .await
+            .expect("Failed to start mock server");
 
         // Pre-populate some keys
         for i in 0..10 {

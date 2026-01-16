@@ -213,7 +213,10 @@ async fn main() -> Result<()> {
 
     if let Some(bytes) = value {
         let user: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");
-        println!("User data: {}", serde_json::to_string_pretty(&user).expect("format"));
+        println!(
+            "User data: {}",
+            serde_json::to_string_pretty(&user).expect("format")
+        );
     }
 
     // -------------------------------------------------------------------------

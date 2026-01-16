@@ -289,7 +289,11 @@ impl TestCluster {
             loop {
                 for node in &self.nodes {
                     if let Some(leader_id) = node.current_leader() {
-                        if self.nodes.iter().any(|n| n.id == leader_id && n.is_leader()) {
+                        if self
+                            .nodes
+                            .iter()
+                            .any(|n| n.id == leader_id && n.is_leader())
+                        {
                             return leader_id;
                         }
                     }
@@ -330,7 +334,10 @@ impl TestCluster {
                 };
                 let leader_applied = leader.last_applied();
 
-                let all_synced = self.nodes.iter().all(|n| n.last_applied() >= leader_applied);
+                let all_synced = self
+                    .nodes
+                    .iter()
+                    .all(|n| n.last_applied() >= leader_applied);
                 if all_synced && leader_applied > 0 {
                     return true;
                 }
@@ -489,9 +496,18 @@ async fn test_batch_read_against_real_cluster() {
         .expect("batch read should succeed");
 
     assert_eq!(results.len(), 4);
-    assert_eq!(results[0], ("batch:0".to_string(), Some(b"batch-value-0".to_vec())));
-    assert_eq!(results[1], ("batch:1".to_string(), Some(b"batch-value-1".to_vec())));
-    assert_eq!(results[2], ("batch:2".to_string(), Some(b"batch-value-2".to_vec())));
+    assert_eq!(
+        results[0],
+        ("batch:0".to_string(), Some(b"batch-value-0".to_vec()))
+    );
+    assert_eq!(
+        results[1],
+        ("batch:1".to_string(), Some(b"batch-value-1".to_vec()))
+    );
+    assert_eq!(
+        results[2],
+        ("batch:2".to_string(), Some(b"batch-value-2".to_vec()))
+    );
     assert_eq!(results[3], ("batch:missing".to_string(), None));
 }
 
@@ -513,7 +529,10 @@ async fn test_idempotency_survives_leader_failover() {
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
     // Perform a write
-    let ops = vec![Operation::set_entity("failover:key", b"original-data".to_vec())];
+    let ops = vec![Operation::set_entity(
+        "failover:key",
+        b"original-data".to_vec(),
+    )];
     let first_result = client
         .write(ns_id, Some(vault_id), ops.clone())
         .await
@@ -565,7 +584,10 @@ async fn test_multiple_client_sessions_independent() {
     let (ns_id, vault_id) = setup_test_namespace_vault(&client1).await;
 
     // First session writes
-    let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec())];
+    let ops1 = vec![Operation::set_entity(
+        "session:key1",
+        b"from-session-1".to_vec(),
+    )];
     let first_result = client1
         .write(ns_id, Some(vault_id), ops1)
         .await
@@ -575,7 +597,10 @@ async fn test_multiple_client_sessions_independent() {
     let client2 = create_sdk_client(leader.addr, "session-2").await;
 
     // Second session writes different data
-    let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec())];
+    let ops2 = vec![Operation::set_entity(
+        "session:key2",
+        b"from-session-2".to_vec(),
+    )];
     let second_result = client2
         .write(ns_id, Some(vault_id), ops2)
         .await
@@ -584,7 +609,10 @@ async fn test_multiple_client_sessions_independent() {
     // Both writes should succeed with unique tx_ids
     assert!(!first_result.tx_id.is_empty());
     assert!(!second_result.tx_id.is_empty());
-    assert_ne!(first_result.tx_id, second_result.tx_id, "should have different tx_ids");
+    assert_ne!(
+        first_result.tx_id, second_result.tx_id,
+        "should have different tx_ids"
+    );
 
     // Read back both keys
     let value1 = client2
@@ -624,7 +652,11 @@ async fn test_watch_blocks_stream_setup() {
     let stream_result = client.watch_blocks(ns_id, vault_id, 1).await;
 
     // Stream setup should succeed
-    assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", stream_result.err());
+    assert!(
+        stream_result.is_ok(),
+        "watch_blocks should succeed: {:?}",
+        stream_result.err()
+    );
 }
 
 // ============================================================================
@@ -715,8 +747,8 @@ async fn test_sequence_recovery_with_persistence() {
     // First session with persistent tracker
     {
         let storage = FileSequenceStorage::new("persist-client", storage_dir.clone());
-        let tracker = PersistentSequenceTracker::new("persist-client", storage)
-            .expect("create tracker");
+        let tracker =
+            PersistentSequenceTracker::new("persist-client", storage).expect("create tracker");
 
         // Perform some sequence operations
         for _ in 0..3 {
@@ -730,8 +762,8 @@ async fn test_sequence_recovery_with_persistence() {
     // Second session - load persisted state
     {
         let storage = FileSequenceStorage::new("persist-client", storage_dir);
-        let tracker = PersistentSequenceTracker::new("persist-client", storage)
-            .expect("create tracker");
+        let tracker =
+            PersistentSequenceTracker::new("persist-client", storage).expect("create tracker");
 
         // Next sequence should continue from where we left off
         let next = tracker.next_sequence(1, 1);
@@ -757,7 +789,10 @@ async fn test_three_node_write_replication() {
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
     // Write through the leader
-    let ops = vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec())];
+    let ops = vec![Operation::set_entity(
+        "replicated:key",
+        b"replicated-data".to_vec(),
+    )];
     client
         .write(ns_id, Some(vault_id), ops)
         .await
@@ -841,6 +876,12 @@ async fn test_health_check_real_cluster() {
     assert!(is_healthy, "cluster should be healthy");
 
     // Detailed health check
-    let health_result = client.health_check_detailed().await.expect("detailed health");
-    assert!(health_result.is_healthy(), "detailed health should report healthy");
+    let health_result = client
+        .health_check_detailed()
+        .await
+        .expect("detailed health");
+    assert!(
+        health_result.is_healthy(),
+        "detailed health should report healthy"
+    );
 }

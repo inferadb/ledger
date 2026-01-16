@@ -61,7 +61,10 @@ async fn main() -> Result<()> {
     println!("=== TLS Connection Example ===\n");
     println!("Endpoint: {endpoint}");
     println!("CA cert: {}", ca_cert.as_deref().unwrap_or("(none)"));
-    println!("Client cert: {}", client_cert.as_deref().unwrap_or("(none)"));
+    println!(
+        "Client cert: {}",
+        client_cert.as_deref().unwrap_or("(none)")
+    );
     println!("Native roots: {use_native_roots}");
     println!();
 
@@ -160,7 +163,9 @@ async fn main() -> Result<()> {
     println!("Usage:");
     println!("  cargo run --example tls_connection -- --native-roots --endpoint https://...");
     println!("  cargo run --example tls_connection -- --ca-cert ca.pem --endpoint https://...");
-    println!("  cargo run --example tls_connection -- --ca-cert ca.pem --client-cert client.pem --client-key client.key");
+    println!(
+        "  cargo run --example tls_connection -- --ca-cert ca.pem --client-cert client.pem --client-key client.key"
+    );
 
     Ok(())
 }

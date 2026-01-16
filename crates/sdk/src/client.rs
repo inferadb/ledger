@@ -5356,7 +5356,10 @@ mod tests {
             .await
             .expect("client creation");
 
-        assert!(!client.is_shutdown(), "client should not be shutdown initially");
+        assert!(
+            !client.is_shutdown(),
+            "client should not be shutdown initially"
+        );
     }
 
     #[tokio::test]
@@ -5367,7 +5370,10 @@ mod tests {
 
         client.shutdown().await;
 
-        assert!(client.is_shutdown(), "client should be shutdown after calling shutdown()");
+        assert!(
+            client.is_shutdown(),
+            "client should be shutdown after calling shutdown()"
+        );
     }
 
     #[tokio::test]
@@ -5400,7 +5406,10 @@ mod tests {
 
         // Both should reflect shutdown state
         assert!(client1.is_shutdown());
-        assert!(client2.is_shutdown(), "cloned client should share shutdown state");
+        assert!(
+            client2.is_shutdown(),
+            "cloned client should share shutdown state"
+        );
     }
 
     #[tokio::test]
@@ -5448,7 +5457,11 @@ mod tests {
         client.shutdown().await;
 
         let result = client
-            .write(1, Some(0), vec![Operation::set_entity("key", vec![1, 2, 3])])
+            .write(
+                1,
+                Some(0),
+                vec![Operation::set_entity("key", vec![1, 2, 3])],
+            )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
@@ -5629,7 +5642,9 @@ mod tests {
         client.shutdown().await;
 
         assert!(matches!(
-            client.verified_read(1, Some(0), "key", VerifyOpts::new()).await,
+            client
+                .verified_read(1, Some(0), "key", VerifyOpts::new())
+                .await,
             Err(crate::error::SdkError::Shutdown)
         ));
     }
@@ -5654,15 +5669,21 @@ mod tests {
         client.shutdown().await;
 
         assert!(matches!(
-            client.list_entities(1, ListEntitiesOpts::with_prefix("key")).await,
+            client
+                .list_entities(1, ListEntitiesOpts::with_prefix("key"))
+                .await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
-            client.list_relationships(1, 0, ListRelationshipsOpts::new()).await,
+            client
+                .list_relationships(1, 0, ListRelationshipsOpts::new())
+                .await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
-            client.list_resources(1, 0, ListResourcesOpts::with_type("doc")).await,
+            client
+                .list_resources(1, 0, ListResourcesOpts::with_type("doc"))
+                .await,
             Err(crate::error::SdkError::Shutdown)
         ));
     }

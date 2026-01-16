@@ -376,8 +376,8 @@ mod proptest_tests {
     use super::*;
     use crate::error::RpcSnafu;
     use proptest::prelude::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use tonic::Code;
 
     proptest! {

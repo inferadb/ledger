@@ -49,11 +49,11 @@ use ledger_raft::proto::{
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::oneshot;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::Server};
 
 /// Key for client state: (namespace_id, vault_id, client_id)
 type ClientKey = (i64, i64, String);
@@ -288,14 +288,16 @@ impl MockLedgerServer {
     /// Used to test idempotency behavior (ALREADY_COMMITTED, SEQUENCE_GAP).
     pub fn set_client_state(&self, namespace_id: i64, vault_id: i64, client_id: &str, seq: u64) {
         let mut sequences = self.state.client_sequences.write();
-        sequences.insert(
-            (namespace_id, vault_id, client_id.to_string()),
-            seq,
-        );
+        sequences.insert((namespace_id, vault_id, client_id.to_string()), seq);
     }
 
     /// Get the last committed sequence for a client.
-    pub fn get_client_state(&self, namespace_id: i64, vault_id: i64, client_id: &str) -> Option<u64> {
+    pub fn get_client_state(
+        &self,
+        namespace_id: i64,
+        vault_id: i64,
+        client_id: &str,
+    ) -> Option<u64> {
         let sequences = self.state.client_sequences.read();
         sequences
             .get(&(namespace_id, vault_id, client_id.to_string()))
@@ -352,28 +354,36 @@ impl MockLedgerServer {
     /// Add a namespace for admin tests.
     pub fn add_namespace(&self, namespace_id: i64, name: &str, shard_id: u32) {
         let mut namespaces = self.state.namespaces.write();
-        namespaces.insert(namespace_id, NamespaceData {
-            name: name.to_string(),
-            shard_id,
-            status: proto::NamespaceStatus::Active as i32,
-        });
+        namespaces.insert(
+            namespace_id,
+            NamespaceData {
+                name: name.to_string(),
+                shard_id,
+                status: proto::NamespaceStatus::Active as i32,
+            },
+        );
     }
 
     /// Add a vault for admin tests.
     pub fn add_vault(&self, namespace_id: i64, vault_id: i64) {
         let mut vaults = self.state.vaults.write();
-        vaults.insert((namespace_id, vault_id), VaultData {
-            height: 1,
-            state_root: vec![0u8; 32],
-            status: proto::VaultStatus::Active as i32,
-        });
+        vaults.insert(
+            (namespace_id, vault_id),
+            VaultData {
+                height: 1,
+                state_root: vec![0u8; 32],
+                status: proto::VaultStatus::Active as i32,
+            },
+        );
     }
 
     /// Add peer info for discovery tests.
     pub fn add_peer(&self, node_id: &str, addresses: Vec<String>, grpc_port: u32) {
         let mut peers = self.state.peers.write();
         peers.push(proto::PeerInfo {
-            node_id: Some(proto::NodeId { id: node_id.to_string() }),
+            node_id: Some(proto::NodeId {
+                id: node_id.to_string(),
+            }),
             addresses,
             grpc_port,
             last_seen: None,
@@ -446,11 +456,17 @@ impl ReadService for MockReadService {
         let key = (namespace_id, vault_id, req.key);
 
         let (value, block_height) = match entities.get(&key) {
-            Some((v, _, _)) => (Some(v.clone()), self.state.block_height.load(Ordering::SeqCst)),
+            Some((v, _, _)) => (
+                Some(v.clone()),
+                self.state.block_height.load(Ordering::SeqCst),
+            ),
             None => (None, self.state.block_height.load(Ordering::SeqCst)),
         };
 
-        Ok(Response::new(proto::ReadResponse { value, block_height }))
+        Ok(Response::new(proto::ReadResponse {
+            value,
+            block_height,
+        }))
     }
 
     async fn batch_read(
@@ -522,11 +538,19 @@ impl ReadService for MockReadService {
             height: block_height,
             namespace_id: Some(proto::NamespaceId { id: namespace_id }),
             vault_id: Some(proto::VaultId { id: vault_id }),
-            previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
-            tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
-            state_root: Some(proto::Hash { value: state_root.clone() }),
+            previous_hash: Some(proto::Hash {
+                value: vec![0u8; 32],
+            }),
+            tx_merkle_root: Some(proto::Hash {
+                value: vec![0u8; 32],
+            }),
+            state_root: Some(proto::Hash {
+                value: state_root.clone(),
+            }),
             timestamp: None,
-            leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
+            leader_id: Some(proto::NodeId {
+                id: "mock-node".to_string(),
+            }),
             term: 1,
             committed_index: block_height,
         };
@@ -607,18 +631,28 @@ impl ReadService for MockReadService {
                 height: req.height,
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
-                previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
-                tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
-                state_root: Some(proto::Hash { value: vec![0u8; 32] }),
+                previous_hash: Some(proto::Hash {
+                    value: vec![0u8; 32],
+                }),
+                tx_merkle_root: Some(proto::Hash {
+                    value: vec![0u8; 32],
+                }),
+                state_root: Some(proto::Hash {
+                    value: vec![0u8; 32],
+                }),
                 timestamp: None,
-                leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
+                leader_id: Some(proto::NodeId {
+                    id: "mock-node".to_string(),
+                }),
                 term: 1,
                 committed_index: req.height,
             }),
             transactions: vec![],
         };
 
-        Ok(Response::new(proto::GetBlockResponse { block: Some(block) }))
+        Ok(Response::new(proto::GetBlockResponse {
+            block: Some(block),
+        }))
     }
 
     async fn get_block_range(
@@ -640,11 +674,19 @@ impl ReadService for MockReadService {
                     height,
                     namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                     vault_id: Some(proto::VaultId { id: vault_id }),
-                    previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
-                    tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
-                    state_root: Some(proto::Hash { value: vec![0u8; 32] }),
+                    previous_hash: Some(proto::Hash {
+                        value: vec![0u8; 32],
+                    }),
+                    tx_merkle_root: Some(proto::Hash {
+                        value: vec![0u8; 32],
+                    }),
+                    state_root: Some(proto::Hash {
+                        value: vec![0u8; 32],
+                    }),
                     timestamp: None,
-                    leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
+                    leader_id: Some(proto::NodeId {
+                        id: "mock-node".to_string(),
+                    }),
                     term: 1,
                     committed_index: height,
                 }),
@@ -672,8 +714,12 @@ impl ReadService for MockReadService {
 
         Ok(Response::new(proto::GetTipResponse {
             height,
-            block_hash: Some(proto::Hash { value: vec![0u8; 32] }),
-            state_root: Some(proto::Hash { value: vec![0u8; 32] }),
+            block_hash: Some(proto::Hash {
+                value: vec![0u8; 32],
+            }),
+            state_root: Some(proto::Hash {
+                value: vec![0u8; 32],
+            }),
         }))
     }
 
@@ -792,13 +838,17 @@ impl ReadService for MockReadService {
         let entities = self.state.entities.read();
         let matching: Vec<proto::Entity> = entities
             .iter()
-            .filter(|((ns, _vault, key), _)| *ns == namespace_id && key.starts_with(&req.key_prefix))
-            .map(|((_, _, key), (value, version, expires_at))| proto::Entity {
-                key: key.clone(),
-                value: value.clone(),
-                expires_at: *expires_at,
-                version: *version,
+            .filter(|((ns, _vault, key), _)| {
+                *ns == namespace_id && key.starts_with(&req.key_prefix)
             })
+            .map(
+                |((_, _, key), (value, version, expires_at))| proto::Entity {
+                    key: key.clone(),
+                    value: value.clone(),
+                    expires_at: *expires_at,
+                    version: *version,
+                },
+            )
             .take(req.limit.max(100) as usize)
             .collect();
 
@@ -866,8 +916,12 @@ impl WriteService for MockWriteService {
                             current_version: None,
                             current_value: None,
                             message: "Already committed".to_string(),
-                            committed_tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
-                            committed_block_height: Some(self.state.block_height.load(Ordering::SeqCst)),
+                            committed_tx_id: Some(proto::TxId {
+                                id: Self::generate_tx_id(),
+                            }),
+                            committed_block_height: Some(
+                                self.state.block_height.load(Ordering::SeqCst),
+                            ),
                             last_committed_sequence: Some(last_seq),
                         })),
                     }));
@@ -879,7 +933,11 @@ impl WriteService for MockWriteService {
                             key: String::new(),
                             current_version: None,
                             current_value: None,
-                            message: format!("Sequence gap: expected {}, got {}", last_seq + 1, sequence),
+                            message: format!(
+                                "Sequence gap: expected {}, got {}",
+                                last_seq + 1,
+                                sequence
+                            ),
                             committed_tx_id: None,
                             committed_block_height: None,
                             last_committed_sequence: Some(last_seq),
@@ -953,12 +1011,16 @@ impl WriteService for MockWriteService {
         }
 
         Ok(Response::new(proto::WriteResponse {
-            result: Some(proto::write_response::Result::Success(proto::WriteSuccess {
-                tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
-                block_height,
-                block_header: None,
-                tx_proof: None,
-            })),
+            result: Some(proto::write_response::Result::Success(
+                proto::WriteSuccess {
+                    tx_id: Some(proto::TxId {
+                        id: Self::generate_tx_id(),
+                    }),
+                    block_height,
+                    block_header: None,
+                    tx_proof: None,
+                },
+            )),
         }))
     }
 
@@ -986,43 +1048,57 @@ impl WriteService for MockWriteService {
             if let Some(&last_seq) = sequences.get(&client_key) {
                 if sequence <= last_seq {
                     return Ok(Response::new(proto::BatchWriteResponse {
-                        result: Some(proto::batch_write_response::Result::Error(proto::WriteError {
-                            code: proto::WriteErrorCode::AlreadyCommitted as i32,
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message: "Already committed".to_string(),
-                            committed_tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
-                            committed_block_height: Some(self.state.block_height.load(Ordering::SeqCst)),
-                            last_committed_sequence: Some(last_seq),
-                        })),
+                        result: Some(proto::batch_write_response::Result::Error(
+                            proto::WriteError {
+                                code: proto::WriteErrorCode::AlreadyCommitted as i32,
+                                key: String::new(),
+                                current_version: None,
+                                current_value: None,
+                                message: "Already committed".to_string(),
+                                committed_tx_id: Some(proto::TxId {
+                                    id: Self::generate_tx_id(),
+                                }),
+                                committed_block_height: Some(
+                                    self.state.block_height.load(Ordering::SeqCst),
+                                ),
+                                last_committed_sequence: Some(last_seq),
+                            },
+                        )),
                     }));
                 } else if sequence > last_seq + 1 {
                     return Ok(Response::new(proto::BatchWriteResponse {
-                        result: Some(proto::batch_write_response::Result::Error(proto::WriteError {
-                            code: proto::WriteErrorCode::SequenceGap as i32,
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message: format!("Sequence gap: expected {}, got {}", last_seq + 1, sequence),
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            last_committed_sequence: Some(last_seq),
-                        })),
+                        result: Some(proto::batch_write_response::Result::Error(
+                            proto::WriteError {
+                                code: proto::WriteErrorCode::SequenceGap as i32,
+                                key: String::new(),
+                                current_version: None,
+                                current_value: None,
+                                message: format!(
+                                    "Sequence gap: expected {}, got {}",
+                                    last_seq + 1,
+                                    sequence
+                                ),
+                                committed_tx_id: None,
+                                committed_block_height: None,
+                                last_committed_sequence: Some(last_seq),
+                            },
+                        )),
                     }));
                 }
             } else if sequence != 1 {
                 return Ok(Response::new(proto::BatchWriteResponse {
-                    result: Some(proto::batch_write_response::Result::Error(proto::WriteError {
-                        code: proto::WriteErrorCode::SequenceGap as i32,
-                        key: String::new(),
-                        current_version: None,
-                        current_value: None,
-                        message: format!("First sequence must be 1, got {}", sequence),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        last_committed_sequence: Some(0),
-                    })),
+                    result: Some(proto::batch_write_response::Result::Error(
+                        proto::WriteError {
+                            code: proto::WriteErrorCode::SequenceGap as i32,
+                            key: String::new(),
+                            current_version: None,
+                            current_value: None,
+                            message: format!("First sequence must be 1, got {}", sequence),
+                            committed_tx_id: None,
+                            committed_block_height: None,
+                            last_committed_sequence: Some(0),
+                        },
+                    )),
                 }));
             }
         }
@@ -1046,7 +1122,8 @@ impl WriteService for MockWriteService {
                             }
                             proto::operation::Op::CreateRelationship(rel) => {
                                 let mut relationships = self.state.relationships.write();
-                                let entry = relationships.entry((namespace_id, vault_id)).or_default();
+                                let entry =
+                                    relationships.entry((namespace_id, vault_id)).or_default();
                                 entry.push(proto::Relationship {
                                     resource: rel.resource,
                                     relation: rel.relation,
@@ -1055,7 +1132,8 @@ impl WriteService for MockWriteService {
                             }
                             proto::operation::Op::DeleteRelationship(del) => {
                                 let mut relationships = self.state.relationships.write();
-                                if let Some(rels) = relationships.get_mut(&(namespace_id, vault_id)) {
+                                if let Some(rels) = relationships.get_mut(&(namespace_id, vault_id))
+                                {
                                     rels.retain(|r| {
                                         r.resource != del.resource
                                             || r.relation != del.relation
@@ -1081,7 +1159,9 @@ impl WriteService for MockWriteService {
         Ok(Response::new(proto::BatchWriteResponse {
             result: Some(proto::batch_write_response::Result::Success(
                 proto::BatchWriteSuccess {
-                    tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
+                    tx_id: Some(proto::TxId {
+                        id: Self::generate_tx_id(),
+                    }),
                     block_height,
                     block_header: None,
                     tx_proof: None,
@@ -1121,11 +1201,14 @@ impl AdminService for MockAdminService {
 
         {
             let mut namespaces = self.state.namespaces.write();
-            namespaces.insert(namespace_id, NamespaceData {
-                name: req.name,
-                shard_id: req.shard_id.map(|s| s.id).unwrap_or(1),
-                status: proto::NamespaceStatus::Active as i32,
-            });
+            namespaces.insert(
+                namespace_id,
+                NamespaceData {
+                    name: req.name,
+                    shard_id: req.shard_id.map(|s| s.id).unwrap_or(1),
+                    status: proto::NamespaceStatus::Active as i32,
+                },
+            );
         }
 
         Ok(Response::new(proto::CreateNamespaceResponse {
@@ -1231,11 +1314,14 @@ impl AdminService for MockAdminService {
 
         {
             let mut vaults = self.state.vaults.write();
-            vaults.insert((namespace_id, vault_id), VaultData {
-                height: 1,
-                state_root: vec![0u8; 32],
-                status: proto::VaultStatus::Active as i32,
-            });
+            vaults.insert(
+                (namespace_id, vault_id),
+                VaultData {
+                    height: 1,
+                    state_root: vec![0u8; 32],
+                    status: proto::VaultStatus::Active as i32,
+                },
+            );
         }
 
         Ok(Response::new(proto::CreateVaultResponse {
@@ -1245,10 +1331,16 @@ impl AdminService for MockAdminService {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
                 previous_hash: None,
-                tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
-                state_root: Some(proto::Hash { value: vec![0u8; 32] }),
+                tx_merkle_root: Some(proto::Hash {
+                    value: vec![0u8; 32],
+                }),
+                state_root: Some(proto::Hash {
+                    value: vec![0u8; 32],
+                }),
                 timestamp: None,
-                leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
+                leader_id: Some(proto::NodeId {
+                    id: "mock-node".to_string(),
+                }),
                 term: 1,
                 committed_index: 0,
             }),
@@ -1291,9 +1383,13 @@ impl AdminService for MockAdminService {
             namespace_id: Some(proto::NamespaceId { id: namespace_id }),
             vault_id: Some(proto::VaultId { id: vault_id }),
             height: data.height,
-            state_root: Some(proto::Hash { value: data.state_root.clone() }),
+            state_root: Some(proto::Hash {
+                value: data.state_root.clone(),
+            }),
             nodes: vec![],
-            leader: Some(proto::NodeId { id: "mock-node".to_string() }),
+            leader: Some(proto::NodeId {
+                id: "mock-node".to_string(),
+            }),
             status: data.status,
             retention_policy: None,
         }))
@@ -1315,15 +1411,21 @@ impl AdminService for MockAdminService {
                 namespace_id: Some(proto::NamespaceId { id: *namespace_id }),
                 vault_id: Some(proto::VaultId { id: *vault_id }),
                 height: data.height,
-                state_root: Some(proto::Hash { value: data.state_root.clone() }),
+                state_root: Some(proto::Hash {
+                    value: data.state_root.clone(),
+                }),
                 nodes: vec![],
-                leader: Some(proto::NodeId { id: "mock-node".to_string() }),
+                leader: Some(proto::NodeId {
+                    id: "mock-node".to_string(),
+                }),
                 status: data.status,
                 retention_policy: None,
             })
             .collect();
 
-        Ok(Response::new(proto::ListVaultsResponse { vaults: responses }))
+        Ok(Response::new(proto::ListVaultsResponse {
+            vaults: responses,
+        }))
     }
 
     async fn join_cluster(
@@ -1391,7 +1493,9 @@ impl AdminService for MockAdminService {
         let _req = request.into_inner();
         Ok(Response::new(proto::CreateSnapshotResponse {
             block_height: self.state.block_height.load(Ordering::SeqCst),
-            state_root: Some(proto::Hash { value: vec![0u8; 32] }),
+            state_root: Some(proto::Hash {
+                value: vec![0u8; 32],
+            }),
             snapshot_path: "/tmp/mock-snapshot".to_string(),
         }))
     }
@@ -1425,7 +1529,9 @@ impl AdminService for MockAdminService {
             message: "Recovered".to_string(),
             health_status: proto::VaultHealthProto::Healthy as i32,
             final_height: self.state.block_height.load(Ordering::SeqCst),
-            final_state_root: Some(proto::Hash { value: vec![0u8; 32] }),
+            final_state_root: Some(proto::Hash {
+                value: vec![0u8; 32],
+            }),
         }))
     }
 
@@ -1543,7 +1649,9 @@ impl SystemDiscoveryService for MockDiscoveryService {
             peers.push(peer);
         }
 
-        Ok(Response::new(proto::AnnouncePeerResponse { accepted: true }))
+        Ok(Response::new(proto::AnnouncePeerResponse {
+            accepted: true,
+        }))
     }
 
     async fn get_system_state(
@@ -1778,9 +1886,7 @@ mod tests {
     /// client parses response. Validates serialization, error handling, and protocol behavior.
     mod integration_tests {
         use super::*;
-        use crate::{
-            ClientConfig, LedgerClient, Operation, RetryPolicy,
-        };
+        use crate::{ClientConfig, LedgerClient, Operation, RetryPolicy};
         use std::time::Duration;
 
         /// Helper to create a client connected to a mock server.
@@ -1862,7 +1968,11 @@ mod tests {
             server.set_entity(1, 0, "exists2", b"value2");
             let client = create_client_for_mock(&server).await;
 
-            let keys = vec!["exists1".to_string(), "missing".to_string(), "exists2".to_string()];
+            let keys = vec![
+                "exists1".to_string(),
+                "missing".to_string(),
+                "exists2".to_string(),
+            ];
             let result = client.batch_read(1, Some(0), keys).await.unwrap();
 
             assert_eq!(result.len(), 3);
@@ -1879,7 +1989,10 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let keys = vec!["a".to_string(), "b".to_string()];
-            let result = client.batch_read_consistent(1, Some(0), keys).await.unwrap();
+            let result = client
+                .batch_read_consistent(1, Some(0), keys)
+                .await
+                .unwrap();
 
             assert_eq!(result.len(), 2);
             assert_eq!(result[0], ("a".to_string(), Some(b"1".to_vec())));
@@ -1943,9 +2056,18 @@ mod tests {
             assert!(!result.tx_id.is_empty());
 
             // All three should be readable
-            assert_eq!(client.read(1, Some(0), "k1").await.unwrap(), Some(b"v1".to_vec()));
-            assert_eq!(client.read(1, Some(0), "k2").await.unwrap(), Some(b"v2".to_vec()));
-            assert_eq!(client.read(1, Some(0), "k3").await.unwrap(), Some(b"v3".to_vec()));
+            assert_eq!(
+                client.read(1, Some(0), "k1").await.unwrap(),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(
+                client.read(1, Some(0), "k2").await.unwrap(),
+                Some(b"v2".to_vec())
+            );
+            assert_eq!(
+                client.read(1, Some(0), "k3").await.unwrap(),
+                Some(b"v3".to_vec())
+            );
         }
 
         #[tokio::test]
@@ -1955,7 +2077,13 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             // Verify it exists
-            assert!(client.read(1, Some(0), "to_delete").await.unwrap().is_some());
+            assert!(
+                client
+                    .read(1, Some(0), "to_delete")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
 
             // Delete it
             let ops = vec![Operation::delete_entity("to_delete")];
@@ -1999,9 +2127,18 @@ mod tests {
             assert_eq!(server.write_count(), 1); // Single batch write
 
             // All entities from all batches should be readable
-            assert_eq!(client.read(1, Some(0), "batch1:a").await.unwrap(), Some(b"a".to_vec()));
-            assert_eq!(client.read(1, Some(0), "batch2:b").await.unwrap(), Some(b"b".to_vec()));
-            assert_eq!(client.read(1, Some(0), "batch2:c").await.unwrap(), Some(b"c".to_vec()));
+            assert_eq!(
+                client.read(1, Some(0), "batch1:a").await.unwrap(),
+                Some(b"a".to_vec())
+            );
+            assert_eq!(
+                client.read(1, Some(0), "batch2:b").await.unwrap(),
+                Some(b"b".to_vec())
+            );
+            assert_eq!(
+                client.read(1, Some(0), "batch2:c").await.unwrap(),
+                Some(b"c".to_vec())
+            );
         }
 
         // ==================== Idempotency ====================
@@ -2197,7 +2334,12 @@ mod tests {
         async fn test_concurrent_reads() {
             let server = MockLedgerServer::start().await.unwrap();
             for i in 0..100 {
-                server.set_entity(1, 0, &format!("key:{}", i), format!("value:{}", i).as_bytes());
+                server.set_entity(
+                    1,
+                    0,
+                    &format!("key:{}", i),
+                    format!("value:{}", i).as_bytes(),
+                );
             }
             let client = create_client_for_mock(&server).await;
 
@@ -2370,7 +2512,11 @@ mod tests {
 
             // Connection should fail after shutdown
             let result = client.health_check().await;
-            assert!(result.is_err(), "Expected error after shutdown, endpoint was: {}", endpoint);
+            assert!(
+                result.is_err(),
+                "Expected error after shutdown, endpoint was: {}",
+                endpoint
+            );
         }
 
         #[tokio::test]
@@ -2401,7 +2547,11 @@ mod tests {
             client.pool().reset();
 
             let result = client.health_check().await;
-            assert!(result.is_ok(), "Expected success after restart: {:?}", result);
+            assert!(
+                result.is_ok(),
+                "Expected success after restart: {:?}",
+                result
+            );
 
             server2.shutdown();
         }
@@ -2498,9 +2648,7 @@ mod tests {
 
             // Start a slow read in background
             let client_clone = client.clone();
-            let handle = tokio::spawn(async move {
-                client_clone.read(1, Some(0), "key").await
-            });
+            let handle = tokio::spawn(async move { client_clone.read(1, Some(0), "key").await });
 
             // Give time for request to start
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2510,12 +2658,12 @@ mod tests {
 
             // The spawned task should complete (may succeed or fail with transport error)
             // The key point is it doesn't hang forever
-            let result = tokio::time::timeout(
-                Duration::from_secs(2),
-                handle
-            ).await;
+            let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
 
-            assert!(result.is_ok(), "Request should complete within timeout after shutdown");
+            assert!(
+                result.is_ok(),
+                "Request should complete within timeout after shutdown"
+            );
         }
 
         #[tokio::test]
