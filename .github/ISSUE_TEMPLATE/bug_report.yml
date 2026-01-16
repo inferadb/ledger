@@ -1,0 +1,117 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in InferaDB Ledger
+labels: ["bug", "needs-triage"]
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight Checklist
+      options:
+        - label: I have searched existing issues to ensure this bug hasn't already been reported
+          required: true
+        - label: I have checked the documentation for solutions
+          required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the information below to help us investigate.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - Types (inferadb-ledger-types)
+        - Storage Engine (inferadb-ledger-store)
+        - State Management (inferadb-ledger-state)
+        - Raft Consensus (inferadb-ledger-raft)
+        - SDK Client (inferadb-ledger-sdk)
+        - Server (inferadb-ledger-server)
+        - gRPC Services
+        - Snapshots
+        - Replication
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe the bug...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal code example or steps to reproduce the behavior.
+      placeholder: |
+        ```rust
+        use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+
+        #[tokio::main]
+        async fn main() {
+            let config = ClientConfig::builder()
+                .with_endpoint("http://localhost:50051")
+                .build()?;
+
+            let client = LedgerClient::new(config).await?;
+
+            // Code that triggers the bug
+        }
+        ```
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include any error messages.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please provide relevant environment details.
+      placeholder: |
+        - Ledger Version: [e.g., 0.1.0]
+        - Rust Version: [e.g., 1.85.0]
+        - OS: [e.g., Ubuntu 22.04, macOS 14]
+        - Deployment: [e.g., single node, 3-node cluster]
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Debug Output
+      description: If applicable, include relevant log output. Use `RUST_LOG=debug` for more details.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here.
+    validations:
+      required: false

@@ -1,0 +1,83 @@
+# Labeler configuration
+# See: https://github.com/actions/labeler
+
+# Documentation
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "docs/**/*"
+
+# CI/CD
+area/ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**/*"
+
+# Configuration
+area/config:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.toml"
+          - "**/*.yaml"
+          - "**/*.yml"
+          - "!.github/**/*"
+
+# Dependencies
+area/deps:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/Cargo.toml"
+          - "**/Cargo.lock"
+
+# Testing
+area/testing:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/tests/**/*"
+          - "**/*_test.rs"
+          - "**/*_tests.rs"
+          - "crates/test-utils/**/*"
+
+# Types crate
+area/types:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/types/**/*"
+
+# Store crate (B+ tree engine)
+area/store:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/store/**/*"
+
+# State crate
+area/state:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/state/**/*"
+
+# Raft crate
+area/raft:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/raft/**/*"
+
+# SDK crate
+area/sdk:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/sdk/**/*"
+
+# Server crate
+area/server:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/server/**/*"
+
+# Protocol buffers
+area/proto:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "proto/**/*"
+          - "gen/**/*"

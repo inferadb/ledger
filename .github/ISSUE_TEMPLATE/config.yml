@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability
+    url: https://github.com/inferadb/ledger/security/advisories/new
+    about: Report security vulnerabilities privately
+  - name: Questions & Support
+    url: https://github.com/inferadb/ledger/discussions
+    about: Ask questions and discuss ideas with the community
+  - name: Documentation
+    url: https://docs.rs/inferadb-ledger-sdk
+    about: Check out the SDK documentation
