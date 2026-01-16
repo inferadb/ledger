@@ -1,4 +1,4 @@
-//! Build script for ledger-raft.
+//! Build script for inferadb-ledger-raft.
 //!
 //! Compiles protobuf definitions into Rust code using tonic-prost-build.
 

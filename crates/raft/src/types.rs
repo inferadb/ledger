@@ -13,7 +13,7 @@ use openraft::BasicNode;
 use openraft::impls::OneshotResponder;
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{Hash, NamespaceId, SetCondition, ShardId, Transaction, VaultId};
+use inferadb_ledger_types::{Hash, NamespaceId, SetCondition, ShardId, Transaction, VaultId};
 
 // ============================================================================
 // Type Configuration

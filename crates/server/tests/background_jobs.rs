@@ -58,7 +58,7 @@ async fn test_vault_health_tracking() {
     let mut client = create_admin_client(leader.addr).await.unwrap();
 
     let ns_response = client
-        .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
+        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: "test_health_ns".to_string(),
             shard_id: None,
         })
@@ -68,8 +68,8 @@ async fn test_vault_health_tracking() {
     let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
 
     let vault_response = client
-        .create_vault(ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
+        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
+            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -153,7 +153,7 @@ async fn test_learner_cache_initialization() {
     let mut client = create_admin_client(leader.addr).await.unwrap();
 
     let _ns_response = client
-        .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
+        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: "test_cache_ns".to_string(),
             shard_id: None,
         })
@@ -165,7 +165,7 @@ async fn test_learner_cache_initialization() {
 
     // All nodes should have the namespace replicated
     for node in cluster.nodes() {
-        // StateLayer is internally thread-safe via ledger-db MVCC
+        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         // Access it directly to verify it's available (doesn't panic)
         let _ = &*node.state;
     }
@@ -187,7 +187,7 @@ async fn test_concurrent_background_jobs() {
 
     // Create namespace
     let ns_response = client
-        .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
+        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: "concurrent_test_ns".to_string(),
             shard_id: None,
         })
@@ -198,8 +198,8 @@ async fn test_concurrent_background_jobs() {
 
     // Create vault
     let _vault_response = client
-        .create_vault(ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
+        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
+            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,

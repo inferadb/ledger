@@ -34,7 +34,7 @@ log() {
 build_if_needed() {
     if [[ ! -f "$BINARY" ]]; then
         log "Building ledger (release)..."
-        cargo build --release --manifest-path "${PROJECT_ROOT}/Cargo.toml" -p ledger-server
+        cargo build --release --manifest-path "${PROJECT_ROOT}/Cargo.toml" -p inferadb-ledger-server
     fi
 }
 

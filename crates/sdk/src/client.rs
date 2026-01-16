@@ -9,7 +9,7 @@ use crate::error::{self, Result};
 use crate::idempotency::SequenceTracker;
 use crate::retry::with_retry;
 use crate::streaming::{HeightTracker, ReconnectingStream};
-use ledger_raft::proto;
+use inferadb_ledger_raft::proto;
 
 /// Read consistency level for read operations.
 ///
@@ -65,7 +65,7 @@ pub struct WriteSuccess {
 /// # Example
 ///
 /// ```rust,ignore
-/// use ledger_sdk::LedgerClient;
+/// use inferadb_ledger_sdk::LedgerClient;
 /// use futures::StreamExt;
 ///
 /// let stream = client.watch_blocks(namespace_id, vault_id, start_height).await?;
@@ -872,7 +872,7 @@ impl ListResourcesOpts {
 /// # Example
 ///
 /// ```rust,ignore
-/// use ledger_sdk::{LedgerClient, VerifyOpts};
+/// use inferadb_ledger_sdk::{LedgerClient, VerifyOpts};
 ///
 /// let result = client.verified_read(ns_id, vault_id, "key", VerifyOpts::new()).await?;
 /// if let Some(verified) = result {
@@ -1156,7 +1156,7 @@ impl SetCondition {
 /// # Example
 ///
 /// ```rust,ignore
-/// use ledger_sdk::{LedgerClient, ClientConfig};
+/// use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
 ///
 /// let config = ClientConfig::builder()
 ///     .with_endpoint("http://localhost:50051")
@@ -1360,7 +1360,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::{LedgerClient, DiscoveryConfig};
+    /// use inferadb_ledger_sdk::{LedgerClient, DiscoveryConfig};
     ///
     /// let client = LedgerClient::connect("http://localhost:50051", "my-client");
     /// let discovery = client.create_discovery_service(DiscoveryConfig::enabled());
@@ -1673,7 +1673,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::Operation;
+    /// use inferadb_ledger_sdk::Operation;
     ///
     /// let result = client.write(
     ///     namespace_id,
@@ -1887,7 +1887,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::Operation;
+    /// use inferadb_ledger_sdk::Operation;
     ///
     /// // Atomic transaction: create user AND grant permissions
     /// let result = client.batch_write(
@@ -2077,7 +2077,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::LedgerClient;
+    /// use inferadb_ledger_sdk::LedgerClient;
     /// use futures::StreamExt;
     ///
     /// let client = LedgerClient::connect("http://localhost:50051", "my-app").await?;
@@ -2658,7 +2658,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::{LedgerClient, VerifyOpts};
+    /// use inferadb_ledger_sdk::{LedgerClient, VerifyOpts};
     ///
     /// let result = client.verified_read(ns_id, Some(vault_id), "user:123", VerifyOpts::new()).await?;
     /// if let Some(verified) = result {
@@ -2725,7 +2725,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::{LedgerClient, ListEntitiesOpts};
+    /// use inferadb_ledger_sdk::{LedgerClient, ListEntitiesOpts};
     ///
     /// // List all users
     /// let result = client.list_entities(ns_id, ListEntitiesOpts::with_prefix("user:")).await?;
@@ -2805,7 +2805,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::{LedgerClient, ListRelationshipsOpts};
+    /// use inferadb_ledger_sdk::{LedgerClient, ListRelationshipsOpts};
     ///
     /// // List all relationships for a document
     /// let result = client.list_relationships(
@@ -2885,7 +2885,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::{LedgerClient, ListResourcesOpts};
+    /// use inferadb_ledger_sdk::{LedgerClient, ListResourcesOpts};
     ///
     /// // List all document resources
     /// let result = client.list_resources(
@@ -4454,28 +4454,28 @@ mod tests {
 
     #[test]
     fn test_direction_from_proto_left() {
-        use ledger_raft::proto::Direction as ProtoDirection;
+        use inferadb_ledger_raft::proto::Direction as ProtoDirection;
         let direction = Direction::from_proto(ProtoDirection::Left as i32);
         assert_eq!(direction, Direction::Left);
     }
 
     #[test]
     fn test_direction_from_proto_right() {
-        use ledger_raft::proto::Direction as ProtoDirection;
+        use inferadb_ledger_raft::proto::Direction as ProtoDirection;
         let direction = Direction::from_proto(ProtoDirection::Right as i32);
         assert_eq!(direction, Direction::Right);
     }
 
     #[test]
     fn test_direction_from_proto_unspecified_defaults_to_right() {
-        use ledger_raft::proto::Direction as ProtoDirection;
+        use inferadb_ledger_raft::proto::Direction as ProtoDirection;
         let direction = Direction::from_proto(ProtoDirection::Unspecified as i32);
         assert_eq!(direction, Direction::Right);
     }
 
     #[test]
     fn test_merkle_sibling_from_proto() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
         let proto_sibling = proto::MerkleSibling {
             hash: Some(proto::Hash {
                 value: vec![1, 2, 3, 4],
@@ -4489,7 +4489,7 @@ mod tests {
 
     #[test]
     fn test_merkle_proof_from_proto() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
         let proto_proof = proto::MerkleProof {
             leaf_hash: Some(proto::Hash { value: vec![0; 32] }),
             siblings: vec![
@@ -4636,7 +4636,7 @@ mod tests {
 
     #[test]
     fn test_block_header_from_proto() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
 
         let proto_header = proto::BlockHeader {
             height: 100,
@@ -4671,7 +4671,7 @@ mod tests {
 
     #[test]
     fn test_block_header_from_proto_with_missing_fields() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
 
         let proto_header = proto::BlockHeader {
             height: 1,
@@ -4699,7 +4699,7 @@ mod tests {
 
     #[test]
     fn test_chain_proof_from_proto() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
 
         let proto_chain = proto::ChainProof {
             headers: vec![
@@ -4815,7 +4815,7 @@ mod tests {
 
     #[test]
     fn test_verified_value_from_proto() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
 
         let proto_response = proto::VerifiedReadResponse {
             value: Some(b"test-value".to_vec()),
@@ -4851,7 +4851,7 @@ mod tests {
 
     #[test]
     fn test_verified_value_from_proto_missing_header() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
 
         let proto_response = proto::VerifiedReadResponse {
             value: Some(b"test-value".to_vec()),
@@ -4870,7 +4870,7 @@ mod tests {
 
     #[test]
     fn test_verified_value_from_proto_missing_proof() {
-        use ledger_raft::proto;
+        use inferadb_ledger_raft::proto;
 
         let proto_response = proto::VerifiedReadResponse {
             value: Some(b"test-value".to_vec()),

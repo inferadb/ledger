@@ -3,10 +3,10 @@
 //! Stores relationship tuples (resource, relation, subject) with dual indexing
 //! for efficient lookups in both directions.
 
-use ledger_db::{ReadTransaction, StorageBackend, WriteTransaction, tables};
+use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{CodecError, Relationship, VaultId, decode, encode};
+use inferadb_ledger_types::{CodecError, Relationship, VaultId, decode, encode};
 
 use crate::keys::{encode_storage_key, vault_prefix};
 
@@ -14,7 +14,9 @@ use crate::keys::{encode_storage_key, vault_prefix};
 #[derive(Debug, Snafu)]
 pub enum RelationshipError {
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: ledger_db::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+    },
 
     #[snafu(display("Codec error: {source}"))]
     Codec { source: CodecError },

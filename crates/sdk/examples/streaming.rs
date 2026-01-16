@@ -12,7 +12,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 
 use futures::StreamExt;
-use ledger_sdk::{ClientConfig, LedgerClient, Operation, Result};
+use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Result};
 use std::time::Duration;
 use tokio::time::timeout;
 

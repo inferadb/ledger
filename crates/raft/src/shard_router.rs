@@ -48,9 +48,9 @@ use snafu::{ResultExt, Snafu};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use ledger_db::{FileBackend, StorageBackend};
-use ledger_state::system::{NamespaceStatus, SystemNamespaceService};
-use ledger_types::{NamespaceId, ShardId};
+use inferadb_ledger_state::system::{NamespaceStatus, SystemNamespaceService};
+use inferadb_ledger_store::{FileBackend, StorageBackend};
+use inferadb_ledger_types::{NamespaceId, ShardId};
 
 // ============================================================================
 // Error Types
@@ -83,7 +83,7 @@ pub enum RoutingError {
     /// System service error during lookup.
     #[snafu(display("System lookup failed: {source}"))]
     SystemLookup {
-        source: ledger_state::system::SystemError,
+        source: inferadb_ledger_state::system::SystemError,
     },
 }
 
@@ -511,9 +511,9 @@ pub struct RouterStats {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use ledger_db::{Database, FileBackend};
-    use ledger_state::StateLayer;
-    use ledger_test_utils::TestDir;
+    use inferadb_ledger_state::StateLayer;
+    use inferadb_ledger_store::{Database, FileBackend};
+    use inferadb_ledger_test_utils::TestDir;
     use std::sync::Arc;
 
     fn create_test_router() -> (

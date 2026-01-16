@@ -1,7 +1,7 @@
 //! Storage engine for InferaDB Ledger.
 //!
 //! This crate provides:
-//! - ledger-db B+ tree-based persistent storage
+//! - inferadb-ledger-store B+ tree-based persistent storage
 //! - State layer with bucket-based hashing
 //! - Snapshot creation and restoration
 //! - Dual indexes for relationship queries
@@ -32,8 +32,8 @@ pub use relationship::RelationshipStore;
 pub use shard::ShardManager;
 pub use snapshot::{Snapshot, SnapshotManager};
 pub use state::{StateError, StateLayer};
-// Re-export ledger-db's tables for convenience
-pub use ledger_db::tables;
+// Re-export inferadb-ledger-store's tables for convenience
+pub use inferadb_ledger_store::tables;
 pub use tiered_storage::{
     LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredConfig,
     TieredSnapshotManager, TieredStorageError,

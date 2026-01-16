@@ -1,5 +1,5 @@
 [package]
-name = "ledger-sdk"
+name = "inferadb-ledger-sdk"
 description = "Production-grade Rust SDK for InferaDB Ledger service"
 version.workspace = true
 edition.workspace = true
@@ -41,16 +41,16 @@ dirs = "5.0"
 sha2 = { workspace = true }
 
 # Internal crates
-ledger-types = { workspace = true }
-ledger-raft = { workspace = true }
+inferadb-ledger-types = { workspace = true }
+inferadb-ledger-raft = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio-test = "0.4"
 prost-types = { workspace = true }
-ledger-server = { workspace = true }
-ledger-test-utils = { workspace = true }
+inferadb-ledger-server = { workspace = true }
+inferadb-ledger-test-utils = { workspace = true }
 openraft = { workspace = true }
 serial_test = "3.2"
 criterion = { version = "0.5", features = ["async_tokio"] }

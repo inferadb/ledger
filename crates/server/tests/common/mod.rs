@@ -21,18 +21,18 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ledger_test_utils::TestDir;
+use inferadb_ledger_test_utils::TestDir;
 use openraft::Raft;
 use tokio::time::timeout;
 
-use ledger_db::FileBackend;
-use ledger_raft::LedgerTypeConfig;
-use ledger_raft::proto::JoinClusterRequest;
-use ledger_raft::proto::admin_service_client::AdminServiceClient;
-use ledger_raft::{
+use inferadb_ledger_raft::LedgerTypeConfig;
+use inferadb_ledger_raft::proto::JoinClusterRequest;
+use inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient;
+use inferadb_ledger_raft::{
     MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig, ShardGroup,
 };
-use ledger_state::StateLayer;
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::FileBackend;
 
 /// A test node in a cluster.
 pub struct TestNode {
@@ -42,7 +42,7 @@ pub struct TestNode {
     pub addr: SocketAddr,
     /// The Raft instance.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer (internally thread-safe via ledger-db MVCC).
+    /// The state layer (internally thread-safe via inferadb-ledger-store MVCC).
     pub state: Arc<StateLayer<FileBackend>>,
     /// Temporary directory for node data.
     _temp_dir: TestDir,
@@ -104,19 +104,19 @@ impl TestCluster {
         let temp_dir = TestDir::new();
 
         // Bootstrap node has NO PEERS - starts as single-node cluster
-        let config = ledger_server::config::Config {
+        let config = inferadb_ledger_server::config::Config {
             node_id,
             listen_addr: addr,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
             peers: vec![], // Empty! Single-node cluster can immediately elect self as leader
-            batching: ledger_server::config::BatchConfig::default(),
-            rate_limit: ledger_server::config::RateLimitConfig::default(),
-            discovery: ledger_server::config::DiscoveryConfig::default(),
+            batching: inferadb_ledger_server::config::BatchConfig::default(),
+            rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
+            discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
             bootstrap: true,
         };
 
-        let bootstrapped = ledger_server::bootstrap::bootstrap_node(&config)
+        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
             .await
             .expect("bootstrap node");
 
@@ -166,25 +166,25 @@ impl TestCluster {
 
             // Non-bootstrap nodes: peers list is just for networking, not initial membership
             // The leader peer is all we need to be able to connect for join RPC
-            let peers = vec![ledger_server::config::PeerConfig {
+            let peers = vec![inferadb_ledger_server::config::PeerConfig {
                 node_id: 1, // leader
                 addr: leader_addr.to_string(),
             }];
 
-            let config = ledger_server::config::Config {
+            let config = inferadb_ledger_server::config::Config {
                 node_id,
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: temp_dir.path().to_path_buf(),
                 peers,
-                batching: ledger_server::config::BatchConfig::default(),
-                rate_limit: ledger_server::config::RateLimitConfig::default(),
-                discovery: ledger_server::config::DiscoveryConfig::default(),
+                batching: inferadb_ledger_server::config::BatchConfig::default(),
+                rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
+                discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
                 bootstrap: false, // Non-bootstrap nodes join dynamically
             };
 
             // Create the node (doesn't join cluster yet)
-            let bootstrapped = ledger_server::bootstrap::bootstrap_node(&config)
+            let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
                 .await
                 .expect("bootstrap node");
 
@@ -410,11 +410,13 @@ impl TestCluster {
 pub async fn create_write_client(
     addr: SocketAddr,
 ) -> Result<
-    ledger_raft::proto::write_service_client::WriteServiceClient<tonic::transport::Channel>,
+    inferadb_ledger_raft::proto::write_service_client::WriteServiceClient<
+        tonic::transport::Channel,
+    >,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    ledger_raft::proto::write_service_client::WriteServiceClient::connect(endpoint).await
+    inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(endpoint).await
 }
 
 /// Helper to create a read client for a node.
@@ -422,11 +424,11 @@ pub async fn create_write_client(
 pub async fn create_read_client(
     addr: SocketAddr,
 ) -> Result<
-    ledger_raft::proto::read_service_client::ReadServiceClient<tonic::transport::Channel>,
+    inferadb_ledger_raft::proto::read_service_client::ReadServiceClient<tonic::transport::Channel>,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint).await
+    inferadb_ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint).await
 }
 
 /// Helper to create a health client for a node.
@@ -434,11 +436,13 @@ pub async fn create_read_client(
 pub async fn create_health_client(
     addr: SocketAddr,
 ) -> Result<
-    ledger_raft::proto::health_service_client::HealthServiceClient<tonic::transport::Channel>,
+    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient<
+        tonic::transport::Channel,
+    >,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    ledger_raft::proto::health_service_client::HealthServiceClient::connect(endpoint).await
+    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient::connect(endpoint).await
 }
 
 /// Helper to create an admin client for a node.
@@ -446,11 +450,13 @@ pub async fn create_health_client(
 pub async fn create_admin_client(
     addr: SocketAddr,
 ) -> Result<
-    ledger_raft::proto::admin_service_client::AdminServiceClient<tonic::transport::Channel>,
+    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient<
+        tonic::transport::Channel,
+    >,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    ledger_raft::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
+    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
 }
 
 // ============================================================================

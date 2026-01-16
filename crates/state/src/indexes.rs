@@ -6,10 +6,10 @@
 //!
 //! Per DESIGN.md: Indexes are NOT merkleized (no per-write amplification).
 
-use ledger_db::{ReadTransaction, StorageBackend, WriteTransaction, tables};
+use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{VaultId, decode, encode};
+use inferadb_ledger_types::{VaultId, decode, encode};
 
 use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_key};
 
@@ -18,10 +18,14 @@ use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_ke
 #[allow(dead_code)]
 pub enum IndexError {
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: ledger_db::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+    },
 
     #[snafu(display("Codec error: {source}"))]
-    Codec { source: ledger_types::CodecError },
+    Codec {
+        source: inferadb_ledger_types::CodecError,
+    },
 }
 
 /// Result type for index operations.

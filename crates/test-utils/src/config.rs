@@ -3,7 +3,7 @@
 //! Provides sensible default configurations for tests, centralizing
 //! magic values that would otherwise be scattered across test modules.
 
-use ledger_types::config::BatchConfig;
+use inferadb_ledger_types::config::BatchConfig;
 use std::time::Duration;
 
 /// Returns a default batch configuration suitable for tests.

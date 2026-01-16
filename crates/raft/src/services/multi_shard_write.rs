@@ -150,21 +150,23 @@ impl MultiShardWriteService {
     /// Convert a proto SetCondition to internal SetCondition.
     fn convert_set_condition(
         proto_condition: &crate::proto::SetCondition,
-    ) -> Option<ledger_types::SetCondition> {
+    ) -> Option<inferadb_ledger_types::SetCondition> {
         use crate::proto::set_condition::Condition;
 
         proto_condition.condition.as_ref().map(|c| match c {
-            Condition::NotExists(true) => ledger_types::SetCondition::MustNotExist,
-            Condition::NotExists(false) => ledger_types::SetCondition::MustExist,
-            Condition::MustExists(true) => ledger_types::SetCondition::MustExist,
-            Condition::MustExists(false) => ledger_types::SetCondition::MustNotExist,
-            Condition::Version(v) => ledger_types::SetCondition::VersionEquals(*v),
-            Condition::ValueEquals(v) => ledger_types::SetCondition::ValueEquals(v.clone()),
+            Condition::NotExists(true) => inferadb_ledger_types::SetCondition::MustNotExist,
+            Condition::NotExists(false) => inferadb_ledger_types::SetCondition::MustExist,
+            Condition::MustExists(true) => inferadb_ledger_types::SetCondition::MustExist,
+            Condition::MustExists(false) => inferadb_ledger_types::SetCondition::MustNotExist,
+            Condition::Version(v) => inferadb_ledger_types::SetCondition::VersionEquals(*v),
+            Condition::ValueEquals(v) => {
+                inferadb_ledger_types::SetCondition::ValueEquals(v.clone())
+            }
         })
     }
 
     /// Convert a proto operation to internal operation.
-    fn convert_operation(op: &Operation) -> Result<ledger_types::Operation, Status> {
+    fn convert_operation(op: &Operation) -> Result<inferadb_ledger_types::Operation, Status> {
         use crate::proto::operation::Op;
 
         let inner_op = op
@@ -173,30 +175,34 @@ impl MultiShardWriteService {
             .ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
 
         match inner_op {
-            Op::CreateRelationship(cr) => Ok(ledger_types::Operation::CreateRelationship {
-                resource: cr.resource.clone(),
-                relation: cr.relation.clone(),
-                subject: cr.subject.clone(),
-            }),
-            Op::DeleteRelationship(dr) => Ok(ledger_types::Operation::DeleteRelationship {
-                resource: dr.resource.clone(),
-                relation: dr.relation.clone(),
-                subject: dr.subject.clone(),
-            }),
+            Op::CreateRelationship(cr) => {
+                Ok(inferadb_ledger_types::Operation::CreateRelationship {
+                    resource: cr.resource.clone(),
+                    relation: cr.relation.clone(),
+                    subject: cr.subject.clone(),
+                })
+            }
+            Op::DeleteRelationship(dr) => {
+                Ok(inferadb_ledger_types::Operation::DeleteRelationship {
+                    resource: dr.resource.clone(),
+                    relation: dr.relation.clone(),
+                    subject: dr.subject.clone(),
+                })
+            }
             Op::SetEntity(se) => {
                 let condition = se.condition.as_ref().and_then(Self::convert_set_condition);
 
-                Ok(ledger_types::Operation::SetEntity {
+                Ok(inferadb_ledger_types::Operation::SetEntity {
                     key: se.key.clone(),
                     value: se.value.clone(),
                     condition,
                     expires_at: se.expires_at,
                 })
             }
-            Op::DeleteEntity(de) => Ok(ledger_types::Operation::DeleteEntity {
+            Op::DeleteEntity(de) => Ok(inferadb_ledger_types::Operation::DeleteEntity {
                 key: de.key.clone(),
             }),
-            Op::ExpireEntity(ee) => Ok(ledger_types::Operation::ExpireEntity {
+            Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
                 key: ee.key.clone(),
                 expired_at: ee.expired_at,
             }),
@@ -213,7 +219,7 @@ impl MultiShardWriteService {
         sequence: u64,
         actor: &str,
     ) -> Result<LedgerRequest, Status> {
-        let internal_ops: Vec<ledger_types::Operation> = operations
+        let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
             .iter()
             .map(Self::convert_operation)
             .collect::<Result<Vec<_>, Status>>()?;
@@ -222,7 +228,7 @@ impl MultiShardWriteService {
             return Err(Status::invalid_argument("No operations provided"));
         }
 
-        let transaction = ledger_types::Transaction {
+        let transaction = inferadb_ledger_types::Transaction {
             id: *Uuid::new_v4().as_bytes(),
             client_id: client_id.to_string(),
             sequence,
@@ -523,7 +529,7 @@ mod tests {
         let result = MultiShardWriteService::convert_set_condition(&proto_condition);
         assert!(matches!(
             result,
-            Some(ledger_types::SetCondition::MustNotExist)
+            Some(inferadb_ledger_types::SetCondition::MustNotExist)
         ));
     }
 
@@ -539,7 +545,7 @@ mod tests {
         let result = MultiShardWriteService::convert_set_condition(&proto_condition);
         assert!(matches!(
             result,
-            Some(ledger_types::SetCondition::MustExist)
+            Some(inferadb_ledger_types::SetCondition::MustExist)
         ));
     }
 
@@ -555,7 +561,7 @@ mod tests {
         let result = MultiShardWriteService::convert_set_condition(&proto_condition);
         assert!(matches!(
             result,
-            Some(ledger_types::SetCondition::VersionEquals(42))
+            Some(inferadb_ledger_types::SetCondition::VersionEquals(42))
         ));
     }
 
@@ -570,7 +576,7 @@ mod tests {
 
         let result = MultiShardWriteService::convert_set_condition(&proto_condition);
         match result {
-            Some(ledger_types::SetCondition::ValueEquals(v)) => {
+            Some(inferadb_ledger_types::SetCondition::ValueEquals(v)) => {
                 assert_eq!(v, b"test_value");
             }
             _ => unreachable!("Expected ValueEquals condition"),
@@ -602,7 +608,7 @@ mod tests {
 
         let result = MultiShardWriteService::convert_operation(&op).unwrap();
         match result {
-            ledger_types::Operation::CreateRelationship {
+            inferadb_ledger_types::Operation::CreateRelationship {
                 resource,
                 relation,
                 subject,
@@ -630,7 +636,7 @@ mod tests {
 
         let result = MultiShardWriteService::convert_operation(&op).unwrap();
         match result {
-            ledger_types::Operation::DeleteRelationship {
+            inferadb_ledger_types::Operation::DeleteRelationship {
                 resource,
                 relation,
                 subject,
@@ -659,7 +665,7 @@ mod tests {
 
         let result = MultiShardWriteService::convert_operation(&op).unwrap();
         match result {
-            ledger_types::Operation::SetEntity {
+            inferadb_ledger_types::Operation::SetEntity {
                 key,
                 value,
                 condition,
@@ -687,7 +693,7 @@ mod tests {
 
         let result = MultiShardWriteService::convert_operation(&op).unwrap();
         match result {
-            ledger_types::Operation::DeleteEntity { key } => {
+            inferadb_ledger_types::Operation::DeleteEntity { key } => {
                 assert_eq!(key, "user:123");
             }
             _ => unreachable!("Expected DeleteEntity operation"),
@@ -708,7 +714,7 @@ mod tests {
 
         let result = MultiShardWriteService::convert_operation(&op).unwrap();
         match result {
-            ledger_types::Operation::ExpireEntity { key, expired_at } => {
+            inferadb_ledger_types::Operation::ExpireEntity { key, expired_at } => {
                 assert_eq!(key, "user:123");
                 assert_eq!(expired_at, 2000);
             }

@@ -28,7 +28,7 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// use std::sync::atomic::{AtomicBool, Ordering};
 /// use std::sync::Arc;
 /// use std::time::Duration;
-/// use ledger_test_utils::assert_eventually;
+/// use inferadb_ledger_test_utils::assert_eventually;
 ///
 /// #[tokio::test]
 /// async fn test_async_operation() {

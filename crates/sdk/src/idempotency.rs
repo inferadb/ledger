@@ -59,7 +59,7 @@ impl From<(i64, i64)> for VaultKey {
 /// # Example
 ///
 /// ```
-/// use ledger_sdk::SequenceTracker;
+/// use inferadb_ledger_sdk::SequenceTracker;
 ///
 /// let tracker = SequenceTracker::new("client-123");
 ///
@@ -265,7 +265,7 @@ struct PersistedState {
 /// # Example
 ///
 /// ```rust,ignore
-/// use ledger_sdk::FileSequenceStorage;
+/// use inferadb_ledger_sdk::FileSequenceStorage;
 /// use std::path::PathBuf;
 ///
 /// let storage = FileSequenceStorage::new("client-123", PathBuf::from("/var/lib/ledger"));
@@ -457,7 +457,7 @@ impl SequenceStorage for FileSequenceStorage {
 /// # Example
 ///
 /// ```rust,ignore
-/// use ledger_sdk::{PersistentSequenceTracker, FileSequenceStorage};
+/// use inferadb_ledger_sdk::{PersistentSequenceTracker, FileSequenceStorage};
 /// use std::path::PathBuf;
 ///
 /// let storage = FileSequenceStorage::new("my-client", PathBuf::from("/var/lib/ledger"));

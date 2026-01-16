@@ -33,8 +33,8 @@ use crate::proto::{
     VerifiedReadResponse, WatchBlocksRequest,
 };
 
-use ledger_db::{Database, FileBackend};
-use ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_store::{Database, FileBackend};
 use tempfile::TempDir;
 
 use crate::IdempotencyCache;
@@ -318,7 +318,7 @@ impl ReadServiceImpl {
         };
 
         // Compute block hash from vault entry
-        let block_hash = ledger_types::vault_entry_hash(entry);
+        let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
         (
             Some(crate::proto::Hash {
@@ -372,12 +372,12 @@ impl ReadServiceImpl {
                     // This snapshot is usable - load its entities into temp_state
                     if let Some(entities) = snapshot.state.vault_entities.get(&vault_id) {
                         // Convert entities to SetEntity operations for replay
-                        let operations: Vec<ledger_types::Operation> = entities
+                        let operations: Vec<inferadb_ledger_types::Operation> = entities
                             .iter()
                             .map(|entity| {
                                 // Entity.key is Vec<u8>, convert to String for Operation
                                 let key = String::from_utf8_lossy(&entity.key).into_owned();
-                                ledger_types::Operation::SetEntity {
+                                inferadb_ledger_types::Operation::SetEntity {
                                     key,
                                     value: entity.value.clone(),
                                     condition: None, // No condition for snapshot restore
@@ -500,7 +500,7 @@ impl ReadServiceImpl {
                 e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
             }) {
                 // Compute vault block hash using the same function as get_tip_hashes
-                let block_hash = ledger_types::vault_entry_hash(entry);
+                let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
                 announcements.push(BlockAnnouncement {
                     namespace_id: Some(crate::proto::NamespaceId {

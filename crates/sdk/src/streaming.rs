@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::Stream;
-use ledger_raft::proto;
+use inferadb_ledger_raft::proto;
 use tonic::Status;
 use tracing::{debug, warn};
 
@@ -87,7 +87,7 @@ impl PositionTracker for HeightTracker {
 /// # Example
 ///
 /// ```ignore
-/// use ledger_sdk::streaming::{ReconnectingStream, HeightTracker};
+/// use inferadb_ledger_sdk::streaming::{ReconnectingStream, HeightTracker};
 ///
 /// let stream = ReconnectingStream::new(
 ///     initial_stream,

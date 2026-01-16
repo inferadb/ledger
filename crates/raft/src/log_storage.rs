@@ -1,4 +1,4 @@
-//! Raft storage implementation using ledger-db.
+//! Raft storage implementation using inferadb-ledger-store.
 //!
 //! This module provides the persistent storage for Raft log entries,
 //! vote state, committed log tracking, and state machine state.
@@ -28,7 +28,7 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
-use ledger_db::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
+use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
 use openraft::storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
@@ -37,7 +37,7 @@ use openraft::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{
+use inferadb_ledger_types::{
     Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root,
     decode, encode,
 };
@@ -49,8 +49,10 @@ use crate::types::{
 };
 
 // Re-export storage types used in this module
-use ledger_state::system::{NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys};
-use ledger_state::{BlockArchive, StateError, StateLayer};
+use inferadb_ledger_state::system::{
+    NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys,
+};
+use inferadb_ledger_state::{BlockArchive, StateError, StateLayer};
 
 // ============================================================================
 // Metadata Keys
@@ -125,7 +127,7 @@ pub struct CombinedSnapshot {
     pub applied_state: AppliedState,
     /// Entity data per vault for StateLayer restoration.
     /// Key: vault_id, Value: list of entities
-    pub vault_entities: HashMap<VaultId, Vec<ledger_types::Entity>>,
+    pub vault_entities: HashMap<VaultId, Vec<inferadb_ledger_types::Entity>>,
 }
 
 /// Metadata for a namespace.
@@ -440,7 +442,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             node_id: String::new(),
             shard_chain: RwLock::new(ShardChainState {
                 height: 0,
-                previous_hash: ledger_types::ZERO_HASH,
+                previous_hash: inferadb_ledger_types::ZERO_HASH,
             }),
         };
 
@@ -586,7 +588,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     .previous_vault_hashes
                     .get(&key)
                     .copied()
-                    .unwrap_or(ledger_types::ZERO_HASH);
+                    .unwrap_or(inferadb_ledger_types::ZERO_HASH);
 
                 // Apply transactions to state layer if configured
                 let state_root = if let Some(state_layer) = &self.state_layer {
@@ -596,7 +598,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         .flat_map(|tx| tx.operations.clone())
                         .collect();
 
-                    // Apply operations (StateLayer is internally thread-safe via ledger-db MVCC)
+                    // Apply operations (StateLayer is internally thread-safe via inferadb-ledger-store MVCC)
                     if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
                         // Per DESIGN.md §6.1: On CAS failure, return current state for conflict resolution
                         return match e {
@@ -637,7 +639,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     // No state layer configured, use placeholder
-                    ledger_types::EMPTY_HASH
+                    inferadb_ledger_types::EMPTY_HASH
                 };
 
                 // Compute tx merkle root
@@ -859,8 +861,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     );
                 } else {
                     // Mark vault as diverged
-                    let expected = expected_root.unwrap_or(ledger_types::ZERO_HASH);
-                    let computed = computed_root.unwrap_or(ledger_types::ZERO_HASH);
+                    let expected = expected_root.unwrap_or(inferadb_ledger_types::ZERO_HASH);
+                    let computed = computed_root.unwrap_or(inferadb_ledger_types::ZERO_HASH);
                     let at_height = diverged_at_height.unwrap_or(0);
                     state.vault_health.insert(
                         key,
@@ -919,7 +921,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// metadata like timestamp or proposer. This ensures all Raft nodes
     /// compute the same hash for the same log entry.
     fn compute_vault_block_hash(&self, entry: &VaultEntry) -> Hash {
-        ledger_types::vault_entry_hash(entry)
+        inferadb_ledger_types::vault_entry_hash(entry)
     }
 
     /// Compute a simple block hash (used in tests).
@@ -930,7 +932,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         vault_id: VaultId,
         height: u64,
     ) -> Hash {
-        use ledger_types::sha256;
+        use inferadb_ledger_types::sha256;
         let mut data = Vec::new();
         data.extend_from_slice(&namespace_id.to_le_bytes());
         data.extend_from_slice(&vault_id.to_le_bytes());
@@ -975,7 +977,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             Bound::Unbounded => None,
         };
 
-        // Use range iteration from ledger-db
+        // Use range iteration from inferadb-ledger-store
         let start_key = start_idx;
         let end_key = end_idx.unwrap_or(u64::MAX);
 
@@ -1382,7 +1384,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 let vault_block =
                     shard_block.extract_vault_block(entry.namespace_id, entry.vault_id);
                 if let Some(vb) = vault_block {
-                    let block_hash = ledger_types::hash::block_hash(&vb.header);
+                    let block_hash = inferadb_ledger_types::hash::block_hash(&vb.header);
                     state
                         .previous_vault_hashes
                         .insert((entry.namespace_id, entry.vault_id), block_hash);
@@ -1390,7 +1392,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             }
 
             // Update shard chain tracking (single lock acquisition)
-            let shard_hash = ledger_types::sha256(&encode(&shard_block).unwrap_or_default());
+            let shard_hash =
+                inferadb_ledger_types::sha256(&encode(&shard_block).unwrap_or_default());
             *self.shard_chain.write() = ShardChainState {
                 height: new_shard_height,
                 previous_hash: shard_hash,
@@ -1446,7 +1449,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             for (vault_id, entities) in &combined.vault_entities {
                 for entity in entities {
                     // Convert entity to SetEntity operation
-                    let ops = vec![ledger_types::Operation::SetEntity {
+                    let ops = vec![inferadb_ledger_types::Operation::SetEntity {
                         key: String::from_utf8_lossy(&entity.key).to_string(),
                         value: entity.value.clone(),
                         condition: None, // No condition for snapshot restore
@@ -1486,7 +1489,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         // Collect entities from StateLayer if configured
-        // StateLayer is internally thread-safe via ledger-db's MVCC, so no lock needed
+        // StateLayer is internally thread-safe via inferadb-ledger-store's MVCC, so no lock needed
         let vault_entities = if let Some(state_layer) = &self.state_layer {
             let mut entities_map = HashMap::new();
 
@@ -1575,7 +1578,7 @@ fn to_serde_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
 )]
 mod tests {
     use super::*;
-    use ledger_db::FileBackend;
+    use inferadb_ledger_store::FileBackend;
     use openraft::CommittedLeaderId;
     use tempfile::tempdir;
 
@@ -1592,9 +1595,9 @@ mod tests {
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        // Verify database can be read (tables exist in ledger-db by default)
+        // Verify database can be read (tables exist in inferadb-ledger-store by default)
         let read_txn = store.db.read().expect("begin read");
-        // Tables are fixed in ledger-db - just verify we can get a transaction
+        // Tables are fixed in inferadb-ledger-store - just verify we can get a transaction
         let _ = read_txn
             .get::<tables::RaftLog>(&0u64)
             .expect("query RaftLog");
@@ -2305,11 +2308,11 @@ mod tests {
         );
 
         // Apply a write with transactions
-        let tx = ledger_types::Transaction {
+        let tx = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
             client_id: "test-client".to_string(),
             sequence: 1,
-            operations: vec![ledger_types::Operation::SetEntity {
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
                 key: "key1".to_string(),
                 value: b"value1".to_vec(),
                 condition: None,

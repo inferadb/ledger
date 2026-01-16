@@ -1,4 +1,4 @@
-//! Error types for the ledger-raft crate using snafu.
+//! Error types for the inferadb-ledger-raft crate using snafu.
 //!
 //! This module provides structured error types that preserve error chains,
 //! source locations, and enable proper error handling patterns.
@@ -14,7 +14,7 @@
 
 use snafu::{Backtrace, GenerateImplicitData, Snafu};
 
-use ledger_state::{BlockArchiveError, StateError};
+use inferadb_ledger_state::{BlockArchiveError, StateError};
 
 // ============================================================================
 // Recovery Errors

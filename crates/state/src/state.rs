@@ -10,11 +10,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ledger_db::{Database, StorageBackend, tables};
+use inferadb_ledger_store::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{
+use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
 
@@ -28,8 +28,8 @@ pub enum StateError {
     /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
     Inkwell {
-        /// The underlying ledger-db storage error.
-        source: ledger_db::Error,
+        /// The underlying inferadb-ledger-store storage error.
+        source: inferadb_ledger_store::Error,
     },
 
     /// Index operation failed.
@@ -43,7 +43,7 @@ pub enum StateError {
     #[snafu(display("Codec error: {source}"))]
     Codec {
         /// The underlying codec error.
-        source: ledger_types::CodecError,
+        source: inferadb_ledger_types::CodecError,
     },
 
     /// Conditional write precondition failed.
@@ -687,7 +687,7 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
 mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
-    use ledger_db::InMemoryBackend;
+    use inferadb_ledger_store::InMemoryBackend;
 
     fn create_test_state() -> StateLayer<InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().expect("open engine");
@@ -1304,7 +1304,7 @@ mod tests {
         use std::error::Error;
 
         // Test Codec variant display
-        let codec_err = ledger_types::CodecError::Decode {
+        let codec_err = inferadb_ledger_types::CodecError::Decode {
             source: postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).expect_err("should fail"),
         };
         let state_err = StateError::Codec { source: codec_err };
@@ -1330,7 +1330,7 @@ mod tests {
         // Simulate codec failure during state operation
         fn simulate_codec_failure() -> std::result::Result<(), StateError> {
             let malformed: &[u8] = &[0xFF, 0xFF];
-            let _: u64 = ledger_types::decode(malformed).context(CodecSnafu)?;
+            let _: u64 = inferadb_ledger_types::decode(malformed).context(CodecSnafu)?;
             Ok(())
         }
 
@@ -1350,7 +1350,7 @@ mod tests {
         use crate::indexes::IndexError;
 
         // IndexError with Codec source
-        let codec_err = ledger_types::CodecError::Decode {
+        let codec_err = inferadb_ledger_types::CodecError::Decode {
             source: postcard::from_bytes::<u64>(&[0xFF]).expect_err("should fail"),
         };
         let index_err = IndexError::Codec { source: codec_err };

@@ -8,7 +8,7 @@
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
-use ledger_types::{decode, encode};
+use inferadb_ledger_types::{decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 

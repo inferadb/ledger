@@ -43,7 +43,7 @@ pub struct PeerConfig {
 /// Storage layer configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Maximum size of the ledger-db cache in bytes.
+    /// Maximum size of the inferadb-ledger-store cache in bytes.
     #[serde(default = "default_cache_size")]
     pub cache_size_bytes: usize,
     /// Number of snapshots to keep in hot cache.

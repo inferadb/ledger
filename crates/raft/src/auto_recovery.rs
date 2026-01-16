@@ -22,8 +22,8 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use ledger_db::StorageBackend;
-use ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_store::StorageBackend;
 
 use crate::error::{
     ApplyOperationsSnafu, BlockArchiveNotConfiguredSnafu, BlockReadSnafu, IndexLookupSnafu,
@@ -93,7 +93,7 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     block_archive: Option<Arc<BlockArchive<B>>>,
     /// Snapshot manager for finding recovery starting points.
     snapshot_manager: Option<Arc<SnapshotManager>>,
-    /// State layer for applying recovered state (internally thread-safe via ledger-db MVCC).
+    /// State layer for applying recovered state (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
     /// Configuration.
     config: AutoRecoveryConfig,
@@ -258,7 +258,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 // For retries, we need to get the original divergence info
                 // This is stored in the applied state, but for simplicity
                 // we'll attempt a full replay
-                (ledger_types::ZERO_HASH, 0)
+                (inferadb_ledger_types::ZERO_HASH, 0)
             }
             VaultHealthStatus::Healthy => return RecoveryResult::Success,
         };
@@ -269,7 +269,9 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             .await
         {
             Ok(computed_root) => {
-                if computed_root == expected_root || expected_root == ledger_types::ZERO_HASH {
+                if computed_root == expected_root
+                    || expected_root == inferadb_ledger_types::ZERO_HASH
+                {
                     // Recovery successful
                     if let Err(e) = self
                         .propose_health_update(
@@ -325,9 +327,9 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         &self,
         namespace_id: i64,
         vault_id: i64,
-        _expected_root: ledger_types::Hash,
+        _expected_root: inferadb_ledger_types::Hash,
         _diverged_height: u64,
-    ) -> Result<ledger_types::Hash, RecoveryError> {
+    ) -> Result<inferadb_ledger_types::Hash, RecoveryError> {
         let archive = self
             .block_archive
             .as_ref()
@@ -371,7 +373,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
 
             if let Some(entry) = vault_entry {
                 // Apply transactions and compute new state root
-                // StateLayer is internally thread-safe via ledger-db MVCC
+                // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
                 for tx in &entry.transactions {
                     self.state
                         .apply_operations(vault_id, &tx.operations, height)
@@ -394,7 +396,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         &self,
         _namespace_id: i64,
         vault_id: i64,
-    ) -> Result<(u64, ledger_types::Hash), RecoveryError> {
+    ) -> Result<(u64, inferadb_ledger_types::Hash), RecoveryError> {
         // Try to find a snapshot to start from
         if let Some(snapshot_manager) = &self.snapshot_manager {
             if let Ok(snapshots) = snapshot_manager.list_snapshots() {
@@ -414,7 +416,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         }
 
         // No snapshot found, start from genesis
-        Ok((1, ledger_types::ZERO_HASH))
+        Ok((1, inferadb_ledger_types::ZERO_HASH))
     }
 
     /// Propose a vault health update through Raft.
@@ -424,8 +426,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         namespace_id: i64,
         vault_id: i64,
         healthy: bool,
-        expected_root: Option<ledger_types::Hash>,
-        computed_root: Option<ledger_types::Hash>,
+        expected_root: Option<inferadb_ledger_types::Hash>,
+        computed_root: Option<inferadb_ledger_types::Hash>,
         diverged_at_height: Option<u64>,
         recovery_attempt: Option<u8>,
         recovery_started_at: Option<i64>,

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use ledger_types::NamespaceId;
+use inferadb_ledger_types::NamespaceId;
 
 /// Default requests per second per namespace.
 const DEFAULT_REQUESTS_PER_SECOND: u64 = 1000;

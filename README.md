@@ -60,7 +60,7 @@ Ledger is InferaDB's persistence layer — a blockchain database for authorizati
 │  ├─ Vault: prod [chain]       │  ├─ Vault: main [chain]     │
 │  └─ Vault: staging [chain]    │  └─ ...                     │
 ├─────────────────────────────────────────────────────────────┤
-│                  State Layer (ledger-db)                    │
+│                State Layer (inferadb-ledger-store)          │
 │    Relationships │ Entities │ Indexes │ State Roots         │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -95,14 +95,14 @@ cargo test
 cp ledger.example.toml ledger.toml
 
 # Edit as needed, then start
-cargo run --release -p ledger-server
+cargo run --release -p inferadb-ledger-server
 
 # Or start with environment variables (no config file needed)
 INFERADB__LEDGER__NODE_ID=1 \
 INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
 INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
 INFERADB__LEDGER__BOOTSTRAP=true \
-cargo run --release -p ledger-server
+cargo run --release -p inferadb-ledger-server
 ```
 
 ### Run a 3-Node Cluster
@@ -133,13 +133,15 @@ Environment variables override config file values using the `INFERADB__LEDGER__`
 
 ## Crates
 
-| Crate            | Description                                    |
-| ---------------- | ---------------------------------------------- |
-| `ledger-types`   | Core types, hashing, and protobuf definitions  |
-| `ledger-db`      | Embedded B+ tree database engine               |
-| `ledger-state`   | Domain state management, indexes, snapshots    |
-| `ledger-raft`    | Raft consensus, log storage, network transport |
-| `ledger-server`  | gRPC server, request routing, client handling  |
+| Crate                        | Description                                    |
+| ---------------------------- | ---------------------------------------------- |
+| `inferadb-ledger-types`      | Core types, hashing, and protobuf definitions  |
+| `inferadb-ledger-store`      | Embedded B+ tree database engine               |
+| `inferadb-ledger-state`      | Domain state management, indexes, snapshots    |
+| `inferadb-ledger-raft`       | Raft consensus, log storage, network transport |
+| `inferadb-ledger-server`     | gRPC server, request routing, client handling  |
+| `inferadb-ledger-sdk`        | Production-grade Rust SDK for client apps      |
+| `inferadb-ledger-test-utils` | Shared test utilities                          |
 
 ## Design
 

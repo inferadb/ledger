@@ -31,16 +31,16 @@ async fn test_ordered_replication() {
 
     // Submit multiple writes
     for i in 0..5u64 {
-        let request = ledger_raft::proto::WriteRequest {
-            client_id: Some(ledger_raft::proto::ClientId {
+        let request = inferadb_ledger_raft::proto::WriteRequest {
+            client_id: Some(inferadb_ledger_raft::proto::ClientId {
                 id: "ordered-test".to_string(),
             }),
             sequence: i + 1,
-            namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
-            vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
-            operations: vec![ledger_raft::proto::Operation {
-                op: Some(ledger_raft::proto::operation::Op::SetEntity(
-                    ledger_raft::proto::SetEntity {
+            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
+            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
+            operations: vec![inferadb_ledger_raft::proto::Operation {
+                op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
+                    inferadb_ledger_raft::proto::SetEntity {
                         key: format!("key-{}", i),
                         value: format!("value-{}", i).into_bytes(),
                         expires_at: None,
@@ -53,7 +53,7 @@ async fn test_ordered_replication() {
 
         let response = client.write(request).await.expect("write should succeed");
         match response.into_inner().result {
-            Some(ledger_raft::proto::write_response::Result::Success(_)) => {}
+            Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {}
             _ => panic!("write {} should succeed", i),
         }
     }
@@ -92,18 +92,18 @@ async fn test_follower_state_consistency() {
         .expect("connect to leader");
 
     // Submit a batch of writes
-    let batch_request = ledger_raft::proto::BatchWriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId {
+    let batch_request = inferadb_ledger_raft::proto::BatchWriteRequest {
+        client_id: Some(inferadb_ledger_raft::proto::ClientId {
             id: "batch-test".to_string(),
         }),
         sequence: 1,
-        namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
+        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: (0..10)
-            .map(|i| ledger_raft::proto::BatchWriteOperation {
-                operations: vec![ledger_raft::proto::Operation {
-                    op: Some(ledger_raft::proto::operation::Op::SetEntity(
-                        ledger_raft::proto::SetEntity {
+            .map(|i| inferadb_ledger_raft::proto::BatchWriteOperation {
+                operations: vec![inferadb_ledger_raft::proto::Operation {
+                    op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
+                        inferadb_ledger_raft::proto::SetEntity {
                             key: format!("batch-key-{}", i),
                             value: format!("batch-value-{}", i).into_bytes(),
                             expires_at: None,
@@ -122,7 +122,7 @@ async fn test_follower_state_consistency() {
         .expect("batch write should succeed");
 
     match response.into_inner().result {
-        Some(ledger_raft::proto::batch_write_response::Result::Success(_)) => {}
+        Some(inferadb_ledger_raft::proto::batch_write_response::Result::Success(_)) => {}
         _ => panic!("batch write should succeed"),
     }
 
@@ -155,16 +155,16 @@ async fn test_replication_after_delay() {
         .expect("connect to leader");
 
     // Write some data
-    let request = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId {
+    let request = inferadb_ledger_raft::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_raft::proto::ClientId {
             id: "delay-test".to_string(),
         }),
         sequence: 1,
-        namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![ledger_raft::proto::Operation {
-            op: Some(ledger_raft::proto::operation::Op::SetEntity(
-                ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_raft::proto::Operation {
+            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
+                inferadb_ledger_raft::proto::SetEntity {
                     key: "delay-key".to_string(),
                     value: b"delay-value".to_vec(),
                     expires_at: None,
@@ -181,16 +181,16 @@ async fn test_replication_after_delay() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Write more data
-    let request2 = ledger_raft::proto::WriteRequest {
-        client_id: Some(ledger_raft::proto::ClientId {
+    let request2 = inferadb_ledger_raft::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_raft::proto::ClientId {
             id: "delay-test".to_string(),
         }),
         sequence: 2,
-        namespace_id: Some(ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![ledger_raft::proto::Operation {
-            op: Some(ledger_raft::proto::operation::Op::SetEntity(
-                ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_raft::proto::Operation {
+            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
+                inferadb_ledger_raft::proto::SetEntity {
                     key: "delay-key-2".to_string(),
                     value: b"delay-value-2".to_vec(),
                     expires_at: None,

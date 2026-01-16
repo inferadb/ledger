@@ -3,10 +3,10 @@
 //! Provides direct entity CRUD operations separate from the state layer.
 //! Used for lower-level access when the full state layer isn't needed.
 
-use ledger_db::{ReadTransaction, StorageBackend, WriteTransaction, tables};
+use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{CodecError, Entity, VaultId, decode, encode};
+use inferadb_ledger_types::{CodecError, Entity, VaultId, decode, encode};
 
 use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 
@@ -14,7 +14,9 @@ use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 #[derive(Debug, Snafu)]
 pub enum EntityError {
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: ledger_db::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+    },
 
     #[snafu(display("Codec error: {source}"))]
     Codec { source: CodecError },
@@ -360,7 +362,7 @@ mod tests {
         use std::error::Error;
 
         // Create a codec error and verify it converts properly
-        let codec_err = ledger_types::CodecError::Decode {
+        let codec_err = inferadb_ledger_types::CodecError::Decode {
             source: postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).expect_err("should fail"),
         };
 
@@ -392,7 +394,7 @@ mod tests {
         // Simulate what happens when a codec operation fails in EntityStore
         fn simulate_codec_failure() -> std::result::Result<(), EntityError> {
             let malformed: &[u8] = &[0xFF, 0xFF];
-            let _: u64 = ledger_types::decode(malformed).context(CodecSnafu)?;
+            let _: u64 = inferadb_ledger_types::decode(malformed).context(CodecSnafu)?;
             Ok(())
         }
 
@@ -409,8 +411,9 @@ mod tests {
     // Test that Storage variant also works correctly
     #[test]
     fn test_entity_error_storage_display() {
-        // We can't easily create an ledger_db::Error, but we can verify the
+        // We can't easily create an inferadb_ledger_store::Error, but we can verify the
         // pattern compiles and the Display format is correct by checking the derive
-        let _: fn(ledger_db::Error) -> EntityError = |source| EntityError::Storage { source };
+        let _: fn(inferadb_ledger_store::Error) -> EntityError =
+            |source| EntityError::Storage { source };
     }
 }

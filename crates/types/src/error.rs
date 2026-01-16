@@ -1,7 +1,7 @@
 //! Error types for InferaDB Ledger using snafu.
 //!
 //! This module provides a unified error type hierarchy that captures:
-//! - Storage errors (ledger-db, I/O)
+//! - Storage errors (inferadb-ledger-store, I/O)
 //! - Consensus errors (Raft)
 //! - Validation errors (hash mismatches, divergence)
 //! - Protocol errors (gRPC, serialization)

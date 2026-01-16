@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use ledger_sdk::{DiscoveryService, DiscoveryConfig, ConnectionPool};
+//! use inferadb_ledger_sdk::{DiscoveryService, DiscoveryConfig, ConnectionPool};
 //!
 //! let pool = ConnectionPool::new(config);
 //! let discovery = DiscoveryService::new(pool.clone(), DiscoveryConfig::enabled());
@@ -40,7 +40,7 @@ use tokio::sync::Notify;
 use tokio::time::{Duration, interval};
 use tracing::{debug, info, warn};
 
-use ledger_raft::proto;
+use inferadb_ledger_raft::proto;
 
 use crate::config::DiscoveryConfig;
 use crate::connection::ConnectionPool;

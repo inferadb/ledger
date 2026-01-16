@@ -106,7 +106,7 @@ impl ReadService for MultiShardReadService {
             )));
         }
 
-        // Read from the shard's state layer (internally thread-safe via ledger-db MVCC)
+        // Read from the shard's state layer (internally thread-safe via inferadb-ledger-store MVCC)
         let entity = ctx
             .state
             .get_entity(vault_id, req.key.as_bytes())
@@ -262,7 +262,7 @@ impl ReadService for MultiShardReadService {
             )));
         }
 
-        // Read from state layer (internally thread-safe via ledger-db MVCC)
+        // Read from state layer (internally thread-safe via inferadb-ledger-store MVCC)
         let entity = ctx
             .state
             .get_entity(vault_id, req.key.as_bytes())
@@ -354,7 +354,7 @@ impl ReadService for MultiShardReadService {
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Read from state layer - simple listing without complex pagination
-        // StateLayer is internally thread-safe via ledger-db MVCC
+        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
         // Use subject-based lookup if subject is specified
         let relationships = if let Some(subject) = &req.subject {
@@ -438,7 +438,7 @@ impl ReadService for MultiShardReadService {
         // Entities are namespace-level (stored in vault_id=0 by convention)
         let vault_id = 0i64;
 
-        // Read from state layer (internally thread-safe via ledger-db MVCC)
+        // Read from state layer (internally thread-safe via inferadb-ledger-store MVCC)
         let raw_entities = ctx
             .state
             .list_entities(vault_id, prefix, None, limit)
@@ -504,7 +504,7 @@ impl ReadService for MultiShardReadService {
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Read from state layer - list relationships and extract unique resources
-        // StateLayer is internally thread-safe via ledger-db MVCC
+        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         let relationships = ctx
             .state
             .list_relationships(vault_id, None, limit * 10) // Over-fetch to filter

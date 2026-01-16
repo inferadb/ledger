@@ -27,9 +27,9 @@ use crate::types::{
     BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
 };
 
-use ledger_db::{Database, FileBackend};
-use ledger_state::{BlockArchive, StateLayer};
-use ledger_types::{VaultEntry, ZERO_HASH};
+use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_store::{Database, FileBackend};
+use inferadb_ledger_types::{VaultEntry, ZERO_HASH};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -85,7 +85,7 @@ impl AdminService for AdminServiceImpl {
         let req = request.into_inner();
 
         // Submit create namespace through Raft
-        // Map proto ShardId to ledger_types::ShardId (i32)
+        // Map proto ShardId to inferadb_ledger_types::ShardId (i32)
         let ledger_request = LedgerRequest::CreateNamespace {
             name: req.name,
             shard_id: req.shard_id.map(|s| s.id),
@@ -1399,15 +1399,17 @@ impl AdminService for AdminServiceImpl {
             let count = expired.len();
 
             // Create ExpireEntity operations
-            let operations: Vec<ledger_types::Operation> = expired
+            let operations: Vec<inferadb_ledger_types::Operation> = expired
                 .iter()
-                .map(|(key, expired_at)| ledger_types::Operation::ExpireEntity {
-                    key: key.clone(),
-                    expired_at: *expired_at,
-                })
+                .map(
+                    |(key, expired_at)| inferadb_ledger_types::Operation::ExpireEntity {
+                        key: key.clone(),
+                        expired_at: *expired_at,
+                    },
+                )
                 .collect();
 
-            let transaction = ledger_types::Transaction {
+            let transaction = inferadb_ledger_types::Transaction {
                 id: *uuid::Uuid::new_v4().as_bytes(),
                 client_id: "system:gc".to_string(),
                 sequence: now, // Use timestamp as sequence for GC

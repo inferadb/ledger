@@ -1,5 +1,5 @@
 [package]
-name = "ledger-server"
+name = "inferadb-ledger-server"
 description = "Server binary for InferaDB Ledger"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-name = "ledger_server"
+name = "inferadb_ledger_server"
 path = "src/lib.rs"
 
 [[bin]]
@@ -18,15 +18,15 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal
-ledger-types.workspace = true
-ledger-state.workspace = true
-ledger-raft.workspace = true
+inferadb-ledger-types.workspace = true
+inferadb-ledger-state.workspace = true
+inferadb-ledger-raft.workspace = true
 
 # Raft consensus
 openraft.workspace = true
 
 # Storage
-ledger-db.workspace = true
+inferadb-ledger-store.workspace = true
 
 # Async runtime
 tokio.workspace = true
@@ -63,7 +63,7 @@ metrics-exporter-prometheus.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 rand.workspace = true
-ledger-test-utils.workspace = true
+inferadb-ledger-test-utils.workspace = true
 futures.workspace = true
 criterion.workspace = true
 serial_test = "3.2"

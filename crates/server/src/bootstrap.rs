@@ -9,19 +9,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ledger_db::{Database, FileBackend};
+use inferadb_ledger_store::{Database, FileBackend};
 use openraft::storage::Adaptor;
 use openraft::{BasicNode, Raft};
 use tonic::transport::Channel;
 use tracing::info;
 
-use ledger_raft::proto::JoinClusterRequest;
-use ledger_raft::proto::admin_service_client::AdminServiceClient;
-use ledger_raft::{
+use inferadb_ledger_raft::proto::JoinClusterRequest;
+use inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient;
+use inferadb_ledger_raft::{
     AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
     LedgerServer, LedgerTypeConfig, RaftLogStore, TtlGarbageCollector,
 };
-use ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 
 use crate::config::Config;
 use crate::discovery::resolve_bootstrap_peers;
@@ -61,7 +61,7 @@ pub struct BootstrappedNode {
     /// The Raft instance.
     #[allow(dead_code)]
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The shared state layer (internally thread-safe via ledger-db MVCC).
+    /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     #[allow(dead_code)]
     pub state: Arc<StateLayer<FileBackend>>,
     /// The configured Ledger server.

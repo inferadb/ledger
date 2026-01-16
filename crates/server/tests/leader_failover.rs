@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use common::{TestCluster, create_read_client, create_write_client};
-use ledger_raft::proto::{ClientId, NamespaceId, ReadRequest, VaultId, WriteRequest};
+use inferadb_ledger_raft::proto::{ClientId, NamespaceId, ReadRequest, VaultId, WriteRequest};
 use serial_test::serial;
 
 /// Helper to create a write request with a single SetEntity operation.
@@ -42,9 +42,9 @@ fn make_write_request(
             id: client_id.to_string(),
         }),
         sequence,
-        operations: vec![ledger_raft::proto::Operation {
-            op: Some(ledger_raft::proto::operation::Op::SetEntity(
-                ledger_raft::proto::SetEntity {
+        operations: vec![inferadb_ledger_raft::proto::Operation {
+            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
+                inferadb_ledger_raft::proto::SetEntity {
                     key: key.to_string(),
                     value: value.to_vec(),
                     condition: None,
@@ -57,10 +57,10 @@ fn make_write_request(
 }
 
 /// Extract block_height from a WriteResponse, panics if not a success.
-fn extract_block_height(response: ledger_raft::proto::WriteResponse) -> u64 {
+fn extract_block_height(response: inferadb_ledger_raft::proto::WriteResponse) -> u64 {
     match response.result {
-        Some(ledger_raft::proto::write_response::Result::Success(s)) => s.block_height,
-        Some(ledger_raft::proto::write_response::Result::Error(e)) => {
+        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => s.block_height,
+        Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
             panic!("write failed: {:?}", e)
         }
         None => panic!("no result in response"),

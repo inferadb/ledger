@@ -155,7 +155,7 @@ All state machine operations must be deterministic:
 Run the determinism test suite:
 
 ```bash
-cargo test --package ledger-raft -- determinism --nocapture
+cargo test --package inferadb-ledger-raft -- determinism --nocapture
 ```
 
 This replays the same transactions on multiple state machines and verifies identical state roots.

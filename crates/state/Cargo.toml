@@ -1,5 +1,5 @@
 [package]
-name = "ledger-state"
+name = "inferadb-ledger-state"
 description = "Domain state management for InferaDB Ledger"
 version.workspace = true
 edition.workspace = true
@@ -10,10 +10,10 @@ authors.workspace = true
 
 [dependencies]
 # Internal
-ledger-types.workspace = true
+inferadb-ledger-types.workspace = true
 
 # Storage engine
-ledger-db.workspace = true
+inferadb-ledger-store.workspace = true
 
 # Crypto (for bucket hashing)
 sha2.workspace = true
@@ -56,7 +56,7 @@ futures.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 rand.workspace = true
-ledger-test-utils.workspace = true
+inferadb-ledger-test-utils.workspace = true
 
 [lints]
 workspace = true

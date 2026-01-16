@@ -1,4 +1,4 @@
-//! Database and transaction management for ledger-db.
+//! Database and transaction management for inferadb-ledger-store.
 //!
 //! Provides ACID transactions over the 13 fixed tables. Uses a single-writer
 //! model optimized for Raft's serialized writes.
@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use ledger_db::{Database, tables};
+//! use inferadb_ledger_store::{Database, tables};
 //!
 //! // Open or create a database
 //! let db = Database::open("data.ink")?;

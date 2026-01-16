@@ -1,13 +1,13 @@
-//! ledger-db storage engine wrapper.
+//! inferadb-ledger-store storage engine wrapper.
 //!
-//! Provides a thin wrapper around ledger-db with:
+//! Provides a thin wrapper around inferadb-ledger-store with:
 //! - Database lifecycle management
 //! - Convenient constructors
 
 use std::path::Path;
 use std::sync::Arc;
 
-use ledger_db::{Database, FileBackend, InMemoryBackend};
+use inferadb_ledger_store::{Database, FileBackend, InMemoryBackend};
 use snafu::Snafu;
 
 /// Error context for storage operations.
@@ -17,16 +17,18 @@ pub enum EngineError {
     #[snafu(display("Failed to open database at {path}: {source}"))]
     Open {
         path: String,
-        source: ledger_db::Error,
+        source: inferadb_ledger_store::Error,
     },
 
     #[snafu(display("Storage operation failed: {source}"))]
-    Storage { source: ledger_db::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+    },
 }
 
-/// Storage engine backed by ledger-db (file-based).
+/// Storage engine backed by inferadb-ledger-store (file-based).
 ///
-/// Wraps an ledger-db Database with a FileBackend for persistent storage.
+/// Wraps an inferadb-ledger-store Database with a FileBackend for persistent storage.
 pub struct StorageEngine {
     db: Arc<Database<FileBackend>>,
 }
@@ -65,7 +67,7 @@ impl Clone for StorageEngine {
 
 /// In-memory storage engine for testing.
 ///
-/// Wraps an ledger-db Database with an InMemoryBackend.
+/// Wraps an inferadb-ledger-store Database with an InMemoryBackend.
 pub struct InMemoryStorageEngine {
     db: Arc<Database<InMemoryBackend>>,
 }
@@ -105,7 +107,7 @@ impl Clone for InMemoryStorageEngine {
 )]
 mod tests {
     use super::*;
-    use ledger_db::tables;
+    use inferadb_ledger_store::tables;
 
     #[test]
     fn test_open_in_memory() {

@@ -17,8 +17,8 @@ use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use ledger_db::StorageBackend;
-use ledger_state::BlockArchive;
+use inferadb_ledger_state::BlockArchive;
+use inferadb_ledger_store::StorageBackend;
 
 use crate::log_storage::AppliedStateAccessor;
 use crate::types::{BlockRetentionMode, LedgerNodeId, LedgerTypeConfig};

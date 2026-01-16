@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ledger_db::{Database, StorageBackend};
+use inferadb_ledger_store::{Database, StorageBackend};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{
+use inferadb_ledger_types::{
     EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultHealth, VaultId, ZERO_HASH,
     compute_chain_commitment, encode,
 };
@@ -43,7 +43,9 @@ pub enum ShardError {
     },
 
     #[snafu(display("Storage error: {source}"))]
-    Inkwell { source: ledger_db::Error },
+    Inkwell {
+        source: inferadb_ledger_store::Error,
+    },
 
     #[snafu(display("Entity store error: {source}"))]
     Entity { source: crate::entity::EntityError },
@@ -69,7 +71,7 @@ pub type Result<T> = std::result::Result<T, ShardError>;
 /// Used to link snapshots together in a verifiable chain.
 fn compute_snapshot_header_hash(header: &crate::snapshot::SnapshotHeader) -> Hash {
     let bytes = encode(header).unwrap_or_default();
-    ledger_types::sha256(&bytes)
+    inferadb_ledger_types::sha256(&bytes)
 }
 
 /// Per-vault metadata tracked by the shard.
@@ -181,7 +183,7 @@ impl<B: StorageBackend> ShardManager<B> {
                 namespace_id,
                 height: 0,
                 state_root: EMPTY_HASH,
-                previous_hash: ledger_types::ZERO_HASH,
+                previous_hash: inferadb_ledger_types::ZERO_HASH,
                 health: VaultHealth::Healthy,
             },
         );
@@ -209,22 +211,24 @@ impl<B: StorageBackend> ShardManager<B> {
                 // Track that we have dirty keys
                 for op in &tx.operations {
                     match op {
-                        ledger_types::Operation::SetEntity { key, .. }
-                        | ledger_types::Operation::DeleteEntity { key }
-                        | ledger_types::Operation::ExpireEntity { key, .. } => {
+                        inferadb_ledger_types::Operation::SetEntity { key, .. }
+                        | inferadb_ledger_types::Operation::DeleteEntity { key }
+                        | inferadb_ledger_types::Operation::ExpireEntity { key, .. } => {
                             dirty_keys.push(key.as_bytes().to_vec());
                         }
-                        ledger_types::Operation::CreateRelationship {
+                        inferadb_ledger_types::Operation::CreateRelationship {
                             resource,
                             relation,
                             subject,
                         }
-                        | ledger_types::Operation::DeleteRelationship {
+                        | inferadb_ledger_types::Operation::DeleteRelationship {
                             resource,
                             relation,
                             subject,
                         } => {
-                            let rel = ledger_types::Relationship::new(resource, relation, subject);
+                            let rel = inferadb_ledger_types::Relationship::new(
+                                resource, relation, subject,
+                            );
                             dirty_keys.push(rel.to_key().into_bytes());
                         }
                     }
@@ -245,7 +249,7 @@ impl<B: StorageBackend> ShardManager<B> {
                         namespace_id: entry.namespace_id,
                         height: 0,
                         state_root: EMPTY_HASH,
-                        previous_hash: ledger_types::ZERO_HASH,
+                        previous_hash: inferadb_ledger_types::ZERO_HASH,
                         health: VaultHealth::Healthy,
                     });
 
@@ -269,7 +273,7 @@ impl<B: StorageBackend> ShardManager<B> {
                     namespace_id: entry.namespace_id,
                     height: 0,
                     state_root: EMPTY_HASH,
-                    previous_hash: ledger_types::ZERO_HASH,
+                    previous_hash: inferadb_ledger_types::ZERO_HASH,
                     health: VaultHealth::Healthy,
                 });
 
@@ -390,7 +394,7 @@ impl<B: StorageBackend> ShardManager<B> {
         let genesis = match self.blocks.read_block(1) {
             Ok(block) => {
                 let header = block.to_shard_header();
-                ledger_types::hash::block_hash(&header)
+                inferadb_ledger_types::hash::block_hash(&header)
             }
             Err(_) => {
                 // No blocks yet - use ZERO_HASH as placeholder
@@ -416,7 +420,7 @@ impl<B: StorageBackend> ShardManager<B> {
                     namespace_id: 0, // Would need to be stored in snapshot
                     height: vault_state.vault_height,
                     state_root: vault_state.state_root,
-                    previous_hash: ledger_types::ZERO_HASH, // Would need snapshot
+                    previous_hash: inferadb_ledger_types::ZERO_HASH, // Would need snapshot
                     health: VaultHealth::Healthy,
                 },
             );
@@ -471,10 +475,13 @@ mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
     use chrono::Utc;
-    use ledger_test_utils::TestDir;
-    use ledger_types::{Operation, Transaction, VaultEntry};
+    use inferadb_ledger_test_utils::TestDir;
+    use inferadb_ledger_types::{Operation, Transaction, VaultEntry};
 
-    fn create_test_manager() -> (ShardManager<ledger_db::InMemoryBackend>, TestDir) {
+    fn create_test_manager() -> (
+        ShardManager<inferadb_ledger_store::InMemoryBackend>,
+        TestDir,
+    ) {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
 
@@ -532,12 +539,12 @@ mod tests {
         let block = ShardBlock {
             shard_id: 1,
             shard_height: 1,
-            previous_shard_hash: ledger_types::ZERO_HASH,
+            previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
                 namespace_id: 1,
                 vault_id: 1,
                 vault_height: 1,
-                previous_vault_hash: ledger_types::ZERO_HASH,
+                previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
                 transactions: vec![tx],
                 tx_merkle_root: [0u8; 32],
                 state_root: expected_root,
@@ -579,12 +586,12 @@ mod tests {
         let block = ShardBlock {
             shard_id: 1,
             shard_height: 1,
-            previous_shard_hash: ledger_types::ZERO_HASH,
+            previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
                 namespace_id: 1,
                 vault_id: 1,
                 vault_height: 1,
-                previous_vault_hash: ledger_types::ZERO_HASH,
+                previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
                 transactions: vec![tx],
                 tx_merkle_root: [0u8; 32],
                 state_root: [42u8; 32], // Wrong!

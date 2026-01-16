@@ -53,10 +53,10 @@ use snafu::Snafu;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use ledger_db::{Database, DatabaseConfig, FileBackend};
-use ledger_state::system::SystemNamespaceService;
-use ledger_state::{BlockArchive, StateLayer};
-use ledger_types::{NamespaceId, ShardId};
+use inferadb_ledger_state::system::SystemNamespaceService;
+use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend};
+use inferadb_ledger_types::{NamespaceId, ShardId};
 
 use crate::auto_recovery::AutoRecoveryJob;
 use crate::block_compaction::BlockCompactor;
@@ -561,7 +561,7 @@ impl MultiRaftManager {
         // This matches RAFT_PAGE_SIZE in RaftLogStore
         const SHARD_PAGE_SIZE: usize = 16 * 1024; // 16KB
 
-        // Open or create state database using ledger-db with 16KB pages
+        // Open or create state database using inferadb-ledger-store with 16KB pages
         let state_db_path = shard_dir.join("state.db");
         let state_db = if state_db_path.exists() {
             Database::<FileBackend>::open(&state_db_path)
@@ -578,7 +578,7 @@ impl MultiRaftManager {
         })?;
         let state = Arc::new(StateLayer::new(Arc::new(state_db)));
 
-        // Open or create block archive database using ledger-db with 16KB pages
+        // Open or create block archive database using inferadb-ledger-store with 16KB pages
         let blocks_db_path = shard_dir.join("blocks.db");
         let blocks_db = if blocks_db_path.exists() {
             Database::<FileBackend>::open(&blocks_db_path)
@@ -595,7 +595,7 @@ impl MultiRaftManager {
         })?;
         let block_archive = Arc::new(BlockArchive::new(Arc::new(blocks_db)));
 
-        // Open Raft log store (uses ledger-db storage - handles open/create internally)
+        // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
         let log_path = shard_dir.join("raft.db");
         let log_store = RaftLogStore::<FileBackend>::open(&log_path)
             .map_err(|e| MultiRaftError::Storage {
@@ -717,7 +717,7 @@ pub struct MultiRaftStats {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use ledger_test_utils::TestDir;
+    use inferadb_ledger_test_utils::TestDir;
 
     fn create_test_config(temp_dir: &TestDir) -> MultiRaftConfig {
         MultiRaftConfig::new(temp_dir.path().to_path_buf(), 1)

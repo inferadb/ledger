@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use ledger_types::NodeId;
+use inferadb_ledger_types::NodeId;
 
 use super::types::{NodeInfo, NodeRole};
 

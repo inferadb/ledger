@@ -26,9 +26,9 @@ use snafu::GenerateImplicitData;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use ledger_db::StorageBackend;
-use ledger_state::StateLayer;
-use ledger_types::{Operation, Transaction};
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::StorageBackend;
+use inferadb_ledger_types::{Operation, Transaction};
 
 use crate::error::OrphanCleanupError;
 use crate::log_storage::AppliedStateAccessor;
@@ -55,7 +55,7 @@ pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer (internally thread-safe via ledger-db MVCC).
+    /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,
@@ -99,7 +99,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
     /// - User has deleted_at set
     /// - User has status = "DELETED" or "DELETING"
     fn get_deleted_user_ids(&self) -> HashSet<i64> {
-        // StateLayer is internally thread-safe via ledger-db MVCC
+        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
         // List all user entities in _system (vault_id = 0)
         let entities = match self
@@ -146,7 +146,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             return Vec::new();
         }
 
-        // StateLayer is internally thread-safe via ledger-db MVCC
+        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         // Note: Namespace entities live in vault_id = 0 for the namespace
         // We need to list entities in the namespace, not vault 0 of _system
         // Actually, namespace-level entities (members, teams) are stored with the namespace

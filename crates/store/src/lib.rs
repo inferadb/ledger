@@ -1,6 +1,6 @@
-//! ledger-db: A purpose-built embedded storage engine for InferaDB.
+//! inferadb-ledger-store: A purpose-built embedded storage engine for InferaDB.
 //!
-//! ledger-db is a simplified B+ tree storage engine designed for InferaDB's
+//! inferadb-ledger-store is a simplified B+ tree storage engine designed for InferaDB's
 //! specific requirements:
 //!
 //! - **Fixed schema**: 13 tables known at compile time
@@ -40,7 +40,7 @@
 //! ## Quick Start
 //!
 //! ```ignore
-//! use ledger_db::{Database, DatabaseConfig};
+//! use inferadb_ledger_store::{Database, DatabaseConfig};
 //!
 //! // Open or create a database
 //! let db = Database::open("my.db", DatabaseConfig::default())?;

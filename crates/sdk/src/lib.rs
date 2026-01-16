@@ -15,10 +15,10 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use ledger_sdk::{LedgerClient, ClientConfig};
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
 //!
 //! #[tokio::main]
-//! async fn main() -> ledger_sdk::Result<()> {
+//! async fn main() -> inferadb_ledger_sdk::Result<()> {
 //!     let config = ClientConfig::builder()
 //!         .with_endpoint("http://localhost:50051")
 //!         .with_client_id("my-app-001")
@@ -90,5 +90,5 @@ pub use idempotency::{
 pub use retry::with_retry;
 pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};
 
-// Re-export commonly used types from ledger-types
-pub use ledger_types::{NamespaceId, VaultId};
+// Re-export commonly used types from inferadb-ledger-types
+pub use inferadb_ledger_types::{NamespaceId, VaultId};

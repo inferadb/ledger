@@ -33,7 +33,7 @@ use crate::error::{Result, RetryExhaustedSnafu, SdkError};
 /// # Example
 ///
 /// ```ignore
-/// use ledger_sdk::{with_retry, RetryPolicy, SdkError};
+/// use inferadb_ledger_sdk::{with_retry, RetryPolicy, SdkError};
 ///
 /// let policy = RetryPolicy::default();
 /// let result = with_retry(&policy, || async {

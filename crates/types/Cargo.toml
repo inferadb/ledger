@@ -1,5 +1,5 @@
 [package]
-name = "ledger-types"
+name = "inferadb-ledger-types"
 description = "Core types, errors, and cryptographic primitives for InferaDB Ledger"
 version.workspace = true
 edition.workspace = true

@@ -1588,6 +1588,189 @@ dependencies = [
 ]
 
 [[package]]
+name = "inferadb-ledger-raft"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fs2",
+ "futures",
+ "hmac",
+ "inferadb-ledger-state",
+ "inferadb-ledger-store",
+ "inferadb-ledger-test-utils",
+ "inferadb-ledger-types",
+ "metrics",
+ "moka",
+ "openraft",
+ "parking_lot",
+ "postcard",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "seahash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "snafu",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "inferadb-ledger-sdk"
+version = "0.1.0"
+dependencies = [
+ "backon",
+ "chrono",
+ "criterion 0.5.1",
+ "dirs",
+ "futures",
+ "inferadb-ledger-raft",
+ "inferadb-ledger-server",
+ "inferadb-ledger-test-utils",
+ "inferadb-ledger-types",
+ "openraft",
+ "parking_lot",
+ "proptest",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "snafu",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-test",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "inferadb-ledger-server"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "config",
+ "criterion 0.8.1",
+ "futures",
+ "hickory-resolver",
+ "hyper",
+ "hyper-util",
+ "inferadb-ledger-raft",
+ "inferadb-ledger-state",
+ "inferadb-ledger-store",
+ "inferadb-ledger-test-utils",
+ "inferadb-ledger-types",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "openraft",
+ "parking_lot",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "snafu",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "turmoil",
+]
+
+[[package]]
+name = "inferadb-ledger-state"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "inferadb-ledger-store",
+ "inferadb-ledger-test-utils",
+ "inferadb-ledger-types",
+ "lru",
+ "object_store",
+ "parking_lot",
+ "postcard",
+ "proptest",
+ "rand 0.8.5",
+ "seahash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "snafu",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "zstd",
+]
+
+[[package]]
+name = "inferadb-ledger-store"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "byteorder",
+ "memmap2",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.5",
+ "snafu",
+ "tempfile",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "inferadb-ledger-test-utils"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "inferadb-ledger-types",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "inferadb-ledger-types"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "humantime",
+ "postcard",
+ "rs_merkle",
+ "seahash",
+ "serde",
+ "sha2",
+ "snafu",
+ "subtle",
+ "tempfile",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "ipconfig"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1701,189 +1884,6 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-
-[[package]]
-name = "ledger-db"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "byteorder",
- "memmap2",
- "parking_lot",
- "proptest",
- "rand 0.8.5",
- "snafu",
- "tempfile",
- "tracing",
- "xxhash-rust",
-]
-
-[[package]]
-name = "ledger-raft"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "chrono",
- "fs2",
- "futures",
- "hmac",
- "ledger-db",
- "ledger-state",
- "ledger-test-utils",
- "ledger-types",
- "metrics",
- "moka",
- "openraft",
- "parking_lot",
- "postcard",
- "prost",
- "prost-types",
- "rand 0.8.5",
- "seahash",
- "serde",
- "serde_json",
- "sha2",
- "snafu",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-build",
- "tonic-prost",
- "tonic-prost-build",
- "tower",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ledger-sdk"
-version = "0.1.0"
-dependencies = [
- "backon",
- "chrono",
- "criterion 0.5.1",
- "dirs",
- "futures",
- "ledger-raft",
- "ledger-server",
- "ledger-test-utils",
- "ledger-types",
- "openraft",
- "parking_lot",
- "proptest",
- "prost",
- "prost-types",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "serial_test",
- "sha2",
- "snafu",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-test",
- "tokio-util",
- "tonic",
- "tower",
- "tracing",
-]
-
-[[package]]
-name = "ledger-server"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "config",
- "criterion 0.8.1",
- "futures",
- "hickory-resolver",
- "hyper",
- "hyper-util",
- "ledger-db",
- "ledger-raft",
- "ledger-state",
- "ledger-test-utils",
- "ledger-types",
- "metrics",
- "metrics-exporter-prometheus",
- "openraft",
- "parking_lot",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "serial_test",
- "snafu",
- "tempfile",
- "tokio",
- "toml",
- "tonic",
- "tower",
- "tracing",
- "tracing-subscriber",
- "turmoil",
-]
-
-[[package]]
-name = "ledger-state"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "ledger-db",
- "ledger-test-utils",
- "ledger-types",
- "lru",
- "object_store",
- "parking_lot",
- "postcard",
- "proptest",
- "rand 0.8.5",
- "seahash",
- "serde",
- "serde_json",
- "sha2",
- "snafu",
- "tempfile",
- "tokio",
- "tracing",
- "url",
- "zstd",
-]
-
-[[package]]
-name = "ledger-test-utils"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ledger-types",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "ledger-types"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chrono",
- "humantime",
- "postcard",
- "rs_merkle",
- "seahash",
- "serde",
- "sha2",
- "snafu",
- "subtle",
- "tempfile",
- "tracing",
- "uuid",
- "zeroize",
-]
 
 [[package]]
 name = "libc"

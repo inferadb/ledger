@@ -2,7 +2,7 @@
 //!
 //! Per DESIGN.md lines 1933-1949.
 
-use ledger_types::{NamespaceId, NodeId, UserId};
+use inferadb_ledger_types::{NamespaceId, NodeId, UserId};
 
 /// Key pattern generators for `_system` namespace entities.
 ///
@@ -21,7 +21,7 @@ impl SystemKeys {
     ///
     /// # Example
     /// ```
-    /// use ledger_state::system::SystemKeys;
+    /// use inferadb_ledger_state::system::SystemKeys;
     /// assert_eq!(SystemKeys::user_key(123), "user:123");
     /// ```
     pub fn user_key(user_id: UserId) -> String {

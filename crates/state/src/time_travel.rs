@@ -19,8 +19,8 @@
 
 use std::sync::Arc;
 
-use ledger_db::{Database, StorageBackend, tables};
-use ledger_types::{decode, encode};
+use inferadb_ledger_store::{Database, StorageBackend, tables};
+use inferadb_ledger_types::{decode, encode};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
@@ -31,15 +31,15 @@ pub enum TimeTravelError {
     /// Error from storage operations.
     #[snafu(display("Storage error: {source}"))]
     Storage {
-        /// The underlying ledger-db error.
-        source: ledger_db::Error,
+        /// The underlying inferadb-ledger-store error.
+        source: inferadb_ledger_store::Error,
     },
 
     /// Codec error.
     #[snafu(display("Codec error: {source}"))]
     Codec {
         /// The underlying codec error.
-        source: ledger_types::CodecError,
+        source: inferadb_ledger_types::CodecError,
     },
 
     /// The vault is not configured for time-travel indexing.
@@ -411,7 +411,7 @@ mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
 
-    fn create_test_index() -> TimeTravelIndex<ledger_db::InMemoryBackend> {
+    fn create_test_index() -> TimeTravelIndex<inferadb_ledger_store::InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         TimeTravelIndex::new(engine.db())
     }

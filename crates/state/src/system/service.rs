@@ -9,10 +9,10 @@
 
 use std::sync::Arc;
 
-use ledger_db::StorageBackend;
+use inferadb_ledger_store::StorageBackend;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId, decode, encode};
+use inferadb_ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId, decode, encode};
 
 use crate::state::{StateError, StateLayer};
 
@@ -40,7 +40,7 @@ pub enum SystemError {
     #[snafu(display("Codec error: {source}"))]
     Codec {
         /// The underlying codec error.
-        source: ledger_types::CodecError,
+        source: inferadb_ledger_types::CodecError,
     },
 
     /// Requested entity was not found.
@@ -63,7 +63,7 @@ pub type Result<T> = std::result::Result<T, SystemError>;
 /// Service for reading from and writing to the `_system` namespace.
 ///
 /// All _system data is stored in namespace_id=0, vault_id=0.
-/// StateLayer is internally thread-safe via ledger-db's MVCC.
+/// StateLayer is internally thread-safe via inferadb-ledger-store's MVCC.
 pub struct SystemNamespaceService<B: StorageBackend> {
     state: Arc<StateLayer<B>>,
 }
@@ -82,7 +82,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     ///
     /// If the counter doesn't exist, initializes it to `start_value`.
     pub fn next_sequence(&self, key: &str, start_value: i64) -> Result<i64> {
-        // StateLayer is internally thread-safe via ledger-db MVCC
+        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         // Read current value
         let current = match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
             Ok(Some(entity)) => {
@@ -192,7 +192,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
 
         Ok(matches!(
             statuses.first(),
-            Some(ledger_types::WriteStatus::Deleted)
+            Some(inferadb_ledger_types::WriteStatus::Deleted)
         ))
     }
 
@@ -357,7 +357,7 @@ mod tests {
     use super::super::types::NodeRole;
     use super::*;
 
-    fn create_test_service() -> SystemNamespaceService<ledger_db::InMemoryBackend> {
+    fn create_test_service() -> SystemNamespaceService<inferadb_ledger_store::InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().unwrap();
         let state = Arc::new(StateLayer::new(engine.db()));
         SystemNamespaceService::new(state)

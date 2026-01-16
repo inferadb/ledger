@@ -1,5 +1,5 @@
 [package]
-name = "ledger-test-utils"
+name = "inferadb-ledger-test-utils"
 description = "Shared test utilities for InferaDB Ledger crates"
 version.workspace = true
 edition.workspace = true
@@ -19,7 +19,7 @@ tokio = { workspace = true, features = ["time", "sync"] }
 chrono.workspace = true
 
 # Configuration types (for test config helpers)
-ledger-types = { workspace = true }
+inferadb-ledger-types = { workspace = true }
 
 [dev-dependencies]
 # For testing the test utilities themselves

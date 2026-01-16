@@ -27,14 +27,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ledger_raft::LedgerTypeConfig;
-use ledger_raft::proto::JoinClusterRequest;
-use ledger_raft::proto::admin_service_client::AdminServiceClient;
-use ledger_sdk::{
+use inferadb_ledger_raft::LedgerTypeConfig;
+use inferadb_ledger_raft::proto::JoinClusterRequest;
+use inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient;
+use inferadb_ledger_sdk::{
     ClientConfig, FileSequenceStorage, LedgerClient, Operation, PersistentSequenceTracker,
     RetryPolicy,
 };
-use ledger_test_utils::TestDir;
+use inferadb_ledger_test_utils::TestDir;
 use openraft::Raft;
 use serial_test::serial;
 use tokio::time::timeout;
@@ -103,19 +103,19 @@ impl TestCluster {
         let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
         let temp_dir = TestDir::new();
 
-        let config = ledger_server::config::Config {
+        let config = inferadb_ledger_server::config::Config {
             node_id,
             listen_addr: addr,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
             peers: vec![],
-            batching: ledger_server::config::BatchConfig::default(),
-            rate_limit: ledger_server::config::RateLimitConfig::default(),
-            discovery: ledger_server::config::DiscoveryConfig::default(),
+            batching: inferadb_ledger_server::config::BatchConfig::default(),
+            rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
+            discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
             bootstrap: true,
         };
 
-        let bootstrapped = ledger_server::bootstrap::bootstrap_node(&config)
+        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
             .await
             .expect("bootstrap node");
 
@@ -162,24 +162,24 @@ impl TestCluster {
             let temp_dir = TestDir::new();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-            let peers = vec![ledger_server::config::PeerConfig {
+            let peers = vec![inferadb_ledger_server::config::PeerConfig {
                 node_id: 1,
                 addr: leader_addr.to_string(),
             }];
 
-            let config = ledger_server::config::Config {
+            let config = inferadb_ledger_server::config::Config {
                 node_id,
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: temp_dir.path().to_path_buf(),
                 peers,
-                batching: ledger_server::config::BatchConfig::default(),
-                rate_limit: ledger_server::config::RateLimitConfig::default(),
-                discovery: ledger_server::config::DiscoveryConfig::default(),
+                batching: inferadb_ledger_server::config::BatchConfig::default(),
+                rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
+                discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
                 bootstrap: false,
             };
 
-            let bootstrapped = ledger_server::bootstrap::bootstrap_node(&config)
+            let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
                 .await
                 .expect("bootstrap node");
 

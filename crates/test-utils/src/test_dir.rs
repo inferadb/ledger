@@ -15,7 +15,7 @@ use tempfile::TempDir;
 /// # Example
 ///
 /// ```
-/// use ledger_test_utils::TestDir;
+/// use inferadb_ledger_test_utils::TestDir;
 ///
 /// let dir = TestDir::new();
 /// let db_path = dir.join("test.db");

@@ -1,7 +1,7 @@
 //! Merkle proof utilities for converting between internal and proto formats.
 //!
 //! Provides helpers for:
-//! - Converting `ledger_types::merkle::MerkleProof` to proto `MerkleProof`
+//! - Converting `inferadb_ledger_types::merkle::MerkleProof` to proto `MerkleProof`
 //! - Generating transaction proofs from transaction lists
 //! - Fetching blocks and generating proofs with proper error handling
 
@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use snafu::{ResultExt, Snafu};
 
-use ledger_db::FileBackend;
-use ledger_state::BlockArchive;
-use ledger_types::hash::{Hash, tx_hash};
-use ledger_types::merkle::MerkleTree;
-use ledger_types::{NamespaceId, Transaction, VaultId};
+use inferadb_ledger_state::BlockArchive;
+use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_types::hash::{Hash, tx_hash};
+use inferadb_ledger_types::merkle::MerkleTree;
+use inferadb_ledger_types::{NamespaceId, Transaction, VaultId};
 
 use crate::proto;
 
@@ -46,7 +46,7 @@ pub enum ProofError {
     #[snafu(display("failed to find shard height: {source}"))]
     FindShardHeight {
         /// The underlying block archive error.
-        source: ledger_state::BlockArchiveError,
+        source: inferadb_ledger_state::BlockArchiveError,
     },
 
     /// Failed to read block from archive.
@@ -55,7 +55,7 @@ pub enum ProofError {
         /// The shard height that failed to read.
         shard_height: u64,
         /// The underlying block archive error.
-        source: ledger_state::BlockArchiveError,
+        source: inferadb_ledger_state::BlockArchiveError,
     },
 
     /// Vault entry not found in the block.
@@ -225,7 +225,7 @@ pub fn generate_tx_proof_by_id(
 // State Proof Generation
 // ============================================================================
 
-use ledger_types::{bucket_id, sha256_concat};
+use inferadb_ledger_types::{bucket_id, sha256_concat};
 
 /// Generate a state proof for an entity.
 ///
@@ -243,7 +243,7 @@ use ledger_types::{bucket_id, sha256_concat};
 ///
 /// A StateProof containing the entity data and all bucket roots needed for verification.
 pub fn generate_state_proof(
-    entity: &ledger_types::Entity,
+    entity: &inferadb_ledger_types::Entity,
     bucket_roots: &[Hash; 256],
     block_height: u64,
 ) -> proto::StateProof {
@@ -479,7 +479,7 @@ mod tests {
     // ========================================================================
 
     use super::{StateProofVerification, generate_state_proof, verify_state_proof};
-    use ledger_types::{EMPTY_HASH, Entity, bucket_id, sha256_concat};
+    use inferadb_ledger_types::{EMPTY_HASH, Entity, bucket_id, sha256_concat};
 
     fn make_entity(key: &[u8], value: &[u8]) -> Entity {
         Entity {

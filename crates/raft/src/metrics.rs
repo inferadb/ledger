@@ -31,16 +31,16 @@ const READS_LATENCY: &str = "ledger_read_latency_seconds";
 const VERIFIED_READS_TOTAL: &str = "ledger_verified_reads_total";
 
 // Raft consensus metrics
-const RAFT_PROPOSALS_TOTAL: &str = "ledger_raft_proposals_total";
-const RAFT_PROPOSALS_PENDING: &str = "ledger_raft_proposals_pending";
-const RAFT_APPLY_LATENCY: &str = "ledger_raft_apply_latency_seconds";
-const RAFT_COMMIT_INDEX: &str = "ledger_raft_commit_index";
-const RAFT_TERM: &str = "ledger_raft_term";
-const RAFT_LEADER: &str = "ledger_raft_is_leader";
+const RAFT_PROPOSALS_TOTAL: &str = "inferadb_ledger_raft_proposals_total";
+const RAFT_PROPOSALS_PENDING: &str = "inferadb_ledger_raft_proposals_pending";
+const RAFT_APPLY_LATENCY: &str = "inferadb_ledger_raft_apply_latency_seconds";
+const RAFT_COMMIT_INDEX: &str = "inferadb_ledger_raft_commit_index";
+const RAFT_TERM: &str = "inferadb_ledger_raft_term";
+const RAFT_LEADER: &str = "inferadb_ledger_raft_is_leader";
 
 // State machine metrics
-const STATE_ROOT_COMPUTATIONS: &str = "ledger_state_root_computations_total";
-const STATE_ROOT_LATENCY: &str = "ledger_state_root_latency_seconds";
+const STATE_ROOT_COMPUTATIONS: &str = "inferadb_ledger_state_root_computations_total";
+const STATE_ROOT_LATENCY: &str = "inferadb_ledger_state_root_latency_seconds";
 const DIRTY_BUCKETS: &str = "ledger_dirty_buckets";
 
 // Storage metrics

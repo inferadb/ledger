@@ -35,7 +35,7 @@ use crate::proto::{
 };
 use crate::shard_router::ShardConnection;
 
-use ledger_types::ShardId;
+use inferadb_ledger_types::ShardId;
 
 /// Default timeout for forwarded requests.
 const DEFAULT_FORWARD_TIMEOUT: Duration = Duration::from_secs(30);

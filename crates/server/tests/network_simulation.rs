@@ -23,8 +23,8 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use turmoil::Builder;
 
-use ledger_raft::proto::raft_service_server::{RaftService, RaftServiceServer};
-use ledger_raft::proto::{
+use inferadb_ledger_raft::proto::raft_service_server::{RaftService, RaftServiceServer};
+use inferadb_ledger_raft::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
     RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse,
 };
@@ -105,11 +105,11 @@ async fn start_minimal_server(node_id: u64, counter: Arc<RpcCounter>) {
 async fn create_raft_client(
     host: &str,
 ) -> Result<
-    ledger_raft::proto::raft_service_client::RaftServiceClient<tonic::transport::Channel>,
+    inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient<tonic::transport::Channel>,
     tonic::transport::Error,
 > {
     let channel = turmoil_common::create_turmoil_channel(host, 9999).await?;
-    Ok(ledger_raft::proto::raft_service_client::RaftServiceClient::new(channel))
+    Ok(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new(channel))
 }
 
 /// Test that network partitions block communication between nodes.

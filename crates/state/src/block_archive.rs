@@ -24,11 +24,11 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ledger_db::{Database, StorageBackend, tables};
+use inferadb_ledger_store::{Database, StorageBackend, tables};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
-use ledger_types::{NamespaceId, ShardBlock, VaultId, decode, encode};
+use inferadb_ledger_types::{NamespaceId, ShardBlock, VaultId, decode, encode};
 
 /// Key for compaction watermark in COMPACTION_META table.
 const COMPACTION_WATERMARK_KEY: &str = "compacted_before";
@@ -57,14 +57,14 @@ pub enum BlockArchiveError {
     #[snafu(display("Codec error: {source}"))]
     Codec {
         /// The underlying codec error.
-        source: ledger_types::CodecError,
+        source: inferadb_ledger_types::CodecError,
     },
 
-    /// Storage engine error from ledger-db.
+    /// Storage engine error from inferadb-ledger-store.
     #[snafu(display("Storage error: {source}"))]
     Inkwell {
         /// The underlying storage error.
-        source: ledger_db::Error,
+        source: inferadb_ledger_store::Error,
     },
 }
 
@@ -109,7 +109,7 @@ struct SegmentWriter {
 
 /// Block archive for a shard.
 ///
-/// Uses ledger-db for the primary block storage (tables::Blocks) and maintains
+/// Uses inferadb-ledger-store for the primary block storage (tables::Blocks) and maintains
 /// a vault_block_index for looking up shard heights by vault/namespace/height.
 #[allow(clippy::result_large_err)]
 pub struct BlockArchive<B: StorageBackend> {
@@ -126,7 +126,7 @@ pub struct BlockArchive<B: StorageBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> BlockArchive<B> {
-    /// Create a new block archive backed by ledger-db.
+    /// Create a new block archive backed by inferadb-ledger-store.
     pub fn new(db: Arc<Database<B>>) -> Self {
         Self {
             db,
@@ -138,7 +138,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Create a block archive with file-based segment storage.
     ///
-    /// Use this for large deployments where blocks exceed ledger-db's practical limits.
+    /// Use this for large deployments where blocks exceed inferadb-ledger-store's practical limits.
     pub fn with_segment_files(db: Arc<Database<B>>, blocks_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&blocks_dir).context(IoSnafu)?;
         Ok(Self {
@@ -508,7 +508,7 @@ mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
     use chrono::Utc;
-    use ledger_types::VaultEntry;
+    use inferadb_ledger_types::VaultEntry;
 
     fn create_test_block(shard_height: u64) -> ShardBlock {
         ShardBlock {
@@ -651,7 +651,7 @@ mod tests {
     // =========================================================================
 
     fn create_block_with_transactions(shard_height: u64, tx_count: usize) -> ShardBlock {
-        use ledger_types::{Operation, Transaction};
+        use inferadb_ledger_types::{Operation, Transaction};
 
         let transactions: Vec<Transaction> = (0..tx_count)
             .map(|i| Transaction {

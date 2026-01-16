@@ -82,7 +82,7 @@ org namespace (per-organization)
 - [Durability & Finality Model](#durability--finality-model)
 - [Persistent Storage Architecture](#persistent-storage-architecture)
   - [Directory Layout](#directory-layout)
-  - [Storage Backend: ledger-db](#storage-backend-ledger-db)
+  - [Storage Backend: inferadb-ledger-store](#storage-backend-inferadb-ledger-store)
   - [Block Archive Format](#block-archive-format)
   - [Snapshot Format](#snapshot-format)
   - [Crash Recovery](#crash-recovery)
@@ -459,7 +459,7 @@ graph TD
 
 **What's NOT merkleized per-write:**
 
-- Individual index entries (stored in ledger-db for O(1) lookup)
+- Individual index entries (stored in inferadb-ledger-store for O(1) lookup)
 - Dual indexes for relationship traversal
 
 **Verification approach:**
@@ -470,7 +470,7 @@ graph TD
 
 ```rust
 struct StateLayer {
-    // Fast K/V storage for queries (ledger-db)
+    // Fast K/V storage for queries (inferadb-ledger-store)
     kv: Database,
 
     // Indexes for relationship traversal
@@ -615,7 +615,7 @@ fn decode_storage_key(storage_key: &[u8]) -> (VaultId, u8, &[u8]) {
 
 #### Per-Vault Bucket Structure
 
-Each vault maintains independent bucket tracking. Vaults in the same shard share an ledger-db database but compute separate `state_root` values.
+Each vault maintains independent bucket tracking. Vaults in the same shard share an inferadb-ledger-store database but compute separate `state_root` values.
 
 ```rust
 struct ShardState {
@@ -720,7 +720,7 @@ impl ShardState {
 State root computation must be identical on all nodes:
 
 1. **Hash function**: seahash for bucket assignment, SHA-256 for roots
-2. **Iteration order**: ledger-db guarantees lexicographic key order within range
+2. **Iteration order**: inferadb-ledger-store guarantees lexicographic key order within range
 3. **Key-value encoding**: Length-prefixed (prevents ambiguous concatenation)
 4. **Empty bucket**: Hash of empty input → `SHA-256("")`
 
@@ -1655,7 +1655,7 @@ Scaling dimensions:
 
 | Metric             | Target          | Measurement                    | Rationale                         |
 | ------------------ | --------------- | ------------------------------ | --------------------------------- |
-| Read (p50)         | <0.5ms          | Single key, no proof, follower | ledger-db lookup + gRPC             |
+| Read (p50)         | <0.5ms          | Single key, no proof, follower | inferadb-ledger-store lookup + gRPC             |
 | Read (p99)         | <2ms            | Single key, no proof, follower | Tail latency from GC/compaction   |
 | Read + proof (p99) | <10ms           | With merkle proof generation   | Bucket-based O(k) proof           |
 | Write (p50)        | <10ms           | Single tx, quorum commit       | Raft RTT + fsync                  |
@@ -1665,7 +1665,7 @@ Scaling dimensions:
 
 **Why these targets are achievable:**
 
-- **Read p99 <2ms**: Follower reads bypass Raft consensus. ledger-db B+ tree lookup is O(log n). etcd achieves ~2ms p99 for serializable reads.
+- **Read p99 <2ms**: Follower reads bypass Raft consensus. inferadb-ledger-store B+ tree lookup is O(log n). etcd achieves ~2ms p99 for serializable reads.
 - **Write p99 <50ms**: Aggressive for blockchain but achievable because:
   - Bucket-based state root: O(k) where k = dirty keys, not O(n) full tree
   - Single Raft RTT: ~1-2ms same datacenter
@@ -2679,9 +2679,9 @@ Each node uses a single data directory with subdirectories per concern:
 | Block segments                | Append-only writes; easy archival of old segments          |
 | Snapshots by height           | Predictable naming; simple retention policy                |
 
-### Storage Backend: ledger-db
+### Storage Backend: inferadb-ledger-store
 
-ledger-db is our custom B+ tree storage engine providing ACID transactions with MVCC. Each shard uses two ledger-db databases:
+inferadb-ledger-store is our custom B+ tree storage engine providing ACID transactions with MVCC. Each shard uses two inferadb-ledger-store databases:
 
 **raft/log.db** — Raft log storage:
 
@@ -2795,7 +2795,7 @@ fn make_key(vault_id: VaultId, key: &[u8]) -> Vec<u8> {
 }
 ```
 
-**Per-shard isolation**: All vaults in a shard share a single ledger-db database. Keys are prefixed with `vault_id` for isolation. This reduces file handle count and enables cross-vault operations within a shard if needed.
+**Per-shard isolation**: All vaults in a shard share a single inferadb-ledger-store database. Keys are prefixed with `vault_id` for isolation. This reduces file handle count and enables cross-vault operations within a shard if needed.
 
 ### Block Archive Format
 
@@ -3001,7 +3001,7 @@ impl Node {
 | Failure Mode         | Recovery Action                               |
 | -------------------- | --------------------------------------------- |
 | Clean shutdown       | Replay from last snapshot + committed log     |
-| Crash during write   | Incomplete ledger-db txn rolled back automatically |
+| Crash during write   | Incomplete inferadb-ledger-store txn rolled back automatically |
 | Corrupted snapshot   | Skip to older snapshot, replay more log       |
 | Corrupted log entry  | Fetch from peer, or rebuild from snapshot     |
 | Missing segment file | Fetch from peer (block archive is replicated) |

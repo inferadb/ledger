@@ -18,7 +18,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use ledger_types::{NamespaceId, UserId};
+use inferadb_ledger_types::{NamespaceId, UserId};
 
 /// Unique identifier for a saga.
 pub type SagaId = String;

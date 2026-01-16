@@ -6,7 +6,7 @@
 //! - Latency (single operation timing)
 //! - Batch amortization (1 vs 10 vs 100 keys)
 //!
-//! Run with: `cargo bench -p ledger-sdk`
+//! Run with: `cargo bench -p inferadb-ledger-sdk`
 //!
 //! # Baseline Numbers (M3 MacBook Pro)
 //!
@@ -25,7 +25,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use ledger_sdk::{
+use inferadb_ledger_sdk::{
     ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker, mock::MockLedgerServer,
 };
 use std::time::Duration;

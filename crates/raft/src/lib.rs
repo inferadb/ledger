@@ -1,7 +1,7 @@
 //! Raft consensus and gRPC services for InferaDB Ledger.
 //!
 //! This crate provides:
-//! - OpenRaft integration with ledger-db log storage
+//! - OpenRaft integration with inferadb-ledger-store log storage
 //! - Combined RaftStorage implementation (log + state machine)
 //! - gRPC services (Read, Write, Admin, Health, Discovery)
 //! - Inter-node Raft network transport

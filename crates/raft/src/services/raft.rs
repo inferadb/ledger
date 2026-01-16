@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ledger_types::decode;
+use inferadb_ledger_types::decode;
 use openraft::raft::AppendEntriesRequest;
 use openraft::{Raft, Vote};
 use tonic::{Request, Response, Status};

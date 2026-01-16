@@ -28,9 +28,9 @@ use crate::proto::{
 use crate::rate_limit::NamespaceRateLimiter;
 use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
-use ledger_db::FileBackend;
-use ledger_state::BlockArchive;
-use ledger_types::SetCondition;
+use inferadb_ledger_state::BlockArchive;
+use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_types::SetCondition;
 
 /// Write service implementation.
 pub struct WriteServiceImpl {
@@ -283,23 +283,25 @@ impl WriteServiceImpl {
     /// Convert a proto SetCondition to internal SetCondition.
     fn convert_set_condition(
         proto_condition: &crate::proto::SetCondition,
-    ) -> Option<ledger_types::SetCondition> {
+    ) -> Option<inferadb_ledger_types::SetCondition> {
         use crate::proto::set_condition::Condition;
 
         proto_condition.condition.as_ref().map(|c| match c {
-            Condition::NotExists(true) => ledger_types::SetCondition::MustNotExist,
-            Condition::NotExists(false) => ledger_types::SetCondition::MustExist,
-            Condition::MustExists(true) => ledger_types::SetCondition::MustExist,
-            Condition::MustExists(false) => ledger_types::SetCondition::MustNotExist,
-            Condition::Version(v) => ledger_types::SetCondition::VersionEquals(*v),
-            Condition::ValueEquals(v) => ledger_types::SetCondition::ValueEquals(v.clone()),
+            Condition::NotExists(true) => inferadb_ledger_types::SetCondition::MustNotExist,
+            Condition::NotExists(false) => inferadb_ledger_types::SetCondition::MustExist,
+            Condition::MustExists(true) => inferadb_ledger_types::SetCondition::MustExist,
+            Condition::MustExists(false) => inferadb_ledger_types::SetCondition::MustNotExist,
+            Condition::Version(v) => inferadb_ledger_types::SetCondition::VersionEquals(*v),
+            Condition::ValueEquals(v) => {
+                inferadb_ledger_types::SetCondition::ValueEquals(v.clone())
+            }
         })
     }
 
     /// Convert a proto Operation to internal Operation.
     fn convert_operation(
         proto_op: &crate::proto::Operation,
-    ) -> Result<ledger_types::Operation, Status> {
+    ) -> Result<inferadb_ledger_types::Operation, Status> {
         use crate::proto::operation::Op;
 
         let op = proto_op
@@ -308,30 +310,34 @@ impl WriteServiceImpl {
             .ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
 
         match op {
-            Op::CreateRelationship(cr) => Ok(ledger_types::Operation::CreateRelationship {
-                resource: cr.resource.clone(),
-                relation: cr.relation.clone(),
-                subject: cr.subject.clone(),
-            }),
-            Op::DeleteRelationship(dr) => Ok(ledger_types::Operation::DeleteRelationship {
-                resource: dr.resource.clone(),
-                relation: dr.relation.clone(),
-                subject: dr.subject.clone(),
-            }),
+            Op::CreateRelationship(cr) => {
+                Ok(inferadb_ledger_types::Operation::CreateRelationship {
+                    resource: cr.resource.clone(),
+                    relation: cr.relation.clone(),
+                    subject: cr.subject.clone(),
+                })
+            }
+            Op::DeleteRelationship(dr) => {
+                Ok(inferadb_ledger_types::Operation::DeleteRelationship {
+                    resource: dr.resource.clone(),
+                    relation: dr.relation.clone(),
+                    subject: dr.subject.clone(),
+                })
+            }
             Op::SetEntity(se) => {
                 let condition = se.condition.as_ref().and_then(Self::convert_set_condition);
 
-                Ok(ledger_types::Operation::SetEntity {
+                Ok(inferadb_ledger_types::Operation::SetEntity {
                     key: se.key.clone(),
                     value: se.value.clone(),
                     condition,
                     expires_at: se.expires_at,
                 })
             }
-            Op::DeleteEntity(de) => Ok(ledger_types::Operation::DeleteEntity {
+            Op::DeleteEntity(de) => Ok(inferadb_ledger_types::Operation::DeleteEntity {
                 key: de.key.clone(),
             }),
-            Op::ExpireEntity(ee) => Ok(ledger_types::Operation::ExpireEntity {
+            Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
                 key: ee.key.clone(),
                 expired_at: ee.expired_at,
             }),
@@ -387,7 +393,7 @@ impl WriteServiceImpl {
         // Convert proto operations to internal Operations
         // Time the proto → internal type conversion
         let convert_start = std::time::Instant::now();
-        let internal_ops: Vec<ledger_types::Operation> = operations
+        let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
             .iter()
             .map(Self::convert_operation)
             .collect::<Result<Vec<_>, Status>>()?;
@@ -399,7 +405,7 @@ impl WriteServiceImpl {
         }
 
         // Create a single transaction with all operations
-        let transaction = ledger_types::Transaction {
+        let transaction = inferadb_ledger_types::Transaction {
             id: *Uuid::new_v4().as_bytes(),
             client_id: client_id.to_string(),
             sequence,

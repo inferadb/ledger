@@ -24,13 +24,13 @@ use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use ledger_db::StorageBackend;
-use ledger_state::StateLayer;
-use ledger_state::system::{
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_state::system::{
     CreateOrgSaga, CreateOrgSagaState, DeleteUserSaga, DeleteUserSagaState, SAGA_POLL_INTERVAL,
     Saga,
 };
-use ledger_types::{Operation, Transaction};
+use inferadb_ledger_store::StorageBackend;
+use inferadb_ledger_types::{Operation, Transaction};
 
 use crate::error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu};
 use crate::log_storage::AppliedStateAccessor;
@@ -54,7 +54,7 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// The shared state layer (internally thread-safe via ledger-db MVCC).
+    /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
     /// Accessor for applied state.
     /// Reserved for future saga state queries.
@@ -96,7 +96,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
     /// Load all pending sagas from _system namespace.
     fn load_pending_sagas(&self) -> Vec<Saga> {
-        // StateLayer is internally thread-safe via ledger-db MVCC
+        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
         // List all entities with saga: prefix in _system (vault_id=0)
         let entities = match self
@@ -636,7 +636,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 )]
 mod tests {
     use super::*;
-    use ledger_state::system::{CreateOrgInput, DeleteUserInput};
+    use inferadb_ledger_state::system::{CreateOrgInput, DeleteUserInput};
 
     #[test]
     fn test_saga_key_format() {

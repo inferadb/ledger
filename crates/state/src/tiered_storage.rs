@@ -832,7 +832,7 @@ mod tests {
     use super::*;
     use crate::bucket::NUM_BUCKETS;
     use crate::snapshot::{SnapshotChainParams, SnapshotStateData, VaultSnapshotMeta};
-    use ledger_types::EMPTY_HASH;
+    use inferadb_ledger_types::EMPTY_HASH;
     use std::collections::HashMap as StdHashMap;
     use tempfile::TempDir;
 

@@ -16,9 +16,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
-use ledger_db::{Database, FileBackend};
-use ledger_state::StateLayer;
-use ledger_types::Operation;
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::{Database, FileBackend};
+use inferadb_ledger_types::Operation;
 
 /// Create a test state layer pre-populated with data.
 fn create_populated_state_layer(

@@ -38,7 +38,7 @@ async fn create_namespace(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(ledger_raft::proto::CreateNamespaceRequest {
+        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: name.to_string(),
             shard_id: None,
         })
@@ -60,8 +60,8 @@ async fn create_vault(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_vault(ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
+        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
+            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,  // Default, ignored for single-shard setup
             initial_nodes: vec![],  // Auto-assigned
             retention_policy: None, // Default: FULL
@@ -89,16 +89,16 @@ async fn write_entity(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
-    let request = ledger_raft::proto::WriteRequest {
-        namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(ledger_raft::proto::VaultId { id: vault_id }),
-        client_id: Some(ledger_raft::proto::ClientId {
+    let request = inferadb_ledger_raft::proto::WriteRequest {
+        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId {
             id: client_id.to_string(),
         }),
         sequence,
-        operations: vec![ledger_raft::proto::Operation {
-            op: Some(ledger_raft::proto::operation::Op::SetEntity(
-                ledger_raft::proto::SetEntity {
+        operations: vec![inferadb_ledger_raft::proto::Operation {
+            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
+                inferadb_ledger_raft::proto::SetEntity {
                     key: key.to_string(),
                     value: value.to_vec(),
                     condition: None,
@@ -112,8 +112,8 @@ async fn write_entity(
     let response = client.write(request).await?.into_inner();
 
     match response.result {
-        Some(ledger_raft::proto::write_response::Result::Success(s)) => Ok(s.block_height),
-        Some(ledger_raft::proto::write_response::Result::Error(e)) => {
+        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => Ok(s.block_height),
+        Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
             Err(format!("Write error: {:?}", e).into())
         }
         None => Err("No result in write response".into()),
@@ -129,9 +129,9 @@ async fn read_entity(
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
-    let request = ledger_raft::proto::ReadRequest {
-        namespace_id: Some(ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(ledger_raft::proto::VaultId { id: vault_id }),
+    let request = inferadb_ledger_raft::proto::ReadRequest {
+        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -792,16 +792,16 @@ async fn test_deletion_isolation() {
     // Delete from vault A
     let mut client = create_write_client(leader.addr).await.expect("client");
     client
-        .write(ledger_raft::proto::WriteRequest {
-            namespace_id: Some(ledger_raft::proto::NamespaceId { id: ns_id }),
-            vault_id: Some(ledger_raft::proto::VaultId { id: vault_a }),
-            client_id: Some(ledger_raft::proto::ClientId {
+        .write(inferadb_ledger_raft::proto::WriteRequest {
+            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: ns_id }),
+            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_a }),
+            client_id: Some(inferadb_ledger_raft::proto::ClientId {
                 id: "client-a".to_string(),
             }),
             sequence: 2,
-            operations: vec![ledger_raft::proto::Operation {
-                op: Some(ledger_raft::proto::operation::Op::DeleteEntity(
-                    ledger_raft::proto::DeleteEntity {
+            operations: vec![inferadb_ledger_raft::proto::Operation {
+                op: Some(inferadb_ledger_raft::proto::operation::Op::DeleteEntity(
+                    inferadb_ledger_raft::proto::DeleteEntity {
                         key: "to-delete".to_string(),
                     },
                 )),

@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     "crates/types",
+    "crates/store",
     "crates/state",
     "crates/raft",
     "crates/server",
-    "crates/db",
     "crates/sdk",
     "crates/test-utils",
 ]
@@ -107,15 +107,15 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 async-stream = "0.3"
 
 # Internal crates
-ledger-types = { path = "crates/types" }
-ledger-state = { path = "crates/state" }
-ledger-raft = { path = "crates/raft" }
-ledger-db = { path = "crates/db" }
-ledger-test-utils = { path = "crates/test-utils" }
-ledger-sdk = { path = "crates/sdk" }
-ledger-server = { path = "crates/server" }
+inferadb-ledger-types = { path = "crates/types" }
+inferadb-ledger-store = { path = "crates/store" }
+inferadb-ledger-state = { path = "crates/state" }
+inferadb-ledger-raft = { path = "crates/raft" }
+inferadb-ledger-server = { path = "crates/server" }
+inferadb-ledger-sdk = { path = "crates/sdk" }
+inferadb-ledger-test-utils = { path = "crates/test-utils" }
 
-# Hashing (for ledger-db)
+# Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
 byteorder = "1.5"
 memmap2 = "0.9"

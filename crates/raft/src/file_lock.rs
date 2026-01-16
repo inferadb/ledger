@@ -195,7 +195,7 @@ impl Drop for DataDirLock {
 )]
 mod tests {
     use super::*;
-    use ledger_test_utils::TestDir;
+    use inferadb_ledger_test_utils::TestDir;
 
     #[test]
     fn test_acquire_lock_creates_directory() {

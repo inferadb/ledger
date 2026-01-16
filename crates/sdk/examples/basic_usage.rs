@@ -12,7 +12,7 @@
 // Examples are allowed to use expect/unwrap for brevity
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 
-use ledger_sdk::{ClientConfig, LedgerClient, Operation, Result};
+use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {

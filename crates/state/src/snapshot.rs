@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use snafu::{ResultExt, Snafu};
 use zstd::stream::{Decoder, Encoder};
 
-use ledger_types::{ChainCommitment, Entity, Hash, ShardId, VaultId, decode, encode};
+use inferadb_ledger_types::{ChainCommitment, Entity, Hash, ShardId, VaultId, decode, encode};
 
 use crate::bucket::NUM_BUCKETS;
 
@@ -41,7 +41,9 @@ pub enum SnapshotError {
     ChecksumMismatch { expected: Hash, actual: Hash },
 
     #[snafu(display("Codec error: {source}"))]
-    Codec { source: ledger_types::CodecError },
+    Codec {
+        source: inferadb_ledger_types::CodecError,
+    },
 
     #[snafu(display("Snapshot not found: {path}"))]
     NotFound { path: String },
@@ -165,7 +167,7 @@ pub struct SnapshotChainParams {
 impl Default for SnapshotChainParams {
     fn default() -> Self {
         Self {
-            genesis_hash: ledger_types::ZERO_HASH,
+            genesis_hash: inferadb_ledger_types::ZERO_HASH,
             previous_snapshot_height: None,
             previous_snapshot_hash: None,
             chain_commitment: ChainCommitment::default(),
@@ -187,7 +189,7 @@ impl Snapshot {
     ) -> Result<Self> {
         // Compute checksum of state data
         let state_bytes = encode(&state).context(CodecSnafu)?;
-        let checksum = ledger_types::sha256(&state_bytes);
+        let checksum = inferadb_ledger_types::sha256(&state_bytes);
 
         let header = SnapshotHeader {
             magic: SNAPSHOT_MAGIC,
@@ -316,7 +318,7 @@ impl Snapshot {
         decoder.read_to_end(&mut state_bytes).context(IoSnafu)?;
 
         // Verify checksum
-        let computed_checksum = ledger_types::sha256(&state_bytes);
+        let computed_checksum = inferadb_ledger_types::sha256(&state_bytes);
         if computed_checksum != header.checksum {
             return Err(SnapshotError::ChecksumMismatch {
                 expected: header.checksum,
@@ -457,7 +459,7 @@ impl SnapshotManager {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use ledger_types::EMPTY_HASH;
+    use inferadb_ledger_types::EMPTY_HASH;
     use tempfile::TempDir;
 
     fn create_test_snapshot() -> Snapshot {

@@ -178,7 +178,7 @@ impl ClientConfigBuilder {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use ledger_sdk::{ClientConfig, TlsConfig};
+    /// use inferadb_ledger_sdk::{ClientConfig, TlsConfig};
     ///
     /// let config = ClientConfig::builder()
     ///     .with_endpoint("https://secure.example.com:443")
@@ -419,7 +419,7 @@ const DEFAULT_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 ///
 /// ```
 /// use std::time::Duration;
-/// use ledger_sdk::DiscoveryConfig;
+/// use inferadb_ledger_sdk::DiscoveryConfig;
 ///
 /// let config = DiscoveryConfig::enabled()
 ///     .with_refresh_interval(Duration::from_secs(30));
@@ -441,7 +441,7 @@ pub struct DiscoveryConfig {
 /// # Example
 ///
 /// ```rust,ignore
-/// use ledger_sdk::TlsConfig;
+/// use inferadb_ledger_sdk::TlsConfig;
 ///
 /// // Simple TLS with CA certificate only (server verification)
 /// let tls = TlsConfig::new()

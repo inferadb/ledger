@@ -12,8 +12,8 @@ use crate::proto::health_service_server::HealthService;
 use crate::proto::{HealthCheckRequest, HealthCheckResponse, HealthStatus};
 use crate::types::LedgerTypeConfig;
 
-use ledger_db::FileBackend;
-use ledger_state::StateLayer;
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::FileBackend;
 
 /// Health service implementation.
 pub struct HealthServiceImpl {

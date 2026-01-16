@@ -13,8 +13,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use ledger_sdk::mock::MockLedgerServer;
-//! use ledger_sdk::{LedgerClient, ClientConfig};
+//! use inferadb_ledger_sdk::mock::MockLedgerServer;
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
 //!
 //! #[tokio::test]
 //! async fn test_read() {
@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use ledger_raft::proto::{
+use inferadb_ledger_raft::proto::{
     self,
     admin_service_server::{AdminService, AdminServiceServer},
     health_service_server::{HealthService, HealthServiceServer},
