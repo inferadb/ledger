@@ -69,14 +69,24 @@ pub enum SdkError {
     },
 
     /// Sequence gap detected - requires recovery.
-    #[snafu(display(
-        "Sequence gap: server has {server_has}, client expected to send {expected}"
-    ))]
+    #[snafu(display("Sequence gap: server has {server_has}, client expected to send {expected}"))]
     SequenceGap {
         /// Sequence number server expected.
         expected: u64,
         /// Last committed sequence on server.
         server_has: u64,
+    },
+
+    /// Write was already committed (idempotent retry detected).
+    ///
+    /// This is not an error - the original write succeeded. The SDK returns
+    /// success with the original transaction details when this is detected.
+    #[snafu(display("Already committed: tx_id={tx_id} at block_height={block_height}"))]
+    AlreadyCommitted {
+        /// Transaction ID from the original commit.
+        tx_id: String,
+        /// Block height where the transaction was committed.
+        block_height: u64,
     },
 
     /// Streaming connection lost.
@@ -105,6 +115,24 @@ pub enum SdkError {
         /// Parse error description.
         message: String,
     },
+
+    /// Service is unavailable.
+    ///
+    /// Returned when a health check indicates the service is not available.
+    #[snafu(display("Service unavailable: {message}"))]
+    Unavailable {
+        /// Unavailable reason.
+        message: String,
+    },
+
+    /// Proof verification failed.
+    ///
+    /// Returned when a Merkle proof or chain proof fails verification.
+    #[snafu(display("Proof verification failed: {reason}"))]
+    ProofVerification {
+        /// Reason for verification failure.
+        reason: &'static str,
+    },
 }
 
 impl SdkError {
@@ -122,6 +150,7 @@ impl SdkError {
     /// - `PERMISSION_DENIED`: Authentication/authorization failure
     /// - `UNAUTHENTICATED`: Missing credentials
     /// - `SequenceGap`: Requires recovery flow, not automatic retry
+    /// - `AlreadyCommitted`: Operation already succeeded
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -139,10 +168,13 @@ impl SdkError {
             // Non-retryable
             Self::Config { .. } => false,
             Self::SequenceGap { .. } => false,
+            Self::AlreadyCommitted { .. } => false,
             Self::Idempotency { .. } => false,
             Self::RetryExhausted { .. } => false,
             Self::Shutdown => false,
             Self::InvalidUrl { .. } => false,
+            Self::Unavailable { .. } => true, // May become available
+            Self::ProofVerification { .. } => false, // Data integrity error
         }
     }
 
@@ -175,6 +207,12 @@ impl From<tonic::Status> for SdkError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 mod tests {
     use super::*;
 
@@ -271,7 +309,13 @@ mod tests {
     fn test_from_tonic_status() {
         let status = tonic::Status::unavailable("server down");
         let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Unavailable, .. }));
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Unavailable,
+                ..
+            }
+        ));
         assert!(err.is_retryable());
     }
 
@@ -285,5 +329,287 @@ mod tests {
 
         let err2 = SdkError::Timeout { duration_ms: 1000 };
         assert_eq!(err2.code(), None);
+    }
+
+    #[test]
+    fn test_already_committed_not_retryable() {
+        let err = SdkError::AlreadyCommitted {
+            tx_id: "tx-123".to_owned(),
+            block_height: 42,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_already_committed_display() {
+        let err = SdkError::AlreadyCommitted {
+            tx_id: "tx-abc".to_owned(),
+            block_height: 100,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("tx-abc"));
+        assert!(msg.contains("100"));
+    }
+
+    // Tests for From<tonic::Status> covering all gRPC status codes
+    #[test]
+    fn test_from_tonic_status_ok() {
+        let status = tonic::Status::ok("success");
+        let err: SdkError = status.into();
+        assert!(matches!(err, SdkError::Rpc { code: Code::Ok, .. }));
+    }
+
+    #[test]
+    fn test_from_tonic_status_cancelled() {
+        let status = tonic::Status::cancelled("operation cancelled");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Cancelled,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_unknown() {
+        let status = tonic::Status::unknown("unknown error");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Unknown,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_invalid_argument() {
+        let status = tonic::Status::invalid_argument("bad input");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::InvalidArgument,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_deadline_exceeded() {
+        let status = tonic::Status::deadline_exceeded("timed out");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::DeadlineExceeded,
+                ..
+            }
+        ));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_not_found() {
+        let status = tonic::Status::not_found("resource missing");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::NotFound,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_already_exists() {
+        let status = tonic::Status::already_exists("duplicate");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::AlreadyExists,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_permission_denied() {
+        let status = tonic::Status::permission_denied("forbidden");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::PermissionDenied,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_resource_exhausted() {
+        let status = tonic::Status::resource_exhausted("quota exceeded");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::ResourceExhausted,
+                ..
+            }
+        ));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_failed_precondition() {
+        let status = tonic::Status::failed_precondition("precondition failed");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::FailedPrecondition,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_aborted() {
+        let status = tonic::Status::aborted("transaction aborted");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Aborted,
+                ..
+            }
+        ));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_out_of_range() {
+        let status = tonic::Status::out_of_range("value out of range");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::OutOfRange,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_unimplemented() {
+        let status = tonic::Status::unimplemented("not implemented");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Unimplemented,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_internal() {
+        let status = tonic::Status::internal("server error");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Internal,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_unavailable() {
+        let status = tonic::Status::unavailable("service down");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Unavailable,
+                ..
+            }
+        ));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_data_loss() {
+        let status = tonic::Status::data_loss("data corrupted");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::DataLoss,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_unauthenticated() {
+        let status = tonic::Status::unauthenticated("no credentials");
+        let err: SdkError = status.into();
+        assert!(matches!(
+            err,
+            SdkError::Rpc {
+                code: Code::Unauthenticated,
+                ..
+            }
+        ));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_from_tonic_status_preserves_message() {
+        let status = tonic::Status::internal("detailed error message");
+        let err: SdkError = status.into();
+        match err {
+            SdkError::Rpc { message, .. } => {
+                assert_eq!(message, "detailed error message");
+            }
+            _ => panic!("Expected Rpc variant"),
+        }
+    }
+
+    #[test]
+    fn test_unavailable_error_is_retryable() {
+        let err = SdkError::Unavailable {
+            message: "service down".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_unavailable_error_display() {
+        let err = SdkError::Unavailable {
+            message: "service down".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Service unavailable"));
+        assert!(display.contains("service down"));
     }
 }

@@ -369,7 +369,86 @@ fn validate_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Default peer discovery refresh interval (60 seconds).
+const DEFAULT_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Configuration for peer discovery.
+///
+/// When enabled, the SDK periodically queries the cluster for peer information
+/// and updates its endpoint list for failover and load distribution.
+///
+/// # Example
+///
+/// ```
+/// use std::time::Duration;
+/// use ledger_sdk::DiscoveryConfig;
+///
+/// let config = DiscoveryConfig::enabled()
+///     .with_refresh_interval(Duration::from_secs(30));
+/// ```
+#[derive(Debug, Clone)]
+pub struct DiscoveryConfig {
+    /// Whether discovery is enabled.
+    enabled: bool,
+
+    /// How often to refresh peer information.
+    refresh_interval: Duration,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            refresh_interval: DEFAULT_DISCOVERY_REFRESH_INTERVAL,
+        }
+    }
+}
+
+impl DiscoveryConfig {
+    /// Creates a disabled discovery configuration.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Creates an enabled discovery configuration with default settings.
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            refresh_interval: DEFAULT_DISCOVERY_REFRESH_INTERVAL,
+        }
+    }
+
+    /// Sets the refresh interval for peer discovery.
+    ///
+    /// Default: 60 seconds.
+    #[must_use]
+    pub fn with_refresh_interval(mut self, interval: Duration) -> Self {
+        self.refresh_interval = interval;
+        self
+    }
+
+    /// Returns whether discovery is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the refresh interval.
+    #[must_use]
+    pub fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
+    }
+}
+
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 mod tests {
     use super::*;
 
@@ -402,7 +481,9 @@ mod tests {
 
     #[test]
     fn test_missing_endpoints() {
-        let result = ClientConfig::builder().with_client_id("test-client").build();
+        let result = ClientConfig::builder()
+            .with_client_id("test-client")
+            .build();
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -553,5 +634,38 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_discovery_config_default_disabled() {
+        let config = DiscoveryConfig::default();
+        assert!(!config.is_enabled());
+        assert_eq!(
+            config.refresh_interval(),
+            DEFAULT_DISCOVERY_REFRESH_INTERVAL
+        );
+    }
+
+    #[test]
+    fn test_discovery_config_disabled() {
+        let config = DiscoveryConfig::disabled();
+        assert!(!config.is_enabled());
+    }
+
+    #[test]
+    fn test_discovery_config_enabled() {
+        let config = DiscoveryConfig::enabled();
+        assert!(config.is_enabled());
+        assert_eq!(
+            config.refresh_interval(),
+            DEFAULT_DISCOVERY_REFRESH_INTERVAL
+        );
+    }
+
+    #[test]
+    fn test_discovery_config_custom_refresh_interval() {
+        let config = DiscoveryConfig::enabled().with_refresh_interval(Duration::from_secs(30));
+        assert!(config.is_enabled());
+        assert_eq!(config.refresh_interval(), Duration::from_secs(30));
     }
 }

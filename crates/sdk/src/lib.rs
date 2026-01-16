@@ -63,14 +63,31 @@
 mod client;
 mod config;
 mod connection;
+mod discovery;
 mod error;
 mod idempotency;
+pub mod mock;
 mod retry;
 mod streaming;
 
 // Public API exports
-pub use config::{ClientConfig, ClientConfigBuilder, RetryPolicy, RetryPolicyBuilder};
+pub use client::{
+    BlockAnnouncement, BlockHeader, ChainProof, Direction, Entity, HealthCheckResult, HealthStatus,
+    LedgerClient, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof,
+    MerkleSibling, NamespaceInfo, NamespaceStatus, Operation, PagedResult, ReadConsistency,
+    Relationship, SetCondition, VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
+};
+pub use config::{
+    ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, RetryPolicyBuilder,
+};
+pub use connection::ConnectionPool;
+pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
+pub use idempotency::{
+    FileSequenceStorage, PersistentSequenceTracker, SequenceStorage, SequenceTracker, VaultKey,
+};
+pub use retry::with_retry;
+pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};
 
 // Re-export commonly used types from ledger-types
 pub use ledger_types::{NamespaceId, VaultId};

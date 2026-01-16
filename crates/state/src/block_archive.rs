@@ -202,7 +202,9 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
 
         #[allow(clippy::expect_used)]
-        let writer = current.as_mut().expect("segment writer exists after init above");
+        let writer = current
+            .as_mut()
+            .expect("segment writer exists after init above");
 
         let offset = writer.file.seek(SeekFrom::End(0)).context(IoSnafu)?;
         writer
