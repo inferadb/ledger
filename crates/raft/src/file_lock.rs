@@ -171,7 +171,7 @@ impl Drop for DataDirLock {
     fn drop(&mut self) {
         // The lock is automatically released when the file is closed.
         // We explicitly unlock here to log it.
-        if let Err(e) = self.file.unlock() {
+        if let Err(e) = FileExt::unlock(&self.file) {
             error!(
                 path = %self.path.display(),
                 error = %e,
@@ -187,7 +187,12 @@ impl Drop for DataDirLock {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 mod tests {
     use super::*;
     use ledger_test_utils::TestDir;

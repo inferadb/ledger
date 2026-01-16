@@ -71,9 +71,8 @@ impl OperationHistory {
     }
 
     pub fn record(&self, _op: Operation) -> u64 {
-        let ts = self.next_ts.fetch_add(1, Ordering::SeqCst);
         // Note: In a real implementation, we'd use a proper concurrent data structure
-        ts
+        self.next_ts.fetch_add(1, Ordering::SeqCst)
     }
 
     /// Verify linearizability of the history.
@@ -91,21 +90,24 @@ impl OperationHistory {
                 Operation::Write { key, value, .. } => {
                     committed_state.insert(key.clone(), *value);
                 }
-                Operation::Read { key, result, .. } => {
-                    if let Some(read_value) = result {
-                        if let Some(committed_value) = committed_state.get(key) {
-                            // Read should return committed value or earlier
-                            // (stale reads are acceptable during partition)
-                            if read_value > committed_value {
-                                return Err(ConsistencyViolation::FutureRead {
-                                    key: key.clone(),
-                                    read_value: *read_value,
-                                    committed_value: *committed_value,
-                                });
-                            }
+                Operation::Read {
+                    key,
+                    result: Some(read_value),
+                    ..
+                } => {
+                    if let Some(committed_value) = committed_state.get(key) {
+                        // Read should return committed value or earlier
+                        // (stale reads are acceptable during partition)
+                        if read_value > committed_value {
+                            return Err(ConsistencyViolation::FutureRead {
+                                key: key.clone(),
+                                read_value: *read_value,
+                                committed_value: *committed_value,
+                            });
                         }
                     }
                 }
+                Operation::Read { result: None, .. } => {}
                 _ => {}
             }
         }
@@ -275,7 +277,7 @@ fn test_minority_cannot_elect_leader() {
         // Verify nodes 3, 4, 5 can still communicate (majority partition)
         let mut client3 = turmoil_common::create_turmoil_channel("node3", 9999)
             .await
-            .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+            .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
             .expect("connect to node3");
 
         let vote_req = RaftVoteRequest {
@@ -428,7 +430,7 @@ fn test_write_fails_in_minority_partition() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -451,7 +453,7 @@ fn test_write_fails_in_minority_partition() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -477,7 +479,7 @@ fn test_write_fails_in_minority_partition() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -599,7 +601,7 @@ fn test_consistency_after_partition_heals() {
         for node in ["node1", "node2"] {
             let mut client = turmoil_common::create_turmoil_channel(node, 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -619,7 +621,7 @@ fn test_consistency_after_partition_heals() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -645,7 +647,7 @@ fn test_consistency_after_partition_heals() {
         for node in ["node1", "node2"] {
             let mut client = turmoil_common::create_turmoil_channel(node, 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect after heal");
 
             let req = RaftAppendEntriesRequest {
@@ -657,7 +659,7 @@ fn test_consistency_after_partition_heals() {
             client
                 .append_entries(req)
                 .await
-                .expect(&format!("{} should be reachable after heal", node));
+                .unwrap_or_else(|_| panic!("{} should be reachable after heal", node));
         }
 
         Ok(())
@@ -1016,7 +1018,7 @@ fn test_network_delay_request_completion() {
         {
             let mut client = turmoil_common::create_turmoil_channel("fast_node", 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to fast node");
 
             let req = RaftVoteRequest {
@@ -1030,7 +1032,7 @@ fn test_network_delay_request_completion() {
         {
             let mut client = turmoil_common::create_turmoil_channel("slow_node", 9999)
                 .await
-                .map(|c| ledger_raft::proto::raft_service_client::RaftServiceClient::new(c))
+                .map(ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to slow node");
 
             let req = RaftVoteRequest {

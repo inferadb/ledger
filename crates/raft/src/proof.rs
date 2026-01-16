@@ -340,20 +340,20 @@ pub fn verify_state_proof(
 
     let mut all_roots: [Hash; 256] = [[0u8; 32]; 256];
     let mut other_idx = 0;
-    for i in 0..256 {
+    for (i, root) in all_roots.iter_mut().enumerate() {
         if i == proof.bucket_id as usize {
             // Use the entity's bucket root
             if bucket_root.len() != 32 {
                 return StateProofVerification::MissingField("bucket_root (invalid length)");
             }
-            all_roots[i].copy_from_slice(bucket_root);
+            root.copy_from_slice(bucket_root);
         } else {
             // Use from other_bucket_roots
             let other = &proof.other_bucket_roots[other_idx];
             if other.value.len() != 32 {
                 return StateProofVerification::MissingField("other_bucket_roots (invalid length)");
             }
-            all_roots[i].copy_from_slice(&other.value);
+            root.copy_from_slice(&other.value);
             other_idx += 1;
         }
     }
@@ -493,8 +493,8 @@ mod tests {
     fn make_bucket_roots() -> [Hash; 256] {
         let mut roots = [EMPTY_HASH; 256];
         // Set some non-empty roots for variety
-        for i in 0..10 {
-            roots[i] = [i as u8; 32];
+        for (i, root) in roots.iter_mut().enumerate().take(10) {
+            *root = [i as u8; 32];
         }
         roots
     }

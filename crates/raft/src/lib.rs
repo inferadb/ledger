@@ -17,6 +17,9 @@
 //! Ledger runs behind WireGuard VPN. Authentication and authorization are handled
 //! by Engine/Control services upstream. Ledger trusts all incoming requests.
 
+// gRPC services return tonic::Status (176 bytes) - this is standard practice for gRPC error handling
+#![allow(clippy::result_large_err)]
+
 mod auto_recovery;
 pub mod batching;
 mod block_compaction;

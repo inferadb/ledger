@@ -523,8 +523,7 @@ mod tests {
     ) {
         let temp_dir = TestDir::new();
         let db = Arc::new(
-            Database::<FileBackend>::create(temp_dir.join("test.db"))
-                .expect("create database"),
+            Database::<FileBackend>::create(temp_dir.join("test.db")).expect("create database"),
         );
         let state = Arc::new(StateLayer::new(db));
         let system = Arc::new(SystemNamespaceService::new(Arc::clone(&state)));

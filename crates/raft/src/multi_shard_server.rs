@@ -129,10 +129,10 @@ impl MultiShardLedgerServer {
         // Admin, Health, and Discovery services use the system shard
         // These handle global operations like namespace management
         let system_shard = self.manager.system_shard().map_err(|e| {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("System shard not available: {}", e),
-            )) as Box<dyn std::error::Error>
+            Box::new(std::io::Error::other(format!(
+                "System shard not available: {}",
+                e
+            ))) as Box<dyn std::error::Error>
         })?;
 
         let admin_service = AdminServiceImpl::with_block_archive(

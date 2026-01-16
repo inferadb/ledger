@@ -283,7 +283,12 @@ pub fn vault_entry_to_proto_block(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::disallowed_methods
+    )]
 
     use super::*;
     use ledger_types::hash::Hash;

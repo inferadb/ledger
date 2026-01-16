@@ -331,7 +331,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         let archive = self
             .block_archive
             .as_ref()
-            .ok_or_else(|| snafu::NoneError)
+            .ok_or(snafu::NoneError)
             .context(BlockArchiveNotConfiguredSnafu)?;
 
         // Find starting point (snapshot or genesis)

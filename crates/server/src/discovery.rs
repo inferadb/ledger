@@ -236,6 +236,12 @@ impl std::fmt::Display for DiscoveryError {
 impl std::error::Error for DiscoveryError {}
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 mod tests {
     use super::*;
     use tempfile::tempdir;

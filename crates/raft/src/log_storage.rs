@@ -1045,7 +1045,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             // If entries were purged, return error (need snapshot replication)
             if start <= purged_idx {
                 return Err(StorageError::IO {
-                    source: openraft::StorageIOError::read_logs(&openraft::AnyError::error(
+                    source: openraft::StorageIOError::read_logs(openraft::AnyError::error(
                         format!(
                             "Log entries [{}, {}) purged (last_purged={}), need snapshot",
                             start, end, purged_idx
@@ -1065,7 +1065,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
                     .map(|e| e.log_id.index)
                     .unwrap_or(0);
                 return Err(StorageError::IO {
-                    source: openraft::StorageIOError::read_logs(&openraft::AnyError::error(
+                    source: openraft::StorageIOError::read_logs(openraft::AnyError::error(
                         format!(
                             "Log entries [{}, {}) not found after {}ms (last={}, purged={})",
                             start,
@@ -1237,9 +1237,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 .map_err(|e| to_storage_error(&e))?;
             for (key_bytes, _) in iter {
                 // Key is u64 encoded as big-endian
-                if key_bytes.len() == 8 {
-                    let key = u64::from_be_bytes(key_bytes.try_into().unwrap());
-                    keys.push(key);
+                if let Ok(arr) = <[u8; 8]>::try_from(key_bytes.as_ref()) {
+                    keys.push(u64::from_be_bytes(arr));
                 }
             }
             keys
@@ -1272,9 +1271,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 .map_err(|e| to_storage_error(&e))?;
             for (key_bytes, _) in iter {
                 // Key is u64 encoded as big-endian
-                if key_bytes.len() == 8 {
-                    let key = u64::from_be_bytes(key_bytes.try_into().unwrap());
-                    keys.push(key);
+                if let Ok(arr) = <[u8; 8]>::try_from(key_bytes.as_ref()) {
+                    keys.push(u64::from_be_bytes(arr));
                 }
             }
             keys
@@ -2557,9 +2555,8 @@ mod tests {
 
         // Create target store (simulating a new follower)
         let target_dir = tempdir().expect("create target dir");
-        let mut target_store =
-            RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.db"))
-                .expect("open target");
+        let mut target_store = RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.db"))
+            .expect("open target");
 
         // Verify initial state is empty
         assert_eq!(target_store.current_shard_height(), 0);

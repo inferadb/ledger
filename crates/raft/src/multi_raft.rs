@@ -43,7 +43,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openraft::storage::Adaptor;
@@ -97,6 +97,13 @@ pub enum MultiRaftError {
 
 /// Result type for multi-raft operations.
 pub type Result<T> = std::result::Result<T, MultiRaftError>;
+
+/// Storage components for a shard (state layer, block archive, raft log store).
+type ShardStorage = (
+    Arc<StateLayer<FileBackend>>,
+    Arc<BlockArchive<FileBackend>>,
+    RaftLogStore<FileBackend>,
+);
 
 // ============================================================================
 // Configuration
@@ -550,15 +557,7 @@ impl MultiRaftManager {
     }
 
     /// Open storage for a shard.
-    fn open_shard_storage(
-        &self,
-        shard_id: ShardId,
-        shard_dir: &PathBuf,
-    ) -> Result<(
-        Arc<StateLayer<FileBackend>>,
-        Arc<BlockArchive<FileBackend>>,
-        RaftLogStore<FileBackend>,
-    )> {
+    fn open_shard_storage(&self, shard_id: ShardId, shard_dir: &Path) -> Result<ShardStorage> {
         // Use larger pages for all databases to support larger batch sizes
         // This matches RAFT_PAGE_SIZE in RaftLogStore
         const SHARD_PAGE_SIZE: usize = 16 * 1024; // 16KB

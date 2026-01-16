@@ -61,7 +61,7 @@ pub enum TimeTravelError {
 pub type Result<T> = std::result::Result<T, TimeTravelError>;
 
 /// Configuration for time-travel indexing on a vault.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TimeTravelConfig {
     /// Whether time-travel indexing is enabled.
     pub enabled: bool,
@@ -69,16 +69,6 @@ pub struct TimeTravelConfig {
     pub key_prefixes: Vec<String>,
     /// Maximum history depth to retain (0 = unlimited).
     pub max_history_depth: u64,
-}
-
-impl Default for TimeTravelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            key_prefixes: vec![],
-            max_history_depth: 0,
-        }
-    }
 }
 
 impl TimeTravelConfig {

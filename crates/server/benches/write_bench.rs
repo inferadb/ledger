@@ -20,8 +20,8 @@ use ledger_types::Operation;
 
 /// Create a test state layer.
 fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
-    let db = Database::<FileBackend>::create(temp_dir.path().join("test.db"))
-        .expect("create database");
+    let db =
+        Database::<FileBackend>::create(temp_dir.path().join("test.db")).expect("create database");
     StateLayer::new(Arc::new(db))
 }
 

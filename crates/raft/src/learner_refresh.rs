@@ -364,8 +364,10 @@ mod tests {
 
     #[test]
     fn test_cached_state_freshness() {
-        let mut state = CachedSystemState::default();
-        state.last_updated = std::time::Instant::now();
+        let state = CachedSystemState {
+            last_updated: std::time::Instant::now(),
+            ..Default::default()
+        };
 
         // Should be fresh with 10 second TTL
         assert!(state.is_fresh(Duration::from_secs(10)));
@@ -373,9 +375,11 @@ mod tests {
 
     #[test]
     fn test_cached_state_stale() {
-        let mut state = CachedSystemState::default();
         // Set last_updated to some time in the past
-        state.last_updated = std::time::Instant::now() - Duration::from_secs(60);
+        let state = CachedSystemState {
+            last_updated: std::time::Instant::now() - Duration::from_secs(60),
+            ..Default::default()
+        };
 
         // Should be stale with 10 second TTL
         assert!(!state.is_fresh(Duration::from_secs(10)));

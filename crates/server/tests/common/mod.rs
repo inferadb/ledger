@@ -93,7 +93,8 @@ impl TestCluster {
     pub async fn new(size: usize) -> Self {
         assert!(size >= 1, "cluster must have at least 1 node");
 
-        let base_port = 50100 + (rand::random::<u16>() % 1000);
+        // Use wide random range to minimize port conflicts when tests run in parallel
+        let base_port = 40000 + (rand::random::<u16>() % 5000);
         let mut nodes = Vec::with_capacity(size);
 
         // Step 1: Start the bootstrap node as a SINGLE-NODE cluster (no peers)
@@ -543,7 +544,8 @@ impl MultiShardTestCluster {
         assert!(num_nodes >= 1, "cluster must have at least 1 node");
         assert!(num_data_shards >= 1, "must have at least 1 data shard");
 
-        let base_port = 51000 + (rand::random::<u16>() % 1000);
+        // Use wide random range (non-overlapping with TestCluster) to minimize port conflicts
+        let base_port = 50000 + (rand::random::<u16>() % 5000);
         let mut nodes = Vec::with_capacity(num_nodes);
 
         // Build the member list for all shards
@@ -590,7 +592,7 @@ impl MultiShardTestCluster {
                 manager
                     .start_data_shard(shard_config)
                     .await
-                    .expect(&format!("start data shard {}", shard_id));
+                    .unwrap_or_else(|_| panic!("start data shard {}", shard_id));
             }
 
             // Create and start the multi-shard gRPC server

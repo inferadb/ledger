@@ -77,12 +77,17 @@ impl PageTokenCodec {
 
     /// Encode a page token to an opaque string.
     pub fn encode(&self, token: &PageToken) -> String {
-        // Serialize the token
-        let token_bytes = encode(token).expect("PageToken serialization should not fail");
+        // Serialize the token - postcard encoding of simple structs is infallible
+        let token_bytes = match encode(token) {
+            Ok(bytes) => bytes,
+            Err(_) => return String::new(), // Unreachable for valid PageToken
+        };
 
-        // Compute HMAC
-        let mut mac =
-            <Hmac<Sha256>>::new_from_slice(&self.key).expect("HMAC key length should be valid");
+        // Compute HMAC - new_from_slice accepts any length for SHA256
+        let mut mac = match <Hmac<Sha256>>::new_from_slice(&self.key) {
+            Ok(m) => m,
+            Err(_) => return String::new(), // Unreachable for 32-byte key
+        };
         mac.update(&token_bytes);
         let result = mac.finalize();
         let hmac_full = result.into_bytes();
@@ -98,7 +103,10 @@ impl PageTokenCodec {
         };
 
         // Serialize and base64 encode
-        let bytes = encode(&encoded).expect("EncodedToken serialization should not fail");
+        let bytes = match encode(&encoded) {
+            Ok(b) => b,
+            Err(_) => return String::new(), // Unreachable for valid EncodedToken
+        };
         URL_SAFE_NO_PAD.encode(&bytes)
     }
 
@@ -123,7 +131,7 @@ impl PageTokenCodec {
             encode(&encoded_token.token).map_err(|_| PageTokenError::InvalidFormat)?;
 
         let mut mac =
-            <Hmac<Sha256>>::new_from_slice(&self.key).expect("HMAC key length should be valid");
+            <Hmac<Sha256>>::new_from_slice(&self.key).map_err(|_| PageTokenError::InvalidFormat)?;
         mac.update(&token_bytes);
         let result = mac.finalize();
         let expected_hmac = result.into_bytes();
@@ -210,6 +218,7 @@ impl std::fmt::Display for PageTokenError {
 impl std::error::Error for PageTokenError {}
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

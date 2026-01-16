@@ -7,6 +7,9 @@
 //! - [`test_batch_config`] - Default batch configuration for tests
 //! - [`test_rate_limit_config`] - Default rate limit configuration for tests
 
+// Test utilities are allowed to use unwrap for simplicity
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod test_dir;
 pub use test_dir::TestDir;
 

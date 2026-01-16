@@ -174,6 +174,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     }
 
     /// Execute a single step of a CreateOrg saga.
+    // Allow: serde_json::json! macro uses unwrap internally for key insertion,
+    // but with string literal keys this is infallible.
+    #[allow(clippy::disallowed_methods)]
     async fn execute_create_org_step(&self, saga: &mut CreateOrgSaga) -> Result<(), SagaError> {
         // Clone state to avoid borrow conflicts with saga.transition()
         match saga.state.clone() {
@@ -280,6 +283,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     }
 
     /// Execute a single step of a DeleteUser saga.
+    // Allow: serde_json::json! macro uses unwrap internally for key insertion,
+    // but with string literal keys this is infallible.
+    #[allow(clippy::disallowed_methods)]
     async fn execute_delete_user_step(&self, saga: &mut DeleteUserSaga) -> Result<(), SagaError> {
         match &saga.state.clone() {
             DeleteUserSagaState::Pending => {
