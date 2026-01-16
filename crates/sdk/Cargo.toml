@@ -53,7 +53,7 @@ inferadb-ledger-server = { workspace = true }
 inferadb-ledger-test-utils = { workspace = true }
 openraft = { workspace = true }
 serial_test = "3.2"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[bench]]
 name = "client_bench"
