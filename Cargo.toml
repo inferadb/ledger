@@ -106,14 +106,14 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 async-stream = "0.3"
 
-# Internal crates
-inferadb-ledger-types = { path = "crates/types" }
-inferadb-ledger-store = { path = "crates/store" }
-inferadb-ledger-state = { path = "crates/state" }
-inferadb-ledger-raft = { path = "crates/raft" }
-inferadb-ledger-server = { path = "crates/server" }
-inferadb-ledger-sdk = { path = "crates/sdk" }
-inferadb-ledger-test-utils = { path = "crates/test-utils" }
+# Internal crates (version + path for crates.io publishing)
+inferadb-ledger-types = { version = "0.1.0", path = "crates/types" }
+inferadb-ledger-store = { version = "0.1.0", path = "crates/store" }
+inferadb-ledger-state = { version = "0.1.0", path = "crates/state" }
+inferadb-ledger-raft = { version = "0.1.0", path = "crates/raft" }
+inferadb-ledger-server = { version = "0.1.0", path = "crates/server" }
+inferadb-ledger-sdk = { version = "0.1.0", path = "crates/sdk" }
+inferadb-ledger-test-utils = { version = "0.1.0", path = "crates/test-utils" }
 
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }

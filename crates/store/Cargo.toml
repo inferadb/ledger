@@ -1,11 +1,16 @@
 [package]
 name = "inferadb-ledger-store"
-version.workspace = true
-edition = "2021"
 description = "Embedded B+ tree database engine for InferaDB Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/inferadb-ledger-store"
+readme = "README.md"
+keywords = ["database", "btree", "embedded", "storage", "ledger"]
+categories = ["database-implementations", "data-structures"]
 
 [dependencies]
 # Hashing for checksums

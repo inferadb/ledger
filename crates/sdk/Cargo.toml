@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/inferadb-ledger-sdk"
+readme = "README.md"
+keywords = ["ledger", "blockchain", "authorization", "sdk", "grpc"]
+categories = ["api-bindings", "authentication"]
 
 [dependencies]
 # Async runtime
@@ -53,7 +57,7 @@ inferadb-ledger-server = { workspace = true }
 inferadb-ledger-test-utils = { workspace = true }
 openraft = { workspace = true }
 serial_test = "3.2"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion.workspace = true
 
 [[bench]]
 name = "client_bench"

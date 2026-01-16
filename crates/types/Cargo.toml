@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/inferadb-ledger-types"
+readme = "README.md"
+keywords = ["ledger", "blockchain", "cryptography", "merkle", "authorization"]
+categories = ["cryptography", "data-structures"]
 
 [dependencies]
 # Crypto

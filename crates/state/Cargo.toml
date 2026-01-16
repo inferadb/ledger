@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/inferadb-ledger-state"
+readme = "README.md"
+keywords = ["ledger", "state", "blockchain", "authorization", "storage"]
+categories = ["database-implementations"]
 
 [dependencies]
 # Internal
