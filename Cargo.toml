@@ -110,6 +110,7 @@ ledger-raft = { path = "crates/raft" }
 ledger-db = { path = "crates/db" }
 ledger-test-utils = { path = "crates/test-utils" }
 ledger-sdk = { path = "crates/sdk" }
+ledger-server = { path = "crates/server" }
 
 # Hashing (for ledger-db)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
