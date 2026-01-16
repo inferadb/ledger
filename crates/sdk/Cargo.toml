@@ -1,0 +1,48 @@
+[package]
+name = "ledger-sdk"
+description = "Production-grade Rust SDK for InferaDB Ledger service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync"] }
+
+# gRPC
+tonic = { workspace = true }
+prost = { workspace = true }
+tower = { workspace = true }
+
+# Retry with backoff
+backon = "1.2"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+snafu = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+
+# Utilities
+tracing = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+
+# Internal crates
+ledger-types = { workspace = true }
+ledger-raft = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+tokio-test = "0.4"
+
+[lints]
+workspace = true
