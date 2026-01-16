@@ -14,7 +14,6 @@ pub mod hash;
 pub mod merkle;
 pub mod types;
 
-// Re-export commonly used types at crate root
 pub use codec::{CodecError, decode, encode};
 pub use error::{LedgerError, Result};
 pub use hash::{

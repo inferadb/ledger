@@ -99,17 +99,14 @@ impl EntityStore {
         let prefix = vault_prefix(vault_id);
         let mut entities = Vec::new();
 
-        // Iterate over all entries in the Entities table
         let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
 
         let mut count = 0;
         for (key_bytes, value) in iter {
-            // Check we're still in the same vault
             if key_bytes.len() < 8 {
                 break;
             }
             if key_bytes[..8] != prefix[..] {
-                // Check if we haven't reached this vault yet
                 if key_bytes[..8] < prefix[..] {
                     continue;
                 }
@@ -143,12 +140,10 @@ impl EntityStore {
         let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
 
         for (key_bytes, value) in iter {
-            // Check we're in the right vault and bucket
             if key_bytes.len() < 9 {
                 continue;
             }
 
-            // Check vault ID
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
             if key_vault_id < vault_id {
                 continue;
@@ -157,7 +152,6 @@ impl EntityStore {
                 break;
             }
 
-            // Check bucket ID
             if key_bytes[8] < bucket_id {
                 continue;
             }
@@ -208,7 +202,6 @@ impl EntityStore {
         let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
 
         for (key_bytes, value) in iter {
-            // Check we're still in the same vault
             if key_bytes.len() < 9 {
                 continue;
             }
@@ -219,10 +212,7 @@ impl EntityStore {
                 break;
             }
 
-            // Extract local key (skip vault_id and bucket_id)
             let local_key = &key_bytes[9..];
-
-            // Check prefix match
             if local_key.starts_with(key_prefix) {
                 let entity = decode(&value).context(CodecSnafu)?;
                 entities.push(entity);
@@ -254,7 +244,6 @@ mod tests {
         let db = engine.db();
         let vault_id = 1;
 
-        // Write
         {
             let mut txn = db.write().expect("begin write");
 
@@ -269,7 +258,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Read
         {
             let txn = db.read().expect("begin read");
 
@@ -282,7 +270,6 @@ mod tests {
             assert_eq!(entity.version, 1);
         }
 
-        // Delete
         {
             let mut txn = db.write().expect("begin write");
 
@@ -291,7 +278,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Verify deleted
         {
             let txn = db.read().expect("begin read");
 
@@ -306,7 +292,6 @@ mod tests {
         let db = engine.db();
         let vault_id = 1;
 
-        // Write multiple entities
         {
             let mut txn = db.write().expect("begin write");
 
@@ -322,7 +307,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // List with pagination
         {
             let txn = db.read().expect("begin read");
 
@@ -339,7 +323,6 @@ mod tests {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
 
-        // Write to vault 1
         {
             let mut txn = db.write().expect("begin write");
 
@@ -353,7 +336,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Vault 2 should not see vault 1's data
         {
             let txn = db.read().expect("begin read");
 

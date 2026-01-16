@@ -59,19 +59,16 @@ impl IndexManager {
         let local_key = encode_obj_index_key(resource, relation);
         let storage_key = encode_storage_key(vault_id, &local_key);
 
-        // Get existing set
         let mut set: SubjectSet = match txn.get::<tables::ObjIndex>(&storage_key) {
             Ok(Some(data)) => decode(&data).unwrap_or_default(),
             _ => SubjectSet::default(),
         };
 
-        // Add subject if not present
         let subject_str = subject.to_string();
         if !set.subjects.contains(&subject_str) {
             set.subjects.push(subject_str);
         }
 
-        // Store updated set
         let encoded = encode(&set).context(CodecSnafu)?;
 
         txn.insert::<tables::ObjIndex>(&storage_key, &encoded)
@@ -91,7 +88,6 @@ impl IndexManager {
         let local_key = encode_obj_index_key(resource, relation);
         let storage_key = encode_storage_key(vault_id, &local_key);
 
-        // Get existing set
         let existing_set: Option<SubjectSet> = match txn.get::<tables::ObjIndex>(&storage_key) {
             Ok(Some(data)) => Some(decode(&data).unwrap_or_default()),
             _ => None,
@@ -101,14 +97,11 @@ impl IndexManager {
             return Ok(());
         };
 
-        // Remove subject
         set.subjects.retain(|s| s != subject);
 
         if set.subjects.is_empty() {
-            // Remove the entire entry if no subjects left
             let _ = txn.delete::<tables::ObjIndex>(&storage_key);
         } else {
-            // Store updated set
             let encoded = encode(&set).context(CodecSnafu)?;
 
             txn.insert::<tables::ObjIndex>(&storage_key, &encoded)
@@ -132,19 +125,16 @@ impl IndexManager {
         let local_key = encode_subj_index_key(subject);
         let storage_key = encode_storage_key(vault_id, &local_key);
 
-        // Get existing set
         let mut set: ResourceRelationSet = match txn.get::<tables::SubjIndex>(&storage_key) {
             Ok(Some(data)) => decode(&data).unwrap_or_default(),
             _ => ResourceRelationSet::default(),
         };
 
-        // Add pair if not present
         let pair = (resource.to_string(), relation.to_string());
         if !set.pairs.contains(&pair) {
             set.pairs.push(pair);
         }
 
-        // Store updated set
         let encoded = encode(&set).context(CodecSnafu)?;
 
         txn.insert::<tables::SubjIndex>(&storage_key, &encoded)
@@ -164,7 +154,6 @@ impl IndexManager {
         let local_key = encode_subj_index_key(subject);
         let storage_key = encode_storage_key(vault_id, &local_key);
 
-        // Get existing set
         let existing_set: Option<ResourceRelationSet> =
             match txn.get::<tables::SubjIndex>(&storage_key) {
                 Ok(Some(data)) => Some(decode(&data).unwrap_or_default()),
@@ -175,15 +164,12 @@ impl IndexManager {
             return Ok(());
         };
 
-        // Remove pair
         let pair = (resource.to_string(), relation.to_string());
         set.pairs.retain(|p| p != &pair);
 
         if set.pairs.is_empty() {
-            // Remove the entire entry if no pairs left
             let _ = txn.delete::<tables::SubjIndex>(&storage_key);
         } else {
-            // Store updated set
             let encoded = encode(&set).context(CodecSnafu)?;
 
             txn.insert::<tables::SubjIndex>(&storage_key, &encoded)
@@ -250,7 +236,6 @@ mod tests {
         let db = engine.db();
         let vault_id = 1;
 
-        // Add subjects
         {
             let mut txn = db.write().expect("begin write");
 
@@ -261,7 +246,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Query
         {
             let txn = db.read().expect("begin read");
 
@@ -272,7 +256,6 @@ mod tests {
             assert!(subjects.contains(&"user:bob".to_string()));
         }
 
-        // Remove one
         {
             let mut txn = db.write().expect("begin write");
 
@@ -287,7 +270,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Verify
         {
             let txn = db.read().expect("begin read");
 
@@ -304,7 +286,6 @@ mod tests {
         let db = engine.db();
         let vault_id = 1;
 
-        // Add resources
         {
             let mut txn = db.write().expect("begin write");
 
@@ -315,7 +296,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Query
         {
             let txn = db.read().expect("begin read");
 
@@ -325,7 +305,6 @@ mod tests {
             assert!(resources.contains(&("doc:456".to_string(), "editor".to_string())));
         }
 
-        // Remove one
         {
             let mut txn = db.write().expect("begin write");
 
@@ -340,7 +319,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Verify
         {
             let txn = db.read().expect("begin read");
 
@@ -355,7 +333,6 @@ mod tests {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
 
-        // Add to vault 1
         {
             let mut txn = db.write().expect("begin write");
 
@@ -364,7 +341,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Vault 2 should not see vault 1's index
         {
             let txn = db.read().expect("begin read");
 
@@ -379,7 +355,6 @@ mod tests {
         let db = engine.db();
         let vault_id = 1;
 
-        // Add same subject twice
         {
             let mut txn = db.write().expect("begin write");
 
@@ -390,7 +365,6 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        // Should only have one entry
         {
             let txn = db.read().expect("begin read");
 

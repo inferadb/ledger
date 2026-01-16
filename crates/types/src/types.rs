@@ -79,19 +79,19 @@ pub struct VaultBlock {
 }
 
 impl VaultBlock {
-    /// Get the namespace ID from the header.
+    /// Returns `header.namespace_id`.
     #[inline]
     pub fn namespace_id(&self) -> NamespaceId {
         self.header.namespace_id
     }
 
-    /// Get the vault ID from the header.
+    /// Returns `header.vault_id`.
     #[inline]
     pub fn vault_id(&self) -> VaultId {
         self.header.vault_id
     }
 
-    /// Get the block height from the header.
+    /// Returns `header.height`.
     #[inline]
     pub fn height(&self) -> u64 {
         self.header.height

@@ -49,17 +49,14 @@ impl std::error::Error for ServerError {}
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    // Parse command line arguments
     let config_path = parse_args();
 
-    // Load configuration
     let config = Config::load(config_path.as_deref()).map_err(ServerError::Config)?;
 
     tracing::info!(
@@ -70,20 +67,15 @@ async fn main() -> Result<(), ServerError> {
         "Starting InferaDB Ledger"
     );
 
-    // Initialize Prometheus metrics exporter if configured
     if let Some(metrics_addr) = config.metrics_addr {
         init_metrics_exporter(metrics_addr)?;
     }
 
-    // Bootstrap node (creates Raft, storage, server)
     let node = bootstrap::bootstrap_node(&config)
         .await
         .map_err(ServerError::Bootstrap)?;
 
-    // Set up graceful shutdown
     let shutdown_coordinator = shutdown::ShutdownCoordinator::new();
-
-    // Spawn shutdown listener
     let shutdown_handle = {
         let coordinator = shutdown_coordinator.clone();
         tokio::spawn(async move {
@@ -92,13 +84,8 @@ async fn main() -> Result<(), ServerError> {
         })
     };
 
-    // Start gRPC server
     tracing::info!("Server ready, accepting connections");
-
-    // Run server until shutdown
     let server_result = node.server.serve().await;
-
-    // Wait for shutdown handler to complete
     let _ = shutdown_handle.await;
 
     server_result.map_err(ServerError::Server)?;

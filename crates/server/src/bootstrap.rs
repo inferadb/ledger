@@ -85,11 +85,9 @@ pub struct BootstrappedNode {
 /// If `config.bootstrap` is true, initializes a new single-node cluster.
 /// Otherwise, the node starts without initialization (ready to join).
 pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, BootstrapError> {
-    // Create data directories
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
 
-    // Open state database and initialize tables using ledger-db
     let state_db_path = config.data_dir.join("state.db");
     let state_db = Arc::new(
         Database::<FileBackend>::create(&state_db_path)
@@ -98,7 +96,6 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // StateLayer is internally thread-safe via MVCC - no external lock needed
     let state = Arc::new(StateLayer::new(state_db));
 
-    // Open block archive for historical block storage using ledger-db
     let blocks_db_path = config.data_dir.join("blocks.db");
     let blocks_db = Arc::new(
         Database::<FileBackend>::create(&blocks_db_path)
@@ -106,7 +103,6 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     );
     let block_archive = Arc::new(BlockArchive::new(blocks_db));
 
-    // Open Raft log store and configure with dependencies
     let log_path = config.data_dir.join("raft.db");
     let log_store = RaftLogStore::open(&log_path)
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
@@ -117,10 +113,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // Get accessor before log_store is consumed by Adaptor
     let applied_state_accessor = log_store.accessor();
 
-    // Create Raft network factory
     let network = GrpcRaftNetworkFactory::new();
-
-    // Build Raft configuration
     let raft_config = openraft::Config {
         cluster_name: "ledger".to_string(),
         heartbeat_interval: 150,
@@ -134,7 +127,6 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // Note: Adaptor takes ownership of the store
     let (log_storage, state_machine) = Adaptor::new(log_store);
 
-    // Create Raft instance
     let raft = Raft::<LedgerTypeConfig>::new(
         config.node_id,
         Arc::new(raft_config),
@@ -147,20 +139,15 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     let raft = Arc::new(raft);
 
-    // Bootstrap cluster if this is the initial node
     if config.bootstrap {
         bootstrap_cluster(&raft, config).await?;
     }
 
-    // Clone block_archive for background jobs before it's moved to server
     let block_archive_for_compactor = block_archive.clone();
     let block_archive_for_recovery = block_archive.clone();
-
-    // Create snapshot manager for recovery optimization
     let snapshot_dir = config.data_dir.join("snapshots");
-    let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir, 5)); // Keep last 5 snapshots
+    let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir, 5));
 
-    // Create server with block archive for GetBlock/GetBlockRange
     let server = LedgerServer::with_block_archive(
         raft.clone(),
         state.clone(),
@@ -173,7 +160,6 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         config.rate_limit.timeout_secs,
     );
 
-    // Start TTL garbage collector as background task
     let gc = TtlGarbageCollector::new(
         raft.clone(),
         config.node_id,
@@ -231,10 +217,7 @@ async fn bootstrap_cluster(
     raft: &Raft<LedgerTypeConfig>,
     config: &Config,
 ) -> Result<(), BootstrapError> {
-    // Build initial membership with this node and any configured peers
     let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
-
-    // Add self
     members.insert(
         config.node_id,
         BasicNode {
@@ -242,7 +225,6 @@ async fn bootstrap_cluster(
         },
     );
 
-    // Add configured peers
     for peer in &config.peers {
         members.insert(
             peer.node_id,
@@ -252,7 +234,6 @@ async fn bootstrap_cluster(
         );
     }
 
-    // Initialize the cluster
     raft.initialize(members)
         .await
         .map_err(|e| BootstrapError::Initialize(format!("failed to initialize: {}", e)))?;
@@ -278,10 +259,7 @@ async fn bootstrap_cluster(
 /// leader needs to be able to reach this node to replicate logs.
 #[allow(dead_code)] // Reserved for join-cluster mode in main.rs
 pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
-    // Extract static peer addresses from config
     let static_peer_addrs: Vec<String> = config.peers.iter().map(|p| p.addr.clone()).collect();
-
-    // Resolve all bootstrap peers: cached + static + DNS SRV
     let peer_addresses = resolve_bootstrap_peers(&static_peer_addrs, &config.discovery).await;
 
     if peer_addresses.is_empty() {
@@ -297,7 +275,6 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
 
     let my_address = config.listen_addr.to_string();
 
-    // Try each peer until one accepts our join request
     for peer_addr in &peer_addresses {
         if let Err(e) = try_join_via_peer(config.node_id, &my_address, *peer_addr).await {
             tracing::warn!(peer_addr = %peer_addr, error = %e, "Join attempt failed");
@@ -319,7 +296,6 @@ async fn try_join_via_peer(
 ) -> Result<(), String> {
     tracing::info!(peer_addr = %peer_addr, "Attempting to join cluster via peer");
 
-    // Connect to peer
     let endpoint = Channel::from_shared(format!("http://{}", peer_addr))
         .map_err(|e| format!("Invalid peer address: {}", e))?
         .connect_timeout(Duration::from_secs(5));
@@ -331,7 +307,6 @@ async fn try_join_via_peer(
 
     let mut client = AdminServiceClient::new(channel);
 
-    // Request to join
     let request = JoinClusterRequest {
         node_id,
         address: my_address.to_string(),

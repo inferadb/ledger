@@ -54,7 +54,6 @@ pub async fn resolve_bootstrap_peers(
 ) -> Vec<SocketAddr> {
     let mut addresses = Vec::new();
 
-    // 1. Try cached peers first
     if let Some(cached_path) = &discovery.cached_peers_path {
         match load_cached_peers(cached_path, discovery.cache_ttl_secs) {
             Ok(cached) => {
@@ -71,7 +70,6 @@ pub async fn resolve_bootstrap_peers(
         }
     }
 
-    // 2. Add static peers from config
     for peer_addr in static_peer_addrs {
         if let Ok(addr) = peer_addr.parse::<SocketAddr>() {
             addresses.push(addr);
@@ -80,7 +78,6 @@ pub async fn resolve_bootstrap_peers(
         }
     }
 
-    // 3. DNS SRV lookup
     if let Some(domain) = &discovery.srv_domain {
         match dns_srv_lookup(domain).await {
             Ok(srv_peers) => {
@@ -93,7 +90,6 @@ pub async fn resolve_bootstrap_peers(
                     }
                 }
 
-                // Add to address list (sorted by priority, then weight)
                 let mut sorted_peers = srv_peers;
                 sorted_peers.sort_by(|a, b| {
                     a.priority
@@ -139,7 +135,6 @@ async fn dns_srv_lookup(domain: &str) -> Result<Vec<DiscoveredPeer>, DiscoveryEr
         // Remove trailing dot from DNS name if present
         let host = target.trim_end_matches('.');
 
-        // Resolve the target hostname to IP addresses
         match resolver.lookup_ip(host).await {
             Ok(ips) => {
                 for ip in ips.iter() {
@@ -167,7 +162,6 @@ fn load_cached_peers(path: &str, ttl_secs: u64) -> Result<Vec<DiscoveredPeer>, D
     let cached: CachedPeers =
         serde_json::from_str(&content).map_err(|e| DiscoveryError::CacheParse(e.to_string()))?;
 
-    // Check if cache is expired
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -192,7 +186,6 @@ fn save_cached_peers(path: &str, peers: &[DiscoveredPeer]) -> Result<(), Discove
         peers: peers.to_vec(),
     };
 
-    // Ensure parent directory exists
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent).map_err(|e| DiscoveryError::CacheWrite(e.to_string()))?;
     }

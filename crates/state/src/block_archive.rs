@@ -153,14 +153,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     pub fn append_block(&self, block: &ShardBlock) -> Result<()> {
         let encoded = encode(block).context(CodecSnafu)?;
 
-        // Store in ledger-db
         let mut txn = self.db.write().context(InkwellSnafu)?;
-
-        // Store the block
         txn.insert::<tables::Blocks>(&block.shard_height, &encoded)
             .context(InkwellSnafu)?;
 
-        // Update vault block index for each vault entry
         for entry in &block.vault_entries {
             let index_key = encode_vault_block_index_key(
                 entry.namespace_id,
@@ -173,7 +169,6 @@ impl<B: StorageBackend> BlockArchive<B> {
 
         txn.commit().context(InkwellSnafu)?;
 
-        // Also write to segment files if configured
         if self.blocks_dir.is_some() {
             self.append_to_segment(block, &encoded)?;
         }
@@ -187,14 +182,11 @@ impl<B: StorageBackend> BlockArchive<B> {
 
         let mut current = self.current_segment.write();
 
-        // Rotate segment if needed
         if current.as_ref().map(|s| s.segment_id) != Some(segment_id) {
-            // Flush current segment if exists
             if let Some(writer) = current.take() {
                 drop(writer);
             }
 
-            // Open new segment
             let segment_path = self.segment_path(segment_id);
             let file = OpenOptions::new()
                 .create(true)
@@ -209,14 +201,10 @@ impl<B: StorageBackend> BlockArchive<B> {
             });
         }
 
-        // Safety: we just set `current = Some(...)` above if it was None
         #[allow(clippy::expect_used)]
-        let writer = current.as_mut().expect("segment writer should exist");
+        let writer = current.as_mut().expect("segment writer exists after init above");
 
-        // Get current offset
         let offset = writer.file.seek(SeekFrom::End(0)).context(IoSnafu)?;
-
-        // Write length-prefixed block
         writer
             .file
             .write_all(&(encoded.len() as u32).to_le_bytes())
@@ -283,10 +271,8 @@ impl<B: StorageBackend> BlockArchive<B> {
     pub fn latest_height(&self) -> Result<Option<u64>> {
         let txn = self.db.read().context(InkwellSnafu)?;
 
-        // Get the last entry in the Blocks table
         match txn.last::<tables::Blocks>().context(InkwellSnafu)? {
             Some((key_bytes, _)) => {
-                // Key is u64 encoded as big-endian bytes
                 if key_bytes.len() == 8 {
                     Ok(Some(u64::from_be_bytes(
                         key_bytes.try_into().unwrap_or([0; 8]),
@@ -321,7 +307,6 @@ impl<B: StorageBackend> BlockArchive<B> {
         let txn = self.db.read().context(InkwellSnafu)?;
         let mut blocks = Vec::new();
 
-        // Iterate over the range
         for (key_bytes, value) in txn.iter::<tables::Blocks>().context(InkwellSnafu)? {
             if key_bytes.len() != 8 {
                 continue;
@@ -389,16 +374,12 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// # Returns
     /// The number of blocks that were compacted.
     pub fn compact_before(&self, before_height: u64) -> Result<u64> {
-        // Get current watermark to avoid re-compacting
         let current_watermark = self.compaction_watermark()?.unwrap_or(0);
         if before_height <= current_watermark {
-            // Nothing new to compact
             return Ok(0);
         }
 
         let mut compacted_count = 0u64;
-
-        // Read blocks that need compaction
         let txn = self.db.read().context(InkwellSnafu)?;
         let mut blocks_to_compact = Vec::new();
 
@@ -415,17 +396,14 @@ impl<B: StorageBackend> BlockArchive<B> {
                 break;
             }
 
-            // Deserialize the block
             let mut block: ShardBlock = decode(&value).context(CodecSnafu)?;
 
-            // Check if it needs compaction (has non-empty transactions)
             let needs_compaction = block
                 .vault_entries
                 .iter()
                 .any(|e| !e.transactions.is_empty());
 
             if needs_compaction {
-                // Remove transaction bodies from each vault entry
                 for entry in &mut block.vault_entries {
                     entry.transactions.clear();
                 }
@@ -434,10 +412,8 @@ impl<B: StorageBackend> BlockArchive<B> {
             }
         }
 
-        // Drop read transaction
         drop(txn);
 
-        // Write compacted blocks back
         if !blocks_to_compact.is_empty() {
             let mut txn = self.db.write().context(InkwellSnafu)?;
 
@@ -450,7 +426,6 @@ impl<B: StorageBackend> BlockArchive<B> {
 
             compacted_count = blocks_to_compact.len() as u64;
 
-            // Update watermark
             txn.insert::<tables::CompactionMeta>(
                 &COMPACTION_WATERMARK_KEY.to_string(),
                 &before_height,

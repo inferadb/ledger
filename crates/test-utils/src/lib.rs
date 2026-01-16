@@ -41,7 +41,6 @@ mod tests {
     fn test_dir_path_returns_valid_path() {
         let dir = TestDir::new();
         let path = dir.path();
-        // Should be able to create files in it
         std::fs::write(path.join("test.txt"), "hello").expect("write file");
         assert!(path.join("test.txt").exists());
     }
@@ -50,7 +49,6 @@ mod tests {
     fn test_dir_join_creates_subdirectory_path() {
         let dir = TestDir::new();
         let subpath = dir.join("subdir/nested");
-        // Path should be under the temp directory
         assert!(subpath.starts_with(dir.path()));
         assert!(subpath.ends_with("subdir/nested"));
     }
@@ -64,7 +62,6 @@ mod tests {
             assert!(p.exists());
             p
         };
-        // After drop, the directory should be removed
         assert!(
             !path.exists(),
             "temp directory should be cleaned up on drop"
@@ -77,7 +74,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_assert_eventually_immediate_success() {
-        // Condition is immediately true
         let result = assert_eventually(Duration::from_millis(100), || true).await;
         assert!(result, "immediately true condition should succeed");
     }
@@ -97,7 +93,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_assert_eventually_timeout() {
-        // Condition never becomes true
         let result = assert_eventually(Duration::from_millis(50), || false).await;
         assert!(!result, "never-true condition should timeout");
     }
@@ -111,7 +106,6 @@ mod tests {
         let state = Arc::new(Mutex::new(0));
         let state_clone = state.clone();
 
-        // Spawn task to update state
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             *state_clone.lock().unwrap() = 42;
@@ -129,7 +123,6 @@ mod tests {
     #[test]
     fn test_batch_config_returns_valid_config() {
         let config = test_batch_config();
-        // Should have reasonable test defaults
         assert!(config.max_batch_size > 0, "batch size should be positive");
         assert!(
             config.batch_timeout.as_millis() > 0,
