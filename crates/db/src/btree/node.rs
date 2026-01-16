@@ -107,7 +107,6 @@ impl<'a> LeafNode<'a> {
     pub fn init(page: &'a mut Page) -> Self {
         let page_size = page.size();
 
-        // Set cell count to 0
         page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].copy_from_slice(&0u16.to_le_bytes());
 
         // Free space starts right after node header
@@ -115,7 +114,6 @@ impl<'a> LeafNode<'a> {
         page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
             .copy_from_slice(&free_start.to_le_bytes());
 
-        // Free space ends at page end
         let free_end = page_size as u16;
         page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].copy_from_slice(&free_end.to_le_bytes());
 
@@ -245,7 +243,6 @@ impl<'a> LeafNode<'a> {
         // Calculate cell size (excluding pointer, which is separate)
         let cell_data_size = 2 + 2 + key.len() + value.len(); // key_len + val_len + key + value
 
-        // Get current free space markers
         let mut free_start = u16::from_le_bytes(
             self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
                 .try_into()
@@ -261,7 +258,6 @@ impl<'a> LeafNode<'a> {
         free_end -= cell_data_size;
         let cell_offset = free_end;
 
-        // Write cell data
         self.page.data[cell_offset..cell_offset + 2]
             .copy_from_slice(&(key.len() as u16).to_le_bytes());
         self.page.data[cell_offset + 2..cell_offset + 4]
@@ -278,17 +274,14 @@ impl<'a> LeafNode<'a> {
             self.page.data.copy_within(src_start..src_end, dst_start);
         }
 
-        // Write new cell pointer
         self.set_cell_ptr(index, cell_offset);
 
-        // Update free space markers
         free_start += CELL_PTR_SIZE;
         self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
             .copy_from_slice(&(free_start as u16).to_le_bytes());
         self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
             .copy_from_slice(&(free_end as u16).to_le_bytes());
 
-        // Update cell count
         let new_count = (count + 1) as u16;
         self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
             .copy_from_slice(&new_count.to_le_bytes());
@@ -360,7 +353,6 @@ impl<'a> LeafNode<'a> {
         self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
             .copy_from_slice(&(free_start as u16).to_le_bytes());
 
-        // Update cell count
         let new_count = (count - 1) as u16;
         self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
             .copy_from_slice(&new_count.to_le_bytes());
@@ -402,7 +394,6 @@ impl<'a> BranchNode<'a> {
     pub fn init(page: &'a mut Page, rightmost_child: PageId) -> Self {
         let page_size = page.size();
 
-        // Set cell count to 0
         page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].copy_from_slice(&0u16.to_le_bytes());
 
         // Free space starts right after node header (including rightmost child)
@@ -410,11 +401,9 @@ impl<'a> BranchNode<'a> {
         page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
             .copy_from_slice(&free_start.to_le_bytes());
 
-        // Free space ends at page end
         let free_end = page_size as u16;
         page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].copy_from_slice(&free_end.to_le_bytes());
 
-        // Set rightmost child
         page.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8]
             .copy_from_slice(&rightmost_child.to_le_bytes());
 
@@ -546,7 +535,6 @@ impl<'a> BranchNode<'a> {
         // Calculate cell size (excluding pointer)
         let cell_data_size = 2 + 8 + key.len(); // key_len + child_page + key
 
-        // Get current free space markers
         let mut free_start = u16::from_le_bytes(
             self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
                 .try_into()
@@ -577,17 +565,14 @@ impl<'a> BranchNode<'a> {
             self.page.data.copy_within(src_start..src_end, dst_start);
         }
 
-        // Write new cell pointer
         self.set_cell_ptr(index, cell_offset);
 
-        // Update free space markers
         free_start += CELL_PTR_SIZE;
         self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
             .copy_from_slice(&(free_start as u16).to_le_bytes());
         self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
             .copy_from_slice(&(free_end as u16).to_le_bytes());
 
-        // Update cell count
         let new_count = (count + 1) as u16;
         self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
             .copy_from_slice(&new_count.to_le_bytes());

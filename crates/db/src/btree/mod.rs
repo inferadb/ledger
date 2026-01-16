@@ -102,7 +102,6 @@ impl<P: PageProvider> BTree<P> {
             return Ok(None);
         }
 
-        // Navigate to the leaf that would contain this key
         let leaf_page = self.find_leaf(key)?;
 
         let mut page = self.provider.read_page(leaf_page)?;
@@ -156,7 +155,6 @@ impl<P: PageProvider> BTree<P> {
             return Ok(None);
         }
 
-        // Find path to leaf
         let (path, old_value) = self.insert_recursive(self.root_page, key, value)?;
 
         // Handle potential root split
@@ -235,7 +233,6 @@ impl<P: PageProvider> BTree<P> {
                     branch.child_for_key(key)
                 };
 
-                // Recurse into child
                 let (promoted, old_value) = self.insert_recursive(child_page_id, key, value)?;
 
                 if let Some((sep_key, new_child)) = promoted {
@@ -245,7 +242,6 @@ impl<P: PageProvider> BTree<P> {
                     let mut branch = BranchNode::from_page(&mut page)?;
 
                     if branch.can_insert(&sep_key) {
-                        // Find position and insert
                         let count = branch.cell_count() as usize;
                         let mut insert_idx = count;
                         for i in 0..count {
@@ -286,7 +282,6 @@ impl<P: PageProvider> BTree<P> {
                         )
                     }
                 } else {
-                    // No split needed
                     Ok((None, old_value))
                 }
             }
@@ -308,7 +303,6 @@ impl<P: PageProvider> BTree<P> {
         value: &[u8],
         old_value: Option<Vec<u8>>,
     ) -> Result<(Option<(Vec<u8>, PageId)>, Option<Vec<u8>>)> {
-        // Allocate new page for right half
         let mut new_page = self.new_leaf_page();
 
         // Use key-aware split that ensures the new key will fit
@@ -335,7 +329,6 @@ impl<P: PageProvider> BTree<P> {
             }
         }
 
-        // Write both pages
         self.provider.write_page(page.clone());
         self.provider.write_page(new_page);
 
@@ -361,10 +354,8 @@ impl<P: PageProvider> BTree<P> {
         right_child: PageId,
         old_value: Option<Vec<u8>>,
     ) -> Result<(Option<(Vec<u8>, PageId)>, Option<Vec<u8>>)> {
-        // Allocate new page and split first
         let mut new_page = self.new_branch_page(0);
 
-        // Do the split
         let split_result = split_branch(page, &mut new_page)?;
 
         // Insert the new separator into appropriate half
@@ -446,7 +437,6 @@ impl<P: PageProvider> BTree<P> {
                 };
 
                 if new_count == 0 && page.id == self.root_page {
-                    // Tree is now empty
                     self.provider.free_page(page.id);
                     self.root_page = 0;
                 } else {
@@ -475,7 +465,6 @@ impl<P: PageProvider> BTree<P> {
             return Ok(None);
         }
 
-        // Navigate to leftmost leaf
         let leaf_page_id = self.find_first_leaf()?;
         let mut page = self.provider.read_page(leaf_page_id)?;
         let leaf = LeafNode::from_page(&mut page)?;
@@ -494,7 +483,6 @@ impl<P: PageProvider> BTree<P> {
             return Ok(None);
         }
 
-        // Navigate to rightmost leaf
         let leaf_page_id = self.find_last_leaf()?;
         let mut page = self.provider.read_page(leaf_page_id)?;
         let leaf = LeafNode::from_page(&mut page)?;
@@ -593,7 +581,6 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             current_leaf: None,
         };
 
-        // Position at start of range
         iter.seek_to_start()?;
 
         Ok(iter)
@@ -605,14 +592,12 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             return Ok(());
         }
 
-        // Find starting position based on range
         let start_key: Option<&[u8]> = match &self.state.range.start {
             cursor::Bound::Unbounded => None,
             cursor::Bound::Included(k) => Some(k),
             cursor::Bound::Excluded(k) => Some(k),
         };
 
-        // Navigate to leaf
         let leaf_page_id = if let Some(key) = start_key {
             self.tree.find_leaf(key)?
         } else {
@@ -692,11 +677,9 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             return Ok(false);
         }
 
-        // Load the new leaf
         self.current_leaf = Some(self.tree.provider.read_page(next_leaf_id)?);
         let new_page = self.current_leaf.as_ref().unwrap();
 
-        // Position at the first entry in the new leaf
         cursor_ops::move_to_first_in_leaf(&mut self.state.position, new_page)?;
 
         Ok(self.state.position.valid)

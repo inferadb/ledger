@@ -195,12 +195,9 @@ impl<B: StorageBackend> Database<B> {
         backend: &B,
         config: &DatabaseConfig,
     ) -> Result<(CommittedState, PageId, bool, PageId)> {
-        // Read and parse header
         let header_bytes = backend.read_header()?;
         let header = DatabaseHeader::from_bytes(&header_bytes)?;
 
-        // Validate and choose the correct commit slot
-        // This handles crash recovery: if primary is corrupt, use secondary
         let valid_slot_index = header.validate_and_choose_slot()?;
         let slot = header.slot(valid_slot_index);
 
@@ -296,11 +293,9 @@ impl<B: StorageBackend> Database<B> {
         // Format: [entry_count: u16][TableEntry; entry_count][padding]
         let mut dir_data = vec![0u8; self.config.page_size];
 
-        // Write entry count
         let entry_count = TableId::COUNT as u16;
         dir_data[0..2].copy_from_slice(&entry_count.to_le_bytes());
 
-        // Write table entries
         let mut offset = 2;
         for table_id in TableId::all() {
             let entry = TableEntry {
@@ -313,10 +308,8 @@ impl<B: StorageBackend> Database<B> {
             offset += TableEntry::SIZE;
         }
 
-        // Write directory page
         backend.write_page(dir_page_id, &dir_data)?;
 
-        // Read current header to preserve existing state
         let header_bytes = backend.read_header()?;
         let mut header = DatabaseHeader::from_bytes(&header_bytes).unwrap_or_else(|_| {
             // If header is corrupt or new, create a fresh one
@@ -326,7 +319,6 @@ impl<B: StorageBackend> Database<B> {
         // Persist the free list to disk and get the head pointer
         let free_list_head = self.persist_free_list(&*backend)?;
 
-        // Build new commit slot data
         let total_pages = self.allocator.lock().next_page_id();
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -400,7 +392,6 @@ impl<B: StorageBackend> Database<B> {
             }
         }
 
-        // Initialize the allocator's free list
         self.allocator.lock().init_free_list(free_pages);
 
         Ok(())
@@ -426,7 +417,6 @@ impl<B: StorageBackend> Database<B> {
             backend.write_page(page_id, &page_data)?;
         }
 
-        // Return head of the list
         Ok(free_pages[0])
     }
 
@@ -478,7 +468,6 @@ impl<B: StorageBackend> Database<B> {
         }
         reachable.insert(page_id);
 
-        // Read the page
         let page = self.read_page(page_id)?;
         let page_type = page.page_type()?;
 
@@ -540,14 +529,10 @@ impl<B: StorageBackend> Database<B> {
     /// transactions can run concurrently - they see a consistent snapshot
     /// and are unaffected by COW modifications.
     pub fn write(&self) -> Result<WriteTransaction<'_, B>> {
-        // Acquire write mutex to ensure only one write at a time
         let write_guard = self.write_lock.lock().map_err(|_| Error::Poisoned)?;
 
-        // Get snapshot ID for this write transaction
         let snapshot_id = self.tracker.start_write_transaction();
 
-        // Start from current committed state
-        // Use load_full() to get Arc directly - avoids Guard which blocks writers
         let current = self.committed_state.load_full();
         let table_roots = current.table_roots;
 
@@ -579,12 +564,10 @@ impl<B: StorageBackend> Database<B> {
 
     /// Read a page from cache or backend.
     fn read_page(&self, page_id: PageId) -> Result<Page> {
-        // Check cache first
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
         }
 
-        // Read from backend
         let backend = self.backend.read();
         let data = backend.read_page(page_id)?;
 
@@ -595,12 +578,10 @@ impl<B: StorageBackend> Database<B> {
 
         let page = Page::from_bytes(page_id, data);
 
-        // Verify checksum
         if !page.verify_checksum() {
             return Err(Error::PageChecksumMismatch { page_id });
         }
 
-        // Cache the page
         self.cache.insert(page.clone());
 
         Ok(page)
@@ -649,7 +630,6 @@ impl<B: StorageBackend> Database<B> {
     ///
     /// Caller is responsible for calling sync() afterward if durability is needed.
     fn flush_pages(&self) -> Result<()> {
-        // Get all dirty pages from cache
         let dirty_pages = self.cache.dirty_pages();
 
         for page in &dirty_pages {
@@ -896,7 +876,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             return Ok(None);
         }
 
-        // Use buffered provider to see our own uncommitted changes
         let provider = BufferedReadPageProvider {
             db: self.db,
             dirty_pages: &self.dirty_pages,
@@ -916,7 +895,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             return Ok(None);
         }
 
-        // Use buffered provider to see our own uncommitted changes
         let provider = BufferedReadPageProvider {
             db: self.db,
             dirty_pages: &self.dirty_pages,
@@ -932,7 +910,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             return Ok(None);
         }
 
-        // Use buffered provider to see our own uncommitted changes
         let provider = BufferedReadPageProvider {
             db: self.db,
             dirty_pages: &self.dirty_pages,
@@ -981,7 +958,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         self.db
             .persist_state_to_disk(&self.table_roots, self.snapshot_id)?;
 
-        // Create new committed state with our updated table roots
         let new_state = CommittedState {
             table_roots: self.table_roots,
             snapshot_id: self.snapshot_id,
@@ -1004,7 +980,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         // Attempt to free old pages that are no longer referenced
         self.db.try_free_pending_pages();
 
-        // End the write transaction in tracker
         self.db.tracker.end_write_transaction(self.snapshot_id);
 
         self.committed = true;
@@ -1054,12 +1029,10 @@ struct CachingReadPageProvider<'txn, 'db, B: StorageBackend> {
 
 impl<'txn, 'db, B: StorageBackend> PageProvider for CachingReadPageProvider<'txn, 'db, B> {
     fn read_page(&self, page_id: PageId) -> Result<Page> {
-        // Check local cache first
         if let Some(page) = self.page_cache.borrow().get(&page_id) {
             return Ok(page.clone());
         }
 
-        // Read from shared cache/backend and store in local cache
         let page = self.db.read_page(page_id)?;
         self.page_cache.borrow_mut().insert(page_id, page.clone());
         Ok(page)
@@ -1110,7 +1083,6 @@ impl<'txn, 'db, B: StorageBackend> PageProvider for BufferedWritePageProvider<'t
         if let Some(page) = self.dirty_pages.get(&page_id) {
             return Ok(page.clone());
         }
-        // Fall back to shared cache/backend
         self.db.read_page(page_id)
     }
 
@@ -1164,7 +1136,6 @@ impl<'txn, 'db, B: StorageBackend> PageProvider for BufferedReadPageProvider<'tx
         if let Some(page) = self.dirty_pages.get(&page_id) {
             return Ok(page.clone());
         }
-        // Fall back to shared cache/backend
         self.db.read_page(page_id)
     }
 
@@ -1258,7 +1229,6 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
         };
         let btree = BTree::new(self.root, provider);
 
-        // Build range bounds
         let range = match (&self.start_bytes, &self.end_bytes) {
             (None, None) => Range::all(),
             (Some(start), None) => Range {
@@ -1275,7 +1245,6 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
             },
         };
 
-        // Collect entries
         let mut iter = btree.range(range)?;
         while let Some((k, v)) = iter.next_entry()? {
             self.entries.push((k, v));
