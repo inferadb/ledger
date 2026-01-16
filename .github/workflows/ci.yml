@@ -86,7 +86,7 @@ jobs:
 
   # Check MSRV (Minimum Supported Rust Version)
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.86)
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-C codegen-units=16 -C link-arg=-fuse-ld=mold"
@@ -99,10 +99,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust 1.85
+      - name: Install Rust 1.86
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: "1.86"
 
       - name: Install mold linker
         run: |
