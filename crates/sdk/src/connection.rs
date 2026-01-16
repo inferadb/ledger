@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use snafu::ResultExt;
 
@@ -140,8 +140,8 @@ impl ConnectionPool {
             .build()
         })?;
 
-        // Apply connection settings
-        let endpoint = self.configure_endpoint(endpoint);
+        // Apply connection settings (including TLS if configured)
+        let endpoint = self.configure_endpoint(endpoint)?;
 
         // Establish the connection
         let channel = endpoint.connect().await.context(TransportSnafu)?;
@@ -154,15 +154,64 @@ impl ConnectionPool {
     /// Note: Compression is configured at the service client level, not the endpoint.
     /// The [`compression_enabled`](Self::compression_enabled) method indicates whether
     /// compression should be applied when creating service clients.
-    fn configure_endpoint(&self, endpoint: Endpoint) -> Endpoint {
-        endpoint
+    fn configure_endpoint(&self, endpoint: Endpoint) -> Result<Endpoint> {
+        let endpoint = endpoint
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.timeout)
             .tcp_nodelay(true)
             .tcp_keepalive(Some(TCP_KEEPALIVE_INTERVAL))
             .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
             .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
-            .keep_alive_while_idle(true)
+            .keep_alive_while_idle(true);
+
+        // Apply TLS configuration if present
+        let endpoint = if let Some(ref tls_config) = self.config.tls {
+            let tls = self.build_tls_config(tls_config)?;
+            endpoint.tls_config(tls).map_err(|e| {
+                ConnectionSnafu {
+                    message: format!("TLS configuration error: {e}"),
+                }
+                .build()
+            })?
+        } else {
+            endpoint
+        };
+
+        Ok(endpoint)
+    }
+
+    /// Builds a tonic `ClientTlsConfig` from our SDK's `TlsConfig`.
+    fn build_tls_config(
+        &self,
+        tls: &crate::config::TlsConfig,
+    ) -> Result<ClientTlsConfig> {
+        let mut tls_config = ClientTlsConfig::new();
+
+        // Add native roots if requested
+        if tls.use_native_roots() {
+            tls_config = tls_config.with_native_roots();
+        }
+
+        // Add CA certificate if provided
+        if let Some(ca_cert) = tls.ca_cert() {
+            let pem = ca_cert.to_pem();
+            let cert = Certificate::from_pem(pem);
+            tls_config = tls_config.ca_certificate(cert);
+        }
+
+        // Add client identity for mutual TLS if provided
+        if let (Some(client_cert), Some(client_key)) = (tls.client_cert(), tls.client_key()) {
+            let cert_pem = client_cert.to_pem();
+            let identity = Identity::from_pem(cert_pem, client_key);
+            tls_config = tls_config.identity(identity);
+        }
+
+        // Set domain name override if provided
+        if let Some(domain) = tls.domain_name() {
+            tls_config = tls_config.domain_name(domain);
+        }
+
+        Ok(tls_config)
     }
 
     /// Returns whether compression is enabled for this connection.

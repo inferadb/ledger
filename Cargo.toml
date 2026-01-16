@@ -22,9 +22,10 @@ authors = ["InferaDB Contributors"]
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
 tokio-stream = "0.1"
+tokio-util = "0.7"
 
 # gRPC
-tonic = { version = "0.12", features = ["gzip", "zstd"] }
+tonic = { version = "0.12", features = ["gzip", "zstd", "tls", "tls-native-roots"] }
 tonic-build = "0.12"
 prost = "0.13"
 prost-types = "0.13"

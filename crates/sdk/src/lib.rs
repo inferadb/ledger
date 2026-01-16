@@ -78,7 +78,8 @@ pub use client::{
     Relationship, SetCondition, VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
 };
 pub use config::{
-    ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, RetryPolicyBuilder,
+    CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy,
+    RetryPolicyBuilder, TlsConfig,
 };
 pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};

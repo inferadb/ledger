@@ -12,6 +12,7 @@ authors.workspace = true
 # Async runtime
 tokio = { workspace = true, features = ["full", "sync"] }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 
 # gRPC
 tonic = { workspace = true }
