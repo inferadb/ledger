@@ -19,9 +19,6 @@ pub struct Config {
     pub metrics_addr: Option<SocketAddr>,
     /// Data directory for Raft logs and snapshots.
     pub data_dir: PathBuf,
-    /// Peer nodes in the cluster.
-    #[serde(default)]
-    pub peers: Vec<PeerConfig>,
     /// Batching configuration.
     #[serde(default)]
     #[allow(dead_code)]
@@ -30,20 +27,12 @@ pub struct Config {
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
     /// Peer discovery configuration (DNS SRV, caching).
+    ///
+    /// Used to determine cluster membership on startup:
+    /// - If discovery finds existing peers, this node joins the cluster
+    /// - If no peers are discovered, this node bootstraps a new cluster
     #[serde(default)]
     pub discovery: DiscoveryConfig,
-    /// Whether this node should bootstrap a new cluster.
-    #[serde(default)]
-    pub bootstrap: bool,
-}
-
-/// Peer node configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PeerConfig {
-    /// Peer node ID.
-    pub node_id: u64,
-    /// Peer address.
-    pub addr: String,
 }
 
 /// Transaction batching configuration.
@@ -154,8 +143,8 @@ impl Config {
         } else {
             // Try default locations
             builder
-                .add_source(config::File::with_name("ledger").required(false))
-                .add_source(config::File::with_name("/etc/ledger/config").required(false))
+                .add_source(config::File::with_name("inferadb-ledger").required(false))
+                .add_source(config::File::with_name("/etc/inferadb-ledger/config").required(false))
         };
 
         // Add environment variables with INFERADB__LEDGER__ prefix.
@@ -179,11 +168,9 @@ impl Config {
             listen_addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             metrics_addr: None,
             data_dir,
-            peers: vec![],
             batching: BatchConfig::default(),
             rate_limit: RateLimitConfig::default(),
             discovery: DiscoveryConfig::default(),
-            bootstrap: true,
         }
     }
 }
@@ -224,6 +211,5 @@ mod tests {
         let config = Config::for_test(1, 50051, PathBuf::from("/tmp/ledger-test"));
         assert_eq!(config.node_id, 1);
         assert_eq!(config.listen_addr.port(), 50051);
-        assert!(config.bootstrap);
     }
 }

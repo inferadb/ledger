@@ -41,18 +41,14 @@ struct CachedPeers {
     peers: Vec<DiscoveredPeer>,
 }
 
-/// Resolve bootstrap peers using multiple discovery methods.
+/// Resolve bootstrap peers using discovery methods.
 ///
 /// Tries in order:
 /// 1. Cached peers (if valid and not expired)
-/// 2. Static peers from configuration
-/// 3. DNS SRV lookup (if configured)
+/// 2. DNS SRV lookup (if configured)
 ///
-/// Returns addresses for load distribution.
-pub async fn resolve_bootstrap_peers(
-    static_peer_addrs: &[String],
-    discovery: &DiscoveryConfig,
-) -> Vec<SocketAddr> {
+/// Returns addresses for cluster discovery.
+pub async fn resolve_bootstrap_peers(discovery: &DiscoveryConfig) -> Vec<SocketAddr> {
     let mut addresses = Vec::new();
 
     if let Some(cached_path) = &discovery.cached_peers_path {
@@ -68,14 +64,6 @@ pub async fn resolve_bootstrap_peers(
             Err(e) => {
                 debug!(error = %e, "No valid cached peers");
             },
-        }
-    }
-
-    for peer_addr in static_peer_addrs {
-        if let Ok(addr) = peer_addr.parse::<SocketAddr>() {
-            addresses.push(addr);
-        } else {
-            warn!(addr = %peer_addr, "Invalid static peer address");
         }
     }
 
@@ -280,11 +268,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_with_static_peers_only() {
-        let static_peers = vec!["127.0.0.1:50051".to_string(), "127.0.0.1:50052".to_string()];
+    async fn test_resolve_with_no_discovery_configured() {
         let discovery = DiscoveryConfig::default();
 
-        let addresses = resolve_bootstrap_peers(&static_peers, &discovery).await;
-        assert_eq!(addresses.len(), 2);
+        // With no discovery sources configured, should return empty
+        let addresses = resolve_bootstrap_peers(&discovery).await;
+        assert!(addresses.is_empty());
     }
 }

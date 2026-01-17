@@ -451,6 +451,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
         AppliedStateAccessor { state: self.applied_state.clone() }
     }
 
+    /// Check if this log store has been previously initialized.
+    ///
+    /// Returns `true` if a vote has been saved, indicating that Raft consensus
+    /// has been started at some point. Used for auto-detection of whether to
+    /// bootstrap a new cluster or resume an existing one.
+    pub fn is_initialized(&self) -> bool {
+        self.vote_cache.read().is_some()
+    }
+
     /// Load metadata values into caches.
     fn load_caches(&self) -> Result<(), StorageError<LedgerNodeId>> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;

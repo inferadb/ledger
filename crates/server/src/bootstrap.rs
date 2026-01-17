@@ -73,10 +73,15 @@ pub struct BootstrappedNode {
     pub learner_refresh_handle: tokio::task::JoinHandle<()>,
 }
 
-/// Bootstrap a new cluster or join an existing one based on configuration.
+/// Bootstrap a new cluster, join an existing one, or resume from saved state.
 ///
-/// If `config.bootstrap` is true, initializes a new single-node cluster.
-/// Otherwise, the node starts without initialization (ready to join).
+/// Behavior is determined automatically:
+///
+/// - If the node has persisted Raft state, it resumes from that state.
+/// - If fresh node and discovery finds existing peers, this is a joining node that waits to be
+///   added via AdminService's JoinCluster RPC.
+/// - If fresh node and no peers discovered, initializes a new single-node cluster with this node as
+///   the sole member (and immediate leader).
 pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, BootstrapError> {
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
@@ -102,6 +107,9 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
         .with_shard_config(0, config.node_id.to_string()); // Default shard 0
+
+    // Determine bootstrap behavior before log_store is consumed by Adaptor
+    let is_initialized = log_store.is_initialized();
 
     // Get accessor before log_store is consumed by Adaptor
     let applied_state_accessor = log_store.accessor();
@@ -132,8 +140,24 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     let raft = Arc::new(raft);
 
-    if config.bootstrap {
-        bootstrap_cluster(&raft, config).await?;
+    // Determine whether to bootstrap based on existing state and discovery
+    if is_initialized {
+        tracing::info!("Existing Raft state found, resuming");
+    } else {
+        // Fresh node - use discovery to determine if joining or bootstrapping
+        let discovered_peers = resolve_bootstrap_peers(&config.discovery).await;
+
+        if discovered_peers.is_empty() {
+            // No peers discovered - this is the first node, bootstrap new cluster
+            tracing::info!("No peers discovered, bootstrapping new single-node cluster");
+            bootstrap_cluster(&raft, config).await?;
+        } else {
+            // Peers discovered - this node will join via AdminService RPC
+            tracing::info!(
+                peer_count = discovered_peers.len(),
+                "Discovered existing peers, waiting to join cluster via AdminService"
+            );
+        }
     }
 
     let block_archive_for_compactor = block_archive.clone();
@@ -200,9 +224,9 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     })
 }
 
-/// Bootstrap a new cluster with this node as the initial member.
+/// Bootstrap a new single-node cluster with this node as the initial member.
 ///
-/// This should only be called once for the first node in a new cluster.
+/// Additional nodes join dynamically via `join_cluster()` using discovery.
 async fn bootstrap_cluster(
     raft: &Raft<LedgerTypeConfig>,
     config: &Config,
@@ -210,38 +234,29 @@ async fn bootstrap_cluster(
     let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
     members.insert(config.node_id, BasicNode { addr: config.listen_addr.to_string() });
 
-    for peer in &config.peers {
-        members.insert(peer.node_id, BasicNode { addr: peer.addr.clone() });
-    }
-
     raft.initialize(members)
         .await
         .map_err(|e| BootstrapError::Initialize(format!("failed to initialize: {}", e)))?;
 
-    tracing::info!(node_id = config.node_id, "Bootstrapped new cluster as initial leader");
+    tracing::info!(node_id = config.node_id, "Bootstrapped new single-node cluster");
 
     Ok(())
 }
 
 /// Join an existing cluster by contacting a peer.
 ///
-/// This is called when `config.bootstrap` is false and the node needs to join
-/// an existing cluster. The node contacts one of the configured peers and
-/// requests to be added to the cluster.
-///
-/// Per DESIGN.md §3.6: Uses DNS SRV discovery to find cluster entry points,
-/// combined with cached peers and static configuration.
+/// Uses discovery (DNS SRV + cached peers) to find cluster entry points.
+/// The node contacts discovered peers and requests to be added to the cluster.
 ///
 /// Note: This should be called after the gRPC server has started, since the
 /// leader needs to be able to reach this node to replicate logs.
 #[allow(dead_code)] // Reserved for join-cluster mode in main.rs
 pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
-    let static_peer_addrs: Vec<String> = config.peers.iter().map(|p| p.addr.clone()).collect();
-    let peer_addresses = resolve_bootstrap_peers(&static_peer_addrs, &config.discovery).await;
+    let peer_addresses = resolve_bootstrap_peers(&config.discovery).await;
 
     if peer_addresses.is_empty() {
         return Err(BootstrapError::Join(
-            "No peers available (checked cache, config, and DNS SRV)".to_string(),
+            "No peers available (checked cache and DNS SRV)".to_string(),
         ));
     }
 

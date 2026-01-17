@@ -1,6 +1,6 @@
 <div align="center">
     <p><a href="https://inferadb.com"><img src=".github/inferadb.png" width="100" alt="InferaDB Logo" /></a></p>
-    <h1>Ledger</h1>
+    <h1>InferaDB Ledger</h1>
     <p>
         <a href="https://discord.gg/inferadb"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
         <a href="#license"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License" /></a>
@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > Under active development. Not production-ready.
 
-Ledger is InferaDB's persistence layer — a blockchain database for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently.
+[InferaDB](https://inferadb.com)'s persistence layer — a blockchain database for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently.
 
 ## Features
 
@@ -92,16 +92,15 @@ cargo test
 
 ```bash
 # Create a config file from the example
-cp ledger.example.toml ledger.toml
+cp inferadb-ledger.example.toml inferadb-ledger.toml
 
 # Edit as needed, then start
 cargo run --release -p inferadb-ledger-server
 
-# Or start with environment variables (no config file needed)
+# Or start with environment variables (auto-bootstraps on fresh data directory)
 INFERADB__LEDGER__NODE_ID=1 \
 INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
 INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
-INFERADB__LEDGER__BOOTSTRAP=true \
 cargo run --release -p inferadb-ledger-server
 ```
 
@@ -116,18 +115,17 @@ cargo run --release -p inferadb-ledger-server
 
 ### Configuration
 
-See [`ledger.example.toml`](ledger.example.toml) for all options. Key settings:
+See [`inferadb-ledger.example.toml`](inferadb-ledger.example.toml) for all options. Key settings:
 
 ```toml
 node_id = 1                           # Unique numeric node ID
 listen_addr = "0.0.0.0:50051"         # gRPC listen address
 data_dir = "/var/lib/ledger"          # Raft logs and state
-bootstrap = true                      # Set true for first node only
-
-[[peers]]                             # Other cluster members
-node_id = 2
-addr = "node-2:50051"
 ```
+
+Cluster membership is determined automatically:
+- If discovery finds existing peers, the node waits to join via AdminService's JoinCluster RPC
+- If no peers discovered, the node bootstraps a new single-node cluster
 
 Environment variables override config file values using the `INFERADB__LEDGER__` prefix (e.g., `INFERADB__LEDGER__NODE_ID=1`).
 

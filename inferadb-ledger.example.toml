@@ -1,0 +1,27 @@
+# InferaDB Ledger Configuration
+#
+# Copy to inferadb-ledger.toml and adjust for your environment.
+# Environment variables override with INFERADB__LEDGER__ prefix (e.g., INFERADB__LEDGER__NODE_ID=1).
+
+# === Required ===
+
+node_id = 1                      # Unique numeric identifier for this node
+listen_addr = "0.0.0.0:50051"    # gRPC listen address
+data_dir = "/var/lib/ledger"     # Data directory for Raft logs and state
+
+# === Optional (defaults shown) ===
+
+# metrics_addr = "0.0.0.0:9090"  # Prometheus endpoint (disabled if not set)
+
+# [batching]
+# max_batch_size = 100           # Max transactions per batch
+# max_batch_delay_ms = 10        # Max wait time for batch to fill (ms)
+
+# [rate_limit]
+# max_concurrent = 100           # Max concurrent requests per connection
+# timeout_secs = 30              # Request timeout
+
+# [discovery]
+# srv_domain = "cluster.example.com"  # DNS SRV for peer discovery (_ledger._tcp.<domain>)
+# cached_peers_path = "/var/lib/ledger/peers.cache"
+# cache_ttl_secs = 3600          # Cache TTL (1 hour)

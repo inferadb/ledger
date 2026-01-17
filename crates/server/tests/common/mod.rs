@@ -12,7 +12,7 @@
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
     LedgerTypeConfig, MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig,
@@ -23,7 +23,39 @@ use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_test_utils::TestDir;
 use openraft::Raft;
+use serde::Serialize;
 use tokio::time::timeout;
+
+/// Write a peer cache file for discovery.
+///
+/// This allows joining nodes to "discover" the leader without real DNS SRV.
+fn write_peer_cache(path: &Path, leader_addr: &SocketAddr) {
+    #[derive(Serialize)]
+    struct CachedPeers {
+        cached_at: u64,
+        peers: Vec<DiscoveredPeer>,
+    }
+
+    #[derive(Serialize)]
+    struct DiscoveredPeer {
+        addr: String,
+        priority: u16,
+        weight: u16,
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let cached = CachedPeers {
+        cached_at: now,
+        peers: vec![DiscoveredPeer { addr: leader_addr.to_string(), priority: 10, weight: 100 }],
+    };
+
+    let content = serde_json::to_string_pretty(&cached).expect("serialize peer cache");
+    std::fs::write(path, content).expect("write peer cache");
+}
 
 /// A test node in a cluster.
 pub struct TestNode {
@@ -89,17 +121,15 @@ impl TestCluster {
         let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
         let temp_dir = TestDir::new();
 
-        // Bootstrap node has NO PEERS - starts as single-node cluster
+        // Bootstrap node: no discovery configured → no peers found → bootstraps
         let config = inferadb_ledger_server::config::Config {
             node_id,
             listen_addr: addr,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
-            peers: vec![], // Empty! Single-node cluster can immediately elect self as leader
             batching: inferadb_ledger_server::config::BatchConfig::default(),
             rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
             discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
-            bootstrap: true,
         };
 
         let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
@@ -150,23 +180,23 @@ impl TestCluster {
             let temp_dir = TestDir::new();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-            // Non-bootstrap nodes: peers list is just for networking, not initial membership
-            // The leader peer is all we need to be able to connect for join RPC
-            let peers = vec![inferadb_ledger_server::config::PeerConfig {
-                node_id: 1, // leader
-                addr: leader_addr.to_string(),
-            }];
+            // Joining node: discovery finds the leader → doesn't bootstrap
+            // Write a cache file with the leader's address for discovery
+            let cache_path = temp_dir.path().join("peers.cache");
+            write_peer_cache(&cache_path, &leader_addr);
 
             let config = inferadb_ledger_server::config::Config {
                 node_id,
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: temp_dir.path().to_path_buf(),
-                peers,
                 batching: inferadb_ledger_server::config::BatchConfig::default(),
                 rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
-                discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
-                bootstrap: false, // Non-bootstrap nodes join dynamically
+                discovery: inferadb_ledger_server::config::DiscoveryConfig {
+                    srv_domain: None,
+                    cached_peers_path: Some(cache_path.to_string_lossy().to_string()),
+                    cache_ttl_secs: 3600,
+                },
             };
 
             // Create the node (doesn't join cluster yet)

@@ -5,14 +5,11 @@
 //! # Usage
 //!
 //! ```bash
-//! # Start with default config (./ledger.toml)
+//! # Start with default config (./inferadb-ledger.toml)
 //! ledger
 //!
 //! # Start with custom config
 //! ledger --config /path/to/config.toml
-//!
-//! # Bootstrap a new cluster
-//! LEDGER_BOOTSTRAP=true ledger
 //! ```
 
 mod bootstrap;
@@ -62,7 +59,6 @@ async fn main() -> Result<(), ServerError> {
         node_id = config.node_id,
         listen_addr = %config.listen_addr,
         data_dir = %config.data_dir.display(),
-        bootstrap = config.bootstrap,
         "Starting InferaDB Ledger"
     );
 
@@ -127,7 +123,7 @@ USAGE:
     ledger [OPTIONS]
 
 OPTIONS:
-    -c, --config <FILE>    Configuration file path [default: ledger.toml]
+    -c, --config <FILE>    Configuration file path [default: inferadb-ledger.toml]
     -h, --help             Print help information
     -V, --version          Print version information
 
@@ -136,7 +132,6 @@ ENVIRONMENT VARIABLES:
     INFERADB__LEDGER__LISTEN_ADDR   gRPC listen address (e.g., 0.0.0.0:50051)
     INFERADB__LEDGER__METRICS_ADDR  Prometheus metrics address (e.g., 0.0.0.0:9090)
     INFERADB__LEDGER__DATA_DIR      Data directory path
-    INFERADB__LEDGER__BOOTSTRAP     Set to 'true' to bootstrap a new cluster
 
 EXAMPLES:
     # Start with default configuration
@@ -145,12 +140,10 @@ EXAMPLES:
     # Start with custom config file
     ledger --config /etc/ledger/config.toml
 
-    # Bootstrap a new single-node cluster
+    # Start a single-node cluster (auto-bootstraps on fresh data directory)
     INFERADB__LEDGER__NODE_ID=1 \
     INFERADB__LEDGER__LISTEN_ADDR=0.0.0.0:50051 \
-    INFERADB__LEDGER__METRICS_ADDR=0.0.0.0:9090 \
     INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
-    INFERADB__LEDGER__BOOTSTRAP=true \
     ledger
 "#
     );

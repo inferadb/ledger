@@ -38,46 +38,63 @@ build_if_needed() {
     fi
 }
 
+create_peer_cache() {
+    local cache_file=$1
+    local leader_addr=$2
+    local now
+    now=$(date +%s)
+
+    cat > "$cache_file" << EOF
+{
+  "cached_at": ${now},
+  "peers": [{"addr": "${leader_addr}", "priority": 10, "weight": 100}]
+}
+EOF
+}
+
 create_config() {
     local node_id=$1
     local port
     port=$(get_port "$node_id")
     local config_dir="${DATA_ROOT}/node-${node_id}"
-    local config_file="${config_dir}/ledger.toml"
+    local config_file="${config_dir}/inferadb-ledger.toml"
+    local leader_port
+    leader_port=$(get_port 1)
+    local cache_file="${config_dir}/peers.cache"
 
     mkdir -p "$config_dir"
 
-    # Build peers list (all nodes except self)
-    local peers=""
-    for peer_id in $NODE_IDS; do
-        if [[ "$peer_id" != "$node_id" ]]; then
-            local peer_port
-            peer_port=$(get_port "$peer_id")
-            peers="${peers}
-[[peers]]
-node_id = ${peer_id}
-addr = \"127.0.0.1:${peer_port}\""
-        fi
-    done
-
-    # Only node 1 bootstraps the cluster
-    local bootstrap="false"
+    # Node 1: No discovery → no peers found → bootstraps new cluster
+    # Other nodes: Discovery finds node 1 → waits to join via AdminService RPC
     if [[ "$node_id" == "1" ]]; then
-        bootstrap="true"
-    fi
-
-    cat > "$config_file" << EOF
+        cat > "$config_file" << EOF
 # Auto-generated config for node ${node_id}
 node_id = ${node_id}
 listen_addr = "127.0.0.1:${port}"
 data_dir = "${config_dir}/data"
-bootstrap = ${bootstrap}
-${peers}
 
 [batching]
 max_batch_size = 100
 max_batch_delay_ms = 10
 EOF
+    else
+        # Create peer cache pointing to node 1
+        create_peer_cache "$cache_file" "127.0.0.1:${leader_port}"
+
+        cat > "$config_file" << EOF
+# Auto-generated config for node ${node_id}
+node_id = ${node_id}
+listen_addr = "127.0.0.1:${port}"
+data_dir = "${config_dir}/data"
+
+[batching]
+max_batch_size = 100
+max_batch_delay_ms = 10
+
+[discovery]
+cached_peers_path = "${cache_file}"
+EOF
+    fi
 
     echo "$config_file"
 }
@@ -139,10 +156,10 @@ start_cluster() {
     log "Data directory: $DATA_ROOT"
     echo
 
-    # Start nodes in order (node 1 first as bootstrap)
+    # Start nodes in order (node 1 first to establish cluster)
     for node_id in $NODE_IDS; do
         start_node "$node_id"
-        # Small delay to let bootstrap node initialize first
+        # Small delay to let first node initialize before others join
         if [[ "$node_id" == "1" ]]; then
             sleep 1
         fi
