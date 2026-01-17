@@ -94,10 +94,10 @@ cargo test
 # Create a config file from the example
 cp inferadb-ledger.example.toml inferadb-ledger.toml
 
-# For single-node development, set min_cluster_size=1:
+# For single-node development, set bootstrap_expect=1:
 INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
 INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
-INFERADB__LEDGER__BOOTSTRAP__MIN_CLUSTER_SIZE=1 \
+INFERADB__LEDGER__BOOTSTRAP__BOOTSTRAP_EXPECT=1 \
 cargo run --release -p inferadb-ledger-server
 ```
 
@@ -119,19 +119,19 @@ listen_addr = "0.0.0.0:50051"         # gRPC listen address
 data_dir = "/var/lib/ledger"          # Raft logs and state
 
 [bootstrap]
-min_cluster_size = 3                  # 0=join, 1=single-node, 2+=coordinated
+bootstrap_expect = 3                  # 0=join, 1=single-node, 2+=coordinated
 ```
 
 **Coordinated Bootstrap**: Nodes automatically generate Snowflake IDs (persisted to `{data_dir}/node_id`) and coordinate cluster formation:
 
 1. Each node starts its gRPC server and polls discovery for peers
-2. Once `min_cluster_size` nodes discover each other, they exchange node info via `GetNodeInfo` RPC
+2. Once `bootstrap_expect` nodes discover each other, they exchange node info via `GetNodeInfo` RPC
 3. The node with the lowest Snowflake ID (earliest started) bootstraps the cluster
 4. Other nodes wait to be added as Raft voters
 
 This prevents split-brain scenarios where multiple nodes independently bootstrap separate clusters.
 
-Environment variables override config file values using the `INFERADB__LEDGER__` prefix (e.g., `INFERADB__LEDGER__BOOTSTRAP__MIN_CLUSTER_SIZE=3`).
+Environment variables override config file values using the `INFERADB__LEDGER__` prefix (e.g., `INFERADB__LEDGER__BOOTSTRAP__BOOTSTRAP_EXPECT=3`).
 
 ## Crates
 

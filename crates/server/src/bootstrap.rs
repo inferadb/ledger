@@ -98,8 +98,8 @@ pub struct BootstrappedNode {
 /// Behavior is determined automatically via coordinated bootstrap:
 ///
 /// - If the node has persisted Raft state, it resumes from that state.
-/// - If `min_cluster_size=0`, waits to be added to existing cluster via AdminService.
-/// - If `min_cluster_size=1`, bootstraps immediately as a single-node cluster.
+/// - If `bootstrap_expect=0`, waits to be added to existing cluster via AdminService.
+/// - If `bootstrap_expect=1`, bootstraps immediately as a single-node cluster.
 /// - Otherwise, coordinates with discovered peers using GetNodeInfo RPC:
 ///   - If any peer is already a cluster member, waits to join existing cluster
 ///   - If enough peers found, the node with lowest Snowflake ID bootstraps all members
@@ -168,20 +168,20 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     let raft = Arc::new(raft);
 
-    // Determine whether to bootstrap based on existing state and min_cluster_size
+    // Determine whether to bootstrap based on existing state and bootstrap_expect
     if is_initialized {
         tracing::info!("Existing Raft state found, resuming");
     } else if config.bootstrap.is_join_mode() {
         // Join mode: wait to be added to existing cluster via AdminService
         tracing::info!(
             node_id,
-            "Join mode (min_cluster_size=0): waiting to be added via AdminService"
+            "Join mode (bootstrap_expect=0): waiting to be added via AdminService"
         );
         // Note: We intentionally do NOT bootstrap or call discovery here.
         // The calling code is responsible for adding this node to the cluster.
     } else if config.bootstrap.is_single_node() {
         // Single-node mode: bootstrap immediately without coordination
-        tracing::info!(node_id, "Bootstrapping single-node cluster (min_cluster_size=1)");
+        tracing::info!(node_id, "Bootstrapping single-node cluster (bootstrap_expect=1)");
         bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
     } else {
         // Fresh node - use coordinated bootstrap to determine action

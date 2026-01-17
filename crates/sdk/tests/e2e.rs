@@ -153,7 +153,7 @@ impl TestCluster {
             let temp_dir = TestDir::new();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-            // Joining node: use join mode (min_cluster_size=0) for dynamic node addition.
+            // Joining node: use join mode (bootstrap_expect=0) for dynamic node addition.
             // This bypasses bootstrap entirely - no Raft cluster initialized, waiting
             // to be added via AdminService's JoinCluster RPC which we call below.
             // Uses auto-generated Snowflake ID (node_id: None) for realistic testing.
@@ -166,7 +166,7 @@ impl TestCluster {
                 rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
                 discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
                 bootstrap: inferadb_ledger_server::config::BootstrapConfig {
-                    min_cluster_size: 0, // Join mode: wait to be added to existing cluster
+                    bootstrap_expect: 0, // Join mode: wait to be added to existing cluster
                     ..Default::default()
                 },
             };

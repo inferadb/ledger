@@ -76,7 +76,7 @@ impl std::error::Error for CoordinatorError {}
 ///
 /// This function implements the coordination algorithm:
 ///
-/// 1. Poll discovery every `poll_interval_secs` until `min_cluster_size` nodes found
+/// 1. Poll discovery every `poll_interval_secs` until `bootstrap_expect` nodes found
 /// 2. Query each discovered peer via `discover_node_info`
 /// 3. If any peer has `is_cluster_member=true`, return `JoinExisting`
 /// 4. If enough peers found and my ID is lowest, return `Bootstrap` with all members
@@ -108,7 +108,7 @@ pub async fn coordinate_bootstrap(
     info!(
         my_id = my_node_id,
         my_address = %my_address,
-        min_cluster_size = bootstrap_config.min_cluster_size,
+        bootstrap_expect = bootstrap_config.bootstrap_expect,
         timeout_secs = bootstrap_config.bootstrap_timeout_secs,
         poll_interval_secs = bootstrap_config.poll_interval_secs,
         "Starting bootstrap coordination"
@@ -121,13 +121,13 @@ pub async fn coordinate_bootstrap(
                 my_id = my_node_id,
                 my_address = %my_address,
                 elapsed_secs = start.elapsed().as_secs(),
-                min_cluster_size = bootstrap_config.min_cluster_size,
+                bootstrap_expect = bootstrap_config.bootstrap_expect,
                 decision = "timeout",
                 "Bootstrap coordination timed out waiting for peers"
             );
             return Err(CoordinatorError::Timeout(format!(
                 "did not discover {} peers within {}s",
-                bootstrap_config.min_cluster_size, bootstrap_config.bootstrap_timeout_secs
+                bootstrap_config.bootstrap_expect, bootstrap_config.bootstrap_timeout_secs
             )));
         }
 
@@ -154,13 +154,13 @@ pub async fn coordinate_bootstrap(
         // Count total nodes (discovered + self)
         let total_nodes = discovered.len() + 1;
 
-        if total_nodes >= bootstrap_config.min_cluster_size as usize {
+        if total_nodes >= bootstrap_config.bootstrap_expect as usize {
             return Ok(make_bootstrap_decision(my_node_id, my_address, &discovered));
         }
 
         debug!(
             found = total_nodes,
-            required = bootstrap_config.min_cluster_size,
+            required = bootstrap_config.bootstrap_expect,
             "Waiting for peers"
         );
         tokio::time::sleep(poll_interval).await;
@@ -371,7 +371,7 @@ mod tests {
     async fn test_coordinate_bootstrap_timeout() {
         // Use a very short timeout and no discoverable peers
         let bootstrap_config = BootstrapConfig {
-            min_cluster_size: 3,
+            bootstrap_expect: 3,
             bootstrap_timeout_secs: 1, // Very short timeout
             poll_interval_secs: 1,
         };
@@ -408,7 +408,7 @@ mod tests {
             coordinate_bootstrap(100, "127.0.0.1:50051", &bootstrap_config, &discovery_config)
                 .await;
 
-        // Should immediately bootstrap as single node (1 node = min_cluster_size)
+        // Should immediately bootstrap as single node (1 node = bootstrap_expect)
         match result {
             Ok(BootstrapDecision::Bootstrap { initial_members }) => {
                 assert_eq!(initial_members.len(), 1);

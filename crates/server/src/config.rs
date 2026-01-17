@@ -118,7 +118,7 @@ pub struct DiscoveryConfig {
 /// Bootstrap configuration for coordinated cluster formation.
 ///
 /// Controls how nodes discover each other and coordinate to form a cluster.
-/// The `min_cluster_size` determines behavior:
+/// The `bootstrap_expect` value determines behavior:
 /// - `0`: Join mode. Node waits to be added to an existing cluster via AdminService.
 /// - `1`: Single-node mode. Node bootstraps immediately without coordination.
 /// - `2+`: Coordinated mode. Nodes discover peers and the lowest-ID node bootstraps.
@@ -127,31 +127,31 @@ pub struct DiscoveryConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)] // Fields used in Task 5/6 (coordinator integration)
 pub struct BootstrapConfig {
-    /// Minimum cluster size before bootstrapping (default: 3).
+    /// Expected number of nodes for bootstrap (default: 3).
     ///
-    /// - When `0`: Join mode. Waits to be added to existing cluster via AdminService.
-    /// - When `1`: Single-node deployment. Bootstraps immediately, no coordination.
-    /// - When `2+`: Waits for this many nodes before coordinated bootstrap.
-    #[serde(default = "default_min_cluster_size")]
-    pub min_cluster_size: u32,
+    /// - `0`: Join mode. Waits to be added to existing cluster via AdminService.
+    /// - `1`: Single-node deployment. Bootstraps immediately, no coordination.
+    /// - `2+`: Waits for this many nodes before coordinated bootstrap.
+    #[serde(default = "default_bootstrap_expect")]
+    pub bootstrap_expect: u32,
 
     /// Timeout waiting for peers in seconds (default: 60).
     ///
-    /// If the minimum cluster size is not reached within this timeout,
+    /// If the expected node count is not reached within this timeout,
     /// the node will fail to start with a timeout error.
-    /// Ignored when `min_cluster_size=1`.
+    /// Ignored when `bootstrap_expect <= 1`.
     #[serde(default = "default_bootstrap_timeout")]
     pub bootstrap_timeout_secs: u64,
 
     /// Discovery polling interval in seconds (default: 2).
     ///
     /// How frequently the node polls for new peers during the bootstrap
-    /// coordination phase. Ignored when `min_cluster_size=1`.
+    /// coordination phase. Ignored when `bootstrap_expect <= 1`.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
 }
 
-fn default_min_cluster_size() -> u32 {
+fn default_bootstrap_expect() -> u32 {
     3
 }
 
@@ -166,7 +166,7 @@ fn default_poll_interval() -> u64 {
 impl Default for BootstrapConfig {
     fn default() -> Self {
         Self {
-            min_cluster_size: default_min_cluster_size(),
+            bootstrap_expect: default_bootstrap_expect(),
             bootstrap_timeout_secs: default_bootstrap_timeout(),
             poll_interval_secs: default_poll_interval(),
         }
@@ -180,12 +180,12 @@ impl BootstrapConfig {
     /// This is primarily for testing or development scenarios where
     /// a single-node cluster is acceptable.
     pub fn for_single_node() -> Self {
-        Self { min_cluster_size: 1, ..Self::default() }
+        Self { bootstrap_expect: 1, ..Self::default() }
     }
 
     /// Validate the bootstrap configuration.
     ///
-    /// Always succeeds - all `min_cluster_size` values are valid:
+    /// Always succeeds - all `bootstrap_expect` values are valid:
     /// - `0`: Join existing cluster (no bootstrap)
     /// - `1`: Single-node deployment
     /// - `2+`: Coordinated multi-node bootstrap
@@ -195,15 +195,15 @@ impl BootstrapConfig {
 
     /// Returns true if this is a single-node deployment (no coordination needed).
     pub fn is_single_node(&self) -> bool {
-        self.min_cluster_size == 1
+        self.bootstrap_expect == 1
     }
 
     /// Returns true if this node should wait to join an existing cluster.
     ///
-    /// When `min_cluster_size=0`, the node starts without initializing a Raft
+    /// When `bootstrap_expect=0`, the node starts without initializing a Raft
     /// cluster and waits to be added via AdminService's JoinCluster RPC.
     pub fn is_join_mode(&self) -> bool {
-        self.min_cluster_size == 0
+        self.bootstrap_expect == 0
     }
 }
 
@@ -267,7 +267,7 @@ impl Config {
 
     /// Create a configuration for testing.
     ///
-    /// Uses `min_cluster_size=1` (single-node mode) by default for simple
+    /// Uses `bootstrap_expect=1` (single-node mode) by default for simple
     /// test scenarios. The `node_id` is explicitly set to allow tests to
     /// use deterministic, predictable node IDs.
     #[allow(clippy::unwrap_used, clippy::disallowed_methods, dead_code)]
@@ -349,14 +349,14 @@ mod tests {
         assert_eq!(config.node_id, Some(1));
         assert_eq!(config.listen_addr.port(), 50051);
         // Verify bootstrap config for tests uses single-node mode
-        assert_eq!(config.bootstrap.min_cluster_size, 1);
+        assert_eq!(config.bootstrap.bootstrap_expect, 1);
         assert!(config.bootstrap.is_single_node());
     }
 
     #[test]
     fn test_bootstrap_config_defaults() {
         let config = BootstrapConfig::default();
-        assert_eq!(config.min_cluster_size, 3);
+        assert_eq!(config.bootstrap_expect, 3);
         assert_eq!(config.bootstrap_timeout_secs, 60);
         assert_eq!(config.poll_interval_secs, 2);
         assert!(!config.is_single_node());
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_config_validate_success() {
-        let config = BootstrapConfig { min_cluster_size: 3, ..Default::default() };
+        let config = BootstrapConfig { bootstrap_expect: 3, ..Default::default() };
         assert!(config.validate().is_ok());
     }
 
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_config_join_mode() {
-        let config = BootstrapConfig { min_cluster_size: 0, ..Default::default() };
+        let config = BootstrapConfig { bootstrap_expect: 0, ..Default::default() };
         assert!(config.validate().is_ok());
         assert!(config.is_join_mode());
         assert!(!config.is_single_node());

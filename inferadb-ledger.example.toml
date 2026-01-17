@@ -2,7 +2,7 @@
 #
 # Copy to inferadb-ledger.toml and adjust for your environment.
 # Environment variables override with INFERADB__LEDGER__ prefix
-# (e.g., INFERADB__LEDGER__BOOTSTRAP__MIN_CLUSTER_SIZE=3).
+# (e.g., INFERADB__LEDGER__BOOTSTRAP__BOOTSTRAP_EXPECT=3).
 
 # === Required ===
 
@@ -16,21 +16,21 @@ data_dir = "/var/lib/ledger"     # Data directory for Raft logs and state
 # the cluster while others wait to join.
 
 [bootstrap]
-# Controls cluster formation behavior:
+# Expected number of nodes for bootstrap (Consul-style semantics):
 #   0 = Join mode: wait to be added to existing cluster via AdminService
 #   1 = Single-node: bootstrap immediately without coordination
 #   2+ = Coordinated: discover peers, lowest-ID node bootstraps
 # Default: 3 (ensures production clusters have proper quorum)
-min_cluster_size = 3
+bootstrap_expect = 3
 
-# Maximum time (seconds) to wait for min_cluster_size peers.
+# Maximum time (seconds) to wait for expected peers.
 # Returns error if timeout expires before enough peers discovered.
-# Ignored when min_cluster_size <= 1.
+# Ignored when bootstrap_expect <= 1.
 # Default: 60
 bootstrap_timeout_secs = 60
 
 # Interval (seconds) between discovery polls during bootstrap.
-# Ignored when min_cluster_size <= 1.
+# Ignored when bootstrap_expect <= 1.
 # Default: 2
 poll_interval_secs = 2
 

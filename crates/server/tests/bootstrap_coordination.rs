@@ -1,7 +1,7 @@
 //! Integration tests for coordinated cluster bootstrap.
 //!
 //! Tests the bootstrap coordination system including:
-//! - Single-node bootstrap with `min_cluster_size=1`
+//! - Single-node bootstrap with `bootstrap_expect=1`
 //! - 3-node coordinated bootstrap (lowest ID wins)
 //! - Node restart preserves ID and rejoins cluster
 //! - Late joiner finds existing cluster via `is_cluster_member`
@@ -22,10 +22,10 @@ use inferadb_ledger_server::{
 use inferadb_ledger_test_utils::TestDir;
 use serial_test::serial;
 
-/// Test single-node bootstrap with `min_cluster_size=1`.
+/// Test single-node bootstrap with `bootstrap_expect=1`.
 ///
 /// Verifies that a single node can bootstrap immediately when configured
-/// with `min_cluster_size=1`.
+/// with `bootstrap_expect=1`.
 #[serial]
 #[tokio::test]
 async fn test_single_node_bootstrap() {
@@ -306,9 +306,9 @@ async fn test_late_joiner_finds_existing_cluster() {
     leader_handle.abort();
 }
 
-/// Test join mode (min_cluster_size=0) starts without bootstrapping.
+/// Test join mode (bootstrap_expect=0) starts without bootstrapping.
 ///
-/// Verifies that a node with min_cluster_size=0 starts successfully but
+/// Verifies that a node with bootstrap_expect=0 starts successfully but
 /// does not initialize a Raft cluster - it waits to be added via AdminService.
 #[serial]
 #[tokio::test]
@@ -326,7 +326,7 @@ async fn test_join_mode_does_not_bootstrap() {
         rate_limit: Default::default(),
         discovery: DiscoveryConfig::default(),
         bootstrap: BootstrapConfig {
-            min_cluster_size: 0, // Join mode
+            bootstrap_expect: 0, // Join mode
             ..Default::default()
         },
     };
