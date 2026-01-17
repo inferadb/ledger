@@ -704,7 +704,12 @@ mod tests {
 /// Helper for hex encoding (dev dependency not needed for tests).
 #[cfg(test)]
 mod hex {
+    use std::fmt::Write;
+
     pub fn encode(data: &[u8]) -> String {
-        data.iter().map(|b| format!("{:02x}", b)).collect()
+        data.iter().fold(String::with_capacity(data.len() * 2), |mut acc, b| {
+            let _ = write!(acc, "{:02x}", b);
+            acc
+        })
     }
 }
