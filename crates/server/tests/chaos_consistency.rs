@@ -161,12 +161,12 @@ impl RaftService for SplitBrainDetectionService {
                 self.state.current_term.store(request_term, Ordering::SeqCst);
                 *self.state.voted_for.lock() = Some(request_term);
                 true
-            }
+            },
             std::cmp::Ordering::Equal => {
                 // Same term - check if already voted
                 let voted_for = self.state.voted_for.lock();
                 voted_for.is_none() || *voted_for == Some(request_term)
-            }
+            },
             std::cmp::Ordering::Less => false,
         };
 
