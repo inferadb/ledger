@@ -84,7 +84,7 @@ impl VaultCommitment {
 
     /// Compute the vault's state root.
     ///
-    /// state_root = SHA-256(bucket_root[0] || ... || bucket_root[255])
+    /// state_root = SHA-256(bucket_root\[0\] || ... || bucket_root\[255\])
     ///
     /// Note: This does NOT recompute dirty bucket roots. Call `update_dirty_buckets`
     /// first to recompute them, or use `compute_state_root_with_scan` which does both.

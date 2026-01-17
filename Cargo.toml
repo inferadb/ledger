@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/inferadb/ledger"
 authors = ["InferaDB Contributors"]
@@ -91,7 +91,7 @@ futures = "0.3"
 proptest = "1.4"
 
 # Benchmarking
-criterion = { version = "0.8", features = ["async_tokio"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 # DNS resolver for SRV record discovery
 hickory-resolver = "0.24"
