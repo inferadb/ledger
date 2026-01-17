@@ -155,17 +155,19 @@ impl RaftService for SplitBrainDetectionService {
         let current_term = self.state.current_term.load(Ordering::SeqCst);
 
         // Standard Raft voting logic (simplified)
-        let vote_granted = if request_term > current_term {
-            // Higher term - grant vote
-            self.state.current_term.store(request_term, Ordering::SeqCst);
-            *self.state.voted_for.lock() = Some(request_term);
-            true
-        } else if request_term == current_term {
-            // Same term - check if already voted
-            let voted_for = self.state.voted_for.lock();
-            voted_for.is_none() || *voted_for == Some(request_term)
-        } else {
-            false
+        let vote_granted = match request_term.cmp(&current_term) {
+            std::cmp::Ordering::Greater => {
+                // Higher term - grant vote
+                self.state.current_term.store(request_term, Ordering::SeqCst);
+                *self.state.voted_for.lock() = Some(request_term);
+                true
+            }
+            std::cmp::Ordering::Equal => {
+                // Same term - check if already voted
+                let voted_for = self.state.voted_for.lock();
+                voted_for.is_none() || *voted_for == Some(request_term)
+            }
+            std::cmp::Ordering::Less => false,
         };
 
         if vote_granted {
