@@ -3,6 +3,7 @@
 //! Provides polling-based assertions for async test scenarios.
 
 use std::time::Duration;
+
 use tokio::time::{Instant, sleep};
 
 /// Default polling interval for [`assert_eventually`].

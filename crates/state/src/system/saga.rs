@@ -16,9 +16,8 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
 use inferadb_ledger_types::{NamespaceId, UserId};
+use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a saga.
 pub type SagaId = String;
@@ -416,12 +415,7 @@ impl Saga {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -454,24 +448,15 @@ mod tests {
 
         // Transition to UserCreated
         saga.transition(CreateOrgSagaState::UserCreated { user_id: 1 });
-        assert!(matches!(
-            saga.state,
-            CreateOrgSagaState::UserCreated { user_id: 1 }
-        ));
+        assert!(matches!(saga.state, CreateOrgSagaState::UserCreated { user_id: 1 }));
         assert!(!saga.is_terminal());
 
         // Transition to NamespaceCreated
-        saga.transition(CreateOrgSagaState::NamespaceCreated {
-            user_id: 1,
-            namespace_id: 100,
-        });
+        saga.transition(CreateOrgSagaState::NamespaceCreated { user_id: 1, namespace_id: 100 });
         assert!(!saga.is_terminal());
 
         // Transition to Completed
-        saga.transition(CreateOrgSagaState::Completed {
-            user_id: 1,
-            namespace_id: 100,
-        });
+        saga.transition(CreateOrgSagaState::Completed { user_id: 1, namespace_id: 100 });
         assert!(saga.is_terminal());
     }
 
@@ -533,18 +518,12 @@ mod tests {
 
         // Should now be in Failed state
         assert!(saga.is_terminal());
-        assert!(matches!(
-            saga.state,
-            CreateOrgSagaState::Failed { step: 1, .. }
-        ));
+        assert!(matches!(saga.state, CreateOrgSagaState::Failed { step: 1, .. }));
     }
 
     #[test]
     fn test_delete_user_saga() {
-        let input = DeleteUserInput {
-            user_id: 1,
-            namespace_ids: vec![100, 101],
-        };
+        let input = DeleteUserInput { user_id: 1, namespace_ids: vec![100, 101] };
         let mut saga = DeleteUserSaga::new("delete-123".to_string(), input);
 
         assert!(!saga.is_terminal());

@@ -5,9 +5,8 @@
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
 use inferadb_ledger_types::{NamespaceId, NodeId, ShardId, UserId};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // User Types

@@ -24,12 +24,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
+use std::{hint::black_box, time::Duration};
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use inferadb_ledger_sdk::{
     ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker, mock::MockLedgerServer,
 };
-use std::hint::black_box;
-use std::time::Duration;
 use tokio::runtime::Runtime;
 
 /// Create a runtime for async benchmarks.
@@ -55,9 +55,7 @@ async fn create_client_for_mock(endpoint: &str) -> LedgerClient {
         .build()
         .expect("Failed to build config");
 
-    LedgerClient::new(config)
-        .await
-        .expect("Failed to create client")
+    LedgerClient::new(config).await.expect("Failed to create client")
 }
 
 // ============================================================================
@@ -71,9 +69,7 @@ async fn create_client_for_mock(endpoint: &str) -> LedgerClient {
 fn bench_sequence_next(c: &mut Criterion) {
     let tracker = SequenceTracker::new("bench-client");
 
-    c.bench_function("sequence_next", |b| {
-        b.iter(|| black_box(tracker.next_sequence(1, 0)))
-    });
+    c.bench_function("sequence_next", |b| b.iter(|| black_box(tracker.next_sequence(1, 0))));
 }
 
 /// Benchmark sequence tracking with multiple vaults.
@@ -95,36 +91,31 @@ fn bench_sequence_multi_vault(c: &mut Criterion) {
 ///
 /// Measures performance when multiple threads increment sequences concurrently.
 fn bench_sequence_concurrent(c: &mut Criterion) {
-    use std::sync::Arc;
-    use std::thread;
+    use std::{sync::Arc, thread};
 
     let mut group = c.benchmark_group("sequence_concurrent");
 
     for num_threads in [2, 4, 10] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_threads),
-            &num_threads,
-            |b, &n| {
-                let tracker = Arc::new(SequenceTracker::new("bench-client"));
+        group.bench_with_input(BenchmarkId::from_parameter(num_threads), &num_threads, |b, &n| {
+            let tracker = Arc::new(SequenceTracker::new("bench-client"));
 
-                b.iter(|| {
-                    let handles: Vec<_> = (0..n)
-                        .map(|i| {
-                            let t = tracker.clone();
-                            thread::spawn(move || {
-                                for _ in 0..100 {
-                                    black_box(t.next_sequence(1, i as i64));
-                                }
-                            })
+            b.iter(|| {
+                let handles: Vec<_> = (0..n)
+                    .map(|i| {
+                        let t = tracker.clone();
+                        thread::spawn(move || {
+                            for _ in 0..100 {
+                                black_box(t.next_sequence(1, i as i64));
+                            }
                         })
-                        .collect();
+                    })
+                    .collect();
 
-                    for h in handles {
-                        h.join().expect("Thread panicked");
-                    }
-                })
-            },
-        );
+                for h in handles {
+                    h.join().expect("Thread panicked");
+                }
+            })
+        });
     }
     group.finish();
 }
@@ -141,9 +132,7 @@ fn bench_read_single(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start()
-            .await
-            .expect("Failed to start mock server");
+        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
         server.set_entity(1, 0, "test-key", b"test-value-data");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
@@ -151,12 +140,7 @@ fn bench_read_single(c: &mut Criterion) {
 
     c.bench_function("read_single_key", |b| {
         b.to_async(&rt).iter(|| async {
-            black_box(
-                client
-                    .read(1, Some(0), "test-key")
-                    .await
-                    .expect("read failed"),
-            )
+            black_box(client.read(1, Some(0), "test-key").await.expect("read failed"))
         })
     });
 }
@@ -169,18 +153,11 @@ fn bench_read_batch(c: &mut Criterion) {
 
     // Setup: start mock server with many keys
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start()
-            .await
-            .expect("Failed to start mock server");
+        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
 
         // Pre-populate 100 keys
         for i in 0..100 {
-            server.set_entity(
-                1,
-                0,
-                &format!("key-{:03}", i),
-                format!("value-{}", i).as_bytes(),
-            );
+            server.set_entity(1, 0, &format!("key-{:03}", i), format!("value-{}", i).as_bytes());
         }
 
         let client = create_client_for_mock(server.endpoint()).await;
@@ -196,10 +173,7 @@ fn bench_read_batch(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(batch_size), &keys, |b, keys| {
             b.to_async(&rt).iter(|| async {
                 black_box(
-                    client
-                        .batch_read(1, Some(0), keys.clone())
-                        .await
-                        .expect("batch_read failed"),
+                    client.batch_read(1, Some(0), keys.clone()).await.expect("batch_read failed"),
                 )
             })
         });
@@ -219,9 +193,7 @@ fn bench_write_single(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start()
-            .await
-            .expect("Failed to start mock server");
+        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
     });
@@ -247,9 +219,7 @@ fn bench_write_multi_op(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start()
-            .await
-            .expect("Failed to start mock server");
+        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
     });
@@ -259,25 +229,21 @@ fn bench_write_multi_op(c: &mut Criterion) {
 
     for op_count in [1, 5, 10] {
         group.throughput(Throughput::Elements(op_count as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(op_count),
-            &op_count,
-            |b, &count| {
-                b.to_async(&rt).iter(|| {
-                    key_counter += 1;
-                    let ops: Vec<Operation> = (0..count)
-                        .map(|i| {
-                            Operation::set_entity(
-                                format!("batch-{}-key-{}", key_counter, i),
-                                format!("value-{}", i).into_bytes(),
-                            )
-                        })
-                        .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(op_count), &op_count, |b, &count| {
+            b.to_async(&rt).iter(|| {
+                key_counter += 1;
+                let ops: Vec<Operation> = (0..count)
+                    .map(|i| {
+                        Operation::set_entity(
+                            format!("batch-{}-key-{}", key_counter, i),
+                            format!("value-{}", i).into_bytes(),
+                        )
+                    })
+                    .collect();
 
-                    async { black_box(client.write(1, Some(0), ops).await.expect("write failed")) }
-                })
-            },
-        );
+                async { black_box(client.write(1, Some(0), ops).await.expect("write failed")) }
+            })
+        });
     }
     group.finish();
 }
@@ -290,9 +256,7 @@ fn bench_batch_write(c: &mut Criterion) {
 
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start()
-            .await
-            .expect("Failed to start mock server");
+        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
     });
@@ -342,9 +306,7 @@ fn bench_mixed_read_heavy(c: &mut Criterion) {
 
     // Setup: start mock server with some data
     let (client, _server) = rt.block_on(async {
-        let server = MockLedgerServer::start()
-            .await
-            .expect("Failed to start mock server");
+        let server = MockLedgerServer::start().await.expect("Failed to start mock server");
 
         // Pre-populate some keys
         for i in 0..10 {

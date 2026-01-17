@@ -12,17 +12,20 @@
 //! Each caller receives a `oneshot::Receiver` that resolves when their
 //! write is committed (or fails).
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use parking_lot::Mutex;
-use tokio::sync::oneshot;
-use tokio::time::interval;
+use tokio::{sync::oneshot, time::interval};
 use tracing::{debug, info, instrument, warn};
 
-use crate::metrics;
-use crate::types::{LedgerRequest, LedgerResponse};
+use crate::{
+    metrics,
+    types::{LedgerRequest, LedgerResponse},
+};
 
 /// Configuration for the batch writer.
 #[derive(Debug, Clone)]
@@ -189,11 +192,7 @@ impl BatchWriterHandle {
     ) -> oneshot::Receiver<Result<LedgerResponse, BatchError>> {
         let (tx, rx) = oneshot::channel();
 
-        let write = PendingWrite {
-            request,
-            response_tx: tx,
-            queued_at: Instant::now(),
-        };
+        let write = PendingWrite { request, response_tx: tx, queued_at: Instant::now() };
 
         let should_flush = {
             let mut state = self.state.lock();
@@ -241,19 +240,12 @@ where
 {
     /// Create a new batch writer.
     pub fn new(config: BatchConfig, submit_fn: F) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(BatchState::new())),
-            config,
-            submit_fn,
-        }
+        Self { state: Arc::new(Mutex::new(BatchState::new())), config, submit_fn }
     }
 
     /// Get a handle for submitting writes.
     pub fn handle(&self) -> BatchWriterHandle {
-        BatchWriterHandle {
-            state: self.state.clone(),
-            config: self.config.clone(),
-        }
+        BatchWriterHandle { state: self.state.clone(), config: self.config.clone() }
     }
 
     /// Run the batch writer loop.
@@ -329,11 +321,7 @@ where
         match result {
             Ok(responses) => {
                 if responses.len() != batch_size {
-                    warn!(
-                        expected = batch_size,
-                        got = responses.len(),
-                        "Response count mismatch"
-                    );
+                    warn!(expected = batch_size, got = responses.len(), "Response count mismatch");
                 }
 
                 for (write, response) in batch.into_iter().zip(responses.into_iter()) {
@@ -346,37 +334,29 @@ where
                     is_eager,
                     "Batch flushed successfully"
                 );
-            }
+            },
             Err(e) => {
                 warn!(error = %e, batch_size, "Batch flush failed");
                 for write in batch {
-                    let _ = write
-                        .response_tx
-                        .send(Err(BatchError::RaftError(e.clone())));
+                    let _ = write.response_tx.send(Err(BatchError::RaftError(e.clone())));
                 }
-            }
+            },
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::*;
+
     fn make_request(namespace_id: i64, vault_id: i64) -> LedgerRequest {
-        LedgerRequest::Write {
-            namespace_id,
-            vault_id,
-            transactions: vec![],
-        }
+        LedgerRequest::Write { namespace_id, vault_id, transactions: vec![] }
     }
 
     fn make_response(block_height: u64) -> LedgerResponse {
-        LedgerResponse::Write {
-            block_height,
-            block_hash: [0u8; 32],
-        }
+        LedgerResponse::Write { block_height, block_hash: [0u8; 32] }
     }
 
     #[tokio::test]
@@ -395,11 +375,7 @@ mod tests {
             let count = call_count_clone.clone();
             Box::pin(async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, _)| make_response(i as u64))
-                    .collect())
+                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
             })
         });
 
@@ -448,11 +424,7 @@ mod tests {
             let count = call_count_clone.clone();
             Box::pin(async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, _)| make_response(i as u64))
-                    .collect())
+                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
             })
         });
 
@@ -593,11 +565,7 @@ mod tests {
             let count = call_count_clone.clone();
             Box::pin(async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, _)| make_response(i as u64))
-                    .collect())
+                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
             })
         });
 

@@ -45,13 +45,7 @@ pub struct PageHeader {
 impl PageHeader {
     /// Create a new page header.
     pub fn new(page_type: PageType, txn_id: u64) -> Self {
-        Self {
-            page_type,
-            flags: 0,
-            item_count: 0,
-            checksum: 0,
-            txn_id,
-        }
+        Self { page_type, flags: 0, item_count: 0, checksum: 0, txn_id }
     }
 
     /// Serialize header to bytes.
@@ -68,9 +62,7 @@ impl PageHeader {
     /// Deserialize header from bytes.
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
         if buf.len() < PAGE_HEADER_SIZE {
-            return Err(Error::Corrupted {
-                reason: "Page header too short".to_string(),
-            });
+            return Err(Error::Corrupted { reason: "Page header too short".to_string() });
         }
 
         Ok(Self {
@@ -101,20 +93,12 @@ impl Page {
         let header = PageHeader::new(page_type, txn_id);
         data[..PAGE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
 
-        Self {
-            id,
-            data,
-            dirty: true,
-        }
+        Self { id, data, dirty: true }
     }
 
     /// Create a page from raw bytes read from storage.
     pub fn from_bytes(id: PageId, data: Vec<u8>) -> Self {
-        Self {
-            id,
-            data,
-            dirty: false,
-        }
+        Self { id, data, dirty: false }
     }
 
     /// Get the page header.

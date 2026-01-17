@@ -22,9 +22,12 @@ pub use config::{TestRateLimitConfig, test_batch_config, test_rate_limit_config}
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     // ============================================
     // TestDir tests
@@ -62,10 +65,7 @@ mod tests {
             assert!(p.exists());
             p
         };
-        assert!(
-            !path.exists(),
-            "temp directory should be cleaned up on drop"
-        );
+        assert!(!path.exists(), "temp directory should be cleaned up on drop");
     }
 
     // ============================================
@@ -99,8 +99,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_assert_eventually_with_state() {
-        use std::sync::Arc;
-        use std::sync::Mutex;
+        use std::sync::{Arc, Mutex};
 
         // Simulate async state change
         let state = Arc::new(Mutex::new(0));
@@ -124,19 +123,13 @@ mod tests {
     fn test_batch_config_returns_valid_config() {
         let config = test_batch_config();
         assert!(config.max_batch_size > 0, "batch size should be positive");
-        assert!(
-            config.batch_timeout.as_millis() > 0,
-            "timeout should be positive"
-        );
+        assert!(config.batch_timeout.as_millis() > 0, "timeout should be positive");
     }
 
     #[test]
     fn test_rate_limit_config_returns_valid_config() {
         let config = test_rate_limit_config();
-        assert!(
-            config.max_concurrent > 0,
-            "max concurrent should be positive"
-        );
+        assert!(config.max_concurrent > 0, "max concurrent should be positive");
         assert!(config.timeout_secs > 0, "timeout should be positive");
     }
 }

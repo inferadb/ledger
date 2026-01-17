@@ -13,9 +13,7 @@ pub async fn shutdown_signal() {
     let ctrl_c = async {
         // Safety: If we can't install signal handlers, the process should panic
         // since graceful shutdown is critical for data integrity.
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]
@@ -85,8 +83,9 @@ impl Default for ShutdownCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_shutdown_coordinator() {

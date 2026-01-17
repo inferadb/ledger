@@ -14,9 +14,9 @@
 //! The [`SequenceTracker`] maintains client-side counters to ensure correct
 //! sequence assignment and provides recovery support when gaps are detected.
 
+use std::{collections::HashMap, sync::Arc};
+
 use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Key for per-vault sequence tracking.
 ///
@@ -33,10 +33,7 @@ impl VaultKey {
     /// Creates a new vault key.
     #[must_use]
     pub fn new(namespace_id: i64, vault_id: i64) -> Self {
-        Self {
-            namespace_id,
-            vault_id,
-        }
+        Self { namespace_id, vault_id }
     }
 }
 
@@ -88,14 +85,11 @@ impl SequenceTracker {
     ///
     /// # Arguments
     ///
-    /// * `client_id` - Unique identifier for this client instance.
-    ///   Used by the server to track per-client sequences.
+    /// * `client_id` - Unique identifier for this client instance. Used by the server to track
+    ///   per-client sequences.
     #[must_use]
     pub fn new(client_id: impl Into<String>) -> Self {
-        Self {
-            client_id: client_id.into(),
-            sequences: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self { client_id: client_id.into(), sequences: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Returns the client identifier.
@@ -198,10 +192,7 @@ impl SequenceTracker {
 
 impl Clone for SequenceTracker {
     fn clone(&self) -> Self {
-        Self {
-            client_id: self.client_id.clone(),
-            sequences: Arc::clone(&self.sequences),
-        }
+        Self { client_id: self.client_id.clone(), sequences: Arc::clone(&self.sequences) }
     }
 }
 
@@ -287,10 +278,7 @@ impl FileSequenceStorage {
     /// * `storage_dir` - Directory for sequence files.
     #[must_use]
     pub fn new(client_id: impl Into<String>, storage_dir: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            client_id: client_id.into(),
-            storage_dir: storage_dir.into(),
-        }
+        Self { client_id: client_id.into(), storage_dir: storage_dir.into() }
     }
 
     /// Creates storage using the default directory.
@@ -349,7 +337,7 @@ impl SequenceStorage for FileSequenceStorage {
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "Corrupted sequence file, starting fresh");
                 return Ok(HashMap::new());
-            }
+            },
         };
 
         // Version check
@@ -395,17 +383,13 @@ impl SequenceStorage for FileSequenceStorage {
         let state = PersistedState {
             version: STORAGE_VERSION,
             client_id: self.client_id.clone(),
-            sequences: sequences
-                .iter()
-                .map(|(k, v)| (Self::format_vault_key(k), *v))
-                .collect(),
+            sequences: sequences.iter().map(|(k, v)| (Self::format_vault_key(k), *v)).collect(),
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        let content =
-            serde_json::to_string_pretty(&state).map_err(|e| crate::SdkError::Config {
-                message: format!("Failed to serialize sequence state: {e}"),
-            })?;
+        let content = serde_json::to_string_pretty(&state).map_err(|e| {
+            crate::SdkError::Config { message: format!("Failed to serialize sequence state: {e}") }
+        })?;
 
         let path = self.file_path();
         let temp_path = path.with_extension("json.tmp");
@@ -413,14 +397,12 @@ impl SequenceStorage for FileSequenceStorage {
         // Write to temp file
         {
             use std::io::Write;
-            let mut file =
-                std::fs::File::create(&temp_path).map_err(|e| crate::SdkError::Config {
-                    message: format!("Failed to create temp file: {e}"),
-                })?;
-            file.write_all(content.as_bytes())
-                .map_err(|e| crate::SdkError::Config {
-                    message: format!("Failed to write temp file: {e}"),
-                })?;
+            let mut file = std::fs::File::create(&temp_path).map_err(|e| {
+                crate::SdkError::Config { message: format!("Failed to create temp file: {e}") }
+            })?;
+            file.write_all(content.as_bytes()).map_err(|e| crate::SdkError::Config {
+                message: format!("Failed to write temp file: {e}"),
+            })?;
             file.sync_all().map_err(|e| crate::SdkError::Config {
                 message: format!("Failed to sync temp file: {e}"),
             })?;
@@ -540,10 +522,7 @@ impl<S: SequenceStorage + 'static> PersistentSequenceTracker<S> {
         let seq = self.tracker.next_sequence(namespace_id, vault_id);
 
         // Increment pending saves counter
-        let pending = self
-            .pending_saves
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
+        let pending = self.pending_saves.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
         // Trigger background save if threshold reached
         if pending >= self.save_threshold {
@@ -556,8 +535,7 @@ impl<S: SequenceStorage + 'static> PersistentSequenceTracker<S> {
     /// Triggers a background save operation.
     fn trigger_background_save(&self) {
         // Reset counter
-        self.pending_saves
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.pending_saves.store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Get snapshot
         let snapshot = self.tracker.snapshot();
@@ -586,8 +564,7 @@ impl<S: SequenceStorage + 'static> PersistentSequenceTracker<S> {
     ///
     /// Returns an error if the save operation fails.
     pub fn flush(&self) -> crate::Result<()> {
-        self.pending_saves
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.pending_saves.store(0, std::sync::atomic::Ordering::Relaxed);
         self.storage.save(&self.tracker.snapshot())
     }
 
@@ -622,16 +599,14 @@ impl<S: SequenceStorage + 'static> PersistentSequenceTracker<S> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+    };
+
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::thread;
 
     #[test]
     fn test_new_tracker() {
@@ -897,9 +872,7 @@ mod tests {
         let mut sequences = HashMap::new();
         sequences.insert(VaultKey::new(1, 0), 42);
 
-        storage
-            .save(&sequences)
-            .expect("Save should create directories");
+        storage.save(&sequences).expect("Save should create directories");
 
         assert!(nested_path.exists());
         assert!(nested_path.join("test-client.json").exists());
@@ -917,10 +890,7 @@ mod tests {
 
         // Check no temp file remains
         let temp_file = temp_dir.path().join("test-client.json.tmp");
-        assert!(
-            !temp_file.exists(),
-            "Temp file should be renamed, not left behind"
-        );
+        assert!(!temp_file.exists(), "Temp file should be renamed, not left behind");
 
         // Check actual file exists
         let actual_file = temp_dir.path().join("test-client.json");
@@ -951,9 +921,7 @@ mod tests {
         let content = r#"{"version": 999, "client_id": "test-client", "sequences": {}, "updated_at": "2026-01-15T00:00:00Z"}"#;
         std::fs::write(&path, content).expect("Write should succeed");
 
-        let loaded = storage
-            .load()
-            .expect("Load should succeed with wrong version");
+        let loaded = storage.load().expect("Load should succeed with wrong version");
         assert!(loaded.is_empty(), "Wrong version should return empty map");
     }
 
@@ -995,17 +963,13 @@ mod tests {
         let mut sequences1 = HashMap::new();
         sequences1.insert(VaultKey::new(1, 0), 10);
         sequences1.insert(VaultKey::new(1, 1), 20);
-        storage
-            .save(&sequences1)
-            .expect("First save should succeed");
+        storage.save(&sequences1).expect("First save should succeed");
 
         // Second save with different data
         let mut sequences2 = HashMap::new();
         sequences2.insert(VaultKey::new(1, 0), 100);
         sequences2.insert(VaultKey::new(2, 0), 50);
-        storage
-            .save(&sequences2)
-            .expect("Second save should succeed");
+        storage.save(&sequences2).expect("Second save should succeed");
 
         // Load should reflect second save
         let loaded = storage.load().expect("Load should succeed");
@@ -1031,10 +995,7 @@ mod tests {
     fn test_file_storage_file_path() {
         let storage = FileSequenceStorage::new("my-client-123", "/var/lib/ledger");
         let path = storage.file_path();
-        assert_eq!(
-            path.to_str().expect("valid path"),
-            "/var/lib/ledger/my-client-123.json"
-        );
+        assert_eq!(path.to_str().expect("valid path"), "/var/lib/ledger/my-client-123.json");
     }
 
     #[test]
@@ -1116,9 +1077,7 @@ mod tests {
             assert_eq!(tracker.next_sequence(2, 0), 2);
 
             // Save state (simulating clean shutdown)
-            storage
-                .save(&tracker.snapshot())
-                .expect("Save should succeed");
+            storage.save(&tracker.snapshot()).expect("Save should succeed");
         }
 
         // Second session: load and continue
@@ -1242,16 +1201,13 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod proptest_tests {
-    use super::*;
-    use proptest::prelude::*;
     use std::collections::HashSet;
+
+    use proptest::prelude::*;
+
+    use super::*;
 
     proptest! {
         /// Property: Sequence always increments by exactly 1

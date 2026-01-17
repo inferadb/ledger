@@ -87,8 +87,7 @@ pub use error::{Result, SdkError};
 pub use idempotency::{
     FileSequenceStorage, PersistentSequenceTracker, SequenceStorage, SequenceTracker, VaultKey,
 };
-pub use retry::with_retry;
-pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};
-
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{NamespaceId, VaultId};
+pub use retry::with_retry;
+pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};

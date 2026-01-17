@@ -10,18 +10,18 @@
 //! - Removes transaction bodies for blocks older than (tip - retention_blocks)
 //! - Headers are always preserved for chain verification
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use inferadb_ledger_state::BlockArchive;
+use inferadb_ledger_store::StorageBackend;
 use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use inferadb_ledger_state::BlockArchive;
-use inferadb_ledger_store::StorageBackend;
-
-use crate::log_storage::AppliedStateAccessor;
-use crate::types::{BlockRetentionMode, LedgerNodeId, LedgerTypeConfig};
+use crate::{
+    log_storage::AppliedStateAccessor,
+    types::{BlockRetentionMode, LedgerNodeId, LedgerTypeConfig},
+};
 
 /// Default interval between compaction cycles.
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
@@ -51,13 +51,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
         block_archive: Arc<BlockArchive<B>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
-        Self {
-            raft,
-            node_id,
-            block_archive,
-            applied_state,
-            interval: COMPACTION_INTERVAL,
-        }
+        Self { raft, node_id, block_archive, applied_state, interval: COMPACTION_INTERVAL }
     }
 
     /// Create with custom interval (for testing).
@@ -118,7 +112,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                 Ok(Some(watermark)) if watermark >= compact_before => {
                     // Already compacted
                     continue;
-                }
+                },
                 Err(e) => {
                     warn!(
                         namespace_id,
@@ -127,21 +121,18 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                         "Failed to get compaction watermark"
                     );
                     continue;
-                }
-                _ => {}
+                },
+                _ => {},
             }
 
             // Perform compaction
             match self.block_archive.compact_before(compact_before) {
                 Ok(count) => {
                     if count > 0 {
-                        info!(
-                            namespace_id,
-                            vault_id, compact_before, count, "Compacted blocks"
-                        );
+                        info!(namespace_id, vault_id, compact_before, count, "Compacted blocks");
                         total_compacted += count;
                     }
-                }
+                },
                 Err(e) => {
                     warn!(
                         namespace_id,
@@ -150,7 +141,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                         error = %e,
                         "Block compaction failed"
                     );
-                }
+                },
             }
         }
 
@@ -213,10 +204,8 @@ mod tests {
         assert!(full_policy.mode != BlockRetentionMode::Compacted);
 
         // Compacted mode - should compact
-        let compacted_policy = BlockRetentionPolicy {
-            mode: BlockRetentionMode::Compacted,
-            retention_blocks: 5000,
-        };
+        let compacted_policy =
+            BlockRetentionPolicy { mode: BlockRetentionMode::Compacted, retention_blocks: 5000 };
         assert_eq!(compacted_policy.mode, BlockRetentionMode::Compacted);
         assert_eq!(compacted_policy.retention_blocks, 5000);
     }

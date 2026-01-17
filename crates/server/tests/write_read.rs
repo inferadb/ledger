@@ -42,15 +42,11 @@ async fn test_single_node_write_read() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create a write client
-    let mut client = common::create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit a write request using SetEntity operation
     let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
-            id: "test-client".to_string(),
-        }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "test-client".to_string() }),
         sequence: 1,
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
@@ -68,27 +64,20 @@ async fn test_single_node_write_read() {
     };
 
     let response = client.write(request).await;
-    assert!(
-        response.is_ok(),
-        "write should succeed: {:?}",
-        response.err()
-    );
+    assert!(response.is_ok(), "write should succeed: {:?}", response.err());
 
     let response = response.unwrap().into_inner();
     match response.result {
         Some(inferadb_ledger_raft::proto::write_response::Result::Success(success)) => {
             assert!(success.tx_id.is_some(), "should have tx_id");
-            assert!(
-                success.block_height > 0,
-                "should have non-zero block height"
-            );
-        }
+            assert!(success.block_height > 0, "should have non-zero block height");
+        },
         Some(inferadb_ledger_raft::proto::write_response::Result::Error(err)) => {
             panic!("write failed: {:?}", err);
-        }
+        },
         None => {
             panic!("no result in response");
-        }
+        },
     }
 }
 
@@ -100,9 +89,7 @@ async fn test_write_idempotency() {
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = common::create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Use sequence 1 to pass sequence gap detection (expects 1 for new client)
     let request = inferadb_ledger_raft::proto::WriteRequest {
@@ -126,18 +113,11 @@ async fn test_write_idempotency() {
     };
 
     // First write
-    let response1 = client
-        .write(request.clone())
-        .await
-        .expect("first write should succeed")
-        .into_inner();
+    let response1 =
+        client.write(request.clone()).await.expect("first write should succeed").into_inner();
 
     // Second write with same client_id + sequence
-    let response2 = client
-        .write(request)
-        .await
-        .expect("second write should succeed")
-        .into_inner();
+    let response2 = client.write(request).await.expect("second write should succeed").into_inner();
 
     // Both should return the same result
     match (response1.result, response2.result) {
@@ -146,11 +126,8 @@ async fn test_write_idempotency() {
             Some(inferadb_ledger_raft::proto::write_response::Result::Success(s2)),
         ) => {
             assert_eq!(s1.tx_id, s2.tx_id, "tx_id should match");
-            assert_eq!(
-                s1.block_height, s2.block_height,
-                "block_height should match"
-            );
-        }
+            assert_eq!(s1.block_height, s2.block_height, "block_height should match");
+        },
         _ => panic!("both writes should succeed"),
     }
 }
@@ -162,10 +139,7 @@ async fn test_two_node_cluster_formation() {
 
     // Wait for leader election
     let leader_id = cluster.wait_for_leader().await;
-    assert!(
-        leader_id >= 1 && leader_id <= 2,
-        "leader should be one of the nodes"
-    );
+    assert!(leader_id >= 1 && leader_id <= 2, "leader should be one of the nodes");
 
     // Should have exactly one leader
     let leaders: Vec<_> = cluster.nodes().iter().filter(|n| n.is_leader()).collect();
@@ -184,10 +158,7 @@ async fn test_three_node_cluster_formation() {
 
     // Wait for leader election
     let leader_id = cluster.wait_for_leader().await;
-    assert!(
-        leader_id >= 1 && leader_id <= 3,
-        "leader should be one of the nodes"
-    );
+    assert!(leader_id >= 1 && leader_id <= 3, "leader should be one of the nodes");
 
     // Should have exactly one leader
     let leaders: Vec<_> = cluster.nodes().iter().filter(|n| n.is_leader()).collect();
@@ -211,18 +182,14 @@ async fn test_write_creates_retrievable_block() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create write and read clients
-    let mut write_client = common::create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
-    let mut read_client = common::create_read_client(leader.addr)
-        .await
-        .expect("connect to leader for reads");
+    let mut write_client =
+        common::create_write_client(leader.addr).await.expect("connect to leader");
+    let mut read_client =
+        common::create_read_client(leader.addr).await.expect("connect to leader for reads");
 
     // Submit a write
     let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
-            id: "block-test".to_string(),
-        }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "block-test".to_string() }),
         sequence: 1,
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
@@ -239,11 +206,7 @@ async fn test_write_creates_retrievable_block() {
         include_tx_proof: false,
     };
 
-    let response = write_client
-        .write(request)
-        .await
-        .expect("write should succeed")
-        .into_inner();
+    let response = write_client.write(request).await.expect("write should succeed").into_inner();
 
     let block_height = match response.result {
         Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => s.block_height,
@@ -271,14 +234,8 @@ async fn test_write_creates_retrievable_block() {
     // Verify block header
     assert_eq!(header.height, block_height, "block height should match");
     assert!(header.state_root.is_some(), "block should have state_root");
-    assert!(
-        header.tx_merkle_root.is_some(),
-        "block should have tx_merkle_root"
-    );
-    assert!(
-        header.previous_hash.is_some(),
-        "block should have previous_hash"
-    );
+    assert!(header.tx_merkle_root.is_some(), "block should have tx_merkle_root");
+    assert!(header.previous_hash.is_some(), "block should have previous_hash");
 
     // Verify state_root is non-zero (we applied operations, so state changed)
     let state_root = header.state_root.unwrap();
@@ -288,17 +245,9 @@ async fn test_write_creates_retrievable_block() {
     );
 
     // Verify block contains the transaction
-    assert_eq!(
-        block.transactions.len(),
-        1,
-        "block should have 1 transaction"
-    );
+    assert_eq!(block.transactions.len(), 1, "block should have 1 transaction");
     let tx = &block.transactions[0];
-    assert_eq!(
-        tx.operations.len(),
-        1,
-        "transaction should have 1 operation"
-    );
+    assert_eq!(tx.operations.len(), 1, "transaction should have 1 operation");
 }
 
 /// Test write to leader replicates to followers.
@@ -308,9 +257,7 @@ async fn test_three_node_write_replication() {
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = common::create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit a write
     let request = inferadb_ledger_raft::proto::WriteRequest {
@@ -338,7 +285,7 @@ async fn test_three_node_write_replication() {
 
     // Verify write succeeded
     match response.result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {}
+        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {},
         _ => panic!("write should succeed"),
     }
 

@@ -2,36 +2,35 @@
 //!
 //! Handles namespace and vault management, cluster membership, snapshots, and integrity checks.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
-
-use openraft::{BasicNode, Raft};
-use tonic::{Request, Response, Status};
-
-use crate::error::ServiceError;
-use crate::log_storage::AppliedStateAccessor;
-use crate::log_storage::VaultHealthStatus;
-use crate::proto::admin_service_server::AdminService;
-use crate::proto::{
-    BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember, ClusterMemberRole,
-    CreateNamespaceRequest, CreateNamespaceResponse, CreateSnapshotRequest, CreateSnapshotResponse,
-    CreateVaultRequest, CreateVaultResponse, DeleteNamespaceRequest, DeleteNamespaceResponse,
-    DeleteVaultRequest, DeleteVaultResponse, GetClusterInfoRequest, GetClusterInfoResponse,
-    GetNamespaceRequest, GetNamespaceResponse, GetVaultRequest, GetVaultResponse, Hash,
-    IntegrityIssue, JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest,
-    LeaveClusterResponse, ListNamespacesRequest, ListNamespacesResponse, ListVaultsRequest,
-    ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest, RecoverVaultResponse, ShardId,
-    VaultHealthProto, VaultId,
-};
-use crate::types::{
-    BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{VaultEntry, ZERO_HASH};
+use openraft::{BasicNode, Raft};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tonic::{Request, Response, Status};
+
+use crate::{
+    error::ServiceError,
+    log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    proto::{
+        BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
+        ClusterMemberRole, CreateNamespaceRequest, CreateNamespaceResponse, CreateSnapshotRequest,
+        CreateSnapshotResponse, CreateVaultRequest, CreateVaultResponse, DeleteNamespaceRequest,
+        DeleteNamespaceResponse, DeleteVaultRequest, DeleteVaultResponse, GetClusterInfoRequest,
+        GetClusterInfoResponse, GetNamespaceRequest, GetNamespaceResponse, GetVaultRequest,
+        GetVaultResponse, Hash, IntegrityIssue, JoinClusterRequest, JoinClusterResponse,
+        LeaveClusterRequest, LeaveClusterResponse, ListNamespacesRequest, ListNamespacesResponse,
+        ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest,
+        RecoverVaultResponse, ShardId, VaultHealthProto, VaultId,
+        admin_service_server::AdminService,
+    },
+    types::{
+        BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
+    },
+};
 
 /// Admin service implementation.
 pub struct AdminServiceImpl {
@@ -52,12 +51,7 @@ impl AdminServiceImpl {
         state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
-        Self {
-            raft,
-            state,
-            applied_state,
-            block_archive: None,
-        }
+        Self { raft, state, applied_state, block_archive: None }
     }
 
     /// Create with block archive for integrity verification.
@@ -67,12 +61,7 @@ impl AdminServiceImpl {
         applied_state: AppliedStateAccessor,
         block_archive: Arc<BlockArchive<FileBackend>>,
     ) -> Self {
-        Self {
-            raft,
-            state,
-            applied_state,
-            block_archive: Some(block_archive),
-        }
+        Self { raft, state, applied_state, block_archive: Some(block_archive) }
     }
 }
 
@@ -86,25 +75,18 @@ impl AdminService for AdminServiceImpl {
 
         // Submit create namespace through Raft
         // Map proto ShardId to inferadb_ledger_types::ShardId (i32)
-        let ledger_request = LedgerRequest::CreateNamespace {
-            name: req.name,
-            shard_id: req.shard_id.map(|s| s.id),
-        };
+        let ledger_request =
+            LedgerRequest::CreateNamespace { name: req.name, shard_id: req.shard_id.map(|s| s.id) };
 
-        let result = self
-            .raft
-            .client_write(ledger_request)
-            .await
-            .map_err(ServiceError::raft)?;
+        let result = self.raft.client_write(ledger_request).await.map_err(ServiceError::raft)?;
 
         match result.data {
-            LedgerResponse::NamespaceCreated {
-                namespace_id,
-                shard_id,
-            } => Ok(Response::new(CreateNamespaceResponse {
-                namespace_id: Some(NamespaceId { id: namespace_id }),
-                shard_id: Some(ShardId { id: shard_id }),
-            })),
+            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
+                Ok(Response::new(CreateNamespaceResponse {
+                    namespace_id: Some(NamespaceId { id: namespace_id }),
+                    shard_id: Some(ShardId { id: shard_id }),
+                }))
+            },
             LedgerResponse::Error { message } => Err(Status::internal(message)),
             _ => Err(Status::internal("Unexpected response type")),
         }
@@ -125,11 +107,7 @@ impl AdminService for AdminServiceImpl {
         // Submit delete namespace through Raft
         let ledger_request = LedgerRequest::DeleteNamespace { namespace_id };
 
-        let result = self
-            .raft
-            .client_write(ledger_request)
-            .await
-            .map_err(ServiceError::raft)?;
+        let result = self.raft.client_write(ledger_request).await.map_err(ServiceError::raft)?;
 
         match result.data {
             LedgerResponse::NamespaceDeleted { success } => {
@@ -142,7 +120,7 @@ impl AdminService for AdminServiceImpl {
                 } else {
                     Err(ServiceError::precondition("Namespace has vaults, cannot delete").into())
                 }
-            }
+            },
             LedgerResponse::Error { message } => Err(Status::internal(message)),
             _ => Err(Status::internal("Unexpected response type")),
         }
@@ -158,18 +136,16 @@ impl AdminService for AdminServiceImpl {
         let ns_meta = match req.lookup {
             Some(crate::proto::get_namespace_request::Lookup::NamespaceId(n)) => {
                 self.applied_state.get_namespace(n.id)
-            }
+            },
             Some(crate::proto::get_namespace_request::Lookup::Name(name)) => {
                 self.applied_state.get_namespace_by_name(&name)
-            }
+            },
             None => return Err(ServiceError::invalid_arg("Missing namespace lookup").into()),
         };
 
         match ns_meta {
             Some(ns) => Ok(Response::new(GetNamespaceResponse {
-                namespace_id: Some(NamespaceId {
-                    id: ns.namespace_id,
-                }),
+                namespace_id: Some(NamespaceId { id: ns.namespace_id }),
                 name: ns.name,
                 shard_id: Some(ShardId { id: ns.shard_id }),
                 member_nodes: vec![],
@@ -190,9 +166,7 @@ impl AdminService for AdminServiceImpl {
             .list_namespaces()
             .into_iter()
             .map(|ns| crate::proto::GetNamespaceResponse {
-                namespace_id: Some(NamespaceId {
-                    id: ns.namespace_id,
-                }),
+                namespace_id: Some(NamespaceId { id: ns.namespace_id }),
                 name: ns.name,
                 shard_id: Some(ShardId { id: ns.shard_id }),
                 member_nodes: vec![],
@@ -202,10 +176,7 @@ impl AdminService for AdminServiceImpl {
             })
             .collect();
 
-        Ok(Response::new(ListNamespacesResponse {
-            namespaces,
-            next_page_token: None,
-        }))
+        Ok(Response::new(ListNamespacesResponse { namespaces, next_page_token: None }))
     }
 
     async fn create_vault(
@@ -265,22 +236,16 @@ impl AdminService for AdminServiceImpl {
                     height: 0,
                     namespace_id: Some(NamespaceId { id: namespace_id }),
                     vault_id: Some(VaultId { id: vault_id }),
-                    previous_hash: Some(Hash {
-                        value: ZERO_HASH.to_vec(),
-                    }),
+                    previous_hash: Some(Hash { value: ZERO_HASH.to_vec() }),
                     tx_merkle_root: Some(Hash {
                         value: ZERO_HASH.to_vec(), // Empty transaction list
                     }),
-                    state_root: Some(Hash {
-                        value: state_root.to_vec(),
-                    }),
+                    state_root: Some(Hash { value: state_root.to_vec() }),
                     timestamp: Some(prost_types::Timestamp {
                         seconds: chrono::Utc::now().timestamp(),
                         nanos: 0,
                     }),
-                    leader_id: Some(NodeId {
-                        id: leader_id.to_string(),
-                    }),
+                    leader_id: Some(NodeId { id: leader_id.to_string() }),
                     term: metrics.current_term,
                     committed_index: result.log_id.index,
                 };
@@ -289,7 +254,7 @@ impl AdminService for AdminServiceImpl {
                     vault_id: Some(VaultId { id: vault_id }),
                     genesis: Some(genesis),
                 }))
-            }
+            },
             LedgerResponse::Error { message } => Err(Status::internal(message)),
             _ => Err(Status::internal("Unexpected response type")),
         }
@@ -314,10 +279,7 @@ impl AdminService for AdminServiceImpl {
             .ok_or_else(|| Status::invalid_argument("Missing vault_id"))?;
 
         // Submit delete vault through Raft
-        let ledger_request = LedgerRequest::DeleteVault {
-            namespace_id,
-            vault_id,
-        };
+        let ledger_request = LedgerRequest::DeleteVault { namespace_id, vault_id };
 
         let result = self
             .raft
@@ -336,7 +298,7 @@ impl AdminService for AdminServiceImpl {
                 } else {
                     Err(Status::internal("Failed to delete vault"))
                 }
-            }
+            },
             LedgerResponse::Error { message } => Err(Status::internal(message)),
             _ => Err(Status::internal("Unexpected response type")),
         }
@@ -447,11 +409,7 @@ impl AdminService for AdminServiceImpl {
             if let (Some(ns), Some(v)) = (namespace_id, vault_id) {
                 // Specific vault
                 let height = self.applied_state.vault_height(ns, v);
-                if height > 0 {
-                    vec![(ns, v, height)]
-                } else {
-                    vec![]
-                }
+                if height > 0 { vec![(ns, v, height)] } else { vec![] }
             } else {
                 // All vaults
                 self.applied_state
@@ -462,10 +420,7 @@ impl AdminService for AdminServiceImpl {
             };
 
         if vault_heights.is_empty() {
-            return Ok(Response::new(CheckIntegrityResponse {
-                healthy: true,
-                issues: vec![],
-            }));
+            return Ok(Response::new(CheckIntegrityResponse { healthy: true, issues: vec![] }));
         }
 
         if req.full_check {
@@ -476,7 +431,7 @@ impl AdminService for AdminServiceImpl {
                     return Err(Status::unavailable(
                         "Block archive not configured for full integrity check",
                     ));
-                }
+                },
             };
 
             for (ns_id, v_id, expected_height) in &vault_heights {
@@ -490,7 +445,7 @@ impl AdminService for AdminServiceImpl {
                             description: format!("Failed to create temp dir: {:?}", e),
                         });
                         continue;
-                    }
+                    },
                 };
                 let temp_db =
                     match Database::<FileBackend>::create(temp_dir.path().join("verify.db")) {
@@ -502,7 +457,7 @@ impl AdminService for AdminServiceImpl {
                                 description: format!("Failed to create temp db: {:?}", e),
                             });
                             continue;
-                        }
+                        },
                     };
                 let temp_state = StateLayer::new(temp_db);
 
@@ -522,7 +477,7 @@ impl AdminService for AdminServiceImpl {
                                 ),
                             });
                             continue;
-                        }
+                        },
                         Err(e) => {
                             issues.push(IntegrityIssue {
                                 block_height: height,
@@ -530,7 +485,7 @@ impl AdminService for AdminServiceImpl {
                                 description: format!("Index lookup failed: {:?}", e),
                             });
                             continue;
-                        }
+                        },
                     };
 
                     let shard_block = match archive.read_block(shard_height) {
@@ -542,7 +497,7 @@ impl AdminService for AdminServiceImpl {
                                 description: format!("Block read failed: {:?}", e),
                             });
                             continue;
-                        }
+                        },
                     };
 
                     // Find the vault entry in this shard block
@@ -562,7 +517,7 @@ impl AdminService for AdminServiceImpl {
                                 ),
                             });
                             continue;
-                        }
+                        },
                     };
 
                     // Verify chain continuity (previous_vault_hash)
@@ -606,14 +561,14 @@ impl AdminService for AdminServiceImpl {
                                     ),
                                 });
                             }
-                        }
+                        },
                         Err(e) => {
                             issues.push(IntegrityIssue {
                                 block_height: height,
                                 issue_type: "compute_error".to_string(),
                                 description: format!("State root computation failed: {:?}", e),
                             });
-                        }
+                        },
                     }
 
                     // Track hash for next iteration's chain verification
@@ -648,7 +603,7 @@ impl AdminService for AdminServiceImpl {
                 match state.compute_state_root(*v_id) {
                     Ok(_root) => {
                         // State root computed successfully - state is internally consistent
-                    }
+                    },
                     Err(e) => {
                         issues.push(IntegrityIssue {
                             block_height: *height,
@@ -658,15 +613,12 @@ impl AdminService for AdminServiceImpl {
                                 v_id, e
                             ),
                         });
-                    }
+                    },
                 }
             }
         }
 
-        Ok(Response::new(CheckIntegrityResponse {
-            healthy: issues.is_empty(),
-            issues,
-        }))
+        Ok(Response::new(CheckIntegrityResponse { healthy: issues.is_empty(), issues }))
     }
 
     // =========================================================================
@@ -706,9 +658,7 @@ impl AdminService for AdminServiceImpl {
         }
 
         // We are the leader - add the new node as a learner first
-        let node = BasicNode {
-            addr: req.address.clone(),
-        };
+        let node = BasicNode { addr: req.address.clone() };
 
         // Check if node is already in the membership (idempotent handling)
         let current_membership = metrics.membership_config.membership();
@@ -732,16 +682,12 @@ impl AdminService for AdminServiceImpl {
         if !already_in_membership {
             let mut add_success = false;
             for attempt in 0..10 {
-                match self
-                    .raft
-                    .add_learner(req.node_id, node.clone(), false)
-                    .await
-                {
+                match self.raft.add_learner(req.node_id, node.clone(), false).await {
                     Ok(_) => {
                         tracing::info!(node_id = req.node_id, "Initiated add_learner");
                         add_success = true;
                         break;
-                    }
+                    },
                     Err(e) => {
                         let err_str = format!("{}", e);
                         if err_str.contains("already undergoing a configuration change") {
@@ -762,7 +708,7 @@ impl AdminService for AdminServiceImpl {
                                 leader_address: String::new(),
                             }));
                         }
-                    }
+                    },
                 }
             }
             if !add_success {
@@ -774,10 +720,7 @@ impl AdminService for AdminServiceImpl {
                 }));
             }
         } else {
-            tracing::info!(
-                node_id = req.node_id,
-                "Node already in membership as learner"
-            );
+            tracing::info!(node_id = req.node_id, "Node already in membership as learner");
         }
 
         // Step 2: Wait for the learner membership change to commit
@@ -826,7 +769,7 @@ impl AdminService for AdminServiceImpl {
                         leader_id: fresh_metrics.id,
                         leader_address: String::new(),
                     }));
-                }
+                },
                 Err(e) => {
                     let err_str = format!("{}", e);
                     if err_str.contains("already undergoing a configuration change") {
@@ -847,7 +790,7 @@ impl AdminService for AdminServiceImpl {
                             leader_address: String::new(),
                         }));
                     }
-                }
+                },
             }
         }
 
@@ -879,10 +822,8 @@ impl AdminService for AdminServiceImpl {
 
         // Remove the node from voters
         let current_membership = metrics.membership_config.membership();
-        let new_voters: BTreeSet<u64> = current_membership
-            .voter_ids()
-            .filter(|id| *id != req.node_id)
-            .collect();
+        let new_voters: BTreeSet<u64> =
+            current_membership.voter_ids().filter(|id| *id != req.node_id).collect();
 
         // Prevent removing the last voter
         if new_voters.is_empty() {
@@ -899,7 +840,7 @@ impl AdminService for AdminServiceImpl {
                     success: true,
                     message: "Node left cluster successfully".to_string(),
                 }))
-            }
+            },
             Err(e) => Ok(Response::new(LeaveClusterResponse {
                 success: false,
                 message: format!("Failed to remove node: {}", e),
@@ -976,10 +917,10 @@ impl AdminService for AdminServiceImpl {
                         final_height: self.applied_state.vault_height(namespace_id, vault_id),
                         final_state_root: None,
                     }));
-                }
+                },
                 VaultHealthStatus::Diverged { .. } | VaultHealthStatus::Recovering { .. } => {
                     // Proceed with recovery
-                }
+                },
             }
         }
 
@@ -990,7 +931,7 @@ impl AdminService for AdminServiceImpl {
                 return Err(Status::unavailable(
                     "Block archive not configured, cannot recover vault",
                 ));
-            }
+            },
         };
 
         // Get expected height from applied state
@@ -1005,12 +946,7 @@ impl AdminService for AdminServiceImpl {
             }));
         }
 
-        tracing::info!(
-            namespace_id,
-            vault_id,
-            expected_height,
-            "Starting vault recovery"
-        );
+        tracing::info!(namespace_id, vault_id, expected_height, "Starting vault recovery");
 
         // Step 1: Clear vault state
         {
@@ -1044,22 +980,18 @@ impl AdminService for AdminServiceImpl {
                         ),
                         health_status: VaultHealthProto::Diverged.into(),
                         final_height: height - 1,
-                        final_state_root: Some(Hash {
-                            value: final_state_root.to_vec(),
-                        }),
+                        final_state_root: Some(Hash { value: final_state_root.to_vec() }),
                     }));
-                }
+                },
                 Err(e) => {
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: format!("Index lookup failed at height {}: {:?}", height, e),
                         health_status: VaultHealthProto::Diverged.into(),
                         final_height: height - 1,
-                        final_state_root: Some(Hash {
-                            value: final_state_root.to_vec(),
-                        }),
+                        final_state_root: Some(Hash { value: final_state_root.to_vec() }),
                     }));
-                }
+                },
             };
 
             // Read the shard block
@@ -1071,11 +1003,9 @@ impl AdminService for AdminServiceImpl {
                         message: format!("Block read failed at height {}: {:?}", height, e),
                         health_status: VaultHealthProto::Diverged.into(),
                         final_height: height - 1,
-                        final_state_root: Some(Hash {
-                            value: final_state_root.to_vec(),
-                        }),
+                        final_state_root: Some(Hash { value: final_state_root.to_vec() }),
                     }));
-                }
+                },
             };
 
             // Find the vault entry
@@ -1092,11 +1022,9 @@ impl AdminService for AdminServiceImpl {
                         ),
                         health_status: VaultHealthProto::Diverged.into(),
                         final_height: height - 1,
-                        final_state_root: Some(Hash {
-                            value: final_state_root.to_vec(),
-                        }),
+                        final_state_root: Some(Hash { value: final_state_root.to_vec() }),
                     }));
-                }
+                },
             };
 
             // Verify chain continuity
@@ -1124,9 +1052,7 @@ impl AdminService for AdminServiceImpl {
                             ),
                             health_status: VaultHealthProto::Diverged.into(),
                             final_height: height - 1,
-                            final_state_root: Some(Hash {
-                                value: final_state_root.to_vec(),
-                            }),
+                            final_state_root: Some(Hash { value: final_state_root.to_vec() }),
                         }));
                     }
                 }
@@ -1145,7 +1071,7 @@ impl AdminService for AdminServiceImpl {
                             // Continue anyway to see if it recovers
                         }
                         final_state_root = computed_root;
-                    }
+                    },
                     Err(e) => {
                         return Ok(Response::new(RecoverVaultResponse {
                             success: false,
@@ -1155,11 +1081,9 @@ impl AdminService for AdminServiceImpl {
                             ),
                             health_status: VaultHealthProto::Diverged.into(),
                             final_height: height - 1,
-                            final_state_root: Some(Hash {
-                                value: final_state_root.to_vec(),
-                            }),
+                            final_state_root: Some(Hash { value: final_state_root.to_vec() }),
                         }));
-                    }
+                    },
                 }
             }
 
@@ -1203,12 +1127,7 @@ impl AdminService for AdminServiceImpl {
                 }),
             }))
         } else {
-            tracing::info!(
-                namespace_id,
-                vault_id,
-                expected_height,
-                "Vault recovery successful"
-            );
+            tracing::info!(namespace_id, vault_id, expected_height, "Vault recovery successful");
 
             // Update vault health to Healthy via Raft for cluster-wide consistency
             let health_request = LedgerRequest::UpdateVaultHealth {
@@ -1232,9 +1151,7 @@ impl AdminService for AdminServiceImpl {
                 message: "Vault recovered successfully".to_string(),
                 health_status: VaultHealthProto::Healthy.into(),
                 final_height: expected_height,
-                final_state_root: Some(Hash {
-                    value: final_state_root.to_vec(),
-                }),
+                final_state_root: Some(Hash { value: final_state_root.to_vec() }),
             }))
         }
     }
@@ -1279,9 +1196,7 @@ impl AdminService for AdminServiceImpl {
             req.at_height
         } else {
             // Get current vault height if not specified
-            self.applied_state
-                .vault_height(namespace_id, vault_id)
-                .max(1)
+            self.applied_state.vault_height(namespace_id, vault_id).max(1)
         };
 
         tracing::warn!(
@@ -1305,11 +1220,7 @@ impl AdminService for AdminServiceImpl {
 
         match self.raft.client_write(health_request).await {
             Ok(_) => {
-                tracing::info!(
-                    namespace_id,
-                    vault_id,
-                    "Vault marked as diverged for testing"
-                );
+                tracing::info!(namespace_id, vault_id, "Vault marked as diverged for testing");
 
                 Ok(Response::new(crate::proto::SimulateDivergenceResponse {
                     success: true,
@@ -1319,7 +1230,7 @@ impl AdminService for AdminServiceImpl {
                     ),
                     health_status: VaultHealthProto::Diverged.into(),
                 }))
-            }
+            },
             Err(e) => {
                 tracing::error!(
                     namespace_id,
@@ -1328,11 +1239,8 @@ impl AdminService for AdminServiceImpl {
                     "Failed to simulate divergence"
                 );
 
-                Err(Status::internal(format!(
-                    "Failed to update vault health: {}",
-                    e
-                )))
-            }
+                Err(Status::internal(format!("Failed to update vault health: {}", e)))
+            },
         }
     }
 
@@ -1346,9 +1254,7 @@ impl AdminService for AdminServiceImpl {
         let metrics = self.raft.metrics().borrow().clone();
         let node_id = metrics.id;
         if metrics.current_leader != Some(node_id) {
-            return Err(Status::failed_precondition(
-                "Only the leader can run garbage collection",
-            ));
+            return Err(Status::failed_precondition("Only the leader can run garbage collection"));
         }
 
         let now = std::time::SystemTime::now()
@@ -1388,7 +1294,7 @@ impl AdminService for AdminServiceImpl {
                     Err(e) => {
                         tracing::warn!(namespace_id, vault_id, error = %e, "Failed to list entities for GC");
                         continue;
-                    }
+                    },
                 }
             };
 
@@ -1401,12 +1307,10 @@ impl AdminService for AdminServiceImpl {
             // Create ExpireEntity operations
             let operations: Vec<inferadb_ledger_types::Operation> = expired
                 .iter()
-                .map(
-                    |(key, expired_at)| inferadb_ledger_types::Operation::ExpireEntity {
-                        key: key.clone(),
-                        expired_at: *expired_at,
-                    },
-                )
+                .map(|(key, expired_at)| inferadb_ledger_types::Operation::ExpireEntity {
+                    key: key.clone(),
+                    expired_at: *expired_at,
+                })
                 .collect();
 
             let transaction = inferadb_ledger_types::Transaction {
@@ -1418,11 +1322,8 @@ impl AdminService for AdminServiceImpl {
                 actor: "system:gc".to_string(),
             };
 
-            let gc_request = LedgerRequest::Write {
-                namespace_id,
-                vault_id,
-                transactions: vec![transaction],
-            };
+            let gc_request =
+                LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
 
             match self.raft.client_write(gc_request).await {
                 Ok(_) => {
@@ -1433,10 +1334,10 @@ impl AdminService for AdminServiceImpl {
                         count,
                         "GC expired entities via ForceGc"
                     );
-                }
+                },
                 Err(e) => {
                     tracing::warn!(namespace_id, vault_id, error = %e, "GC write failed");
-                }
+                },
             }
         }
 
@@ -1471,12 +1372,7 @@ fn compute_vault_block_hash(entry: &VaultEntry) -> [u8; 32] {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1528,10 +1424,7 @@ mod tests {
         let hash1 = compute_vault_block_hash(&entry1);
         let hash2 = compute_vault_block_hash(&entry2);
 
-        assert_ne!(
-            hash1, hash2,
-            "Different inputs should produce different hashes"
-        );
+        assert_ne!(hash1, hash2, "Different inputs should produce different hashes");
     }
 
     #[test]
@@ -1559,10 +1452,7 @@ mod tests {
         let hash1 = compute_vault_block_hash(&entry1);
         let hash2 = compute_vault_block_hash(&entry2);
 
-        assert_ne!(
-            hash1, hash2,
-            "Different state_root should produce different hash"
-        );
+        assert_ne!(hash1, hash2, "Different state_root should produce different hash");
     }
 
     #[test]
@@ -1630,28 +1520,16 @@ mod tests {
         // Changing namespace_id should change hash
         let mut modified = base_entry.clone();
         modified.namespace_id = 99;
-        assert_ne!(
-            compute_vault_block_hash(&modified),
-            base_hash,
-            "namespace_id affects hash"
-        );
+        assert_ne!(compute_vault_block_hash(&modified), base_hash, "namespace_id affects hash");
 
         // Changing vault_id should change hash
         let mut modified = base_entry.clone();
         modified.vault_id = 99;
-        assert_ne!(
-            compute_vault_block_hash(&modified),
-            base_hash,
-            "vault_id affects hash"
-        );
+        assert_ne!(compute_vault_block_hash(&modified), base_hash, "vault_id affects hash");
 
         // Changing tx_merkle_root should change hash
         let mut modified = base_entry.clone();
         modified.tx_merkle_root = [99u8; 32];
-        assert_ne!(
-            compute_vault_block_hash(&modified),
-            base_hash,
-            "tx_merkle_root affects hash"
-        );
+        assert_ne!(compute_vault_block_hash(&modified), base_hash, "tx_merkle_root affects hash");
     }
 }

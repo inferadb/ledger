@@ -7,18 +7,14 @@
 
 #![allow(clippy::expect_used, missing_docs)]
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use std::hint::black_box;
+use std::{hint::black_box, sync::Arc, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use parking_lot::RwLock;
-use tempfile::TempDir;
-
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::Operation;
+use parking_lot::RwLock;
+use tempfile::TempDir;
 
 /// Create a test state layer pre-populated with data.
 fn create_populated_state_layer(
@@ -38,9 +34,7 @@ fn create_populated_state_layer(
             expires_at: None,
             condition: None,
         }];
-        state
-            .apply_operations(vault_id, &operations, i as u64)
-            .expect("apply");
+        state.apply_operations(vault_id, &operations, i as u64).expect("apply");
     }
 
     state
@@ -54,11 +48,8 @@ fn bench_single_reads(c: &mut Criterion) {
     for entity_count in [1000, 10000, 100000] {
         let temp_dir = TempDir::new().expect("create temp dir");
         let vault_id = 1i64;
-        let state = Arc::new(RwLock::new(create_populated_state_layer(
-            &temp_dir,
-            vault_id,
-            entity_count,
-        )));
+        let state =
+            Arc::new(RwLock::new(create_populated_state_layer(&temp_dir, vault_id, entity_count)));
 
         group.bench_with_input(
             BenchmarkId::new("entities", entity_count),
@@ -88,11 +79,8 @@ fn bench_sequential_reads(c: &mut Criterion) {
     let temp_dir = TempDir::new().expect("create temp dir");
     let vault_id = 1i64;
     let entity_count = 10000;
-    let state = Arc::new(RwLock::new(create_populated_state_layer(
-        &temp_dir,
-        vault_id,
-        entity_count,
-    )));
+    let state =
+        Arc::new(RwLock::new(create_populated_state_layer(&temp_dir, vault_id, entity_count)));
 
     group.bench_function("100_keys", |b| {
         let mut start = 0usize;
@@ -119,11 +107,8 @@ fn bench_random_reads(c: &mut Criterion) {
     let temp_dir = TempDir::new().expect("create temp dir");
     let vault_id = 1i64;
     let entity_count = 10000;
-    let state = Arc::new(RwLock::new(create_populated_state_layer(
-        &temp_dir,
-        vault_id,
-        entity_count,
-    )));
+    let state =
+        Arc::new(RwLock::new(create_populated_state_layer(&temp_dir, vault_id, entity_count)));
 
     // Pre-generate random indices
     use rand::Rng;
@@ -167,9 +152,7 @@ fn bench_multi_vault_reads(c: &mut Criterion) {
                 expires_at: None,
                 condition: None,
             }];
-            state
-                .apply_operations(vault_id, &operations, i as u64)
-                .expect("apply");
+            state.apply_operations(vault_id, &operations, i as u64).expect("apply");
         }
     }
 
@@ -198,9 +181,7 @@ fn bench_missing_key_reads(c: &mut Criterion) {
 
     let temp_dir = TempDir::new().expect("create temp dir");
     let vault_id = 1i64;
-    let state = Arc::new(RwLock::new(create_populated_state_layer(
-        &temp_dir, vault_id, 10000,
-    )));
+    let state = Arc::new(RwLock::new(create_populated_state_layer(&temp_dir, vault_id, 10000)));
 
     group.bench_function("missing_key", |b| {
         let mut counter = 0u64;

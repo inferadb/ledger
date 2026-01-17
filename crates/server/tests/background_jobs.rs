@@ -6,18 +6,14 @@
 //! - Learner refresh job syncs state from voters
 //! - Learner refresh metrics are recorded
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 mod common;
 
+use std::time::Duration;
+
 use common::{TestCluster, create_admin_client};
 use serial_test::serial;
-use std::time::Duration;
 
 // ============================================================================
 // Auto-Recovery Tests
@@ -41,10 +37,7 @@ async fn test_auto_recovery_job_starts() {
 
     // Cluster should still be healthy
     let metrics = leader.raft.metrics().borrow().clone();
-    assert!(
-        metrics.current_leader.is_some(),
-        "cluster should remain healthy"
-    );
+    assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
 }
 
 /// Test that vault health status can be queried.
@@ -88,10 +81,7 @@ async fn test_vault_health_tracking() {
 
     // Cluster should still be healthy (no recovery needed for fresh vault)
     let metrics = leader.raft.metrics().borrow().clone();
-    assert!(
-        metrics.current_leader.is_some(),
-        "leader should still exist"
-    );
+    assert!(metrics.current_leader.is_some(), "leader should still exist");
 }
 
 // ============================================================================
@@ -112,10 +102,7 @@ async fn test_learner_refresh_job_starts() {
 
     // Node should still be healthy
     let metrics = node.raft.metrics().borrow().clone();
-    assert!(
-        metrics.current_leader.is_some(),
-        "node should remain healthy"
-    );
+    assert!(metrics.current_leader.is_some(), "node should remain healthy");
 }
 
 /// Test that a 3-node cluster has properly distributed learner/voter roles.
@@ -133,11 +120,7 @@ async fn test_voter_detection() {
         let membership = metrics.membership_config.membership();
         let is_voter = membership.voter_ids().any(|id| id == node.id);
 
-        assert!(
-            is_voter,
-            "node {} should be a voter in 3-node cluster",
-            node.id
-        );
+        assert!(is_voter, "node {} should be a voter in 3-node cluster", node.id);
     }
 }
 
@@ -218,11 +201,7 @@ async fn test_concurrent_background_jobs() {
     // All nodes should still be responsive
     for node in cluster.nodes() {
         let metrics = node.raft.metrics().borrow().clone();
-        assert!(
-            metrics.current_leader.is_some(),
-            "node {} should know the leader",
-            node.id
-        );
+        assert!(metrics.current_leader.is_some(), "node {} should know the leader", node.id);
     }
 }
 
@@ -247,8 +226,5 @@ async fn test_recovery_only_on_leader() {
 
     // Cluster should remain stable
     let new_leader_id = cluster.wait_for_leader().await;
-    assert_eq!(
-        leader_id, new_leader_id,
-        "leader should not have changed unexpectedly"
-    );
+    assert_eq!(leader_id, new_leader_id, "leader should not have changed unexpectedly");
 }

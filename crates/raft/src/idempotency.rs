@@ -40,11 +40,7 @@ pub struct IdempotencyKey {
 impl IdempotencyKey {
     /// Create a new idempotency key.
     pub fn new(namespace_id: i64, vault_id: i64, client_id: String) -> Self {
-        Self {
-            namespace_id,
-            vault_id,
-            client_id,
-        }
+        Self { namespace_id, vault_id, client_id }
     }
 }
 
@@ -76,10 +72,7 @@ pub struct IdempotencyCache {
 impl IdempotencyCache {
     /// Create a new idempotency cache.
     pub fn new() -> Self {
-        let cache = Cache::builder()
-            .max_capacity(MAX_CACHE_SIZE)
-            .time_to_live(ENTRY_TTL)
-            .build();
+        let cache = Cache::builder().max_capacity(MAX_CACHE_SIZE).time_to_live(ENTRY_TTL).build();
 
         Self { cache }
     }
@@ -99,11 +92,7 @@ impl IdempotencyCache {
         let key = IdempotencyKey::new(namespace_id, vault_id, client_id.to_string());
         self.cache.get(&key).and_then(|entry| {
             // Check if sequence is a duplicate (same or lower than cached)
-            if entry.sequence >= sequence {
-                Some(entry.result.clone())
-            } else {
-                None
-            }
+            if entry.sequence >= sequence { Some(entry.result.clone()) } else { None }
         })
     }
 
@@ -140,13 +129,7 @@ impl IdempotencyCache {
         }
 
         // Not a duplicate, insert the new result
-        self.insert(
-            namespace_id,
-            vault_id,
-            client_id.to_string(),
-            sequence,
-            result,
-        );
+        self.insert(namespace_id, vault_id, client_id.to_string(), sequence, result);
         None
     }
 
@@ -169,10 +152,7 @@ impl IdempotencyCache {
     /// have been cached (either never written or cache expired).
     pub fn get_last_sequence(&self, namespace_id: i64, vault_id: i64, client_id: &str) -> u64 {
         let key = IdempotencyKey::new(namespace_id, vault_id, client_id.to_string());
-        self.cache
-            .get(&key)
-            .map(|entry| entry.sequence)
-            .unwrap_or(0)
+        self.cache.get(&key).map(|entry| entry.sequence).unwrap_or(0)
     }
 
     /// Force synchronous eviction of expired entries.
@@ -276,10 +256,7 @@ mod tests {
 
         // Same client, same sequence, but different vault should NOT be duplicate
         let cached = cache.check(1, 2, "client-1", 1);
-        assert!(
-            cached.is_none(),
-            "different vault should not be a duplicate"
-        );
+        assert!(cached.is_none(), "different vault should not be a duplicate");
 
         // Now insert for vault 2
         cache.insert(1, 2, "client-1".to_string(), 1, result);
@@ -302,10 +279,7 @@ mod tests {
 
         // Same client, same vault, same sequence, but different namespace should NOT be duplicate
         let cached = cache.check(2, 1, "client-1", 1);
-        assert!(
-            cached.is_none(),
-            "different namespace should not be a duplicate"
-        );
+        assert!(cached.is_none(), "different namespace should not be a duplicate");
     }
 
     /// DESIGN.md compliance test: sequence numbers must be monotonically increasing.

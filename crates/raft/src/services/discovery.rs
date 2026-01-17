@@ -5,25 +5,28 @@
 //! Per DESIGN.md, peer addresses must be private/WireGuard IPs. Public IPs are
 //! rejected to ensure cluster traffic stays within the private network.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::Arc,
+};
 
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
-use crate::log_storage::AppliedStateAccessor;
-use crate::peer_tracker::PeerTracker;
-use crate::proto::system_discovery_service_server::SystemDiscoveryService;
-use crate::proto::{
-    AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-    GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry,
-    NodeCapabilities, NodeId, NodeInfo, PeerInfo, ShardId,
+use crate::{
+    log_storage::AppliedStateAccessor,
+    peer_tracker::PeerTracker,
+    proto::{
+        AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
+        GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry,
+        NodeCapabilities, NodeId, NodeInfo, PeerInfo, ShardId,
+        system_discovery_service_server::SystemDiscoveryService,
+    },
+    types::LedgerTypeConfig,
 };
-use crate::types::LedgerTypeConfig;
-
-use inferadb_ledger_state::StateLayer;
-use inferadb_ledger_store::FileBackend;
 
 // =============================================================================
 // IP Address Validation
@@ -113,9 +116,7 @@ fn is_private_ipv6(ip: Ipv6Addr) -> bool {
 /// Returns Ok(()) if valid, Err with reason if invalid.
 fn validate_private_ip(addr: &str) -> Result<(), String> {
     // Parse as IP address (strips any port)
-    let ip: IpAddr = addr
-        .parse()
-        .map_err(|_| format!("Invalid IP address: {}", addr))?;
+    let ip: IpAddr = addr.parse().map_err(|_| format!("Invalid IP address: {}", addr))?;
 
     match ip {
         IpAddr::V4(ipv4) => {
@@ -127,7 +128,7 @@ fn validate_private_ip(addr: &str) -> Result<(), String> {
                     addr
                 ))
             }
-        }
+        },
         IpAddr::V6(ipv6) => {
             if is_private_ipv6(ipv6) {
                 Ok(())
@@ -137,7 +138,7 @@ fn validate_private_ip(addr: &str) -> Result<(), String> {
                     addr
                 ))
             }
-        }
+        },
     }
 }
 
@@ -147,9 +148,7 @@ fn validate_private_ip(addr: &str) -> Result<(), String> {
 #[allow(clippy::result_large_err)] // tonic::Status is external, can't box it
 fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
     if addresses.is_empty() {
-        return Err(Status::invalid_argument(
-            "Peer must have at least one address",
-        ));
+        return Err(Status::invalid_argument("Peer must have at least one address"));
     }
 
     for addr in addresses {
@@ -292,11 +291,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
         request: Request<GetPeersRequest>,
     ) -> Result<Response<GetPeersResponse>, Status> {
         let req = request.into_inner();
-        let max_peers = if req.max_peers == 0 {
-            100
-        } else {
-            req.max_peers as usize
-        };
+        let max_peers = if req.max_peers == 0 { 100 } else { req.max_peers as usize };
 
         // Get peers from Raft membership
         let metrics = self.raft.metrics().borrow().clone();
@@ -309,9 +304,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             .map(|(id, node)| {
                 let node_id_str = id.to_string();
                 PeerInfo {
-                    node_id: Some(NodeId {
-                        id: node_id_str.clone(),
-                    }),
+                    node_id: Some(NodeId { id: node_id_str.clone() }),
                     addresses: vec![node.addr.clone()],
                     grpc_port: 5000, // Default port
                     last_seen: tracker.get_last_seen(&node_id_str),
@@ -319,10 +312,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             })
             .collect();
 
-        Ok(Response::new(GetPeersResponse {
-            peers,
-            system_version: metrics.current_term,
-        }))
+        Ok(Response::new(GetPeersResponse { peers, system_version: metrics.current_term }))
     }
 
     async fn announce_peer(
@@ -332,14 +322,10 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
         let req = request.into_inner();
 
         // Validate the peer info
-        let peer = req
-            .peer
-            .ok_or_else(|| Status::invalid_argument("Missing peer info"))?;
+        let peer = req.peer.ok_or_else(|| Status::invalid_argument("Missing peer info"))?;
 
-        let node_id = peer
-            .node_id
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("Missing node_id"))?;
+        let node_id =
+            peer.node_id.as_ref().ok_or_else(|| Status::invalid_argument("Missing node_id"))?;
 
         // Validate gRPC port
         if peer.grpc_port == 0 || peer.grpc_port > 65535 {
@@ -405,32 +391,23 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
                 node_id: Some(NodeId { id: id.to_string() }),
                 addresses: vec![node.addr.clone()],
                 grpc_port: 5000,
-                capabilities: Some(NodeCapabilities {
-                    can_lead: true,
-                    max_vaults: 1000,
-                }),
+                capabilities: Some(NodeCapabilities { can_lead: true, max_vaults: 1000 }),
                 last_heartbeat: None,
             })
             .collect();
 
         // Build namespace registry from applied state
-        let member_nodes: Vec<NodeId> = membership
-            .nodes()
-            .map(|(id, _)| NodeId { id: id.to_string() })
-            .collect();
+        let member_nodes: Vec<NodeId> =
+            membership.nodes().map(|(id, _)| NodeId { id: id.to_string() }).collect();
 
-        let leader_hint = metrics
-            .current_leader
-            .map(|id| NodeId { id: id.to_string() });
+        let leader_hint = metrics.current_leader.map(|id| NodeId { id: id.to_string() });
 
         let namespaces: Vec<NamespaceRegistry> = self
             .applied_state
             .list_namespaces()
             .into_iter()
             .map(|ns| NamespaceRegistry {
-                namespace_id: Some(NamespaceId {
-                    id: ns.namespace_id,
-                }),
+                namespace_id: Some(NamespaceId { id: ns.namespace_id }),
                 shard_id: Some(ShardId { id: ns.shard_id }),
                 members: member_nodes.clone(),
                 leader_hint: leader_hint.clone(),
@@ -438,21 +415,12 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             })
             .collect();
 
-        Ok(Response::new(GetSystemStateResponse {
-            version: current_version,
-            nodes,
-            namespaces,
-        }))
+        Ok(Response::new(GetSystemStateResponse { version: current_version, nodes, namespaces }))
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -525,18 +493,14 @@ mod tests {
         // fd00::/8 - Unique Local Addresses (WireGuard typical)
         assert!(is_private_ipv6("fd00::1".parse().unwrap()));
         assert!(is_private_ipv6("fd12:3456:789a::1".parse().unwrap()));
-        assert!(is_private_ipv6(
-            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
-        ));
+        assert!(is_private_ipv6("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
     }
 
     #[test]
     fn test_private_ipv6_link_local() {
         // fe80::/10
         assert!(is_private_ipv6("fe80::1".parse().unwrap()));
-        assert!(is_private_ipv6(
-            "fe80::1234:5678:abcd:ef01".parse().unwrap()
-        ));
+        assert!(is_private_ipv6("fe80::1234:5678:abcd:ef01".parse().unwrap()));
     }
 
     #[test]

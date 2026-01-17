@@ -81,8 +81,10 @@ pub mod transaction;
 pub mod types;
 
 // Re-export commonly used types
-pub use backend::{DEFAULT_PAGE_SIZE, HEADER_SIZE, MAGIC};
-pub use backend::{DatabaseHeader, FileBackend, InMemoryBackend, StorageBackend};
+pub use backend::{
+    DEFAULT_PAGE_SIZE, DatabaseHeader, FileBackend, HEADER_SIZE, InMemoryBackend, MAGIC,
+    StorageBackend,
+};
 pub use btree::{BTree, PageProvider};
 pub use db::{
     Database, DatabaseConfig, DatabaseStats, ReadTransaction, TableIterator, WriteTransaction,

@@ -19,8 +19,7 @@
 
 mod common;
 
-use std::collections::HashSet;
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use common::{TestCluster, create_read_client, create_write_client};
 use inferadb_ledger_raft::proto::{ClientId, NamespaceId, ReadRequest, VaultId, WriteRequest};
@@ -38,9 +37,7 @@ fn make_write_request(
     WriteRequest {
         namespace_id: Some(NamespaceId { id: namespace_id }),
         vault_id: Some(VaultId { id: vault_id }),
-        client_id: Some(ClientId {
-            id: client_id.to_string(),
-        }),
+        client_id: Some(ClientId { id: client_id.to_string() }),
         sequence,
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
@@ -62,7 +59,7 @@ fn extract_block_height(response: inferadb_ledger_raft::proto::WriteResponse) ->
         Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => s.block_height,
         Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
             panic!("write failed: {:?}", e)
-        }
+        },
         None => panic!("no result in response"),
     }
 }
@@ -101,18 +98,12 @@ async fn test_committed_write_survives_leader_crash() {
     let leader_addr = leader.addr;
 
     // Write some data through the leader
-    let mut client = create_write_client(leader_addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader_addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
     let write_req = make_write_request(1, 1, "chaos-key", b"chaos-value", &client_id, 1);
 
-    let response = client
-        .write(write_req)
-        .await
-        .expect("write should succeed")
-        .into_inner();
+    let response = client.write(write_req).await.expect("write should succeed").into_inner();
     let block_height = extract_block_height(response);
     assert!(block_height > 0, "write should be committed");
 
@@ -131,11 +122,7 @@ async fn test_committed_write_survives_leader_crash() {
     let followers = cluster.followers();
     let follower = followers.first().expect("should have follower");
     let value = read_entity(follower.addr, 1, 1, "chaos-key").await;
-    assert_eq!(
-        value,
-        Some(b"chaos-value".to_vec()),
-        "follower should have the committed write"
-    );
+    assert_eq!(value, Some(b"chaos-value".to_vec()), "follower should have the committed write");
 }
 
 /// Test that writes are still readable after a new leader is elected.
@@ -154,9 +141,7 @@ async fn test_read_consistency_after_leader_change() {
     let leader = cluster.node(initial_leader_id).expect("leader exists");
 
     // Write data through the initial leader
-    let mut client = create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", initial_leader_id);
 
@@ -203,9 +188,7 @@ async fn test_writes_succeed_with_one_node_down() {
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // Write through the leader (all 3 nodes up)
-    let mut client = create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
     let write_req = make_write_request(1, 1, "before-failure", b"value1", &client_id, 1);
@@ -242,9 +225,7 @@ async fn test_deterministic_block_height_across_nodes() {
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
-    let mut client = create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
 
@@ -354,9 +335,7 @@ async fn test_rapid_writes_no_data_loss() {
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
-    let mut client = create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("rapid-client-{}", leader_id);
     let num_writes = 50u64;
@@ -404,20 +383,12 @@ async fn test_term_agreement_maintained() {
 
     // Submit some writes to exercise the cluster
     let leader = cluster.leader().expect("should have leader");
-    let mut client = create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("term-test-{}", leader_id);
     for i in 0..5u64 {
-        let write_req = make_write_request(
-            1,
-            1,
-            &format!("term-key-{}", i),
-            b"value",
-            &client_id,
-            i + 1,
-        );
+        let write_req =
+            make_write_request(1, 1, &format!("term-key-{}", i), b"value", &client_id, i + 1);
         client.write(write_req).await.expect("write should succeed");
     }
 
@@ -427,12 +398,7 @@ async fn test_term_agreement_maintained() {
     let terms: Vec<u64> = cluster.nodes().iter().map(|n| n.current_term()).collect();
     let unique_terms: HashSet<_> = terms.iter().collect();
 
-    assert_eq!(
-        unique_terms.len(),
-        1,
-        "all nodes should be on the same term, got {:?}",
-        terms
-    );
+    assert_eq!(unique_terms.len(), 1, "all nodes should be on the same term, got {:?}", terms);
 }
 
 // Note: Vault and namespace isolation tests are in write_read.rs.
@@ -446,9 +412,7 @@ async fn test_key_overwrite_consistency() {
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
-    let mut client = create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("overwrite-test-{}", leader_id);
 
@@ -466,12 +430,7 @@ async fn test_key_overwrite_consistency() {
     // All nodes should see the updated value
     for node in cluster.nodes() {
         let value = read_entity(node.addr, 1, 1, "overwrite-key").await;
-        assert_eq!(
-            value,
-            Some(b"updated".to_vec()),
-            "node {} should have updated value",
-            node.id
-        );
+        assert_eq!(value, Some(b"updated".to_vec()), "node {} should have updated value", node.id);
     }
 }
 
@@ -483,9 +442,7 @@ async fn test_large_batch_writes() {
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
-    let mut client = create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("batch-test-{}", leader_id);
 

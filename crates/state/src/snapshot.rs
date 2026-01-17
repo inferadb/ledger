@@ -6,15 +6,16 @@
 //! - Format: header + compressed state data
 //! - Naming: {shard_height:09}.snap
 
-use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
-
-use snafu::{ResultExt, Snafu};
-use zstd::stream::{Decoder, Encoder};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{BufReader, BufWriter, Read, Write},
+    path::{Path, PathBuf},
+};
 
 use inferadb_ledger_types::{ChainCommitment, Entity, Hash, ShardId, VaultId, decode, encode};
+use snafu::{ResultExt, Snafu};
+use zstd::stream::{Decoder, Encoder};
 
 use crate::bucket::NUM_BUCKETS;
 
@@ -41,9 +42,7 @@ pub enum SnapshotError {
     ChecksumMismatch { expected: Hash, actual: Hash },
 
     #[snafu(display("Codec error: {source}"))]
-    Codec {
-        source: inferadb_ledger_types::CodecError,
-    },
+    Codec { source: inferadb_ledger_types::CodecError },
 
     #[snafu(display("Snapshot not found: {path}"))]
     NotFound { path: String },
@@ -77,13 +76,7 @@ impl VaultSnapshotMeta {
         bucket_roots: [Hash; NUM_BUCKETS],
         key_count: u64,
     ) -> Self {
-        Self {
-            vault_id,
-            vault_height,
-            state_root,
-            bucket_roots: bucket_roots.to_vec(),
-            key_count,
-        }
+        Self { vault_id, vault_height, state_root, bucket_roots: bucket_roots.to_vec(), key_count }
     }
 
     /// Get bucket roots as a fixed-size array.
@@ -217,13 +210,7 @@ impl Snapshot {
         vault_states: Vec<VaultSnapshotMeta>,
         state: SnapshotStateData,
     ) -> Result<Self> {
-        Self::new(
-            shard_id,
-            shard_height,
-            vault_states,
-            state,
-            SnapshotChainParams::default(),
-        )
+        Self::new(shard_id, shard_height, vault_states, state, SnapshotChainParams::default())
     }
 
     /// Get the shard height of this snapshot.
@@ -233,10 +220,7 @@ impl Snapshot {
 
     /// Get vault metadata by vault_id.
     pub fn get_vault_meta(&self, vault_id: VaultId) -> Option<&VaultSnapshotMeta> {
-        self.header
-            .vault_states
-            .iter()
-            .find(|v| v.vault_id == vault_id)
+        self.header.vault_states.iter().find(|v| v.vault_id == vault_id)
     }
 
     /// Get entities for a vault.
@@ -263,9 +247,7 @@ impl Snapshot {
         let header_bytes = encode(&self.header).context(CodecSnafu)?;
 
         // Length-prefixed header
-        writer
-            .write_all(&(header_bytes.len() as u32).to_le_bytes())
-            .context(IoSnafu)?;
+        writer.write_all(&(header_bytes.len() as u32).to_le_bytes()).context(IoSnafu)?;
         writer.write_all(&header_bytes).context(IoSnafu)?;
 
         // Compressed state data
@@ -278,9 +260,7 @@ impl Snapshot {
     /// Read snapshot from file.
     pub fn read_from_file(path: &Path) -> Result<Self> {
         if !path.exists() {
-            return Err(SnapshotError::NotFound {
-                path: path.display().to_string(),
-            });
+            return Err(SnapshotError::NotFound { path: path.display().to_string() });
         }
 
         let file = File::open(path).context(IoSnafu)?;
@@ -304,9 +284,7 @@ impl Snapshot {
 
         // Validate version
         if header.version != SNAPSHOT_VERSION {
-            return Err(SnapshotError::UnsupportedVersion {
-                version: header.version,
-            });
+            return Err(SnapshotError::UnsupportedVersion { version: header.version });
         }
 
         // Read and decompress state data
@@ -354,10 +332,7 @@ pub struct SnapshotManager {
 impl SnapshotManager {
     /// Create a new snapshot manager.
     pub fn new(snapshot_dir: PathBuf, max_snapshots: usize) -> Self {
-        Self {
-            snapshot_dir,
-            max_snapshots,
-        }
+        Self { snapshot_dir, max_snapshots }
     }
 
     /// Get the snapshot directory path.
@@ -458,9 +433,10 @@ impl SnapshotManager {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
     use inferadb_ledger_types::EMPTY_HASH;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn create_test_snapshot() -> Snapshot {
         let vault_states = vec![VaultSnapshotMeta {
@@ -507,10 +483,7 @@ mod tests {
 
         assert_eq!(loaded.header.shard_id, snapshot.header.shard_id);
         assert_eq!(loaded.header.shard_height, snapshot.header.shard_height);
-        assert_eq!(
-            loaded.header.vault_states.len(),
-            snapshot.header.vault_states.len()
-        );
+        assert_eq!(loaded.header.vault_states.len(), snapshot.header.vault_states.len());
 
         let entities = loaded.get_vault_entities(1).expect("vault 1 entities");
         assert_eq!(entities.len(), 2);
@@ -535,9 +508,7 @@ mod tests {
                 1,
                 height,
                 vault_states,
-                SnapshotStateData {
-                    vault_entities: HashMap::new(),
-                },
+                SnapshotStateData { vault_entities: HashMap::new() },
             )
             .expect("create snapshot");
 
@@ -589,10 +560,7 @@ mod tests {
 
         // Should fail checksum validation
         let result = Snapshot::read_from_file(&path);
-        assert!(matches!(
-            result,
-            Err(SnapshotError::ChecksumMismatch { .. })
-        ));
+        assert!(matches!(result, Err(SnapshotError::ChecksumMismatch { .. })));
     }
 
     #[test]
@@ -608,9 +576,7 @@ mod tests {
             key_count: 5,
         }];
 
-        let state = SnapshotStateData {
-            vault_entities: HashMap::new(),
-        };
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
 
         // Create chain params with actual values
         let chain_params = SnapshotChainParams {
@@ -643,14 +609,8 @@ mod tests {
         assert_eq!(loaded.header.genesis_hash, [1u8; 32]);
         assert_eq!(loaded.header.previous_snapshot_height, Some(500));
         assert_eq!(loaded.header.previous_snapshot_hash, Some([2u8; 32]));
-        assert_eq!(
-            loaded.header.chain_commitment.accumulated_header_hash,
-            [3u8; 32]
-        );
-        assert_eq!(
-            loaded.header.chain_commitment.state_root_accumulator,
-            [4u8; 32]
-        );
+        assert_eq!(loaded.header.chain_commitment.accumulated_header_hash, [3u8; 32]);
+        assert_eq!(loaded.header.chain_commitment.state_root_accumulator, [4u8; 32]);
         assert_eq!(loaded.header.chain_commitment.from_height, 501);
         assert_eq!(loaded.header.chain_commitment.to_height, 1000);
     }

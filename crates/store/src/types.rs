@@ -7,8 +7,9 @@
 //!
 //! Values are always `&[u8]` (arbitrary bytes).
 
-use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use std::cmp::Ordering;
+
+use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 
 /// Key type discriminant for compile-time table definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +66,7 @@ impl Key for u64 {
     }
 
     fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() >= 8 {
-            Some(BigEndian::read_u64(buf))
-        } else {
-            None
-        }
+        if buf.len() >= 8 { Some(BigEndian::read_u64(buf)) } else { None }
     }
 
     fn compare_encoded(a: &[u8], b: &[u8]) -> Ordering {
@@ -247,11 +244,7 @@ impl Value for u64 {
     }
 
     fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() >= 8 {
-            Some(BigEndian::read_u64(buf))
-        } else {
-            None
-        }
+        if buf.len() >= 8 { Some(BigEndian::read_u64(buf)) } else { None }
     }
 
     fn encoded_size(&self) -> usize {
@@ -274,11 +267,7 @@ pub fn encode_length_prefixed(data: &[u8], buf: &mut Vec<u8>) {
 pub fn decode_length_prefixed(buf: &[u8]) -> Option<(&[u8], usize)> {
     let (len, varint_size) = decode_varint(buf)?;
     let total_size = varint_size + len as usize;
-    if buf.len() >= total_size {
-        Some((&buf[varint_size..total_size], total_size))
-    } else {
-        None
-    }
+    if buf.len() >= total_size { Some((&buf[varint_size..total_size], total_size)) } else { None }
 }
 
 /// Encode a u32 as a varint (1-5 bytes).

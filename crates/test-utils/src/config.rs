@@ -3,8 +3,9 @@
 //! Provides sensible default configurations for tests, centralizing
 //! magic values that would otherwise be scattered across test modules.
 
-use inferadb_ledger_types::config::BatchConfig;
 use std::time::Duration;
+
+use inferadb_ledger_types::config::BatchConfig;
 
 /// Returns a default batch configuration suitable for tests.
 ///
@@ -40,8 +41,5 @@ pub struct TestRateLimitConfig {
 /// - `timeout_secs`: 30 (generous timeout)
 #[must_use]
 pub fn test_rate_limit_config() -> TestRateLimitConfig {
-    TestRateLimitConfig {
-        max_concurrent: 100,
-        timeout_secs: 30,
-    }
+    TestRateLimitConfig { max_concurrent: 100, timeout_secs: 30 }
 }

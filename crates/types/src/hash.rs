@@ -164,32 +164,19 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
     use crate::types::Operation;
 
     match op {
-        Operation::CreateRelationship {
-            resource,
-            relation,
-            subject,
-        } => {
+        Operation::CreateRelationship { resource, relation, subject } => {
             hasher.update([0x01]); // type byte
             hash_length_prefixed_str(hasher, resource);
             hash_length_prefixed_str(hasher, relation);
             hash_length_prefixed_str(hasher, subject);
-        }
-        Operation::DeleteRelationship {
-            resource,
-            relation,
-            subject,
-        } => {
+        },
+        Operation::DeleteRelationship { resource, relation, subject } => {
             hasher.update([0x02]); // type byte
             hash_length_prefixed_str(hasher, resource);
             hash_length_prefixed_str(hasher, relation);
             hash_length_prefixed_str(hasher, subject);
-        }
-        Operation::SetEntity {
-            key,
-            value,
-            condition,
-            expires_at,
-        } => {
+        },
+        Operation::SetEntity { key, value, condition, expires_at } => {
             hasher.update([0x03]); // type byte
             hash_length_prefixed_str(hasher, key);
             hash_length_prefixed_bytes(hasher, value);
@@ -201,29 +188,29 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
                     hasher.update([cond.type_byte()]);
                     match cond {
                         crate::types::SetCondition::MustNotExist
-                        | crate::types::SetCondition::MustExist => {}
+                        | crate::types::SetCondition::MustExist => {},
                         crate::types::SetCondition::VersionEquals(v) => {
                             hasher.update(v.to_be_bytes());
-                        }
+                        },
                         crate::types::SetCondition::ValueEquals(v) => {
                             hash_length_prefixed_bytes(hasher, v);
-                        }
+                        },
                     }
-                }
+                },
             }
 
             // expires_at: u64 BE (0 if None)
             hasher.update(expires_at.unwrap_or(0).to_be_bytes());
-        }
+        },
         Operation::DeleteEntity { key } => {
             hasher.update([0x04]); // type byte
             hash_length_prefixed_str(hasher, key);
-        }
+        },
         Operation::ExpireEntity { key, expired_at } => {
             hasher.update([0x05]); // type byte
             hash_length_prefixed_str(hasher, key);
             hasher.update((*expired_at).to_be_bytes());
-        }
+        },
     }
 }
 
@@ -253,10 +240,7 @@ pub struct BucketHasher {
 impl BucketHasher {
     /// Create a new bucket hasher.
     pub fn new() -> Self {
-        Self {
-            hasher: Sha256::new(),
-            has_entries: false,
-        }
+        Self { hasher: Sha256::new(), has_entries: false }
     }
 
     /// Add an entity to the bucket hash.
@@ -276,8 +260,7 @@ impl BucketHasher {
         // key: variable
         self.hasher.update(&entity.key);
         // value_len: u32 LE
-        self.hasher
-            .update((entity.value.len() as u32).to_le_bytes());
+        self.hasher.update((entity.value.len() as u32).to_le_bytes());
         // value: variable
         self.hasher.update(&entity.value);
         // expires_at: u64 BE (0 = never)
@@ -290,11 +273,7 @@ impl BucketHasher {
     ///
     /// Returns EMPTY_HASH for empty buckets per DESIGN.md line 660.
     pub fn finalize(self) -> Hash {
-        if self.has_entries {
-            self.hasher.finalize().into()
-        } else {
-            EMPTY_HASH
-        }
+        if self.has_entries { self.hasher.finalize().into() } else { EMPTY_HASH }
     }
 }
 
@@ -416,8 +395,9 @@ pub fn compute_chain_commitment(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use chrono::{TimeZone, Utc};
+
+    use super::*;
 
     #[test]
     fn test_empty_hash_is_sha256_of_empty() {

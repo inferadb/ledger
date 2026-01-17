@@ -458,10 +458,7 @@ pub struct Timer {
 impl Timer {
     /// Create a new timer.
     pub fn new<F: FnOnce(f64) + Send + 'static>(record_fn: F) -> Self {
-        Self {
-            start: Instant::now(),
-            record_fn: Some(Box::new(record_fn)),
-        }
+        Self { start: Instant::now(), record_fn: Some(Box::new(record_fn)) }
     }
 
     /// Get elapsed time in seconds.

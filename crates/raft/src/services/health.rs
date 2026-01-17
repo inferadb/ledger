@@ -4,16 +4,18 @@
 
 use std::sync::Arc;
 
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
 use tonic::{Request, Response, Status};
 
-use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus};
-use crate::proto::health_service_server::HealthService;
-use crate::proto::{HealthCheckRequest, HealthCheckResponse, HealthStatus};
-use crate::types::LedgerTypeConfig;
-
-use inferadb_ledger_state::StateLayer;
-use inferadb_ledger_store::FileBackend;
+use crate::{
+    log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    proto::{
+        HealthCheckRequest, HealthCheckResponse, HealthStatus, health_service_server::HealthService,
+    },
+    types::LedgerTypeConfig,
+};
 
 /// Health service implementation.
 pub struct HealthServiceImpl {
@@ -32,11 +34,7 @@ impl HealthServiceImpl {
         state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
-        Self {
-            raft,
-            state,
-            applied_state,
-        }
+        Self { raft, state, applied_state }
     }
 }
 
@@ -66,36 +64,20 @@ impl HealthService for HealthServiceImpl {
                 VaultHealthStatus::Healthy => {
                     details.insert("health_status".to_string(), "healthy".to_string());
                     (HealthStatus::Healthy, "Vault is healthy")
-                }
-                VaultHealthStatus::Diverged {
-                    expected,
-                    computed,
-                    at_height,
-                } => {
+                },
+                VaultHealthStatus::Diverged { expected, computed, at_height } => {
                     details.insert("health_status".to_string(), "diverged".to_string());
                     details.insert("diverged_at_height".to_string(), at_height.to_string());
-                    details.insert(
-                        "expected_root".to_string(),
-                        format!("{:x?}", &expected[..8]),
-                    );
-                    details.insert(
-                        "computed_root".to_string(),
-                        format!("{:x?}", &computed[..8]),
-                    );
+                    details.insert("expected_root".to_string(), format!("{:x?}", &expected[..8]));
+                    details.insert("computed_root".to_string(), format!("{:x?}", &computed[..8]));
                     (HealthStatus::Unavailable, "Vault has diverged state")
-                }
-                VaultHealthStatus::Recovering {
-                    started_at,
-                    attempt,
-                } => {
+                },
+                VaultHealthStatus::Recovering { started_at, attempt } => {
                     details.insert("health_status".to_string(), "recovering".to_string());
                     details.insert("recovery_started_at".to_string(), started_at.to_string());
                     details.insert("recovery_attempt".to_string(), attempt.to_string());
-                    (
-                        HealthStatus::Degraded,
-                        "Vault is recovering from divergence",
-                    )
-                }
+                    (HealthStatus::Degraded, "Vault is recovering from divergence")
+                },
             };
 
             // Get vault metadata (last write timestamp)
@@ -115,10 +97,7 @@ impl HealthService for HealthServiceImpl {
             if let Ok(entities) = self.state.list_entities(vault_id, None, None, 1) {
                 // We fetch 1 to check if any exist, actual count needs full scan
                 // For now, indicate whether vault has entities
-                details.insert(
-                    "has_entities".to_string(),
-                    (!entities.is_empty()).to_string(),
-                );
+                details.insert("has_entities".to_string(), (!entities.is_empty()).to_string());
             }
 
             return Ok(Response::new(HealthCheckResponse {
@@ -139,12 +118,7 @@ impl HealthService for HealthServiceImpl {
         }
         details.insert(
             "member_count".to_string(),
-            metrics
-                .membership_config
-                .membership()
-                .nodes()
-                .count()
-                .to_string(),
+            metrics.membership_config.membership().nodes().count().to_string(),
         );
 
         // Determine health status based on Raft state

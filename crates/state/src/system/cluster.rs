@@ -16,19 +16,16 @@
 //! 1. **OpenRaft Built-in Replication**: Learners receive log entries from the leader
 //!    automatically, keeping their state reasonably fresh under normal conditions.
 //!
-//! 2. **Background Refresh Job** (`LearnerRefreshJob`): Learners periodically poll
-//!    voters via `GetSystemState` RPC to refresh their cached system state (namespace
-//!    registry, routing info). This provides an additional layer of freshness beyond
-//!    Raft replication.
+//! 2. **Background Refresh Job** (`LearnerRefreshJob`): Learners periodically poll voters via
+//!    `GetSystemState` RPC to refresh their cached system state (namespace registry, routing info).
+//!    This provides an additional layer of freshness beyond Raft replication.
 //!
 //! The `LearnerCacheConfig` below provides configuration for cache TTL and refresh
 //! intervals. Staleness checks can be integrated into read paths if needed.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, Utc};
-
 use inferadb_ledger_types::NodeId;
 
 use super::types::{NodeInfo, NodeRole};
@@ -49,10 +46,7 @@ pub struct LearnerCacheConfig {
 
 impl Default for LearnerCacheConfig {
     fn default() -> Self {
-        Self {
-            cache_ttl: Duration::from_secs(5),
-            refresh_interval: Duration::from_secs(1),
-        }
+        Self { cache_ttl: Duration::from_secs(5), refresh_interval: Duration::from_secs(1) }
     }
 }
 
@@ -93,9 +87,7 @@ impl Default for ClusterMembership {
 impl ClusterMembership {
     /// Create a new empty cluster membership.
     pub fn new() -> Self {
-        Self {
-            nodes: HashMap::new(),
-        }
+        Self { nodes: HashMap::new() }
     }
 
     /// Create cluster membership from a list of nodes.
@@ -126,18 +118,12 @@ impl ClusterMembership {
 
     /// Count the number of Voter nodes.
     pub fn voter_count(&self) -> usize {
-        self.nodes
-            .values()
-            .filter(|n| matches!(n.role, NodeRole::Voter))
-            .count()
+        self.nodes.values().filter(|n| matches!(n.role, NodeRole::Voter)).count()
     }
 
     /// Count the number of Learner nodes.
     pub fn learner_count(&self) -> usize {
-        self.nodes
-            .values()
-            .filter(|n| matches!(n.role, NodeRole::Learner))
-            .count()
+        self.nodes.values().filter(|n| matches!(n.role, NodeRole::Learner)).count()
     }
 
     /// Get all Voter node IDs.
@@ -163,11 +149,7 @@ impl ClusterMembership {
     /// If there are fewer than MAX_VOTERS voters, the new node becomes a Voter.
     /// Otherwise, it becomes a Learner.
     pub fn determine_role(&self, _new_node: &NodeId) -> NodeRole {
-        if self.voter_count() < MAX_VOTERS {
-            NodeRole::Voter
-        } else {
-            NodeRole::Learner
-        }
+        if self.voter_count() < MAX_VOTERS { NodeRole::Voter } else { NodeRole::Learner }
     }
 
     /// Add a new node to the cluster.
@@ -289,26 +271,19 @@ mod tests {
     fn test_determine_role_below_max() {
         let cluster = ClusterMembership::new();
         // First 5 nodes should be Voters
-        assert_eq!(
-            cluster.determine_role(&"node-1".to_string()),
-            NodeRole::Voter
-        );
+        assert_eq!(cluster.determine_role(&"node-1".to_string()), NodeRole::Voter);
     }
 
     #[test]
     fn test_determine_role_at_max() {
         let now = Utc::now();
-        let nodes: Vec<NodeInfo> = (0..5)
-            .map(|i| make_node(&format!("node-{i}"), NodeRole::Voter, now))
-            .collect();
+        let nodes: Vec<NodeInfo> =
+            (0..5).map(|i| make_node(&format!("node-{i}"), NodeRole::Voter, now)).collect();
         let cluster = ClusterMembership::from_nodes(nodes);
 
         // 6th node should be Learner
         assert_eq!(cluster.voter_count(), 5);
-        assert_eq!(
-            cluster.determine_role(&"node-5".to_string()),
-            NodeRole::Learner
-        );
+        assert_eq!(cluster.determine_role(&"node-5".to_string()), NodeRole::Learner);
     }
 
     #[test]
@@ -356,9 +331,8 @@ mod tests {
     #[test]
     fn test_no_promotion_at_max_voters() {
         let now = Utc::now();
-        let nodes: Vec<NodeInfo> = (0..5)
-            .map(|i| make_node(&format!("node-{i}"), NodeRole::Voter, now))
-            .collect();
+        let nodes: Vec<NodeInfo> =
+            (0..5).map(|i| make_node(&format!("node-{i}"), NodeRole::Voter, now)).collect();
         let mut cluster = ClusterMembership::from_nodes(nodes);
 
         // Add a learner

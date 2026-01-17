@@ -4,9 +4,8 @@
 //! Used for lower-level access when the full state layer isn't needed.
 
 use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
-use snafu::{ResultExt, Snafu};
-
 use inferadb_ledger_types::{CodecError, Entity, VaultId, decode, encode};
+use snafu::{ResultExt, Snafu};
 
 use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 
@@ -14,9 +13,7 @@ use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 #[derive(Debug, Snafu)]
 pub enum EntityError {
     #[snafu(display("Storage error: {source}"))]
-    Storage {
-        source: inferadb_ledger_store::Error,
-    },
+    Storage { source: inferadb_ledger_store::Error },
 
     #[snafu(display("Codec error: {source}"))]
     Codec { source: CodecError },
@@ -37,14 +34,11 @@ impl EntityStore {
     ) -> Result<Option<Entity>> {
         let storage_key = encode_storage_key(vault_id, key);
 
-        match txn
-            .get::<tables::Entities>(&storage_key)
-            .context(StorageSnafu)?
-        {
+        match txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)? {
             Some(data) => {
                 let entity = decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -58,8 +52,7 @@ impl EntityStore {
         let storage_key = encode_storage_key(vault_id, &entity.key);
         let encoded = encode(entity).context(CodecSnafu)?;
 
-        txn.insert::<tables::Entities>(&storage_key, &encoded)
-            .context(StorageSnafu)?;
+        txn.insert::<tables::Entities>(&storage_key, &encoded).context(StorageSnafu)?;
         Ok(())
     }
 
@@ -70,9 +63,7 @@ impl EntityStore {
         key: &[u8],
     ) -> Result<bool> {
         let storage_key = encode_storage_key(vault_id, key);
-        let existed = txn
-            .delete::<tables::Entities>(&storage_key)
-            .context(StorageSnafu)?;
+        let existed = txn.delete::<tables::Entities>(&storage_key).context(StorageSnafu)?;
         Ok(existed)
     }
 
@@ -83,10 +74,7 @@ impl EntityStore {
         key: &[u8],
     ) -> Result<bool> {
         let storage_key = encode_storage_key(vault_id, key);
-        Ok(txn
-            .get::<tables::Entities>(&storage_key)
-            .context(StorageSnafu)?
-            .is_some())
+        Ok(txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)?.is_some())
     }
 
     /// List all entities in a vault with pagination.
@@ -230,12 +218,7 @@ impl EntityStore {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    unused_mut
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, unused_mut)]
 mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
@@ -370,20 +353,14 @@ mod tests {
         let display = format!("{entity_err}");
 
         // Should have format "Codec error: Decoding failed: <postcard error>"
-        assert!(
-            display.starts_with("Codec error:"),
-            "Expected 'Codec error:', got: {display}"
-        );
+        assert!(display.starts_with("Codec error:"), "Expected 'Codec error:', got: {display}");
         assert!(
             display.contains("Decoding failed"),
             "Expected to contain 'Decoding failed', got: {display}"
         );
 
         // Verify source chain is preserved
-        assert!(
-            entity_err.source().is_some(),
-            "EntityError::Codec should have a source"
-        );
+        assert!(entity_err.source().is_some(), "EntityError::Codec should have a source");
     }
 
     // Test error conversion chain: CodecError -> EntityError
@@ -402,10 +379,7 @@ mod tests {
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert!(
-            matches!(err, EntityError::Codec { .. }),
-            "Should be EntityError::Codec variant"
-        );
+        assert!(matches!(err, EntityError::Codec { .. }), "Should be EntityError::Codec variant");
     }
 
     // Test that Storage variant also works correctly

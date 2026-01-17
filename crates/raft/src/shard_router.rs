@@ -38,19 +38,20 @@
 //! **Phase 3 (future)**: Shard lifecycle management - creating new shards,
 //! migrating namespaces between shards, rebalancing.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use parking_lot::RwLock;
-use snafu::{ResultExt, Snafu};
-use tonic::transport::Channel;
-use tracing::{debug, info, warn};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_state::system::{NamespaceStatus, SystemNamespaceService};
 use inferadb_ledger_store::{FileBackend, StorageBackend};
 use inferadb_ledger_types::{NamespaceId, ShardId};
+use parking_lot::RwLock;
+use snafu::{ResultExt, Snafu};
+use tonic::transport::Channel;
+use tracing::{debug, info, warn};
 
 // ============================================================================
 // Error Types
@@ -67,10 +68,7 @@ pub enum RoutingError {
 
     /// Namespace is not active (migrating, suspended, deleted).
     #[snafu(display("Namespace {namespace_id} is {status:?}"))]
-    NamespaceUnavailable {
-        namespace_id: NamespaceId,
-        status: NamespaceStatus,
-    },
+    NamespaceUnavailable { namespace_id: NamespaceId, status: NamespaceStatus },
 
     /// Shard has no available nodes.
     #[snafu(display("Shard {shard_id} has no available nodes"))]
@@ -82,9 +80,7 @@ pub enum RoutingError {
 
     /// System service error during lookup.
     #[snafu(display("System lookup failed: {source}"))]
-    SystemLookup {
-        source: inferadb_ledger_state::system::SystemError,
-    },
+    SystemLookup { source: inferadb_ledger_state::system::SystemError },
 }
 
 /// Result type for routing operations.
@@ -229,12 +225,8 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         let routing = self.get_routing_internal(namespace_id)?;
 
         // 2. Get or create connection
-        self.get_connection(
-            routing.shard_id,
-            &routing.member_nodes,
-            routing.leader_hint.as_deref(),
-        )
-        .await
+        self.get_connection(routing.shard_id, &routing.member_nodes, routing.leader_hint.as_deref())
+            .await
     }
 
     /// Get routing information for a namespace (public API).
@@ -242,8 +234,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Returns the shard assignment and member nodes for the namespace.
     /// Uses cached data if fresh, otherwise queries `_system`.
     pub fn get_routing(&self, namespace_id: NamespaceId) -> Result<RoutingInfo> {
-        self.get_routing_internal(namespace_id)
-            .map(|entry| entry.to_routing_info())
+        self.get_routing_internal(namespace_id).map(|entry| entry.to_routing_info())
     }
 
     /// Get routing information for a namespace (internal).
@@ -323,8 +314,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         // No existing connection - create new one
-        self.create_connection(shard_id, member_nodes, leader_hint)
-            .await
+        self.create_connection(shard_id, member_nodes, leader_hint).await
     }
 
     /// Create a new connection to a shard.
@@ -360,11 +350,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
                         connections.insert(shard_id, conn.clone());
                     }
                     return Ok(conn);
-                }
+                },
                 Err(e) => {
                     warn!(shard_id, node_id, error = %e, "Failed to connect to node");
                     last_error = Some(e);
-                }
+                },
             }
         }
 
@@ -418,12 +408,10 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
         // Assume it's just a hostname, append default port
         let addr_str = format!("{}:{}", node_id, self.config.grpc_port);
-        addr_str
-            .parse()
-            .map_err(|_| RoutingError::ConnectionFailed {
-                shard_id: 0,
-                message: format!("Invalid hostname: {}", node_id),
-            })
+        addr_str.parse().map_err(|_| RoutingError::ConnectionFailed {
+            shard_id: 0,
+            message: format!("Invalid hostname: {}", node_id),
+        })
     }
 
     /// Invalidate cached routing for a namespace.
@@ -464,10 +452,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         let cache = self.cache.read();
         let connections = self.connections.read();
 
-        let stale_entries = cache
-            .values()
-            .filter(|e| e.is_stale(self.config.cache_ttl))
-            .count();
+        let stale_entries = cache.values().filter(|e| e.is_stale(self.config.cache_ttl)).count();
 
         RouterStats {
             cached_namespaces: cache.len(),
@@ -510,17 +495,15 @@ pub struct RouterStats {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use inferadb_ledger_state::StateLayer;
     use inferadb_ledger_store::{Database, FileBackend};
     use inferadb_ledger_test_utils::TestDir;
-    use std::sync::Arc;
 
-    fn create_test_router() -> (
-        ShardRouter<FileBackend>,
-        Arc<StateLayer<FileBackend>>,
-        TestDir,
-    ) {
+    use super::*;
+
+    fn create_test_router() -> (ShardRouter<FileBackend>, Arc<StateLayer<FileBackend>>, TestDir) {
         let temp_dir = TestDir::new();
         let db = Arc::new(
             Database::<FileBackend>::create(temp_dir.join("test.db")).expect("create database"),
@@ -561,9 +544,7 @@ mod tests {
     fn test_resolve_node_address_socket_addr() {
         let (router, _, _temp) = create_test_router();
 
-        let addr = router
-            .resolve_node_address("127.0.0.1:50051")
-            .expect("parse address");
+        let addr = router.resolve_node_address("127.0.0.1:50051").expect("parse address");
         assert_eq!(addr.port(), 50051);
     }
 
@@ -571,9 +552,7 @@ mod tests {
     fn test_resolve_node_address_hostname() {
         let (router, _, _temp) = create_test_router();
 
-        let addr = router
-            .resolve_node_address("127.0.0.1")
-            .expect("parse hostname");
+        let addr = router.resolve_node_address("127.0.0.1").expect("parse hostname");
         assert_eq!(addr.port(), router.config.grpc_port);
     }
 
@@ -582,10 +561,7 @@ mod tests {
         let (router, _, _temp) = create_test_router();
 
         let result = router.get_routing(999);
-        assert!(matches!(
-            result,
-            Err(RoutingError::NamespaceNotFound { namespace_id: 999 })
-        ));
+        assert!(matches!(result, Err(RoutingError::NamespaceNotFound { namespace_id: 999 })));
     }
 
     #[test]

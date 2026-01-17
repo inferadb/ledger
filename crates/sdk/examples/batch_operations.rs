@@ -62,10 +62,7 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    println!(
-        "Created 3 teams atomically at block {}, tx: {}\n",
-        result.block_height, result.tx_id
-    );
+    println!("Created 3 teams atomically at block {}, tx: {}\n", result.block_height, result.tx_id);
 
     // -------------------------------------------------------------------------
     // 4. Batch write with logical groups
@@ -113,10 +110,7 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    println!(
-        "Batch write (3 groups) committed at block {}\n",
-        result.block_height
-    );
+    println!("Batch write (3 groups) committed at block {}\n", result.block_height);
 
     // -------------------------------------------------------------------------
     // 5. Conditional writes with SetCondition
@@ -136,10 +130,7 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    println!(
-        "Created config:settings (NotExists condition) at block {}",
-        result.block_height
-    );
+    println!("Created config:settings (NotExists condition) at block {}", result.block_height);
 
     // Update an entity that must exist (UPDATE IF EXISTS)
     let result = client
@@ -154,10 +145,7 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    println!(
-        "Updated config:settings (MustExist condition) at block {}\n",
-        result.block_height
-    );
+    println!("Updated config:settings (MustExist condition) at block {}\n", result.block_height);
 
     // -------------------------------------------------------------------------
     // 6. Atomic user provisioning workflow
@@ -183,11 +171,7 @@ async fn main() -> Result<()> {
                     .expect("serialize"),
                 )],
                 // Step 2: Add to default team
-                vec![Operation::create_relationship(
-                    "team:product",
-                    "member",
-                    new_user_id,
-                )],
+                vec![Operation::create_relationship("team:product", "member", new_user_id)],
                 // Step 3: Grant standard permissions
                 vec![
                     Operation::create_relationship("doc:roadmap", "viewer", new_user_id),
@@ -207,16 +191,11 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     println!("\n=== Verification ===");
 
-    let value = client
-        .read(namespace_id, Some(vault_id), new_user_id)
-        .await?;
+    let value = client.read(namespace_id, Some(vault_id), new_user_id).await?;
 
     if let Some(bytes) = value {
         let user: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");
-        println!(
-            "User data: {}",
-            serde_json::to_string_pretty(&user).expect("format")
-        );
+        println!("User data: {}", serde_json::to_string_pretty(&user).expect("format"));
     }
 
     // -------------------------------------------------------------------------

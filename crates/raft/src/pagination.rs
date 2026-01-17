@@ -97,10 +97,7 @@ impl PageTokenCodec {
         hmac.copy_from_slice(&hmac_full[..HMAC_LENGTH]);
 
         // Create encoded token
-        let encoded = EncodedToken {
-            token: token.clone(),
-            hmac,
-        };
+        let encoded = EncodedToken { token: token.clone(), hmac };
 
         // Serialize and base64 encode
         let bytes = match encode(&encoded) {
@@ -118,9 +115,7 @@ impl PageTokenCodec {
     /// - The token version is not supported
     pub fn decode(&self, encoded: &str) -> Result<PageToken, PageTokenError> {
         // Base64 decode
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(|_| PageTokenError::InvalidFormat)?;
+        let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| PageTokenError::InvalidFormat)?;
 
         // Deserialize
         let encoded_token: EncodedToken =
@@ -143,9 +138,7 @@ impl PageTokenCodec {
 
         // Check version
         if encoded_token.token.version != TOKEN_VERSION {
-            return Err(PageTokenError::UnsupportedVersion(
-                encoded_token.token.version,
-            ));
+            return Err(PageTokenError::UnsupportedVersion(encoded_token.token.version));
         }
 
         Ok(encoded_token.token)
@@ -206,11 +199,11 @@ impl std::fmt::Display for PageTokenError {
             PageTokenError::InvalidHmac => write!(f, "invalid page token"),
             PageTokenError::UnsupportedVersion(v) => {
                 write!(f, "unsupported page token version: {}", v)
-            }
+            },
             PageTokenError::ContextMismatch => write!(f, "page token does not match request"),
             PageTokenError::QueryChanged => {
                 write!(f, "query parameters changed; start new pagination")
-            }
+            },
         }
     }
 }

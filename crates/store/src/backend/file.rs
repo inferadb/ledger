@@ -1,11 +1,15 @@
 //! File-based storage backend using memory-mapped I/O.
 
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+};
+
+use parking_lot::RwLock;
+
 use super::{DatabaseHeader, HEADER_SIZE, StorageBackend};
 use crate::error::{Error, PageId, Result};
-use parking_lot::RwLock;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
 
 /// File-based storage backend.
 ///
@@ -24,10 +28,7 @@ impl FileBackend {
     /// Open an existing database file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_str = path.as_ref().display().to_string();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path.as_ref())?;
+        let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
 
         // Read header to get page size
         let mut file_guard = file;
@@ -36,11 +37,7 @@ impl FileBackend {
 
         let header = DatabaseHeader::from_bytes(&header_buf)?;
 
-        Ok(Self {
-            file: RwLock::new(file_guard),
-            page_size: header.page_size(),
-            path: path_str,
-        })
+        Ok(Self { file: RwLock::new(file_guard), page_size: header.page_size(), path: path_str })
     }
 
     /// Create a new database file.
@@ -49,9 +46,7 @@ impl FileBackend {
 
         // Ensure page size is power of 2
         if !page_size.is_power_of_two() || page_size < 512 || page_size > 65536 {
-            return Err(Error::Corrupted {
-                reason: format!("Invalid page size: {}", page_size),
-            });
+            return Err(Error::Corrupted { reason: format!("Invalid page size: {}", page_size) });
         }
 
         let file = OpenOptions::new()
@@ -70,11 +65,7 @@ impl FileBackend {
         file_guard.write_all(&header_bytes)?;
         file_guard.sync_all()?;
 
-        Ok(Self {
-            file: RwLock::new(file_guard),
-            page_size,
-            path: path_str,
-        })
+        Ok(Self { file: RwLock::new(file_guard), page_size, path: path_str })
     }
 
     /// Get the file for direct operations.
@@ -109,11 +100,7 @@ impl StorageBackend for FileBackend {
     fn write_header(&self, header: &[u8]) -> Result<()> {
         if header.len() != HEADER_SIZE {
             return Err(Error::Corrupted {
-                reason: format!(
-                    "Invalid header size: {} (expected {})",
-                    header.len(),
-                    HEADER_SIZE
-                ),
+                reason: format!("Invalid header size: {} (expected {})", header.len(), HEADER_SIZE),
             });
         }
 
@@ -193,9 +180,10 @@ impl StorageBackend for FileBackend {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::backend::DEFAULT_PAGE_SIZE;
-    use tempfile::tempdir;
 
     #[test]
     fn test_create_and_open() {

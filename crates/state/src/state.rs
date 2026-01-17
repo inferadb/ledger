@@ -7,20 +7,20 @@
 //!
 //! Per DESIGN.md: State layer separates commitment (merkleized) from storage (fast K/V).
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use inferadb_ledger_store::{Database, StorageBackend, tables};
-use parking_lot::RwLock;
-use snafu::{ResultExt, Snafu};
-
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
+use parking_lot::RwLock;
+use snafu::{ResultExt, Snafu};
 
-use crate::bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment};
-use crate::indexes::{IndexError, IndexManager};
-use crate::keys::{bucket_prefix, encode_storage_key};
+use crate::{
+    bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment},
+    indexes::{IndexError, IndexManager},
+    keys::{bucket_prefix, encode_storage_key},
+};
 
 /// State layer error types.
 #[derive(Debug, Snafu)]
@@ -91,10 +91,7 @@ pub struct StateLayer<B: StorageBackend> {
 impl<B: StorageBackend> StateLayer<B> {
     /// Create a new state layer backed by the given database.
     pub fn new(db: Arc<Database<B>>) -> Self {
-        Self {
-            db,
-            vault_commitments: RwLock::new(HashMap::new()),
-        }
+        Self { db, vault_commitments: RwLock::new(HashMap::new()) }
     }
 
     /// Execute a function with mutable access to a vault's commitment.
@@ -126,41 +123,33 @@ impl<B: StorageBackend> StateLayer<B> {
 
         for op in operations {
             let status = match op {
-                Operation::SetEntity {
-                    key,
-                    value,
-                    condition,
-                    expires_at,
-                } => {
+                Operation::SetEntity { key, value, condition, expires_at } => {
                     let local_key = key.as_bytes();
                     let storage_key = encode_storage_key(vault_id, local_key);
 
                     // Check condition - get existing entity
-                    let existing = txn
-                        .get::<tables::Entities>(&storage_key)
-                        .context(InkwellSnafu)?;
+                    let existing =
+                        txn.get::<tables::Entities>(&storage_key).context(InkwellSnafu)?;
 
                     let is_update = existing.is_some();
-                    let entity_data = existing
-                        .as_ref()
-                        .and_then(|data| decode::<Entity>(data).ok());
+                    let entity_data =
+                        existing.as_ref().and_then(|data| decode::<Entity>(data).ok());
 
                     let condition_met = match condition {
                         None => true,
                         Some(SetCondition::MustNotExist) => !is_update,
                         Some(SetCondition::MustExist) => is_update,
-                        Some(SetCondition::VersionEquals(v)) => entity_data
-                            .as_ref()
-                            .map(|e| e.version == *v)
-                            .unwrap_or(false),
-                        Some(SetCondition::ValueEquals(expected)) => entity_data
-                            .as_ref()
-                            .map(|e| e.value == *expected)
-                            .unwrap_or(false),
+                        Some(SetCondition::VersionEquals(v)) => {
+                            entity_data.as_ref().map(|e| e.version == *v).unwrap_or(false)
+                        },
+                        Some(SetCondition::ValueEquals(expected)) => {
+                            entity_data.as_ref().map(|e| e.value == *expected).unwrap_or(false)
+                        },
                     };
 
                     if !condition_met {
-                        // Per DESIGN.md §5.9: All-or-nothing - if ANY condition fails, entire batch fails
+                        // Per DESIGN.md §5.9: All-or-nothing - if ANY condition fails, entire batch
+                        // fails
                         return Err(StateError::PreconditionFailed {
                             key: key.clone(),
                             current_version: entity_data.as_ref().map(|e| e.version),
@@ -178,25 +167,19 @@ impl<B: StorageBackend> StateLayer<B> {
 
                     let encoded = encode(&entity).context(CodecSnafu)?;
 
-                    txn.insert::<tables::Entities>(&storage_key, &encoded)
-                        .context(InkwellSnafu)?;
+                    txn.insert::<tables::Entities>(&storage_key, &encoded).context(InkwellSnafu)?;
 
                     dirty_keys.push(local_key.to_vec());
 
-                    if is_update {
-                        WriteStatus::Updated
-                    } else {
-                        WriteStatus::Created
-                    }
-                }
+                    if is_update { WriteStatus::Updated } else { WriteStatus::Created }
+                },
 
                 Operation::DeleteEntity { key } => {
                     let local_key = key.as_bytes();
                     let storage_key = encode_storage_key(vault_id, local_key);
 
-                    let existed = txn
-                        .delete::<tables::Entities>(&storage_key)
-                        .context(InkwellSnafu)?;
+                    let existed =
+                        txn.delete::<tables::Entities>(&storage_key).context(InkwellSnafu)?;
 
                     if existed {
                         dirty_keys.push(local_key.to_vec());
@@ -204,15 +187,14 @@ impl<B: StorageBackend> StateLayer<B> {
                     } else {
                         WriteStatus::NotFound
                     }
-                }
+                },
 
                 Operation::ExpireEntity { key, .. } => {
                     let local_key = key.as_bytes();
                     let storage_key = encode_storage_key(vault_id, local_key);
 
-                    let existed = txn
-                        .delete::<tables::Entities>(&storage_key)
-                        .context(InkwellSnafu)?;
+                    let existed =
+                        txn.delete::<tables::Entities>(&storage_key).context(InkwellSnafu)?;
 
                     if existed {
                         dirty_keys.push(local_key.to_vec());
@@ -220,13 +202,9 @@ impl<B: StorageBackend> StateLayer<B> {
                     } else {
                         WriteStatus::NotFound
                     }
-                }
+                },
 
-                Operation::CreateRelationship {
-                    resource,
-                    relation,
-                    subject,
-                } => {
+                Operation::CreateRelationship { resource, relation, subject } => {
                     let rel = Relationship::new(resource, relation, subject);
                     let rel_key = rel.to_key();
                     let local_key = rel_key.as_bytes();
@@ -257,21 +235,16 @@ impl<B: StorageBackend> StateLayer<B> {
                         dirty_keys.push(local_key.to_vec());
                         WriteStatus::Created
                     }
-                }
+                },
 
-                Operation::DeleteRelationship {
-                    resource,
-                    relation,
-                    subject,
-                } => {
+                Operation::DeleteRelationship { resource, relation, subject } => {
                     let rel = Relationship::new(resource, relation, subject);
                     let rel_key = rel.to_key();
                     let local_key = rel_key.as_bytes();
                     let storage_key = encode_storage_key(vault_id, local_key);
 
-                    let existed = txn
-                        .delete::<tables::Relationships>(&storage_key)
-                        .context(InkwellSnafu)?;
+                    let existed =
+                        txn.delete::<tables::Relationships>(&storage_key).context(InkwellSnafu)?;
 
                     if existed {
                         // Update indexes
@@ -287,7 +260,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     } else {
                         WriteStatus::NotFound
                     }
-                }
+                },
             };
 
             statuses.push(status);
@@ -352,8 +325,7 @@ impl<B: StorageBackend> StateLayer<B> {
         }
 
         for key in keys_to_delete {
-            txn.delete::<tables::Relationships>(&key)
-                .context(InkwellSnafu)?;
+            txn.delete::<tables::Relationships>(&key).context(InkwellSnafu)?;
         }
 
         // Clear indexes
@@ -390,8 +362,7 @@ impl<B: StorageBackend> StateLayer<B> {
         }
 
         for key in keys_to_delete {
-            txn.delete::<tables::SubjIndex>(&key)
-                .context(InkwellSnafu)?;
+            txn.delete::<tables::SubjIndex>(&key).context(InkwellSnafu)?;
         }
 
         txn.commit().context(InkwellSnafu)?;
@@ -407,14 +378,11 @@ impl<B: StorageBackend> StateLayer<B> {
         let storage_key = encode_storage_key(vault_id, key);
         let txn = self.db.read().context(InkwellSnafu)?;
 
-        match txn
-            .get::<tables::Entities>(&storage_key)
-            .context(InkwellSnafu)?
-        {
+        match txn.get::<tables::Entities>(&storage_key).context(InkwellSnafu)? {
             Some(data) => {
                 let entity = decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -433,10 +401,7 @@ impl<B: StorageBackend> StateLayer<B> {
 
         let txn = self.db.read().context(InkwellSnafu)?;
 
-        Ok(txn
-            .get::<tables::Relationships>(&storage_key)
-            .context(InkwellSnafu)?
-            .is_some())
+        Ok(txn.get::<tables::Relationships>(&storage_key).context(InkwellSnafu)?.is_some())
     }
 
     /// Compute state root for a vault, updating dirty bucket roots.
@@ -450,16 +415,16 @@ impl<B: StorageBackend> StateLayer<B> {
             match map.get(&vault_id) {
                 Some(commitment) if commitment.is_dirty() => {
                     commitment.dirty_buckets().iter().copied().collect()
-                }
+                },
                 Some(commitment) => {
                     // Not dirty, return cached state root
                     return Ok(commitment.compute_state_root());
-                }
+                },
                 None => {
                     // No commitment yet, create default and return its state root
                     drop(map);
                     return Ok(self.with_commitment(vault_id, |c| c.compute_state_root()));
-                }
+                },
             }
         };
 
@@ -521,10 +486,7 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Get the current bucket roots for a vault (for persistence).
     pub fn get_bucket_roots(&self, vault_id: VaultId) -> Option<[Hash; NUM_BUCKETS]> {
-        self.vault_commitments
-            .read()
-            .get(&vault_id)
-            .map(|c| *c.bucket_roots())
+        self.vault_commitments.read().get(&vault_id).map(|c| *c.bucket_roots())
     }
 
     /// List subjects for a given resource and relation.
@@ -535,9 +497,7 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
     ) -> Result<Vec<String>> {
         let txn = self.db.read().context(InkwellSnafu)?;
-        Ok(IndexManager::get_subjects(
-            &txn, vault_id, resource, relation,
-        )?)
+        Ok(IndexManager::get_subjects(&txn, vault_id, resource, relation)?)
     }
 
     /// List resource-relation pairs for a given subject.
@@ -678,16 +638,12 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
+    use inferadb_ledger_store::InMemoryBackend;
+
     use super::*;
     use crate::engine::InMemoryStorageEngine;
-    use inferadb_ledger_store::InMemoryBackend;
 
     fn create_test_state() -> StateLayer<InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().expect("open engine");
@@ -752,7 +708,7 @@ mod tests {
                 assert_eq!(current_version, Some(1)); // Set at block_height 1
                 assert_eq!(current_value, Some(b"value1".to_vec()));
                 assert_eq!(failed_condition, Some(SetCondition::MustNotExist));
-            }
+            },
             Ok(_) => panic!("Expected PreconditionFailed error, got Ok"),
             Err(e) => panic!("Expected PreconditionFailed error, got: {:?}", e),
         }
@@ -772,9 +728,7 @@ mod tests {
         }];
         state.apply_operations(vault_id, &ops, 1).unwrap();
 
-        let ops = vec![Operation::DeleteEntity {
-            key: "key".to_string(),
-        }];
+        let ops = vec![Operation::DeleteEntity { key: "key".to_string() }];
         let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Deleted]);
 
@@ -800,11 +754,7 @@ mod tests {
         let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        assert!(
-            state
-                .relationship_exists(vault_id, "doc:123", "viewer", "user:alice")
-                .unwrap()
-        );
+        assert!(state.relationship_exists(vault_id, "doc:123", "viewer", "user:alice").unwrap());
 
         // Create again should return AlreadyExists
         let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
@@ -833,11 +783,7 @@ mod tests {
         let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Deleted]);
 
-        assert!(
-            !state
-                .relationship_exists(vault_id, "doc:123", "viewer", "user:alice")
-                .unwrap()
-        );
+        assert!(!state.relationship_exists(vault_id, "doc:123", "viewer", "user:alice").unwrap());
     }
 
     #[test]
@@ -859,9 +805,7 @@ mod tests {
         assert_ne!(root1, root2);
 
         // Deleting should change root again
-        let ops = vec![Operation::DeleteEntity {
-            key: "key".to_string(),
-        }];
+        let ops = vec![Operation::DeleteEntity { key: "key".to_string() }];
         state.apply_operations(vault_id, &ops, 2).unwrap();
 
         let root3 = state.compute_state_root(vault_id).unwrap();
@@ -930,11 +874,7 @@ mod tests {
         // Verify data exists in vault 1
         assert!(state.get_entity(vault_id, b"entity1").unwrap().is_some());
         assert!(state.get_entity(vault_id, b"entity2").unwrap().is_some());
-        assert!(
-            state
-                .relationship_exists(vault_id, "doc:1", "viewer", "user:alice")
-                .unwrap()
-        );
+        assert!(state.relationship_exists(vault_id, "doc:1", "viewer", "user:alice").unwrap());
 
         // Clear vault 1
         state.clear_vault(vault_id).unwrap();
@@ -942,11 +882,7 @@ mod tests {
         // Verify vault 1 data is gone
         assert!(state.get_entity(vault_id, b"entity1").unwrap().is_none());
         assert!(state.get_entity(vault_id, b"entity2").unwrap().is_none());
-        assert!(
-            !state
-                .relationship_exists(vault_id, "doc:1", "viewer", "user:alice")
-                .unwrap()
-        );
+        assert!(!state.relationship_exists(vault_id, "doc:1", "viewer", "user:alice").unwrap());
 
         // Verify vault 2 data is still there (isolation)
         assert!(state.get_entity(2, b"entity_v2").unwrap().is_some());
@@ -977,15 +913,8 @@ mod tests {
                 expires_at: None,
             }];
 
-            let statuses = state
-                .apply_operations(vault_id, &ops, i as u64 + 1)
-                .unwrap();
-            assert_eq!(
-                statuses,
-                vec![WriteStatus::Created],
-                "Failed to create key {}",
-                i
-            );
+            let statuses = state.apply_operations(vault_id, &ops, i as u64 + 1).unwrap();
+            assert_eq!(statuses, vec![WriteStatus::Created], "Failed to create key {}", i);
         }
 
         // Verify all keys are present
@@ -996,10 +925,10 @@ mod tests {
             match state.get_entity(vault_id, key.as_bytes()).unwrap() {
                 Some(entity) => {
                     assert_eq!(entity.value, expected, "Value mismatch for key {}", i);
-                }
+                },
                 None => {
                     missing.push(i);
-                }
+                },
             }
         }
 
@@ -1015,8 +944,7 @@ mod tests {
     /// Stress test with concurrent threads writing different keys
     #[test]
     fn test_concurrent_writes_from_threads() {
-        use std::sync::Arc;
-        use std::thread;
+        use std::{sync::Arc, thread};
 
         let state = Arc::new(create_test_state());
         let vault_id = 1i64;
@@ -1039,9 +967,7 @@ mod tests {
 
                     // Each write gets a unique block height
                     let block_height = (thread_id * writes_per_thread + i + 1) as u64;
-                    state
-                        .apply_operations(vault_id, &ops, block_height)
-                        .unwrap();
+                    state.apply_operations(vault_id, &ops, block_height).unwrap();
                 }
             });
             handles.push(handle);
@@ -1061,10 +987,10 @@ mod tests {
                 match state.get_entity(vault_id, key.as_bytes()).unwrap() {
                     Some(entity) => {
                         assert_eq!(entity.value, expected, "Value mismatch for key {}", key);
-                    }
+                    },
                     None => {
                         missing.push(key);
-                    }
+                    },
                 }
             }
         }
@@ -1084,8 +1010,9 @@ mod tests {
     // =========================================================================
 
     mod proptest_determinism {
-        use super::*;
         use proptest::prelude::*;
+
+        use super::*;
 
         /// Generate an arbitrary entity key (short identifiers for efficiency).
         fn arb_key() -> impl Strategy<Value = String> {
@@ -1099,10 +1026,7 @@ mod tests {
 
         /// Generate an arbitrary resource identifier.
         fn arb_resource() -> impl Strategy<Value = String> {
-            (
-                arb_key(),
-                prop::sample::select(vec!["doc", "folder", "project"]),
-            )
+            (arb_key(), prop::sample::select(vec!["doc", "folder", "project"]))
                 .prop_map(|(id, typ)| format!("{}:{}", typ, id))
         }
 
@@ -1118,10 +1042,7 @@ mod tests {
 
         /// Generate an arbitrary subject identifier.
         fn arb_subject() -> impl Strategy<Value = String> {
-            (
-                arb_key(),
-                prop::sample::select(vec!["user", "group", "team"]),
-            )
+            (arb_key(), prop::sample::select(vec!["user", "group", "team"]))
                 .prop_map(|(id, typ)| format!("{}:{}", typ, id))
         }
 
@@ -1130,33 +1051,20 @@ mod tests {
             prop_oneof![
                 // SetEntity (most common)
                 (arb_key(), arb_value()).prop_map(|(key, value)| {
-                    Operation::SetEntity {
-                        key,
-                        value,
-                        condition: None,
-                        expires_at: None,
-                    }
+                    Operation::SetEntity { key, value, condition: None, expires_at: None }
                 }),
                 // DeleteEntity
                 arb_key().prop_map(|key| Operation::DeleteEntity { key }),
                 // CreateRelationship
                 (arb_resource(), arb_relation(), arb_subject()).prop_map(
                     |(resource, relation, subject)| {
-                        Operation::CreateRelationship {
-                            resource,
-                            relation,
-                            subject,
-                        }
+                        Operation::CreateRelationship { resource, relation, subject }
                     }
                 ),
                 // DeleteRelationship
                 (arb_resource(), arb_relation(), arb_subject()).prop_map(
                     |(resource, relation, subject)| {
-                        Operation::DeleteRelationship {
-                            resource,
-                            relation,
-                            subject,
-                        }
+                        Operation::DeleteRelationship { resource, relation, subject }
                     }
                 ),
             ]
@@ -1310,16 +1218,10 @@ mod tests {
         let state_err = StateError::Codec { source: codec_err };
         let display = format!("{state_err}");
 
-        assert!(
-            display.starts_with("Codec error:"),
-            "Expected 'Codec error:', got: {display}"
-        );
+        assert!(display.starts_with("Codec error:"), "Expected 'Codec error:', got: {display}");
 
         // Verify source chain is preserved
-        assert!(
-            state_err.source().is_some(),
-            "StateError::Codec should have a source"
-        );
+        assert!(state_err.source().is_some(), "StateError::Codec should have a source");
     }
 
     // Test error conversion: CodecError -> StateError (via context)
@@ -1338,10 +1240,7 @@ mod tests {
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert!(
-            matches!(err, StateError::Codec { .. }),
-            "Should be StateError::Codec variant"
-        );
+        assert!(matches!(err, StateError::Codec { .. }), "Should be StateError::Codec variant");
     }
 
     // Test the full error chain: CodecError -> IndexError -> StateError

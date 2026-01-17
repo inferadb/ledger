@@ -13,24 +13,23 @@
 //!
 //! Recovery runs only on the leader to avoid duplicate work.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use openraft::Raft;
-use snafu::{GenerateImplicitData, ResultExt};
-use tokio::sync::mpsc;
-use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::StorageBackend;
+use openraft::Raft;
+use snafu::{GenerateImplicitData, ResultExt};
+use tokio::{sync::mpsc, time::interval};
+use tracing::{debug, error, info, warn};
 
-use crate::error::{
-    ApplyOperationsSnafu, BlockArchiveNotConfiguredSnafu, BlockReadSnafu, IndexLookupSnafu,
-    RecoveryError, StateRootComputationSnafu,
+use crate::{
+    error::{
+        ApplyOperationsSnafu, BlockArchiveNotConfiguredSnafu, BlockReadSnafu, IndexLookupSnafu,
+        RecoveryError, StateRootComputationSnafu,
+    },
+    log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus},
+    types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig},
 };
-use crate::log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus};
-use crate::types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig};
 
 /// Default interval between recovery scans.
 const RECOVERY_SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -93,7 +92,8 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     block_archive: Option<Arc<BlockArchive<B>>>,
     /// Snapshot manager for finding recovery starting points.
     snapshot_manager: Option<Arc<SnapshotManager>>,
-    /// State layer for applying recovered state (internally thread-safe via inferadb-ledger-store MVCC).
+    /// State layer for applying recovered state (internally thread-safe via inferadb-ledger-store
+    /// MVCC).
     state: Arc<StateLayer<B>>,
     /// Configuration.
     config: AutoRecoveryConfig,
@@ -145,10 +145,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Calculate retry delay with exponential backoff.
     fn retry_delay(&self, attempt: u8) -> Duration {
         let multiplier = 2u64.saturating_pow(attempt.saturating_sub(1) as u32);
-        let delay = self
-            .config
-            .base_retry_delay
-            .saturating_mul(multiplier as u32);
+        let delay = self.config.base_retry_delay.saturating_mul(multiplier as u32);
         std::cmp::min(delay, self.config.max_retry_delay)
     }
 
@@ -174,20 +171,17 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             match &health {
                 VaultHealthStatus::Diverged { .. } => {
                     needs_recovery.push((namespace_id, vault_id, health));
-                }
-                VaultHealthStatus::Recovering {
-                    started_at,
-                    attempt,
-                } => {
+                },
+                VaultHealthStatus::Recovering { started_at, attempt } => {
                     if *attempt < MAX_RECOVERY_ATTEMPTS
                         && self.is_ready_for_retry(*started_at, *attempt)
                     {
                         needs_recovery.push((namespace_id, vault_id, health));
                     }
-                }
+                },
                 VaultHealthStatus::Healthy => {
                     // Nothing to do
-                }
+                },
             }
         }
 
@@ -242,31 +236,22 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             return RecoveryResult::TransientFailure(e.to_string());
         }
 
-        info!(
-            namespace_id,
-            vault_id, attempt, "Starting vault recovery attempt"
-        );
+        info!(namespace_id, vault_id, attempt, "Starting vault recovery attempt");
 
         // Get the expected state root from the divergence info
         let (expected_root, diverged_height) = match current_health {
-            VaultHealthStatus::Diverged {
-                expected,
-                at_height,
-                ..
-            } => (*expected, *at_height),
+            VaultHealthStatus::Diverged { expected, at_height, .. } => (*expected, *at_height),
             VaultHealthStatus::Recovering { .. } => {
                 // For retries, we need to get the original divergence info
                 // This is stored in the applied state, but for simplicity
                 // we'll attempt a full replay
                 (inferadb_ledger_types::ZERO_HASH, 0)
-            }
+            },
             VaultHealthStatus::Healthy => return RecoveryResult::Success,
         };
 
         // Attempt the actual recovery
-        match self
-            .replay_vault_state(namespace_id, vault_id, expected_root, diverged_height)
-            .await
+        match self.replay_vault_state(namespace_id, vault_id, expected_root, diverged_height).await
         {
             Ok(computed_root) => {
                 if computed_root == expected_root
@@ -308,7 +293,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                     crate::metrics::record_determinism_bug(namespace_id, vault_id);
                     RecoveryResult::DeterminismBug
                 }
-            }
+            },
             Err(e) => {
                 warn!(
                     namespace_id,
@@ -318,7 +303,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                     "Vault recovery attempt failed"
                 );
                 RecoveryResult::TransientFailure(e.to_string())
-            }
+            },
         }
     }
 
@@ -352,20 +337,15 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         for height in start_height..=tip_height {
             let shard_height = archive
                 .find_shard_height(namespace_id, vault_id, height)
-                .context(IndexLookupSnafu {
-                    namespace_id,
-                    vault_id,
-                    height,
-                })?;
+                .context(IndexLookupSnafu { namespace_id, vault_id, height })?;
 
             let shard_height = match shard_height {
                 Some(h) => h,
                 None => continue,
             };
 
-            let shard_block = archive
-                .read_block(shard_height)
-                .context(BlockReadSnafu { shard_height })?;
+            let shard_block =
+                archive.read_block(shard_height).context(BlockReadSnafu { shard_height })?;
 
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
                 e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
@@ -402,11 +382,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             if let Ok(snapshots) = snapshot_manager.list_snapshots() {
                 for &shard_height in snapshots.iter().rev() {
                     if let Ok(snapshot) = snapshot_manager.load(shard_height) {
-                        if let Some(vault_state) = snapshot
-                            .header
-                            .vault_states
-                            .iter()
-                            .find(|v| v.vault_id == vault_id)
+                        if let Some(vault_state) =
+                            snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id)
                         {
                             return Ok((vault_state.vault_height + 1, vault_state.state_root));
                         }
@@ -444,13 +421,10 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         };
 
         let result =
-            self.raft
-                .client_write(request)
-                .await
-                .map_err(|e| RecoveryError::RaftConsensus {
-                    message: format!("{:?}", e),
-                    backtrace: snafu::Backtrace::generate(),
-                })?;
+            self.raft.client_write(request).await.map_err(|e| RecoveryError::RaftConsensus {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         match result.data {
             LedgerResponse::VaultHealthUpdated { success: true } => Ok(()),
@@ -458,10 +432,10 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 Err(RecoveryError::HealthUpdateRejected {
                     reason: "Health update failed".to_string(),
                 })
-            }
-            other => Err(RecoveryError::UnexpectedRaftResponse {
-                description: format!("{:?}", other),
-            }),
+            },
+            other => {
+                Err(RecoveryError::UnexpectedRaftResponse { description: format!("{:?}", other) })
+            },
         }
     }
 
@@ -478,10 +452,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         let mut ticker = interval(self.config.scan_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        info!(
-            interval_secs = self.config.scan_interval.as_secs(),
-            "Auto-recovery job started"
-        );
+        info!(interval_secs = self.config.scan_interval.as_secs(), "Auto-recovery job started");
 
         loop {
             tokio::select! {
@@ -601,10 +572,7 @@ mod tests {
     #[test]
     fn test_recovery_result_variants() {
         assert_eq!(RecoveryResult::Success, RecoveryResult::Success);
-        assert_ne!(
-            RecoveryResult::Success,
-            RecoveryResult::TransientFailure("error".to_string())
-        );
+        assert_ne!(RecoveryResult::Success, RecoveryResult::TransientFailure("error".to_string()));
         assert_ne!(RecoveryResult::Success, RecoveryResult::DeterminismBug);
         assert_ne!(RecoveryResult::Success, RecoveryResult::MaxAttemptsExceeded);
     }

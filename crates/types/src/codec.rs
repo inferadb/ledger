@@ -45,8 +45,9 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
     use serde::Deserialize;
+
+    use super::*;
 
     // Test encode/decode roundtrip for primitive types
     #[test]
@@ -103,10 +104,7 @@ mod tests {
             id: 12345,
             name: "test entity".to_string(),
             data: vec![0xDE, 0xAD, 0xBE, 0xEF],
-            nested: Some(NestedStruct {
-                value: -42,
-                flag: true,
-            }),
+            nested: Some(NestedStruct { value: -42, flag: true }),
         };
         let bytes = encode(&original).expect("encode complex struct");
         let decoded: ComplexStruct = decode(&bytes).expect("decode complex struct");
@@ -115,12 +113,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_complex_struct_with_none() {
-        let original = ComplexStruct {
-            id: 0,
-            name: String::new(),
-            data: vec![],
-            nested: None,
-        };
+        let original = ComplexStruct { id: 0, name: String::new(), data: vec![], nested: None };
         let bytes = encode(&original).expect("encode complex struct with None");
         let decoded: ComplexStruct = decode(&bytes).expect("decode complex struct with None");
         assert_eq!(original, decoded);
@@ -260,10 +253,7 @@ mod tests {
         let source = err.source().unwrap();
         // Verify source has a Display impl (postcard::Error)
         let source_display = format!("{source}");
-        assert!(
-            !source_display.is_empty(),
-            "Source should have non-empty display"
-        );
+        assert!(!source_display.is_empty(), "Source should have non-empty display");
     }
 
     // Test Debug implementation contains useful info
@@ -275,15 +265,9 @@ mod tests {
 
         let debug = format!("{err:?}");
         // Debug output should contain the variant name
-        assert!(
-            debug.contains("Decode"),
-            "Debug should contain 'Decode' variant name"
-        );
+        assert!(debug.contains("Decode"), "Debug should contain 'Decode' variant name");
         // Debug output should contain "source" field info
-        assert!(
-            debug.contains("source"),
-            "Debug should contain 'source' field: {debug}"
-        );
+        assert!(debug.contains("source"), "Debug should contain 'source' field: {debug}");
     }
 
     // Test that both error variants exist and are distinct

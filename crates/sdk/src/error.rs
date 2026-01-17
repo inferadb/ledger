@@ -190,92 +190,64 @@ impl SdkError {
 
 impl From<tonic::transport::Error> for SdkError {
     fn from(source: tonic::transport::Error) -> Self {
-        Self::Transport {
-            source,
-            location: Location::default(),
-        }
+        Self::Transport { source, location: Location::default() }
     }
 }
 
 impl From<tonic::Status> for SdkError {
     fn from(status: tonic::Status) -> Self {
-        Self::Rpc {
-            code: status.code(),
-            message: status.message().to_owned(),
-        }
+        Self::Rpc { code: status.code(), message: status.message().to_owned() }
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_rpc_error_retryable_unavailable() {
-        let err = SdkError::Rpc {
-            code: Code::Unavailable,
-            message: "server unavailable".to_owned(),
-        };
+        let err =
+            SdkError::Rpc { code: Code::Unavailable, message: "server unavailable".to_owned() };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn test_rpc_error_retryable_deadline_exceeded() {
-        let err = SdkError::Rpc {
-            code: Code::DeadlineExceeded,
-            message: "timeout".to_owned(),
-        };
+        let err = SdkError::Rpc { code: Code::DeadlineExceeded, message: "timeout".to_owned() };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn test_rpc_error_retryable_resource_exhausted() {
-        let err = SdkError::Rpc {
-            code: Code::ResourceExhausted,
-            message: "rate limited".to_owned(),
-        };
+        let err =
+            SdkError::Rpc { code: Code::ResourceExhausted, message: "rate limited".to_owned() };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn test_rpc_error_retryable_aborted() {
-        let err = SdkError::Rpc {
-            code: Code::Aborted,
-            message: "transaction conflict".to_owned(),
-        };
+        let err = SdkError::Rpc { code: Code::Aborted, message: "transaction conflict".to_owned() };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn test_rpc_error_non_retryable_invalid_argument() {
-        let err = SdkError::Rpc {
-            code: Code::InvalidArgument,
-            message: "bad request".to_owned(),
-        };
+        let err = SdkError::Rpc { code: Code::InvalidArgument, message: "bad request".to_owned() };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn test_rpc_error_non_retryable_permission_denied() {
-        let err = SdkError::Rpc {
-            code: Code::PermissionDenied,
-            message: "access denied".to_owned(),
-        };
+        let err =
+            SdkError::Rpc { code: Code::PermissionDenied, message: "access denied".to_owned() };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn test_rpc_error_non_retryable_unauthenticated() {
-        let err = SdkError::Rpc {
-            code: Code::Unauthenticated,
-            message: "not authenticated".to_owned(),
-        };
+        let err =
+            SdkError::Rpc { code: Code::Unauthenticated, message: "not authenticated".to_owned() };
         assert!(!err.is_retryable());
     }
 
@@ -290,18 +262,13 @@ mod tests {
 
     #[test]
     fn test_sequence_gap_not_retryable() {
-        let err = SdkError::SequenceGap {
-            expected: 5,
-            server_has: 4,
-        };
+        let err = SdkError::SequenceGap { expected: 5, server_has: 4 };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn test_config_error_not_retryable() {
-        let err = SdkError::Config {
-            message: "invalid config".to_owned(),
-        };
+        let err = SdkError::Config { message: "invalid config".to_owned() };
         assert!(!err.is_retryable());
     }
 
@@ -309,22 +276,13 @@ mod tests {
     fn test_from_tonic_status() {
         let status = tonic::Status::unavailable("server down");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Unavailable,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Unavailable, .. }));
         assert!(err.is_retryable());
     }
 
     #[test]
     fn test_code_accessor() {
-        let err = SdkError::Rpc {
-            code: Code::NotFound,
-            message: "not found".to_owned(),
-        };
+        let err = SdkError::Rpc { code: Code::NotFound, message: "not found".to_owned() };
         assert_eq!(err.code(), Some(Code::NotFound));
 
         let err2 = SdkError::Timeout { duration_ms: 1000 };
@@ -333,19 +291,13 @@ mod tests {
 
     #[test]
     fn test_already_committed_not_retryable() {
-        let err = SdkError::AlreadyCommitted {
-            tx_id: "tx-123".to_owned(),
-            block_height: 42,
-        };
+        let err = SdkError::AlreadyCommitted { tx_id: "tx-123".to_owned(), block_height: 42 };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn test_already_committed_display() {
-        let err = SdkError::AlreadyCommitted {
-            tx_id: "tx-abc".to_owned(),
-            block_height: 100,
-        };
+        let err = SdkError::AlreadyCommitted { tx_id: "tx-abc".to_owned(), block_height: 100 };
         let msg = format!("{err}");
         assert!(msg.contains("tx-abc"));
         assert!(msg.contains("100"));
@@ -363,13 +315,7 @@ mod tests {
     fn test_from_tonic_status_cancelled() {
         let status = tonic::Status::cancelled("operation cancelled");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Cancelled,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Cancelled, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -377,13 +323,7 @@ mod tests {
     fn test_from_tonic_status_unknown() {
         let status = tonic::Status::unknown("unknown error");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Unknown,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Unknown, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -391,13 +331,7 @@ mod tests {
     fn test_from_tonic_status_invalid_argument() {
         let status = tonic::Status::invalid_argument("bad input");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::InvalidArgument,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::InvalidArgument, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -405,13 +339,7 @@ mod tests {
     fn test_from_tonic_status_deadline_exceeded() {
         let status = tonic::Status::deadline_exceeded("timed out");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::DeadlineExceeded,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::DeadlineExceeded, .. }));
         assert!(err.is_retryable());
     }
 
@@ -419,13 +347,7 @@ mod tests {
     fn test_from_tonic_status_not_found() {
         let status = tonic::Status::not_found("resource missing");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::NotFound,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::NotFound, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -433,13 +355,7 @@ mod tests {
     fn test_from_tonic_status_already_exists() {
         let status = tonic::Status::already_exists("duplicate");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::AlreadyExists,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::AlreadyExists, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -447,13 +363,7 @@ mod tests {
     fn test_from_tonic_status_permission_denied() {
         let status = tonic::Status::permission_denied("forbidden");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::PermissionDenied,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::PermissionDenied, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -461,13 +371,7 @@ mod tests {
     fn test_from_tonic_status_resource_exhausted() {
         let status = tonic::Status::resource_exhausted("quota exceeded");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::ResourceExhausted,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::ResourceExhausted, .. }));
         assert!(err.is_retryable());
     }
 
@@ -475,13 +379,7 @@ mod tests {
     fn test_from_tonic_status_failed_precondition() {
         let status = tonic::Status::failed_precondition("precondition failed");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::FailedPrecondition,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::FailedPrecondition, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -489,13 +387,7 @@ mod tests {
     fn test_from_tonic_status_aborted() {
         let status = tonic::Status::aborted("transaction aborted");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Aborted,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Aborted, .. }));
         assert!(err.is_retryable());
     }
 
@@ -503,13 +395,7 @@ mod tests {
     fn test_from_tonic_status_out_of_range() {
         let status = tonic::Status::out_of_range("value out of range");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::OutOfRange,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::OutOfRange, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -517,13 +403,7 @@ mod tests {
     fn test_from_tonic_status_unimplemented() {
         let status = tonic::Status::unimplemented("not implemented");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Unimplemented,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Unimplemented, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -531,13 +411,7 @@ mod tests {
     fn test_from_tonic_status_internal() {
         let status = tonic::Status::internal("server error");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Internal,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Internal, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -545,13 +419,7 @@ mod tests {
     fn test_from_tonic_status_unavailable() {
         let status = tonic::Status::unavailable("service down");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Unavailable,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Unavailable, .. }));
         assert!(err.is_retryable());
     }
 
@@ -559,13 +427,7 @@ mod tests {
     fn test_from_tonic_status_data_loss() {
         let status = tonic::Status::data_loss("data corrupted");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::DataLoss,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::DataLoss, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -573,13 +435,7 @@ mod tests {
     fn test_from_tonic_status_unauthenticated() {
         let status = tonic::Status::unauthenticated("no credentials");
         let err: SdkError = status.into();
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::Unauthenticated,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::Unauthenticated, .. }));
         assert!(!err.is_retryable());
     }
 
@@ -590,24 +446,20 @@ mod tests {
         match err {
             SdkError::Rpc { message, .. } => {
                 assert_eq!(message, "detailed error message");
-            }
+            },
             _ => panic!("Expected Rpc variant"),
         }
     }
 
     #[test]
     fn test_unavailable_error_is_retryable() {
-        let err = SdkError::Unavailable {
-            message: "service down".to_string(),
-        };
+        let err = SdkError::Unavailable { message: "service down".to_string() };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn test_unavailable_error_display() {
-        let err = SdkError::Unavailable {
-            message: "service down".to_string(),
-        };
+        let err = SdkError::Unavailable { message: "service down".to_string() };
         let display = format!("{}", err);
         assert!(display.contains("Service unavailable"));
         assert!(display.contains("service down"));

@@ -27,13 +27,13 @@ pub use bucket::VaultCommitment;
 pub use engine::{InMemoryStorageEngine, StorageEngine};
 pub use entity::EntityStore;
 pub use indexes::IndexManager;
+// Re-export inferadb-ledger-store's tables for convenience
+pub use inferadb_ledger_store::tables;
 pub use keys::{StorageKey, decode_storage_key, encode_storage_key};
 pub use relationship::RelationshipStore;
 pub use shard::ShardManager;
 pub use snapshot::{Snapshot, SnapshotManager};
 pub use state::{StateError, StateLayer};
-// Re-export inferadb-ledger-store's tables for convenience
-pub use inferadb_ledger_store::tables;
 pub use tiered_storage::{
     LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredConfig,
     TieredSnapshotManager, TieredStorageError,

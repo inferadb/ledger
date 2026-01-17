@@ -7,9 +7,8 @@
 //! Per DESIGN.md: Indexes are NOT merkleized (no per-write amplification).
 
 use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
-use snafu::{ResultExt, Snafu};
-
 use inferadb_ledger_types::{VaultId, decode, encode};
+use snafu::{ResultExt, Snafu};
 
 use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_key};
 
@@ -18,14 +17,10 @@ use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_ke
 #[allow(dead_code)]
 pub enum IndexError {
     #[snafu(display("Storage error: {source}"))]
-    Storage {
-        source: inferadb_ledger_store::Error,
-    },
+    Storage { source: inferadb_ledger_store::Error },
 
     #[snafu(display("Codec error: {source}"))]
-    Codec {
-        source: inferadb_ledger_types::CodecError,
-    },
+    Codec { source: inferadb_ledger_types::CodecError },
 }
 
 /// Result type for index operations.
@@ -75,8 +70,7 @@ impl IndexManager {
 
         let encoded = encode(&set).context(CodecSnafu)?;
 
-        txn.insert::<tables::ObjIndex>(&storage_key, &encoded)
-            .context(StorageSnafu)?;
+        txn.insert::<tables::ObjIndex>(&storage_key, &encoded).context(StorageSnafu)?;
 
         Ok(())
     }
@@ -108,8 +102,7 @@ impl IndexManager {
         } else {
             let encoded = encode(&set).context(CodecSnafu)?;
 
-            txn.insert::<tables::ObjIndex>(&storage_key, &encoded)
-                .context(StorageSnafu)?;
+            txn.insert::<tables::ObjIndex>(&storage_key, &encoded).context(StorageSnafu)?;
         }
 
         Ok(())
@@ -141,8 +134,7 @@ impl IndexManager {
 
         let encoded = encode(&set).context(CodecSnafu)?;
 
-        txn.insert::<tables::SubjIndex>(&storage_key, &encoded)
-            .context(StorageSnafu)?;
+        txn.insert::<tables::SubjIndex>(&storage_key, &encoded).context(StorageSnafu)?;
 
         Ok(())
     }
@@ -176,8 +168,7 @@ impl IndexManager {
         } else {
             let encoded = encode(&set).context(CodecSnafu)?;
 
-            txn.insert::<tables::SubjIndex>(&storage_key, &encoded)
-                .context(StorageSnafu)?;
+            txn.insert::<tables::SubjIndex>(&storage_key, &encoded).context(StorageSnafu)?;
         }
 
         Ok(())
@@ -197,7 +188,7 @@ impl IndexManager {
             Ok(Some(data)) => {
                 let set: SubjectSet = decode(&data).context(CodecSnafu)?;
                 Ok(set.subjects)
-            }
+            },
             Ok(None) => Ok(Vec::new()),
             Err(e) => Err(IndexError::Storage { source: e }),
         }
@@ -216,7 +207,7 @@ impl IndexManager {
             Ok(Some(data)) => {
                 let set: ResourceRelationSet = decode(&data).context(CodecSnafu)?;
                 Ok(set.pairs)
-            }
+            },
             Ok(None) => Ok(Vec::new()),
             Err(e) => Err(IndexError::Storage { source: e }),
         }
@@ -224,12 +215,7 @@ impl IndexManager {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    unused_mut
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, unused_mut)]
 mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;

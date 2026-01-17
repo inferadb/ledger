@@ -8,8 +8,10 @@
 
 use snafu::{Location, Snafu};
 
-use crate::hash::Hash;
-use crate::types::{NamespaceId, VaultId};
+use crate::{
+    hash::Hash,
+    types::{NamespaceId, VaultId},
+};
 
 /// Unified result type for ledger operations.
 pub type Result<T, E = LedgerError> = std::result::Result<T, E>;
@@ -287,10 +289,7 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = LedgerError::VaultDiverged {
-            vault_id: 42,
-            height: 100,
-        };
+        let err = LedgerError::VaultDiverged { vault_id: 42, height: 100 };
         assert_eq!(err.to_string(), "Vault 42 diverged at height 100");
     }
 

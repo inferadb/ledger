@@ -11,9 +11,10 @@
 // Examples are allowed to use expect/unwrap for brevity
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 
+use std::time::Duration;
+
 use futures::StreamExt;
 use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Result};
-use std::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::main]
@@ -102,11 +103,11 @@ async fn main() -> Result<()> {
 
                     // Print transaction count if available
                     println!("         block_hash: {:?}", hex_preview(&block.block_hash));
-                }
+                },
                 Err(e) => {
                     println!("[Stream] Error: {}", e);
                     // The stream will attempt to reconnect automatically
-                }
+                },
             }
         }
         block_count

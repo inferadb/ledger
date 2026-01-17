@@ -2,9 +2,7 @@
 //!
 //! Configuration is loaded from TOML files and environment variables.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -180,8 +178,9 @@ fn default_coalesce_enabled() -> bool {
 
 /// Duration serialization using humantime format.
 mod humantime_serde {
-    use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where

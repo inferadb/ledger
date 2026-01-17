@@ -7,18 +7,14 @@
 
 #![allow(clippy::expect_used, missing_docs)]
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use std::hint::black_box;
+use std::{hint::black_box, sync::Arc, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use parking_lot::RwLock;
-use tempfile::TempDir;
-
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::Operation;
+use parking_lot::RwLock;
+use tempfile::TempDir;
 
 /// Create a test state layer.
 fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
@@ -36,29 +32,25 @@ fn bench_single_writes(c: &mut Criterion) {
     let state = Arc::new(RwLock::new(create_state_layer(&temp_dir)));
 
     for vault_id in [1i64, 10, 100] {
-        group.bench_with_input(
-            BenchmarkId::new("vault", vault_id),
-            &vault_id,
-            |b, &vault_id| {
-                let mut counter = 0u64;
-                b.iter(|| {
-                    counter += 1;
-                    let key = format!("key-{}", counter);
-                    let value = format!("value-{}", counter);
+        group.bench_with_input(BenchmarkId::new("vault", vault_id), &vault_id, |b, &vault_id| {
+            let mut counter = 0u64;
+            b.iter(|| {
+                counter += 1;
+                let key = format!("key-{}", counter);
+                let value = format!("value-{}", counter);
 
-                    let operations = vec![Operation::SetEntity {
-                        key,
-                        value: value.into_bytes(),
-                        expires_at: None,
-                        condition: None,
-                    }];
+                let operations = vec![Operation::SetEntity {
+                    key,
+                    value: value.into_bytes(),
+                    expires_at: None,
+                    condition: None,
+                }];
 
-                    let state = state.read();
-                    let result = state.apply_operations(vault_id, &operations, counter);
-                    black_box(result)
-                });
-            },
-        );
+                let state = state.read();
+                let result = state.apply_operations(vault_id, &operations, counter);
+                black_box(result)
+            });
+        });
     }
 
     group.finish();
@@ -125,9 +117,7 @@ fn bench_state_root(c: &mut Criterion) {
                 expires_at: None,
                 condition: None,
             }];
-            state
-                .apply_operations(vault_id, &operations, i as u64)
-                .expect("apply");
+            state.apply_operations(vault_id, &operations, i as u64).expect("apply");
         }
 
         let state = Arc::new(RwLock::new(state));

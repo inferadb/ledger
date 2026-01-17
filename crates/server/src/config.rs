@@ -2,8 +2,7 @@
 //!
 //! Provides configuration loading from files and environment variables.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use serde::Deserialize;
 
@@ -116,11 +115,7 @@ pub struct DiscoveryConfig {
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
-        Self {
-            srv_domain: None,
-            cached_peers_path: None,
-            cache_ttl_secs: default_cache_ttl(),
-        }
+        Self { srv_domain: None, cached_peers_path: None, cache_ttl_secs: default_cache_ttl() }
     }
 }
 
@@ -165,20 +160,15 @@ impl Config {
 
         // Add environment variables with INFERADB__LEDGER__ prefix.
         // Use "__" separator for nesting (e.g., INFERADB__LEDGER__BATCHING__MAX_BATCH_SIZE).
-        // Single underscores in field names are preserved (e.g., INFERADB__LEDGER__NODE_ID → node_id).
+        // Single underscores in field names are preserved (e.g., INFERADB__LEDGER__NODE_ID →
+        // node_id).
         let builder = builder.add_source(
-            config::Environment::with_prefix("INFERADB__LEDGER")
-                .separator("__")
-                .try_parsing(true),
+            config::Environment::with_prefix("INFERADB__LEDGER").separator("__").try_parsing(true),
         );
 
-        let config = builder
-            .build()
-            .map_err(|e| ConfigError::Load(e.to_string()))?;
+        let config = builder.build().map_err(|e| ConfigError::Load(e.to_string()))?;
 
-        config
-            .try_deserialize()
-            .map_err(|e| ConfigError::Parse(e.to_string()))
+        config.try_deserialize().map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
     /// Create a configuration for testing.

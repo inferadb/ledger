@@ -18,17 +18,18 @@
 //! - Transaction inclusion (if client provides tx body + merkle proof)
 //! - Snapshot-based state reconstruction
 
-use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    fs::{self, File, OpenOptions},
+    io::{BufWriter, Seek, SeekFrom, Write},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use inferadb_ledger_store::{Database, StorageBackend, tables};
+use inferadb_ledger_types::{NamespaceId, ShardBlock, VaultId, decode, encode};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
-
-use inferadb_ledger_types::{NamespaceId, ShardBlock, VaultId, decode, encode};
 
 /// Key for compaction watermark in COMPACTION_META table.
 const COMPACTION_WATERMARK_KEY: &str = "compacted_before";
@@ -154,8 +155,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         let encoded = encode(block).context(CodecSnafu)?;
 
         let mut txn = self.db.write().context(InkwellSnafu)?;
-        txn.insert::<tables::Blocks>(&block.shard_height, &encoded)
-            .context(InkwellSnafu)?;
+        txn.insert::<tables::Blocks>(&block.shard_height, &encoded).context(InkwellSnafu)?;
 
         for entry in &block.vault_entries {
             let index_key = encode_vault_block_index_key(
@@ -194,23 +194,15 @@ impl<B: StorageBackend> BlockArchive<B> {
                 .open(&segment_path)
                 .context(IoSnafu)?;
 
-            *current = Some(SegmentWriter {
-                segment_id,
-                file: BufWriter::new(file),
-                index: Vec::new(),
-            });
+            *current =
+                Some(SegmentWriter { segment_id, file: BufWriter::new(file), index: Vec::new() });
         }
 
         #[allow(clippy::expect_used)]
-        let writer = current
-            .as_mut()
-            .expect("segment writer exists after init above");
+        let writer = current.as_mut().expect("segment writer exists after init above");
 
         let offset = writer.file.seek(SeekFrom::End(0)).context(IoSnafu)?;
-        writer
-            .file
-            .write_all(&(encoded.len() as u32).to_le_bytes())
-            .context(IoSnafu)?;
+        writer.file.write_all(&(encoded.len() as u32).to_le_bytes()).context(IoSnafu)?;
         writer.file.write_all(encoded).context(IoSnafu)?;
         writer.file.flush().context(IoSnafu)?;
 
@@ -228,17 +220,12 @@ impl<B: StorageBackend> BlockArchive<B> {
     pub fn read_block(&self, shard_height: u64) -> Result<ShardBlock> {
         let txn = self.db.read().context(InkwellSnafu)?;
 
-        match txn
-            .get::<tables::Blocks>(&shard_height)
-            .context(InkwellSnafu)?
-        {
+        match txn.get::<tables::Blocks>(&shard_height).context(InkwellSnafu)? {
             Some(data) => {
                 let block = decode(&data).context(CodecSnafu)?;
                 Ok(block)
-            }
-            None => Err(BlockArchiveError::BlockNotFound {
-                height: shard_height,
-            }),
+            },
+            None => Err(BlockArchiveError::BlockNotFound { height: shard_height }),
         }
     }
 
@@ -253,10 +240,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
         let key = encode_vault_block_index_key(namespace_id, vault_id, vault_height);
 
-        match txn
-            .get::<tables::VaultBlockIndex>(&key.to_vec())
-            .context(InkwellSnafu)?
-        {
+        match txn.get::<tables::VaultBlockIndex>(&key.to_vec()).context(InkwellSnafu)? {
             Some(data) => {
                 // The value is a u64 encoded as big-endian bytes (by Value trait)
                 if data.len() == 8 {
@@ -264,7 +248,7 @@ impl<B: StorageBackend> BlockArchive<B> {
                 } else {
                     Ok(None)
                 }
-            }
+            },
             None => Ok(None),
         }
     }
@@ -276,13 +260,11 @@ impl<B: StorageBackend> BlockArchive<B> {
         match txn.last::<tables::Blocks>().context(InkwellSnafu)? {
             Some((key_bytes, _)) => {
                 if key_bytes.len() == 8 {
-                    Ok(Some(u64::from_be_bytes(
-                        key_bytes.try_into().unwrap_or([0; 8]),
-                    )))
+                    Ok(Some(u64::from_be_bytes(key_bytes.try_into().unwrap_or([0; 8]))))
                 } else {
                     Ok(None)
                 }
-            }
+            },
             None => Ok(None),
         }
     }
@@ -299,7 +281,7 @@ impl<B: StorageBackend> BlockArchive<B> {
                 let first_height = u64::from_be_bytes(first_key.try_into().unwrap_or([0; 8]));
                 let last_height = u64::from_be_bytes(last_key.try_into().unwrap_or([0; 8]));
                 Ok(Some((first_height, last_height)))
-            }
+            },
             _ => Ok(None),
         }
     }
@@ -350,7 +332,7 @@ impl<B: StorageBackend> BlockArchive<B> {
                 } else {
                     Ok(None)
                 }
-            }
+            },
             None => Ok(None),
         }
     }
@@ -400,10 +382,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
             let mut block: ShardBlock = decode(&value).context(CodecSnafu)?;
 
-            let needs_compaction = block
-                .vault_entries
-                .iter()
-                .any(|e| !e.transactions.is_empty());
+            let needs_compaction = block.vault_entries.iter().any(|e| !e.transactions.is_empty());
 
             if needs_compaction {
                 for entry in &mut block.vault_entries {
@@ -422,8 +401,7 @@ impl<B: StorageBackend> BlockArchive<B> {
             for (height, block) in &blocks_to_compact {
                 let encoded = encode(block).context(CodecSnafu)?;
 
-                txn.insert::<tables::Blocks>(height, &encoded)
-                    .context(InkwellSnafu)?;
+                txn.insert::<tables::Blocks>(height, &encoded).context(InkwellSnafu)?;
             }
 
             compacted_count = blocks_to_compact.len() as u64;
@@ -505,10 +483,11 @@ fn encode_vault_block_index_key(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
-    use crate::engine::InMemoryStorageEngine;
     use chrono::Utc;
     use inferadb_ledger_types::VaultEntry;
+
+    use super::*;
+    use crate::engine::InMemoryStorageEngine;
 
     fn create_test_block(shard_height: u64) -> ShardBlock {
         ShardBlock {
@@ -553,10 +532,8 @@ mod tests {
         archive.append_block(&block).expect("append block");
 
         // Should find the shard height from vault coordinates
-        let shard_height = archive
-            .find_shard_height(1, 1, 100)
-            .expect("find")
-            .expect("should exist");
+        let shard_height =
+            archive.find_shard_height(1, 1, 100).expect("find").expect("should exist");
         assert_eq!(shard_height, 100);
 
         // Non-existent vault block
@@ -609,14 +586,10 @@ mod tests {
 
         assert!(archive.latest_height().expect("latest").is_none());
 
-        archive
-            .append_block(&create_test_block(50))
-            .expect("append");
+        archive.append_block(&create_test_block(50)).expect("append");
         assert_eq!(archive.latest_height().expect("latest"), Some(50));
 
-        archive
-            .append_block(&create_test_block(100))
-            .expect("append");
+        archive.append_block(&create_test_block(100)).expect("append");
         assert_eq!(archive.latest_height().expect("latest"), Some(100));
     }
 
@@ -694,12 +667,7 @@ mod tests {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let archive = BlockArchive::new(engine.db());
 
-        assert!(
-            archive
-                .compaction_watermark()
-                .expect("get watermark")
-                .is_none()
-        );
+        assert!(archive.compaction_watermark().expect("get watermark").is_none());
         assert!(!archive.is_compacted(100).expect("is_compacted"));
     }
 
@@ -723,10 +691,7 @@ mod tests {
         assert_eq!(compacted, 3); // blocks 100, 101, 102
 
         // Verify watermark is set
-        assert_eq!(
-            archive.compaction_watermark().expect("watermark"),
-            Some(103)
-        );
+        assert_eq!(archive.compaction_watermark().expect("watermark"), Some(103));
 
         // Verify compacted blocks have empty transactions
         for height in [100, 101, 102] {
@@ -831,10 +796,7 @@ mod tests {
         assert_eq!(count2, 0); // No new blocks to compact
 
         // Watermark unchanged
-        assert_eq!(
-            archive.compaction_watermark().expect("watermark"),
-            Some(102)
-        );
+        assert_eq!(archive.compaction_watermark().expect("watermark"), Some(102));
     }
 
     #[test]
@@ -850,10 +812,8 @@ mod tests {
         archive.compact_before(101).expect("compact");
 
         // Index should still work
-        let shard_height = archive
-            .find_shard_height(1, 1, 100)
-            .expect("find")
-            .expect("should exist");
+        let shard_height =
+            archive.find_shard_height(1, 1, 100).expect("find").expect("should exist");
         assert_eq!(shard_height, 100);
     }
 }

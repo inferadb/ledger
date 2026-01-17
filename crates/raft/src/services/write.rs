@@ -6,31 +6,30 @@
 //! write requests into single Raft proposals, improving throughput by reducing
 //! consensus round-trips.
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
+use inferadb_ledger_state::BlockArchive;
+use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_types::SetCondition;
 use openraft::Raft;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::IdempotencyCache;
-use crate::batching::{BatchConfig, BatchWriter, BatchWriterHandle};
-use crate::log_storage::AppliedStateAccessor;
-use crate::metrics;
-use crate::proof::{self, ProofError};
-use crate::proto::write_service_server::WriteService;
-use crate::proto::{
-    BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
-    WriteRequest, WriteResponse, WriteSuccess,
+use crate::{
+    IdempotencyCache,
+    batching::{BatchConfig, BatchWriter, BatchWriterHandle},
+    log_storage::AppliedStateAccessor,
+    metrics,
+    proof::{self, ProofError},
+    proto::{
+        BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
+        WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
+    },
+    rate_limit::NamespaceRateLimiter,
+    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
 };
-use crate::rate_limit::NamespaceRateLimiter;
-use crate::types::{LedgerRequest, LedgerResponse, LedgerTypeConfig};
-
-use inferadb_ledger_state::BlockArchive;
-use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::SetCondition;
 
 /// Write service implementation.
 pub struct WriteServiceImpl {
@@ -111,9 +110,9 @@ impl WriteServiceImpl {
                             other => {
                                 // Single request case - shouldn't happen but handle it
                                 Ok(vec![other])
-                            }
+                            },
                         }
-                    }
+                    },
                     Err(e) => Err(format!("Raft error: {}", e)),
                 }
             })
@@ -254,29 +253,29 @@ impl WriteServiceImpl {
             Some(SetCondition::MustNotExist) => {
                 // MustNotExist failed means the key exists
                 WriteErrorCode::KeyExists
-            }
+            },
             Some(SetCondition::MustExist) => {
                 // MustExist failed means the key doesn't exist
                 WriteErrorCode::KeyNotFound
-            }
+            },
             Some(SetCondition::VersionEquals(_)) => {
                 if key_exists {
                     WriteErrorCode::VersionMismatch
                 } else {
                     WriteErrorCode::KeyNotFound
                 }
-            }
+            },
             Some(SetCondition::ValueEquals(_)) => {
                 if key_exists {
                     WriteErrorCode::ValueMismatch
                 } else {
                     WriteErrorCode::KeyNotFound
                 }
-            }
+            },
             None => {
                 // No condition - shouldn't reach here for PreconditionFailed
                 WriteErrorCode::Unspecified
-            }
+            },
         }
     }
 
@@ -294,7 +293,7 @@ impl WriteServiceImpl {
             Condition::Version(v) => inferadb_ledger_types::SetCondition::VersionEquals(*v),
             Condition::ValueEquals(v) => {
                 inferadb_ledger_types::SetCondition::ValueEquals(v.clone())
-            }
+            },
         })
     }
 
@@ -316,14 +315,14 @@ impl WriteServiceImpl {
                     relation: cr.relation.clone(),
                     subject: cr.subject.clone(),
                 })
-            }
+            },
             Op::DeleteRelationship(dr) => {
                 Ok(inferadb_ledger_types::Operation::DeleteRelationship {
                     resource: dr.resource.clone(),
                     relation: dr.relation.clone(),
                     subject: dr.subject.clone(),
                 })
-            }
+            },
             Op::SetEntity(se) => {
                 let condition = se.condition.as_ref().and_then(Self::convert_set_condition);
 
@@ -333,10 +332,10 @@ impl WriteServiceImpl {
                     condition,
                     expires_at: se.expires_at,
                 })
-            }
-            Op::DeleteEntity(de) => Ok(inferadb_ledger_types::Operation::DeleteEntity {
-                key: de.key.clone(),
-            }),
+            },
+            Op::DeleteEntity(de) => {
+                Ok(inferadb_ledger_types::Operation::DeleteEntity { key: de.key.clone() })
+            },
             Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
                 key: ee.key.clone(),
                 expired_at: ee.expired_at,
@@ -353,10 +352,7 @@ impl WriteServiceImpl {
         namespace_id: i64,
         vault_id: i64,
         vault_height: u64,
-    ) -> (
-        Option<crate::proto::BlockHeader>,
-        Option<crate::proto::MerkleProof>,
-    ) {
+    ) -> (Option<crate::proto::BlockHeader>, Option<crate::proto::MerkleProof>) {
         let Some(archive) = &self.block_archive else {
             debug!("Block archive not available for proof generation");
             return (None, None);
@@ -371,13 +367,13 @@ impl WriteServiceImpl {
                     ProofError::BlockNotFound { .. } | ProofError::NoTransactions => {
                         // These may be timing issues (block not yet written to archive)
                         debug!(error = %e, "Proof generation skipped");
-                    }
+                    },
                     _ => {
                         warn!(error = %e, "Proof generation failed");
-                    }
+                    },
                 }
                 (None, None)
-            }
+            },
         }
     }
 
@@ -393,10 +389,8 @@ impl WriteServiceImpl {
         // Convert proto operations to internal Operations
         // Time the proto → internal type conversion
         let convert_start = std::time::Instant::now();
-        let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
-            .iter()
-            .map(Self::convert_operation)
-            .collect::<Result<Vec<_>, Status>>()?;
+        let internal_ops: Vec<inferadb_ledger_types::Operation> =
+            operations.iter().map(Self::convert_operation).collect::<Result<Vec<_>, Status>>()?;
         let convert_secs = convert_start.elapsed().as_secs_f64();
 
         // Record proto decode metrics (per operation average for consistency)
@@ -441,11 +435,7 @@ impl WriteService for WriteServiceImpl {
         let req = request.into_inner();
 
         // Extract client ID and sequence for idempotency
-        let client_id = req
-            .client_id
-            .as_ref()
-            .map(|c| c.id.clone())
-            .unwrap_or_default();
+        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
         let sequence = req.sequence;
 
         // Extract namespace and vault IDs (needed for idempotency key)
@@ -465,10 +455,7 @@ impl WriteService for WriteServiceImpl {
 
         // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
         // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
-        if let Some(cached) = self
-            .idempotency
-            .check(namespace_id, vault_id, &client_id, sequence)
-        {
+        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
             debug!("Returning cached result for duplicate request");
             metrics::record_idempotency_hit();
             metrics::record_write(true, start.elapsed().as_secs_f64());
@@ -516,12 +503,12 @@ impl WriteService for WriteServiceImpl {
                     warn!(error = %batch_err, "Batch write failed");
                     metrics::record_write(false, start.elapsed().as_secs_f64());
                     return Err(Status::internal(format!("Batch error: {}", batch_err)));
-                }
+                },
                 Err(_recv_err) => {
                     warn!("Batch writer channel closed");
                     metrics::record_write(false, start.elapsed().as_secs_f64());
                     return Err(Status::internal("Batch writer unavailable"));
-                }
+                },
             }
         } else {
             // Fallback: direct Raft proposal with mutex serialization
@@ -537,10 +524,7 @@ impl WriteService for WriteServiceImpl {
         let latency = start.elapsed().as_secs_f64();
 
         match response {
-            LedgerResponse::Write {
-                block_height,
-                block_hash: _,
-            } => {
+            LedgerResponse::Write { block_height, block_hash: _ } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proof {
                     self.generate_write_proof(namespace_id, vault_id, block_height)
@@ -549,9 +533,7 @@ impl WriteService for WriteServiceImpl {
                 };
 
                 let success = WriteSuccess {
-                    tx_id: Some(TxId {
-                        id: Uuid::new_v4().as_bytes().to_vec(),
-                    }),
+                    tx_id: Some(TxId { id: Uuid::new_v4().as_bytes().to_vec() }),
                     block_height,
                     block_header,
                     tx_proof,
@@ -567,17 +549,13 @@ impl WriteService for WriteServiceImpl {
                 );
                 metrics::set_idempotency_cache_size(self.idempotency.len());
 
-                info!(
-                    block_height,
-                    latency_ms = latency * 1000.0,
-                    "Write committed"
-                );
+                info!(block_height, latency_ms = latency * 1000.0, "Write committed");
                 metrics::record_write(true, latency);
 
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Success(success)),
                 }))
-            }
+            },
             LedgerResponse::Error { message } => {
                 warn!(error = %message, "Write failed");
                 metrics::record_write(false, latency);
@@ -594,7 +572,7 @@ impl WriteService for WriteServiceImpl {
                         last_committed_sequence: None,
                     })),
                 }))
-            }
+            },
             LedgerResponse::PreconditionFailed {
                 key,
                 current_version,
@@ -602,7 +580,8 @@ impl WriteService for WriteServiceImpl {
                 failed_condition,
             } => {
                 // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
-                // Key exists if we have a current_version (which is the version when entity was last modified)
+                // Key exists if we have a current_version (which is the version when entity was
+                // last modified)
                 let key_exists = current_version.is_some();
                 let error_code =
                     Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
@@ -622,11 +601,11 @@ impl WriteService for WriteServiceImpl {
                         last_committed_sequence: None,
                     })),
                 }))
-            }
+            },
             _ => {
                 metrics::record_write(false, latency);
                 Err(Status::internal("Unexpected response type"))
-            }
+            },
         }
     }
 
@@ -648,11 +627,7 @@ impl WriteService for WriteServiceImpl {
         let req = request.into_inner();
 
         // Extract client ID and sequence for idempotency
-        let client_id = req
-            .client_id
-            .as_ref()
-            .map(|c| c.id.clone())
-            .unwrap_or_default();
+        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
         let sequence = req.sequence;
 
         // Extract namespace and vault IDs (needed for idempotency key)
@@ -672,10 +647,7 @@ impl WriteService for WriteServiceImpl {
 
         // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
         // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
-        if let Some(cached) = self
-            .idempotency
-            .check(namespace_id, vault_id, &client_id, sequence)
-        {
+        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
             debug!("Returning cached result for duplicate batch request");
             metrics::record_idempotency_hit();
             metrics::record_batch_write(true, 0, start.elapsed().as_secs_f64());
@@ -711,11 +683,8 @@ impl WriteService for WriteServiceImpl {
         }
 
         // Flatten all operations from all groups
-        let all_operations: Vec<crate::proto::Operation> = req
-            .operations
-            .iter()
-            .flat_map(|group| group.operations.clone())
-            .collect();
+        let all_operations: Vec<crate::proto::Operation> =
+            req.operations.iter().flat_map(|group| group.operations.clone()).collect();
 
         let batch_size = all_operations.len();
         tracing::Span::current().record("batch_size", batch_size);
@@ -744,10 +713,7 @@ impl WriteService for WriteServiceImpl {
         let latency = start.elapsed().as_secs_f64();
 
         match response {
-            LedgerResponse::Write {
-                block_height,
-                block_hash: _,
-            } => {
+            LedgerResponse::Write { block_height, block_hash: _ } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proofs {
                     self.generate_write_proof(namespace_id, vault_id, block_height)
@@ -756,9 +722,7 @@ impl WriteService for WriteServiceImpl {
                 };
 
                 let success = WriteSuccess {
-                    tx_id: Some(TxId {
-                        id: Uuid::new_v4().as_bytes().to_vec(),
-                    }),
+                    tx_id: Some(TxId { id: Uuid::new_v4().as_bytes().to_vec() }),
                     block_height,
                     block_header,
                     tx_proof,
@@ -792,26 +756,24 @@ impl WriteService for WriteServiceImpl {
                         },
                     )),
                 }))
-            }
+            },
             LedgerResponse::Error { message } => {
                 warn!(error = %message, batch_size, "Batch write failed");
                 metrics::record_batch_write(false, batch_size, latency);
 
                 Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Error(
-                        WriteError {
-                            code: WriteErrorCode::Unspecified.into(),
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message,
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            last_committed_sequence: None,
-                        },
-                    )),
+                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
+                        code: WriteErrorCode::Unspecified.into(),
+                        key: String::new(),
+                        current_version: None,
+                        current_value: None,
+                        message,
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        last_committed_sequence: None,
+                    })),
                 }))
-            }
+            },
             LedgerResponse::PreconditionFailed {
                 key,
                 current_version,
@@ -819,7 +781,8 @@ impl WriteService for WriteServiceImpl {
                 failed_condition,
             } => {
                 // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
-                // Key exists if we have a current_version (which is the version when entity was last modified)
+                // Key exists if we have a current_version (which is the version when entity was
+                // last modified)
                 let key_exists = current_version.is_some();
                 let error_code =
                     Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
@@ -828,24 +791,22 @@ impl WriteService for WriteServiceImpl {
                 metrics::record_batch_write(false, batch_size, latency);
 
                 Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Error(
-                        WriteError {
-                            code: error_code.into(),
-                            key,
-                            current_version,
-                            current_value,
-                            message: "Precondition failed".to_string(),
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            last_committed_sequence: None,
-                        },
-                    )),
+                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
+                        code: error_code.into(),
+                        key,
+                        current_version,
+                        current_value,
+                        message: "Precondition failed".to_string(),
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        last_committed_sequence: None,
+                    })),
                 }))
-            }
+            },
             _ => {
                 metrics::record_batch_write(false, batch_size, latency);
                 Err(Status::internal("Unexpected response type"))
-            }
+            },
         }
     }
 }

@@ -26,9 +26,12 @@
 //! [Cells: (key_len:2, child_page:8, key_bytes)]
 //! ```
 
-use crate::error::{Error, PageId, PageType, Result};
-use crate::page::{PAGE_HEADER_SIZE, Page};
 use std::cmp::Ordering;
+
+use crate::{
+    error::{Error, PageId, PageType, Result},
+    page::{PAGE_HEADER_SIZE, Page},
+};
 
 /// Node header size (after page header).
 pub const NODE_HEADER_SIZE: usize = 8;
@@ -124,40 +127,26 @@ impl<'a> LeafNode<'a> {
     /// Get the number of cells in this node.
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes(
-            self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap(),
         )
     }
 
     /// Get the free space available for new cells.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
-            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
         ) as usize;
         let free_end = u16::from_le_bytes(
-            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].try_into().unwrap(),
         ) as usize;
 
-        if free_end > free_start {
-            free_end - free_start
-        } else {
-            0
-        }
+        if free_end > free_start { free_end - free_start } else { 0 }
     }
 
     /// Get a cell pointer (offset into page where cell data is stored).
     fn cell_ptr(&self, index: usize) -> usize {
         let ptr_offset = LEAF_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
-        u16::from_le_bytes(
-            self.page.data[ptr_offset..ptr_offset + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize
+        u16::from_le_bytes(self.page.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize
     }
 
     /// Set a cell pointer.
@@ -170,26 +159,20 @@ impl<'a> LeafNode<'a> {
     /// Get the key at a given index.
     pub fn key(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
-        let key_len = u16::from_le_bytes(
-            self.page.data[cell_offset..cell_offset + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let key_len =
+            u16::from_le_bytes(self.page.data[cell_offset..cell_offset + 2].try_into().unwrap())
+                as usize;
         &self.page.data[cell_offset + 4..cell_offset + 4 + key_len]
     }
 
     /// Get the value at a given index.
     pub fn value(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
-        let key_len = u16::from_le_bytes(
-            self.page.data[cell_offset..cell_offset + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let key_len =
+            u16::from_le_bytes(self.page.data[cell_offset..cell_offset + 2].try_into().unwrap())
+                as usize;
         let val_len = u16::from_le_bytes(
-            self.page.data[cell_offset + 2..cell_offset + 4]
-                .try_into()
-                .unwrap(),
+            self.page.data[cell_offset + 2..cell_offset + 4].try_into().unwrap(),
         ) as usize;
         &self.page.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + val_len]
     }
@@ -244,14 +227,10 @@ impl<'a> LeafNode<'a> {
         let cell_data_size = 2 + 2 + key.len() + value.len(); // key_len + val_len + key + value
 
         let mut free_start = u16::from_le_bytes(
-            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
         ) as usize;
         let mut free_end = u16::from_le_bytes(
-            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].try_into().unwrap(),
         ) as usize;
 
         // Allocate cell from end of free space
@@ -292,41 +271,35 @@ impl<'a> LeafNode<'a> {
     /// Update the value at a given index (in place if same size, or rewrite).
     pub fn update(&mut self, index: usize, value: &[u8]) -> bool {
         let cell_offset = self.cell_ptr(index);
-        let key_len = u16::from_le_bytes(
-            self.page.data[cell_offset..cell_offset + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let key_len =
+            u16::from_le_bytes(self.page.data[cell_offset..cell_offset + 2].try_into().unwrap())
+                as usize;
         let old_val_len = u16::from_le_bytes(
-            self.page.data[cell_offset + 2..cell_offset + 4]
-                .try_into()
-                .unwrap(),
+            self.page.data[cell_offset + 2..cell_offset + 4].try_into().unwrap(),
         ) as usize;
 
-        if value.len() == old_val_len {
-            // In-place update
-            self.page.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + value.len()]
-                .copy_from_slice(value);
-            self.page.dirty = true;
-            true
-        } else if value.len() < old_val_len {
-            // Value shrunk - update in place, leave dead space
-            self.page.data[cell_offset + 2..cell_offset + 4]
-                .copy_from_slice(&(value.len() as u16).to_le_bytes());
-            self.page.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + value.len()]
-                .copy_from_slice(value);
-            self.page.dirty = true;
-            true
-        } else {
-            // Value grew - need to check if we have space
-            let extra_needed = value.len() - old_val_len;
-            if self.free_space() >= extra_needed {
-                // Allocate new cell at end, mark old one as dead
+        match value.len().cmp(&old_val_len) {
+            std::cmp::Ordering::Equal => {
+                // In-place update
+                self.page.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + value.len()]
+                    .copy_from_slice(value);
+                self.page.dirty = true;
+                true
+            },
+            std::cmp::Ordering::Less => {
+                // Value shrunk - update in place, leave dead space
+                self.page.data[cell_offset + 2..cell_offset + 4]
+                    .copy_from_slice(&(value.len() as u16).to_le_bytes());
+                self.page.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + value.len()]
+                    .copy_from_slice(value);
+                self.page.dirty = true;
+                true
+            },
+            std::cmp::Ordering::Greater => {
+                // Value grew - need to check if we have space
                 // For simplicity, we reinsert (could optimize later with compaction)
                 false
-            } else {
-                false
-            }
+            },
         }
     }
 
@@ -345,9 +318,7 @@ impl<'a> LeafNode<'a> {
 
         // Update free space start (one less pointer)
         let mut free_start = u16::from_le_bytes(
-            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
         ) as usize;
         free_start -= CELL_PTR_SIZE;
         self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
@@ -414,18 +385,14 @@ impl<'a> BranchNode<'a> {
     /// Get the number of cells (separator keys) in this node.
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes(
-            self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap(),
         )
     }
 
     /// Get the rightmost child page ID.
     pub fn rightmost_child(&self) -> PageId {
         u64::from_le_bytes(
-            self.page.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8]
-                .try_into()
-                .unwrap(),
+            self.page.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8].try_into().unwrap(),
         )
     }
 
@@ -439,31 +406,19 @@ impl<'a> BranchNode<'a> {
     /// Get the free space available.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
-            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
         ) as usize;
         let free_end = u16::from_le_bytes(
-            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].try_into().unwrap(),
         ) as usize;
 
-        if free_end > free_start {
-            free_end - free_start
-        } else {
-            0
-        }
+        if free_end > free_start { free_end - free_start } else { 0 }
     }
 
     /// Get a cell pointer.
     fn cell_ptr(&self, index: usize) -> usize {
         let ptr_offset = BRANCH_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
-        u16::from_le_bytes(
-            self.page.data[ptr_offset..ptr_offset + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize
+        u16::from_le_bytes(self.page.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize
     }
 
     /// Set a cell pointer.
@@ -476,22 +431,16 @@ impl<'a> BranchNode<'a> {
     /// Get the separator key at a given index.
     pub fn key(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
-        let key_len = u16::from_le_bytes(
-            self.page.data[cell_offset..cell_offset + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let key_len =
+            u16::from_le_bytes(self.page.data[cell_offset..cell_offset + 2].try_into().unwrap())
+                as usize;
         &self.page.data[cell_offset + 2 + 8..cell_offset + 2 + 8 + key_len]
     }
 
     /// Get the child page ID at a given index (left child of separator key).
     pub fn child(&self, index: usize) -> PageId {
         let cell_offset = self.cell_ptr(index);
-        u64::from_le_bytes(
-            self.page.data[cell_offset + 2..cell_offset + 2 + 8]
-                .try_into()
-                .unwrap(),
-        )
+        u64::from_le_bytes(self.page.data[cell_offset + 2..cell_offset + 2 + 8].try_into().unwrap())
     }
 
     /// Set the child page ID at a given index.
@@ -536,14 +485,10 @@ impl<'a> BranchNode<'a> {
         let cell_data_size = 2 + 8 + key.len(); // key_len + child_page + key
 
         let mut free_start = u16::from_le_bytes(
-            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
         ) as usize;
         let mut free_end = u16::from_le_bytes(
-            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].try_into().unwrap(),
         ) as usize;
 
         // Allocate cell from end of free space
@@ -618,11 +563,7 @@ impl<'a> LeafNodeRef<'a> {
 
     /// Get the number of cells.
     pub fn cell_count(&self) -> u16 {
-        u16::from_le_bytes(
-            self.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
-                .try_into()
-                .unwrap(),
-        )
+        u16::from_le_bytes(self.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap())
     }
 
     /// Get a cell pointer.
@@ -646,11 +587,9 @@ impl<'a> LeafNodeRef<'a> {
         let key_len =
             u16::from_le_bytes(self.data[cell_offset..cell_offset + 2].try_into().unwrap())
                 as usize;
-        let val_len = u16::from_le_bytes(
-            self.data[cell_offset + 2..cell_offset + 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let val_len =
+            u16::from_le_bytes(self.data[cell_offset + 2..cell_offset + 4].try_into().unwrap())
+                as usize;
         &self.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + val_len]
     }
 
@@ -681,21 +620,13 @@ impl<'a> LeafNodeRef<'a> {
     /// Get the free space available for new cells.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
-            self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
         ) as usize;
-        let free_end = u16::from_le_bytes(
-            self.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let free_end =
+            u16::from_le_bytes(self.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].try_into().unwrap())
+                as usize;
 
-        if free_end > free_start {
-            free_end - free_start
-        } else {
-            0
-        }
+        if free_end > free_start { free_end - free_start } else { 0 }
     }
 
     /// Check if there's room for a new cell.
@@ -726,19 +657,13 @@ impl<'a> BranchNodeRef<'a> {
 
     /// Get the number of cells.
     pub fn cell_count(&self) -> u16 {
-        u16::from_le_bytes(
-            self.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
-                .try_into()
-                .unwrap(),
-        )
+        u16::from_le_bytes(self.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap())
     }
 
     /// Get the rightmost child.
     pub fn rightmost_child(&self) -> PageId {
         u64::from_le_bytes(
-            self.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8]
-                .try_into()
-                .unwrap(),
+            self.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8].try_into().unwrap(),
         )
     }
 
@@ -760,11 +685,7 @@ impl<'a> BranchNodeRef<'a> {
     /// Get the child page ID at a given index.
     pub fn child(&self, index: usize) -> PageId {
         let cell_offset = self.cell_ptr(index);
-        u64::from_le_bytes(
-            self.data[cell_offset + 2..cell_offset + 2 + 8]
-                .try_into()
-                .unwrap(),
-        )
+        u64::from_le_bytes(self.data[cell_offset + 2..cell_offset + 2 + 8].try_into().unwrap())
     }
 
     /// Get the child page for a given key.
@@ -784,21 +705,13 @@ impl<'a> BranchNodeRef<'a> {
     /// Get the free space available.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
-            self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
-                .try_into()
-                .unwrap(),
+            self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
         ) as usize;
-        let free_end = u16::from_le_bytes(
-            self.data[FREE_END_OFFSET..FREE_END_OFFSET + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let free_end =
+            u16::from_le_bytes(self.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].try_into().unwrap())
+                as usize;
 
-        if free_end > free_start {
-            free_end - free_start
-        } else {
-            0
-        }
+        if free_end > free_start { free_end - free_start } else { 0 }
     }
 
     /// Check if there's room for a new cell.
@@ -858,14 +771,8 @@ mod tests {
         assert!(matches!(node.search(b"apple"), SearchResult::Found(0)));
         assert!(matches!(node.search(b"banana"), SearchResult::Found(1)));
         assert!(matches!(node.search(b"cherry"), SearchResult::Found(2)));
-        assert!(matches!(
-            node.search(b"aardvark"),
-            SearchResult::NotFound(0)
-        ));
-        assert!(matches!(
-            node.search(b"blueberry"),
-            SearchResult::NotFound(2)
-        ));
+        assert!(matches!(node.search(b"aardvark"), SearchResult::NotFound(0)));
+        assert!(matches!(node.search(b"blueberry"), SearchResult::NotFound(2)));
         assert!(matches!(node.search(b"zebra"), SearchResult::NotFound(3)));
     }
 

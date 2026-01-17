@@ -27,17 +27,18 @@
 
 use std::sync::Arc;
 
-use openraft::Raft;
-use tonic::Status;
-
-use crate::log_storage::AppliedStateAccessor;
-use crate::multi_raft::MultiRaftManager;
-use crate::shard_router::{RoutingInfo, ShardRouter};
-use crate::types::LedgerTypeConfig;
-
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{NamespaceId, ShardId};
+use openraft::Raft;
+use tonic::Status;
+
+use crate::{
+    log_storage::AppliedStateAccessor,
+    multi_raft::MultiRaftManager,
+    shard_router::{RoutingInfo, ShardRouter},
+    types::LedgerTypeConfig,
+};
 
 /// Resolved shard context for handling a request locally.
 ///
@@ -160,12 +161,7 @@ impl SingleShardResolver {
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
-        Self {
-            raft,
-            state,
-            block_archive,
-            applied_state,
-        }
+        Self { raft, state, block_archive, applied_state }
     }
 }
 
@@ -230,10 +226,7 @@ impl ShardResolver for MultiShardResolver {
                 ))
             } else {
                 // Namespace not found in routing table
-                Status::not_found(format!(
-                    "Namespace {} not found in routing table",
-                    namespace_id
-                ))
+                Status::not_found(format!("Namespace {} not found in routing table", namespace_id))
             }
         })?;
 
@@ -262,18 +255,17 @@ impl ShardResolver for MultiShardResolver {
         }
 
         // Not local - check if we have routing info for forwarding
-        let router = self
-            .router()
-            .ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
+        let router =
+            self.router().ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
 
         // Get routing info from the ShardRouter
         let routing = router.get_routing(namespace_id).map_err(|e| match e {
-            crate::shard_router::RoutingError::NamespaceNotFound { .. } => Status::not_found(
-                format!("Namespace {} not found in routing table", namespace_id),
-            ),
+            crate::shard_router::RoutingError::NamespaceNotFound { .. } => {
+                Status::not_found(format!("Namespace {} not found in routing table", namespace_id))
+            },
             crate::shard_router::RoutingError::NamespaceUnavailable { status, .. } => {
                 Status::unavailable(format!("Namespace {} is {:?}", namespace_id, status))
-            }
+            },
             _ => Status::internal(format!("Routing error: {}", e)),
         })?;
 
@@ -329,11 +321,8 @@ mod tests {
             leader_hint: Some("node-1".to_string()),
         };
 
-        let remote_info = RemoteShardInfo {
-            shard_id: 1,
-            namespace_id: 42,
-            routing: routing.clone(),
-        };
+        let remote_info =
+            RemoteShardInfo { shard_id: 1, namespace_id: 42, routing: routing.clone() };
 
         assert_eq!(remote_info.shard_id, 1);
         assert_eq!(remote_info.namespace_id, 42);
@@ -357,11 +346,7 @@ mod tests {
             leader_hint: None,
         };
 
-        let remote = RemoteShardInfo {
-            shard_id: 2,
-            namespace_id: 100,
-            routing,
-        };
+        let remote = RemoteShardInfo { shard_id: 2, namespace_id: 100, routing };
 
         let result = ResolveResult::Remote(remote);
 
@@ -371,7 +356,7 @@ mod tests {
                 assert_eq!(info.shard_id, 2);
                 assert_eq!(info.namespace_id, 100);
                 assert_eq!(info.routing.member_nodes.len(), 1);
-            }
+            },
         }
     }
 
@@ -390,11 +375,7 @@ mod tests {
             RemoteShardInfo {
                 shard_id: 1,
                 namespace_id: 1,
-                routing: RoutingInfo {
-                    shard_id: 1,
-                    member_nodes: vec![],
-                    leader_hint: None,
-                },
+                routing: RoutingInfo { shard_id: 1, member_nodes: vec![], leader_hint: None },
             }
         );
         assert!(debug_output.contains("RemoteShardInfo"));
@@ -409,11 +390,7 @@ mod tests {
             leader_hint: Some("node-1".to_string()),
         };
 
-        let remote_info = RemoteShardInfo {
-            shard_id: 1,
-            namespace_id: 42,
-            routing,
-        };
+        let remote_info = RemoteShardInfo { shard_id: 1, namespace_id: 42, routing };
 
         let result = ResolveResult::Remote(remote_info);
         let debug_output = format!("{:?}", result);

@@ -8,12 +8,7 @@
 //! - Uses ExpireEntity operation (distinct from DeleteEntity)
 //! - Actor recorded as "system:gc" for audit trail
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 mod common;
 
@@ -37,11 +32,8 @@ async fn create_namespace(
         })
         .await?;
 
-    let namespace_id = response
-        .into_inner()
-        .namespace_id
-        .map(|n| n.id)
-        .ok_or("No namespace_id in response")?;
+    let namespace_id =
+        response.into_inner().namespace_id.map(|n| n.id).ok_or("No namespace_id in response")?;
 
     Ok(namespace_id)
 }
@@ -61,11 +53,7 @@ async fn create_vault(
         })
         .await?;
 
-    let vault_id = response
-        .into_inner()
-        .vault_id
-        .map(|v| v.id)
-        .ok_or("No vault_id in response")?;
+    let vault_id = response.into_inner().vault_id.map(|v| v.id).ok_or("No vault_id in response")?;
 
     Ok(vault_id)
 }
@@ -86,9 +74,7 @@ async fn write_entity_with_ttl(
     let request = inferadb_ledger_raft::proto::WriteRequest {
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
-            id: client_id.to_string(),
-        }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
         sequence,
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
@@ -109,7 +95,7 @@ async fn write_entity_with_ttl(
         Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => Ok(s.block_height),
         Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
             Err(format!("Write error: {:?}", e).into())
-        }
+        },
         None => Err("No result in write response".into()),
     }
 }
@@ -171,18 +157,11 @@ async fn test_force_gc_removes_expired_entities() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and vault
-    let ns_id = create_namespace(leader.addr, "ttl-gc-test")
-        .await
-        .expect("create namespace");
-    let vault_id = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault");
+    let ns_id = create_namespace(leader.addr, "ttl-gc-test").await.expect("create namespace");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Get current time
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
     // Write an entity that expired 1 hour ago
     let expired_at = now - 3600;
@@ -230,32 +209,23 @@ async fn test_force_gc_removes_expired_entities() {
 
     // Before GC: All entities should be readable (expired entities are lazy-filtered)
     // Note: Read filters out expired entities by default, but they're still in state
-    let _expired_before = read_entity(leader.addr, ns_id, vault_id, "expired-key")
-        .await
-        .expect("read expired key");
+    let _expired_before =
+        read_entity(leader.addr, ns_id, vault_id, "expired-key").await.expect("read expired key");
     // Read may return None for expired entities due to lazy filtering
     // The key here is that the entity is still IN state storage
 
     let permanent_before = read_entity(leader.addr, ns_id, vault_id, "permanent-key")
         .await
         .expect("read permanent key");
-    assert!(
-        permanent_before.is_some(),
-        "permanent entity should be readable before GC"
-    );
+    assert!(permanent_before.is_some(), "permanent entity should be readable before GC");
 
-    let future_before = read_entity(leader.addr, ns_id, vault_id, "future-key")
-        .await
-        .expect("read future key");
-    assert!(
-        future_before.is_some(),
-        "future entity should be readable before GC"
-    );
+    let future_before =
+        read_entity(leader.addr, ns_id, vault_id, "future-key").await.expect("read future key");
+    assert!(future_before.is_some(), "future entity should be readable before GC");
 
     // Run GC
-    let (expired_count, vaults_scanned) = force_gc(leader.addr, Some(ns_id), Some(vault_id))
-        .await
-        .expect("force gc");
+    let (expired_count, vaults_scanned) =
+        force_gc(leader.addr, Some(ns_id), Some(vault_id)).await.expect("force gc");
 
     assert_eq!(expired_count, 1, "should have expired 1 entity");
     assert_eq!(vaults_scanned, 1, "should have scanned 1 vault");
@@ -264,18 +234,12 @@ async fn test_force_gc_removes_expired_entities() {
     let permanent_after = read_entity(leader.addr, ns_id, vault_id, "permanent-key")
         .await
         .expect("read permanent key after gc");
-    assert!(
-        permanent_after.is_some(),
-        "permanent entity should still exist after GC"
-    );
+    assert!(permanent_after.is_some(), "permanent entity should still exist after GC");
 
     let future_after = read_entity(leader.addr, ns_id, vault_id, "future-key")
         .await
         .expect("read future key after gc");
-    assert!(
-        future_after.is_some(),
-        "future entity should still exist after GC"
-    );
+    assert!(future_after.is_some(), "future entity should still exist after GC");
 }
 
 /// Test that GC on empty vault succeeds.
@@ -287,17 +251,12 @@ async fn test_force_gc_empty_vault() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and vault
-    let ns_id = create_namespace(leader.addr, "empty-gc-test")
-        .await
-        .expect("create namespace");
-    let vault_id = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault");
+    let ns_id = create_namespace(leader.addr, "empty-gc-test").await.expect("create namespace");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Run GC on empty vault
-    let (expired_count, vaults_scanned) = force_gc(leader.addr, Some(ns_id), Some(vault_id))
-        .await
-        .expect("force gc on empty vault");
+    let (expired_count, vaults_scanned) =
+        force_gc(leader.addr, Some(ns_id), Some(vault_id)).await.expect("force gc on empty vault");
 
     assert_eq!(expired_count, 0, "should have no expired entities");
     assert_eq!(vaults_scanned, 1, "should have scanned 1 vault");
@@ -312,21 +271,13 @@ async fn test_force_gc_all_vaults() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and multiple vaults
-    let ns_id = create_namespace(leader.addr, "multi-vault-gc-test")
-        .await
-        .expect("create namespace");
-    let vault1 = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault 1");
-    let vault2 = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault 2");
+    let ns_id =
+        create_namespace(leader.addr, "multi-vault-gc-test").await.expect("create namespace");
+    let vault1 = create_vault(leader.addr, ns_id).await.expect("create vault 1");
+    let vault2 = create_vault(leader.addr, ns_id).await.expect("create vault 2");
 
     // Write expired entities to both vaults
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let expired_at = now - 3600;
 
     write_entity_with_ttl(
@@ -358,9 +309,8 @@ async fn test_force_gc_all_vaults() {
     .expect("write to vault 2");
 
     // Run GC on all vaults (no filter)
-    let (expired_count, vaults_scanned) = force_gc(leader.addr, None, None)
-        .await
-        .expect("force gc all vaults");
+    let (expired_count, vaults_scanned) =
+        force_gc(leader.addr, None, None).await.expect("force gc all vaults");
 
     assert_eq!(expired_count, 2, "should have expired 2 entities");
     assert!(vaults_scanned >= 2, "should have scanned at least 2 vaults");

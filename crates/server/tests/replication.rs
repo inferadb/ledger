@@ -25,9 +25,7 @@ async fn test_ordered_replication() {
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = common::create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit multiple writes
     for i in 0..5u64 {
@@ -53,7 +51,7 @@ async fn test_ordered_replication() {
 
         let response = client.write(request).await.expect("write should succeed");
         match response.into_inner().result {
-            Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {}
+            Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {},
             _ => panic!("write {} should succeed", i),
         }
     }
@@ -64,10 +62,7 @@ async fn test_ordered_replication() {
 
     // All nodes should have same last applied
     let leader_applied = leader.last_applied();
-    assert!(
-        leader_applied >= 5,
-        "leader should have applied at least 5 entries"
-    );
+    assert!(leader_applied >= 5, "leader should have applied at least 5 entries");
 
     for follower in cluster.followers() {
         assert_eq!(
@@ -87,15 +82,11 @@ async fn test_follower_state_consistency() {
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = common::create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit a batch of writes
     let batch_request = inferadb_ledger_raft::proto::BatchWriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
-            id: "batch-test".to_string(),
-        }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "batch-test".to_string() }),
         sequence: 1,
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
@@ -116,13 +107,10 @@ async fn test_follower_state_consistency() {
         include_tx_proofs: false,
     };
 
-    let response = client
-        .batch_write(batch_request)
-        .await
-        .expect("batch write should succeed");
+    let response = client.batch_write(batch_request).await.expect("batch write should succeed");
 
     match response.into_inner().result {
-        Some(inferadb_ledger_raft::proto::batch_write_response::Result::Success(_)) => {}
+        Some(inferadb_ledger_raft::proto::batch_write_response::Result::Success(_)) => {},
         _ => panic!("batch write should succeed"),
     }
 
@@ -150,15 +138,11 @@ async fn test_replication_after_delay() {
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = common::create_write_client(leader.addr)
-        .await
-        .expect("connect to leader");
+    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Write some data
     let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
-            id: "delay-test".to_string(),
-        }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "delay-test".to_string() }),
         sequence: 1,
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
@@ -182,9 +166,7 @@ async fn test_replication_after_delay() {
 
     // Write more data
     let request2 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
-            id: "delay-test".to_string(),
-        }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "delay-test".to_string() }),
         sequence: 2,
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
@@ -201,10 +183,7 @@ async fn test_replication_after_delay() {
         include_tx_proof: false,
     };
 
-    client
-        .write(request2)
-        .await
-        .expect("second write should succeed");
+    client.write(request2).await.expect("second write should succeed");
 
     // Should still sync
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;

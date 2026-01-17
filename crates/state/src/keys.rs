@@ -71,11 +71,7 @@ pub fn decode_storage_key(key: &[u8]) -> Option<StorageKey> {
     let bucket_id = key[8];
     let local_key = key[9..].to_vec();
 
-    Some(StorageKey {
-        vault_id,
-        bucket_id,
-        local_key,
-    })
+    Some(StorageKey { vault_id, bucket_id, local_key })
 }
 
 /// Encode a relationship key.

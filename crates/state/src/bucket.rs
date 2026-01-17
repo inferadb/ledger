@@ -27,18 +27,12 @@ pub struct VaultCommitment {
 impl VaultCommitment {
     /// Create a new vault commitment with all empty buckets.
     pub fn new() -> Self {
-        Self {
-            bucket_roots: [EMPTY_HASH; NUM_BUCKETS],
-            dirty_buckets: BTreeSet::new(),
-        }
+        Self { bucket_roots: [EMPTY_HASH; NUM_BUCKETS], dirty_buckets: BTreeSet::new() }
     }
 
     /// Create from existing bucket roots (e.g., from snapshot).
     pub fn from_bucket_roots(bucket_roots: [Hash; NUM_BUCKETS]) -> Self {
-        Self {
-            bucket_roots,
-            dirty_buckets: BTreeSet::new(),
-        }
+        Self { bucket_roots, dirty_buckets: BTreeSet::new() }
     }
 
     /// Mark a bucket as dirty based on a key.
@@ -123,10 +117,7 @@ pub struct BucketRootBuilder {
 impl BucketRootBuilder {
     /// Create a new builder for a specific bucket.
     pub fn new(bucket_id: u8) -> Self {
-        Self {
-            hasher: BucketHasher::new(),
-            bucket_id,
-        }
+        Self { hasher: BucketHasher::new(), bucket_id }
     }
 
     /// Get the bucket ID this builder is for.
@@ -191,12 +182,7 @@ mod tests {
     #[test]
     fn test_bucket_root_from_entities() {
         let entities = vec![
-            Entity {
-                key: b"key1".to_vec(),
-                value: b"value1".to_vec(),
-                expires_at: 0,
-                version: 1,
-            },
+            Entity { key: b"key1".to_vec(), value: b"value1".to_vec(), expires_at: 0, version: 1 },
             Entity {
                 key: b"key2".to_vec(),
                 value: b"value2".to_vec(),
@@ -215,18 +201,8 @@ mod tests {
 
     #[test]
     fn test_bucket_root_order_matters() {
-        let e1 = Entity {
-            key: b"a".to_vec(),
-            value: b"1".to_vec(),
-            expires_at: 0,
-            version: 1,
-        };
-        let e2 = Entity {
-            key: b"b".to_vec(),
-            value: b"2".to_vec(),
-            expires_at: 0,
-            version: 1,
-        };
+        let e1 = Entity { key: b"a".to_vec(), value: b"1".to_vec(), expires_at: 0, version: 1 };
+        let e2 = Entity { key: b"b".to_vec(), value: b"2".to_vec(), expires_at: 0, version: 1 };
 
         let root1 = VaultCommitment::compute_bucket_root_from_entities(&[e1.clone(), e2.clone()]);
         let root2 = VaultCommitment::compute_bucket_root_from_entities(&[e2, e1]);

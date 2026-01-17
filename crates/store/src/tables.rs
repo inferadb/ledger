@@ -87,7 +87,7 @@ impl TableId {
             // String keys
             Self::RaftState | Self::Sequences | Self::ClientSequences | Self::CompactionMeta => {
                 KeyType::Str
-            }
+            },
 
             // Byte slice keys
             Self::Entities
@@ -334,11 +334,7 @@ impl TableEntry {
 
     /// Create a new empty table entry.
     pub fn empty(table_id: TableId) -> Self {
-        Self {
-            table_id,
-            root_page: 0,
-            entry_count: 0,
-        }
+        Self { table_id, root_page: 0, entry_count: 0 }
     }
 
     /// Serialize to bytes.
@@ -358,11 +354,7 @@ impl TableEntry {
         let table_id = TableId::from_u8(buf[0])?;
         let root_page = u64::from_le_bytes(buf[1..9].try_into().ok()?);
         let entry_count = u64::from_le_bytes(buf[9..17].try_into().ok()?);
-        Some(Self {
-            table_id,
-            root_page,
-            entry_count,
-        })
+        Some(Self { table_id, root_page, entry_count })
     }
 }
 
@@ -381,11 +373,7 @@ mod tests {
 
     #[test]
     fn test_table_entry_serialization() {
-        let entry = TableEntry {
-            table_id: TableId::RaftLog,
-            root_page: 12345,
-            entry_count: 999,
-        };
+        let entry = TableEntry { table_id: TableId::RaftLog, root_page: 12345, entry_count: 999 };
         let bytes = entry.to_bytes();
         let recovered = TableEntry::from_bytes(&bytes).unwrap();
         assert_eq!(entry.table_id, recovered.table_id);

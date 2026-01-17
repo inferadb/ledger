@@ -6,6 +6,7 @@
 #![allow(clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
+
 use tempfile::TempDir;
 
 /// A managed temporary directory for tests.

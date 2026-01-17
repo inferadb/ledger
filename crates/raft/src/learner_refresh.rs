@@ -17,20 +17,19 @@
 //! This distributes load across voters and provides resilience against individual
 //! voter failures.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use openraft::Raft;
 use parking_lot::RwLock;
-use tokio::sync::mpsc;
-use tokio::time::interval;
+use tokio::{sync::mpsc, time::interval};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use crate::log_storage::AppliedStateAccessor;
-use crate::proto::GetSystemStateRequest;
-use crate::proto::system_discovery_service_client::SystemDiscoveryServiceClient;
-use crate::types::{LedgerNodeId, LedgerTypeConfig};
+use crate::{
+    log_storage::AppliedStateAccessor,
+    proto::{GetSystemStateRequest, system_discovery_service_client::SystemDiscoveryServiceClient},
+    types::{LedgerNodeId, LedgerTypeConfig},
+};
 
 /// Default refresh interval for learner background task.
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -192,9 +191,7 @@ impl LearnerRefreshJob {
 
         // Request system state from voter
         // Use if_version_greater_than=0 to always get full state
-        let request = tonic::Request::new(GetSystemStateRequest {
-            if_version_greater_than: 0,
-        });
+        let request = tonic::Request::new(GetSystemStateRequest { if_version_greater_than: 0 });
 
         let response = client
             .get_system_state(request)
@@ -252,7 +249,7 @@ impl LearnerRefreshJob {
             match self.refresh_from_voter(&voter_addr).await {
                 Ok(updated) => {
                     return Ok(updated);
-                }
+                },
                 Err(e) => {
                     warn!(voter_id, voter_addr, error = %e, "Failed to refresh from voter");
                     // Classify error type for metrics
@@ -265,7 +262,7 @@ impl LearnerRefreshJob {
                     };
                     crate::metrics::record_learner_voter_error(voter_id, error_type);
                     last_error = Some(e);
-                }
+                },
             }
         }
 
@@ -364,10 +361,8 @@ mod tests {
 
     #[test]
     fn test_cached_state_freshness() {
-        let state = CachedSystemState {
-            last_updated: std::time::Instant::now(),
-            ..Default::default()
-        };
+        let state =
+            CachedSystemState { last_updated: std::time::Instant::now(), ..Default::default() };
 
         // Should be fresh with 10 second TTL
         assert!(state.is_fresh(Duration::from_secs(10)));

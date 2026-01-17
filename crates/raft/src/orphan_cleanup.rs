@@ -17,22 +17,21 @@
 //! Eventual cleanup is simpler, and orphaned memberships are harmless in
 //! the interim (user can't authenticate, so membership grants nothing).
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::StorageBackend;
+use inferadb_ledger_types::{Operation, Transaction};
 use openraft::Raft;
 use snafu::GenerateImplicitData;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use inferadb_ledger_state::StateLayer;
-use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, Transaction};
-
-use crate::error::OrphanCleanupError;
-use crate::log_storage::AppliedStateAccessor;
-use crate::types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig};
+use crate::{
+    error::OrphanCleanupError,
+    log_storage::AppliedStateAccessor,
+    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
+};
 
 /// Default interval between cleanup cycles (1 hour).
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -71,13 +70,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         state: Arc<StateLayer<B>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
-        Self {
-            raft,
-            node_id,
-            state,
-            applied_state,
-            interval: CLEANUP_INTERVAL,
-        }
+        Self { raft, node_id, state, applied_state, interval: CLEANUP_INTERVAL }
     }
 
     /// Create with custom interval (for testing).
@@ -102,15 +95,12 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
         // List all user entities in _system (vault_id = 0)
-        let entities = match self
-            .state
-            .list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10)
-        {
+        let entities = match self.state.list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10) {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Failed to list users");
                 return HashSet::new();
-            }
+            },
         };
 
         entities
@@ -152,15 +142,12 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         // Actually, namespace-level entities (members, teams) are stored with the namespace
         // For this implementation, we assume entities are in vault_id = 0 per namespace
 
-        let entities = match self
-            .state
-            .list_entities(0, Some("member:"), None, MAX_BATCH_SIZE)
-        {
+        let entities = match self.state.list_entities(0, Some("member:"), None, MAX_BATCH_SIZE) {
             Ok(e) => e,
             Err(e) => {
                 warn!(namespace_id, error = %e, "Failed to list memberships");
                 return Vec::new();
-            }
+            },
         };
 
         entities
@@ -172,11 +159,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
                 let member_data: serde_json::Value = serde_json::from_slice(&entity.value).ok()?;
                 let user_id = member_data.get("user_id")?.as_i64()?;
 
-                if deleted_users.contains(&user_id) {
-                    Some((key, user_id))
-                } else {
-                    None
-                }
+                if deleted_users.contains(&user_id) { Some((key, user_id)) } else { None }
             })
             .collect()
     }
@@ -222,13 +205,10 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             transactions: vec![transaction],
         };
 
-        self.raft
-            .client_write(request)
-            .await
-            .map_err(|e| OrphanCleanupError::OrphanRaftWrite {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
+        self.raft.client_write(request).await.map_err(|e| OrphanCleanupError::OrphanRaftWrite {
+            message: format!("{:?}", e),
+            backtrace: snafu::Backtrace::generate(),
+        })?;
 
         info!(namespace_id, count, "Removed orphaned memberships");
 
@@ -275,10 +255,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
                 "Found orphaned memberships"
             );
 
-            match self
-                .remove_orphaned_memberships(ns.namespace_id, orphaned)
-                .await
-            {
+            match self.remove_orphaned_memberships(ns.namespace_id, orphaned).await {
                 Ok(count) => total_removed += count,
                 Err(e) => {
                     warn!(
@@ -286,7 +263,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
                         error = %e,
                         "Failed to remove orphaned memberships"
                     );
-                }
+                },
             }
         }
 
@@ -313,12 +290,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     #[test]
     fn test_deleted_user_detection() {

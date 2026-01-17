@@ -67,9 +67,8 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     println!("=== Example 1: Basic Verified Read ===");
 
-    let result = client
-        .verified_read(namespace_id, Some(vault_id), test_key, VerifyOpts::new())
-        .await?;
+    let result =
+        client.verified_read(namespace_id, Some(vault_id), test_key, VerifyOpts::new()).await?;
 
     match result {
         Some(verified) => {
@@ -86,16 +85,10 @@ async fn main() -> Result<()> {
             }
 
             println!("\nProof details:");
-            println!(
-                "  Leaf hash: {}",
-                hex_string(&verified.merkle_proof.leaf_hash)
-            );
+            println!("  Leaf hash: {}", hex_string(&verified.merkle_proof.leaf_hash));
             println!("  Sibling count: {}", verified.merkle_proof.siblings.len());
-            println!(
-                "  State root in header: {}",
-                hex_string(&verified.block_header.state_root)
-            );
-        }
+            println!("  State root in header: {}", hex_string(&verified.block_header.state_root));
+        },
         None => println!("Key not found"),
     }
 
@@ -117,9 +110,7 @@ async fn main() -> Result<()> {
 
     // Read at the ORIGINAL block height (before the update)
     let opts = VerifyOpts::new().at_height(write_result.block_height);
-    let historical = client
-        .verified_read(namespace_id, Some(vault_id), test_key, opts)
-        .await?;
+    let historical = client.verified_read(namespace_id, Some(vault_id), test_key, opts).await?;
 
     match historical {
         Some(verified) => {
@@ -128,10 +119,7 @@ async fn main() -> Result<()> {
                 .as_ref()
                 .map(|v| String::from_utf8_lossy(v).to_string())
                 .unwrap_or_else(|| "none".to_string());
-            println!(
-                "Historical value (at block {}): {:?}",
-                verified.block_height, value_str
-            );
+            println!("Historical value (at block {}): {:?}", verified.block_height, value_str);
 
             // Verify this historical proof
             match verified.verify() {
@@ -139,14 +127,13 @@ async fn main() -> Result<()> {
                 Ok(false) => println!("✗ Historical proof verification failed"),
                 Err(e) => println!("✗ Verification error: {}", e),
             }
-        }
+        },
         None => println!("Historical key not found at that height"),
     }
 
     // Read at the CURRENT block height (after the update)
-    let current = client
-        .verified_read(namespace_id, Some(vault_id), test_key, VerifyOpts::new())
-        .await?;
+    let current =
+        client.verified_read(namespace_id, Some(vault_id), test_key, VerifyOpts::new()).await?;
 
     if let Some(verified) = current {
         let value_str = verified
@@ -154,10 +141,7 @@ async fn main() -> Result<()> {
             .as_ref()
             .map(|v| String::from_utf8_lossy(v).to_string())
             .unwrap_or_else(|| "none".to_string());
-        println!(
-            "Current value (at block {}): {:?}",
-            verified.block_height, value_str
-        );
+        println!("Current value (at block {}): {:?}", verified.block_height, value_str);
     }
 
     // -------------------------------------------------------------------------

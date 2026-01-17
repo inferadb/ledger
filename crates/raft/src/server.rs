@@ -7,34 +7,33 @@
 //! - HealthService: Health checks
 //! - SystemDiscoveryService: Peer discovery
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
 use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
-use crate::IdempotencyCache;
-use crate::batching::BatchConfig;
-use crate::log_storage::AppliedStateAccessor;
-use crate::proto::BlockAnnouncement;
-use crate::proto::admin_service_server::AdminServiceServer;
-use crate::proto::health_service_server::HealthServiceServer;
-use crate::proto::raft_service_server::RaftServiceServer;
-use crate::proto::read_service_server::ReadServiceServer;
-use crate::proto::system_discovery_service_server::SystemDiscoveryServiceServer;
-use crate::proto::write_service_server::WriteServiceServer;
-use crate::rate_limit::NamespaceRateLimiter;
-use crate::services::{
-    AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl, ReadServiceImpl,
-    WriteServiceImpl,
+use crate::{
+    IdempotencyCache,
+    batching::BatchConfig,
+    log_storage::AppliedStateAccessor,
+    proto::{
+        BlockAnnouncement, admin_service_server::AdminServiceServer,
+        health_service_server::HealthServiceServer, raft_service_server::RaftServiceServer,
+        read_service_server::ReadServiceServer,
+        system_discovery_service_server::SystemDiscoveryServiceServer,
+        write_service_server::WriteServiceServer,
+    },
+    rate_limit::NamespaceRateLimiter,
+    services::{
+        AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl,
+        ReadServiceImpl, WriteServiceImpl,
+    },
+    types::LedgerTypeConfig,
 };
-use crate::types::LedgerTypeConfig;
-
-use inferadb_ledger_state::{BlockArchive, StateLayer};
-use inferadb_ledger_store::FileBackend;
 
 /// The main Ledger gRPC server.
 ///
@@ -118,9 +117,8 @@ impl LedgerServer {
     /// Per DESIGN.md §3.7: Mitigates noisy neighbor problems by limiting
     /// requests per namespace. Each namespace gets an independent rate limit.
     pub fn with_namespace_rate_limit(mut self, requests_per_second: u64) -> Self {
-        self.namespace_rate_limiter = Some(Arc::new(NamespaceRateLimiter::with_limit(
-            requests_per_second,
-        )));
+        self.namespace_rate_limiter =
+            Some(Arc::new(NamespaceRateLimiter::with_limit(requests_per_second)));
         self
     }
 

@@ -18,24 +18,23 @@
 
 use std::time::Duration;
 
-use tonic::transport::Channel;
-use tonic::{Request, Response, Status};
+use inferadb_ledger_types::ShardId;
+use tonic::{Request, Response, Status, transport::Channel};
 use tracing::{debug, warn};
 
-use crate::proto::read_service_client::ReadServiceClient;
-use crate::proto::write_service_client::WriteServiceClient;
-use crate::proto::{
-    BatchWriteRequest, BatchWriteResponse, BlockAnnouncement, GetBlockRangeRequest,
-    GetBlockRangeResponse, GetBlockRequest, GetBlockResponse, GetClientStateRequest,
-    GetClientStateResponse, GetTipRequest, GetTipResponse, HistoricalReadRequest,
-    HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse, ListRelationshipsRequest,
-    ListRelationshipsResponse, ListResourcesRequest, ListResourcesResponse, ReadRequest,
-    ReadResponse, VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest, WriteRequest,
-    WriteResponse,
+use crate::{
+    proto::{
+        BatchWriteRequest, BatchWriteResponse, BlockAnnouncement, GetBlockRangeRequest,
+        GetBlockRangeResponse, GetBlockRequest, GetBlockResponse, GetClientStateRequest,
+        GetClientStateResponse, GetTipRequest, GetTipResponse, HistoricalReadRequest,
+        HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
+        ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
+        ListResourcesResponse, ReadRequest, ReadResponse, VerifiedReadRequest,
+        VerifiedReadResponse, WatchBlocksRequest, WriteRequest, WriteResponse,
+        read_service_client::ReadServiceClient, write_service_client::WriteServiceClient,
+    },
+    shard_router::ShardConnection,
 };
-use crate::shard_router::ShardConnection;
-
-use inferadb_ledger_types::ShardId;
 
 /// Default timeout for forwarded requests.
 const DEFAULT_FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -112,10 +111,7 @@ impl ForwardClient {
         &mut self,
         request: HistoricalReadRequest,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
-        debug!(
-            shard_id = self.shard_id,
-            "Forwarding historical_read request"
-        );
+        debug!(shard_id = self.shard_id, "Forwarding historical_read request");
         let mut req = Request::new(request);
         req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
         self.read_client.historical_read(req).await.map_err(|e| {
@@ -158,10 +154,7 @@ impl ForwardClient {
         &mut self,
         request: GetBlockRangeRequest,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
-        debug!(
-            shard_id = self.shard_id,
-            "Forwarding get_block_range request"
-        );
+        debug!(shard_id = self.shard_id, "Forwarding get_block_range request");
         let mut req = Request::new(request);
         req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
         self.read_client.get_block_range(req).await.map_err(|e| {
@@ -189,10 +182,7 @@ impl ForwardClient {
         &mut self,
         request: GetClientStateRequest,
     ) -> Result<Response<GetClientStateResponse>, Status> {
-        debug!(
-            shard_id = self.shard_id,
-            "Forwarding get_client_state request"
-        );
+        debug!(shard_id = self.shard_id, "Forwarding get_client_state request");
         let mut req = Request::new(request);
         req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
         self.read_client.get_client_state(req).await.map_err(|e| {
@@ -206,10 +196,7 @@ impl ForwardClient {
         &mut self,
         request: ListRelationshipsRequest,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
-        debug!(
-            shard_id = self.shard_id,
-            "Forwarding list_relationships request"
-        );
+        debug!(shard_id = self.shard_id, "Forwarding list_relationships request");
         let mut req = Request::new(request);
         req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
         self.read_client.list_relationships(req).await.map_err(|e| {
@@ -223,10 +210,7 @@ impl ForwardClient {
         &mut self,
         request: ListResourcesRequest,
     ) -> Result<Response<ListResourcesResponse>, Status> {
-        debug!(
-            shard_id = self.shard_id,
-            "Forwarding list_resources request"
-        );
+        debug!(shard_id = self.shard_id, "Forwarding list_resources request");
         let mut req = Request::new(request);
         req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
         self.read_client.list_resources(req).await.map_err(|e| {

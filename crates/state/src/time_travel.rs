@@ -74,19 +74,12 @@ pub struct TimeTravelConfig {
 impl TimeTravelConfig {
     /// Create a new config with time-travel enabled for all keys.
     pub fn enabled() -> Self {
-        Self {
-            enabled: true,
-            ..Default::default()
-        }
+        Self { enabled: true, ..Default::default() }
     }
 
     /// Create a config with time-travel enabled for specific key prefixes.
     pub fn with_prefixes(prefixes: Vec<String>) -> Self {
-        Self {
-            enabled: true,
-            key_prefixes: prefixes,
-            max_history_depth: 0,
-        }
+        Self { enabled: true, key_prefixes: prefixes, max_history_depth: 0 }
     }
 
     /// Check if a key should be indexed.
@@ -149,10 +142,7 @@ pub struct TimeTravelIndex<B: StorageBackend> {
 impl<B: StorageBackend> TimeTravelIndex<B> {
     /// Create a new time-travel index manager.
     pub fn new(db: Arc<Database<B>>) -> Self {
-        Self {
-            db,
-            config_cache: RwLock::new(std::collections::HashMap::new()),
-        }
+        Self { db, config_cache: RwLock::new(std::collections::HashMap::new()) }
     }
 
     /// Configure time-travel indexing for a vault.
@@ -160,8 +150,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         let serialized = encode(&config).context(CodecSnafu)?;
 
         let mut txn = self.db.write().context(StorageSnafu)?;
-        txn.insert::<tables::TimeTravelConfig>(&vault_id, &serialized)
-            .context(StorageSnafu)?;
+        txn.insert::<tables::TimeTravelConfig>(&vault_id, &serialized).context(StorageSnafu)?;
         txn.commit().context(StorageSnafu)?;
 
         // Update cache
@@ -180,15 +169,12 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         // Load from database
         let txn = self.db.read().context(StorageSnafu)?;
 
-        match txn
-            .get::<tables::TimeTravelConfig>(&vault_id)
-            .context(StorageSnafu)?
-        {
+        match txn.get::<tables::TimeTravelConfig>(&vault_id).context(StorageSnafu)? {
             Some(data) => {
                 let config: TimeTravelConfig = decode(&data).context(CodecSnafu)?;
                 self.config_cache.write().insert(vault_id, config.clone());
                 Ok(Some(config))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -215,19 +201,14 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
             return Ok(());
         }
 
-        let entry = TimeTravelEntry {
-            height,
-            value,
-            version,
-        };
+        let entry = TimeTravelEntry { height, value, version };
 
         let serialized = encode(&entry).context(CodecSnafu)?;
 
         let index_key = make_index_key(vault_id, key, height);
 
         let mut txn = self.db.write().context(StorageSnafu)?;
-        txn.insert::<tables::TimeTravelIndex>(&index_key, &serialized)
-            .context(StorageSnafu)?;
+        txn.insert::<tables::TimeTravelIndex>(&index_key, &serialized).context(StorageSnafu)?;
         txn.commit().context(StorageSnafu)?;
 
         Ok(())
@@ -250,9 +231,8 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         let key_hash = seahash::hash(key.as_bytes());
 
         // Scan for first entry at or before requested height
-        for (k, v) in txn
-            .range::<tables::TimeTravelIndex>(Some(&start_key), None)
-            .context(StorageSnafu)?
+        for (k, v) in
+            txn.range::<tables::TimeTravelIndex>(Some(&start_key), None).context(StorageSnafu)?
         {
             // Parse key to check vault_id and key_hash match
             if let Some((v_id, k_hash, _entry_height)) = parse_index_key(&k) {
@@ -286,9 +266,8 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         let mut entries = Vec::new();
         let max_entries = limit.unwrap_or(usize::MAX);
 
-        for (k, v) in txn
-            .range::<tables::TimeTravelIndex>(Some(&start_key), None)
-            .context(StorageSnafu)?
+        for (k, v) in
+            txn.range::<tables::TimeTravelIndex>(Some(&start_key), None).context(StorageSnafu)?
         {
             if entries.len() >= max_entries {
                 break;
@@ -349,8 +328,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         let mut pruned = 0u64;
 
         for key in keys_to_delete {
-            txn.delete::<tables::TimeTravelIndex>(&key)
-                .context(StorageSnafu)?;
+            txn.delete::<tables::TimeTravelIndex>(&key).context(StorageSnafu)?;
             pruned += 1;
         }
 
@@ -370,9 +348,8 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         let mut total_bytes = 0u64;
         let mut unique_keys = std::collections::HashSet::new();
 
-        for (k, v) in txn
-            .range::<tables::TimeTravelIndex>(Some(&start), Some(&end))
-            .context(StorageSnafu)?
+        for (k, v) in
+            txn.range::<tables::TimeTravelIndex>(Some(&start), Some(&end)).context(StorageSnafu)?
         {
             if let Some((_, key_hash, _)) = parse_index_key(&k) {
                 unique_keys.insert(key_hash);
@@ -381,11 +358,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
             }
         }
 
-        Ok(TimeTravelStats {
-            entry_count,
-            unique_keys: unique_keys.len() as u64,
-            total_bytes,
-        })
+        Ok(TimeTravelStats { entry_count, unique_keys: unique_keys.len() as u64, total_bytes })
     }
 }
 
@@ -401,12 +374,7 @@ pub struct TimeTravelStats {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;
@@ -476,20 +444,12 @@ mod tests {
         let index = create_test_index();
 
         // Enable time-travel for vault
-        index
-            .configure_vault(1, TimeTravelConfig::enabled())
-            .unwrap();
+        index.configure_vault(1, TimeTravelConfig::enabled()).unwrap();
 
         // Record some values
-        index
-            .record(1, "key1", 10, Some(b"value_v1".to_vec()), 1)
-            .unwrap();
-        index
-            .record(1, "key1", 20, Some(b"value_v2".to_vec()), 2)
-            .unwrap();
-        index
-            .record(1, "key1", 30, Some(b"value_v3".to_vec()), 3)
-            .unwrap();
+        index.record(1, "key1", 10, Some(b"value_v1".to_vec()), 1).unwrap();
+        index.record(1, "key1", 20, Some(b"value_v2".to_vec()), 2).unwrap();
+        index.record(1, "key1", 30, Some(b"value_v3".to_vec()), 3).unwrap();
 
         // Get at specific heights
         let entry = index.get_at_height(1, "key1", 25).unwrap().unwrap();
@@ -508,15 +468,11 @@ mod tests {
     fn test_get_history() {
         let index = create_test_index();
 
-        index
-            .configure_vault(1, TimeTravelConfig::enabled())
-            .unwrap();
+        index.configure_vault(1, TimeTravelConfig::enabled()).unwrap();
 
         // Record multiple versions
         for i in 1..=5 {
-            index
-                .record(1, "key1", i * 10, Some(format!("v{}", i).into_bytes()), i)
-                .unwrap();
+            index.record(1, "key1", i * 10, Some(format!("v{}", i).into_bytes()), i).unwrap();
         }
 
         // Get full history
@@ -535,14 +491,10 @@ mod tests {
     fn test_tombstone() {
         let index = create_test_index();
 
-        index
-            .configure_vault(1, TimeTravelConfig::enabled())
-            .unwrap();
+        index.configure_vault(1, TimeTravelConfig::enabled()).unwrap();
 
         // Record value then delete
-        index
-            .record(1, "key1", 10, Some(b"value".to_vec()), 1)
-            .unwrap();
+        index.record(1, "key1", 10, Some(b"value".to_vec()), 1).unwrap();
         index.record(1, "key1", 20, None, 2).unwrap(); // Tombstone
 
         // Before delete
@@ -560,21 +512,14 @@ mod tests {
 
         // Only index "user:" prefix
         index
-            .configure_vault(
-                1,
-                TimeTravelConfig::with_prefixes(vec!["user:".to_string()]),
-            )
+            .configure_vault(1, TimeTravelConfig::with_prefixes(vec!["user:".to_string()]))
             .unwrap();
 
         // Record user key (should be indexed)
-        index
-            .record(1, "user:123", 10, Some(b"alice".to_vec()), 1)
-            .unwrap();
+        index.record(1, "user:123", 10, Some(b"alice".to_vec()), 1).unwrap();
 
         // Record order key (should NOT be indexed)
-        index
-            .record(1, "order:456", 10, Some(b"pizza".to_vec()), 1)
-            .unwrap();
+        index.record(1, "order:456", 10, Some(b"pizza".to_vec()), 1).unwrap();
 
         // User key should be retrievable
         assert!(index.get_at_height(1, "user:123", 10).unwrap().is_some());
@@ -587,20 +532,12 @@ mod tests {
     fn test_stats() {
         let index = create_test_index();
 
-        index
-            .configure_vault(1, TimeTravelConfig::enabled())
-            .unwrap();
+        index.configure_vault(1, TimeTravelConfig::enabled()).unwrap();
 
         // Record entries for multiple keys
-        index
-            .record(1, "key1", 10, Some(b"v1".to_vec()), 1)
-            .unwrap();
-        index
-            .record(1, "key1", 20, Some(b"v2".to_vec()), 2)
-            .unwrap();
-        index
-            .record(1, "key2", 10, Some(b"v1".to_vec()), 1)
-            .unwrap();
+        index.record(1, "key1", 10, Some(b"v1".to_vec()), 1).unwrap();
+        index.record(1, "key1", 20, Some(b"v2".to_vec()), 2).unwrap();
+        index.record(1, "key2", 10, Some(b"v1".to_vec()), 1).unwrap();
 
         let stats = index.stats(1).unwrap();
         assert_eq!(stats.entry_count, 3);
@@ -615,9 +552,7 @@ mod tests {
         // Don't configure vault - time-travel is disabled
 
         // Record should succeed but not store anything
-        index
-            .record(1, "key1", 10, Some(b"value".to_vec()), 1)
-            .unwrap();
+        index.record(1, "key1", 10, Some(b"value".to_vec()), 1).unwrap();
 
         // Nothing should be retrievable
         assert!(index.get_at_height(1, "key1", 10).unwrap().is_none());

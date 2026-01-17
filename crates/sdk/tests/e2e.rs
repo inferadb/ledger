@@ -16,20 +16,14 @@
 //! - **Streaming**: WatchBlocks continues after leader election
 //! - **Recovery**: Sequence recovery after client restart
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use inferadb_ledger_raft::LedgerTypeConfig;
-use inferadb_ledger_raft::proto::JoinClusterRequest;
-use inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient;
+use inferadb_ledger_raft::{
+    LedgerTypeConfig,
+    proto::{JoinClusterRequest, admin_service_client::AdminServiceClient},
+};
 use inferadb_ledger_sdk::{
     ClientConfig, FileSequenceStorage, LedgerClient, Operation, PersistentSequenceTracker,
     RetryPolicy,
@@ -71,12 +65,7 @@ impl TestNode {
 
     /// Get the last applied log index.
     fn last_applied(&self) -> u64 {
-        self.raft
-            .metrics()
-            .borrow()
-            .last_applied
-            .map(|id| id.index)
-            .unwrap_or(0)
+        self.raft.metrics().borrow().last_applied.map(|id| id.index).unwrap_or(0)
     }
 }
 
@@ -205,24 +194,21 @@ impl TestCluster {
 
                 match connect_result {
                     Ok(mut admin_client) => {
-                        let request = JoinClusterRequest {
-                            node_id,
-                            address: addr.to_string(),
-                        };
+                        let request = JoinClusterRequest { node_id, address: addr.to_string() };
 
                         match admin_client.join_cluster(request).await {
                             Ok(_) => {
                                 join_success = true;
                                 break;
-                            }
+                            },
                             Err(e) => {
                                 last_error = format!("join RPC failed: {}", e);
-                            }
+                            },
                         }
-                    }
+                    },
                     Err(e) => {
                         last_error = format!("connect failed: {}", e);
-                    }
+                    },
                 }
 
                 attempts += 1;
@@ -231,10 +217,7 @@ impl TestCluster {
             }
 
             if !join_success {
-                panic!(
-                    "Failed to join cluster after {} attempts: {}",
-                    max_attempts, last_error
-                );
+                panic!("Failed to join cluster after {} attempts: {}", max_attempts, last_error);
             }
 
             let new_raft = bootstrapped.raft.clone();
@@ -289,11 +272,7 @@ impl TestCluster {
             loop {
                 for node in &self.nodes {
                     if let Some(leader_id) = node.current_leader() {
-                        if self
-                            .nodes
-                            .iter()
-                            .any(|n| n.id == leader_id && n.is_leader())
-                        {
+                        if self.nodes.iter().any(|n| n.id == leader_id && n.is_leader()) {
                             return leader_id;
                         }
                     }
@@ -330,14 +309,11 @@ impl TestCluster {
                     None => {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
-                    }
+                    },
                 };
                 let leader_applied = leader.last_applied();
 
-                let all_synced = self
-                    .nodes
-                    .iter()
-                    .all(|n| n.last_applied() >= leader_applied);
+                let all_synced = self.nodes.iter().all(|n| n.last_applied() >= leader_applied);
                 if all_synced && leader_applied > 0 {
                     return true;
                 }
@@ -375,10 +351,7 @@ async fn create_sdk_client(addr: SocketAddr, client_id: &str) -> LedgerClient {
 
 /// Create a test namespace and vault, returning (namespace_id, vault_id).
 async fn setup_test_namespace_vault(client: &LedgerClient) -> (i64, i64) {
-    let ns_id = client
-        .create_namespace("test-ns")
-        .await
-        .expect("create namespace");
+    let ns_id = client.create_namespace("test-ns").await.expect("create namespace");
     let vault_info = client.create_vault(ns_id).await.expect("create vault");
     (ns_id, vault_info.vault_id)
 }
@@ -402,25 +375,17 @@ async fn test_write_read_cycle_against_real_cluster() {
 
     // Write an entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice Data".to_vec())];
-    let write_result = client
-        .write(ns_id, Some(vault_id), ops)
-        .await
-        .expect("write should succeed");
+    let write_result =
+        client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
 
     assert!(!write_result.tx_id.is_empty(), "should have tx_id");
     assert!(write_result.block_height > 0, "should have block height");
 
     // Read the entity back
-    let read_result = client
-        .read(ns_id, Some(vault_id), "user:alice")
-        .await
-        .expect("read should succeed");
+    let read_result =
+        client.read(ns_id, Some(vault_id), "user:alice").await.expect("read should succeed");
 
-    assert_eq!(
-        read_result,
-        Some(b"Alice Data".to_vec()),
-        "should read back written value"
-    );
+    assert_eq!(read_result, Some(b"Alice Data".to_vec()), "should read back written value");
 }
 
 /// Test multiple writes and reads.
@@ -441,20 +406,14 @@ async fn test_multiple_writes_reads() {
         let key = format!("item:{}", i);
         let value = format!("value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value)];
-        client
-            .write(ns_id, Some(vault_id), ops)
-            .await
-            .expect("write should succeed");
+        client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
     }
 
     // Read all entities back
     for i in 0..5 {
         let key = format!("item:{}", i);
         let expected = format!("value-{}", i).into_bytes();
-        let result = client
-            .read(ns_id, Some(vault_id), &key)
-            .await
-            .expect("read should succeed");
+        let result = client.read(ns_id, Some(vault_id), &key).await.expect("read should succeed");
         assert_eq!(result, Some(expected), "should read back value for {}", key);
     }
 }
@@ -477,10 +436,7 @@ async fn test_batch_read_against_real_cluster() {
         let key = format!("batch:{}", i);
         let value = format!("batch-value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value)];
-        client
-            .write(ns_id, Some(vault_id), ops)
-            .await
-            .expect("write should succeed");
+        client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
     }
 
     // Batch read including a missing key
@@ -490,24 +446,13 @@ async fn test_batch_read_against_real_cluster() {
         "batch:2".to_string(),
         "batch:missing".to_string(),
     ];
-    let results = client
-        .batch_read(ns_id, Some(vault_id), keys)
-        .await
-        .expect("batch read should succeed");
+    let results =
+        client.batch_read(ns_id, Some(vault_id), keys).await.expect("batch read should succeed");
 
     assert_eq!(results.len(), 4);
-    assert_eq!(
-        results[0],
-        ("batch:0".to_string(), Some(b"batch-value-0".to_vec()))
-    );
-    assert_eq!(
-        results[1],
-        ("batch:1".to_string(), Some(b"batch-value-1".to_vec()))
-    );
-    assert_eq!(
-        results[2],
-        ("batch:2".to_string(), Some(b"batch-value-2".to_vec()))
-    );
+    assert_eq!(results[0], ("batch:0".to_string(), Some(b"batch-value-0".to_vec())));
+    assert_eq!(results[1], ("batch:1".to_string(), Some(b"batch-value-1".to_vec())));
+    assert_eq!(results[2], ("batch:2".to_string(), Some(b"batch-value-2".to_vec())));
     assert_eq!(results[3], ("batch:missing".to_string(), None));
 }
 
@@ -529,14 +474,8 @@ async fn test_idempotency_survives_leader_failover() {
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
     // Perform a write
-    let ops = vec![Operation::set_entity(
-        "failover:key",
-        b"original-data".to_vec(),
-    )];
-    let first_result = client
-        .write(ns_id, Some(vault_id), ops.clone())
-        .await
-        .expect("first write");
+    let ops = vec![Operation::set_entity("failover:key", b"original-data".to_vec())];
+    let first_result = client.write(ns_id, Some(vault_id), ops.clone()).await.expect("first write");
 
     // Wait for replication
     cluster.wait_for_sync(Duration::from_secs(5)).await;
@@ -554,11 +493,7 @@ async fn test_idempotency_survives_leader_failover() {
         .await
         .expect("read from follower");
 
-    assert_eq!(
-        result,
-        Some(b"original-data".to_vec()),
-        "data should be replicated to follower"
-    );
+    assert_eq!(result, Some(b"original-data".to_vec()), "data should be replicated to follower");
 
     // Verify block height consistency across cluster
     assert!(first_result.block_height > 0);
@@ -584,45 +519,24 @@ async fn test_multiple_client_sessions_independent() {
     let (ns_id, vault_id) = setup_test_namespace_vault(&client1).await;
 
     // First session writes
-    let ops1 = vec![Operation::set_entity(
-        "session:key1",
-        b"from-session-1".to_vec(),
-    )];
-    let first_result = client1
-        .write(ns_id, Some(vault_id), ops1)
-        .await
-        .expect("first write");
+    let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec())];
+    let first_result = client1.write(ns_id, Some(vault_id), ops1).await.expect("first write");
 
     // Create second independent client session with different ID
     let client2 = create_sdk_client(leader.addr, "session-2").await;
 
     // Second session writes different data
-    let ops2 = vec![Operation::set_entity(
-        "session:key2",
-        b"from-session-2".to_vec(),
-    )];
-    let second_result = client2
-        .write(ns_id, Some(vault_id), ops2)
-        .await
-        .expect("second write");
+    let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec())];
+    let second_result = client2.write(ns_id, Some(vault_id), ops2).await.expect("second write");
 
     // Both writes should succeed with unique tx_ids
     assert!(!first_result.tx_id.is_empty());
     assert!(!second_result.tx_id.is_empty());
-    assert_ne!(
-        first_result.tx_id, second_result.tx_id,
-        "should have different tx_ids"
-    );
+    assert_ne!(first_result.tx_id, second_result.tx_id, "should have different tx_ids");
 
     // Read back both keys
-    let value1 = client2
-        .read(ns_id, Some(vault_id), "session:key1")
-        .await
-        .expect("read first");
-    let value2 = client2
-        .read(ns_id, Some(vault_id), "session:key2")
-        .await
-        .expect("read second");
+    let value1 = client2.read(ns_id, Some(vault_id), "session:key1").await.expect("read first");
+    let value2 = client2.read(ns_id, Some(vault_id), "session:key2").await.expect("read second");
 
     assert_eq!(value1, Some(b"from-session-1".to_vec()));
     assert_eq!(value2, Some(b"from-session-2".to_vec()));
@@ -652,11 +566,7 @@ async fn test_watch_blocks_stream_setup() {
     let stream_result = client.watch_blocks(ns_id, vault_id, 1).await;
 
     // Stream setup should succeed
-    assert!(
-        stream_result.is_ok(),
-        "watch_blocks should succeed: {:?}",
-        stream_result.err()
-    );
+    assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", stream_result.err());
 }
 
 // ============================================================================
@@ -688,10 +598,7 @@ async fn test_data_persistence_across_sessions() {
             let key = format!("persist:{}", i);
             let value = format!("data-{}", i).into_bytes();
             let ops = vec![Operation::set_entity(&key, value)];
-            client
-                .write(ns_id, Some(vault_id), ops)
-                .await
-                .expect("write should succeed");
+            client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
         }
     } // Client dropped, simulating shutdown
 
@@ -704,10 +611,7 @@ async fn test_data_persistence_across_sessions() {
         for i in 0..5 {
             let key = format!("persist:{}", i);
             let expected = format!("data-{}", i).into_bytes();
-            let read_result = client
-                .read(ns_id, Some(vault_id), &key)
-                .await
-                .expect("read");
+            let read_result = client.read(ns_id, Some(vault_id), &key).await.expect("read");
             assert_eq!(read_result, Some(expected), "should read {}", key);
         }
 
@@ -715,17 +619,12 @@ async fn test_data_persistence_across_sessions() {
         let key = "persist:5";
         let value = b"data-5".to_vec();
         let ops = vec![Operation::set_entity(key, value.clone())];
-        let result = client
-            .write(ns_id, Some(vault_id), ops)
-            .await
-            .expect("write from new session");
+        let result =
+            client.write(ns_id, Some(vault_id), ops).await.expect("write from new session");
         assert!(!result.tx_id.is_empty(), "should have tx_id");
 
         // Verify the new write is readable
-        let read_result = client
-            .read(ns_id, Some(vault_id), key)
-            .await
-            .expect("read new write");
+        let read_result = client.read(ns_id, Some(vault_id), key).await.expect("read new write");
         assert_eq!(read_result, Some(value));
     }
 }
@@ -735,6 +634,7 @@ async fn test_data_persistence_across_sessions() {
 #[tokio::test]
 async fn test_sequence_recovery_with_persistence() {
     use std::path::PathBuf;
+
     use tempfile::tempdir;
 
     let cluster = TestCluster::new(1).await;
@@ -789,14 +689,8 @@ async fn test_three_node_write_replication() {
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
     // Write through the leader
-    let ops = vec![Operation::set_entity(
-        "replicated:key",
-        b"replicated-data".to_vec(),
-    )];
-    client
-        .write(ns_id, Some(vault_id), ops)
-        .await
-        .expect("write should succeed");
+    let ops = vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec())];
+    client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
 
     // Wait for replication to all nodes
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
@@ -834,10 +728,7 @@ async fn test_admin_operations_real_cluster() {
     let client = create_sdk_client(leader.addr, "admin-client").await;
 
     // Create a namespace
-    let ns_id = client
-        .create_namespace("test-namespace")
-        .await
-        .expect("create namespace");
+    let ns_id = client.create_namespace("test-namespace").await.expect("create namespace");
 
     assert!(ns_id > 0, "should get valid namespace ID");
 
@@ -876,12 +767,6 @@ async fn test_health_check_real_cluster() {
     assert!(is_healthy, "cluster should be healthy");
 
     // Detailed health check
-    let health_result = client
-        .health_check_detailed()
-        .await
-        .expect("detailed health");
-    assert!(
-        health_result.is_healthy(),
-        "detailed health should report healthy"
-    );
+    let health_result = client.health_check_detailed().await.expect("detailed health");
+    assert!(health_result.is_healthy(), "detailed health should report healthy");
 }

@@ -11,14 +11,11 @@
 //! - Tiered manager that moves snapshots between tiers
 //! - Transparent loading from any tier
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
 use futures::TryStreamExt;
-use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{ObjectStore, PutPayload, path::Path as ObjectPath};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 use url::Url;
@@ -107,9 +104,7 @@ pub struct LocalBackend {
 impl LocalBackend {
     /// Create a new local storage backend.
     pub fn new(snapshot_dir: PathBuf, max_snapshots: usize) -> Self {
-        Self {
-            manager: SnapshotManager::new(snapshot_dir, max_snapshots),
-        }
+        Self { manager: SnapshotManager::new(snapshot_dir, max_snapshots) }
     }
 }
 
@@ -265,11 +260,9 @@ impl ObjectStorageBackend {
 
     /// Create S3 object store.
     fn create_s3_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
-        let bucket = url
-            .host_str()
-            .ok_or_else(|| TieredStorageError::ObjectStorage {
-                message: "S3 URL must include bucket name as host".to_string(),
-            })?;
+        let bucket = url.host_str().ok_or_else(|| TieredStorageError::ObjectStorage {
+            message: "S3 URL must include bucket name as host".to_string(),
+        })?;
 
         let prefix = url.path().trim_start_matches('/');
 
@@ -288,27 +281,21 @@ impl ObjectStorageBackend {
 
         // Support custom endpoint for MinIO/Wasabi/etc.
         if let Ok(endpoint) = std::env::var("AWS_ENDPOINT") {
-            builder = builder
-                .with_endpoint(endpoint)
-                .with_virtual_hosted_style_request(false);
+            builder = builder.with_endpoint(endpoint).with_virtual_hosted_style_request(false);
         }
 
-        let store = builder
-            .build()
-            .map_err(|e| TieredStorageError::ObjectStorage {
-                message: format!("Failed to create S3 store: {}", e),
-            })?;
+        let store = builder.build().map_err(|e| TieredStorageError::ObjectStorage {
+            message: format!("Failed to create S3 store: {}", e),
+        })?;
 
         Ok((Arc::new(store), ObjectPath::from(prefix)))
     }
 
     /// Create GCS object store.
     fn create_gcs_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
-        let bucket = url
-            .host_str()
-            .ok_or_else(|| TieredStorageError::ObjectStorage {
-                message: "GCS URL must include bucket name as host".to_string(),
-            })?;
+        let bucket = url.host_str().ok_or_else(|| TieredStorageError::ObjectStorage {
+            message: "GCS URL must include bucket name as host".to_string(),
+        })?;
 
         let prefix = url.path().trim_start_matches('/');
 
@@ -320,22 +307,18 @@ impl ObjectStorageBackend {
             builder = builder.with_service_account_path(creds_path);
         }
 
-        let store = builder
-            .build()
-            .map_err(|e| TieredStorageError::ObjectStorage {
-                message: format!("Failed to create GCS store: {}", e),
-            })?;
+        let store = builder.build().map_err(|e| TieredStorageError::ObjectStorage {
+            message: format!("Failed to create GCS store: {}", e),
+        })?;
 
         Ok((Arc::new(store), ObjectPath::from(prefix)))
     }
 
     /// Create Azure Blob object store.
     fn create_azure_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
-        let container = url
-            .host_str()
-            .ok_or_else(|| TieredStorageError::ObjectStorage {
-                message: "Azure URL must include container name as host".to_string(),
-            })?;
+        let container = url.host_str().ok_or_else(|| TieredStorageError::ObjectStorage {
+            message: "Azure URL must include container name as host".to_string(),
+        })?;
 
         let prefix = url.path().trim_start_matches('/');
 
@@ -353,11 +336,9 @@ impl ObjectStorageBackend {
             builder = builder.with_access_key(key);
         }
 
-        let store = builder
-            .build()
-            .map_err(|e| TieredStorageError::ObjectStorage {
-                message: format!("Failed to create Azure store: {}", e),
-            })?;
+        let store = builder.build().map_err(|e| TieredStorageError::ObjectStorage {
+            message: format!("Failed to create Azure store: {}", e),
+        })?;
 
         Ok((Arc::new(store), ObjectPath::from(prefix)))
     }
@@ -435,9 +416,7 @@ impl StorageBackend for ObjectStorageBackend {
             let temp_path = temp_dir.path().join("temp.snap");
             snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
             let buf = std::fs::read(&temp_path).context(IoSnafu)?;
-            self.test_storage
-                .write()
-                .insert(snapshot.shard_height(), buf);
+            self.test_storage.write().insert(snapshot.shard_height(), buf);
             return Ok(());
         }
 
@@ -451,10 +430,11 @@ impl StorageBackend for ObjectStorageBackend {
         let path = self.object_path(snapshot.shard_height());
         let payload = PutPayload::from(Bytes::from(data));
 
-        self.block_on(async { self.store.put(&path, payload).await })
-            .map_err(|e| TieredStorageError::ObjectStorage {
+        self.block_on(async { self.store.put(&path, payload).await }).map_err(|e| {
+            TieredStorageError::ObjectStorage {
                 message: format!("Failed to upload snapshot: {}", e),
-            })?;
+            }
+        })?;
 
         Ok(())
     }
@@ -463,9 +443,7 @@ impl StorageBackend for ObjectStorageBackend {
         #[cfg(test)]
         if self.is_test_backend {
             let guard = self.test_storage.read();
-            let data = guard
-                .get(&height)
-                .ok_or(TieredStorageError::SnapshotNotFound { height })?;
+            let data = guard.get(&height).ok_or(TieredStorageError::SnapshotNotFound { height })?;
 
             let temp_dir =
                 tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
@@ -476,22 +454,21 @@ impl StorageBackend for ObjectStorageBackend {
 
         let path = self.object_path(height);
 
-        let get_result = self
-            .block_on(async { self.store.get(&path).await })
-            .map_err(|e| match e {
+        let get_result =
+            self.block_on(async { self.store.get(&path).await }).map_err(|e| match e {
                 object_store::Error::NotFound { .. } => {
                     TieredStorageError::SnapshotNotFound { height }
-                }
+                },
                 _ => TieredStorageError::ObjectStorage {
                     message: format!("Failed to download snapshot: {}", e),
                 },
             })?;
 
-        let data = self
-            .block_on(async { get_result.bytes().await })
-            .map_err(|e| TieredStorageError::ObjectStorage {
+        let data = self.block_on(async { get_result.bytes().await }).map_err(|e| {
+            TieredStorageError::ObjectStorage {
                 message: format!("Failed to read snapshot bytes: {}", e),
-            })?;
+            }
+        })?;
 
         // Write to temp file and parse
         let temp_dir =
@@ -511,10 +488,11 @@ impl StorageBackend for ObjectStorageBackend {
 
         let path = self.object_path(height);
 
-        self.block_on(async { self.store.delete(&path).await })
-            .map_err(|e| TieredStorageError::ObjectStorage {
+        self.block_on(async { self.store.delete(&path).await }).map_err(|e| {
+            TieredStorageError::ObjectStorage {
                 message: format!("Failed to delete snapshot: {}", e),
-            })?;
+            }
+        })?;
 
         Ok(())
     }
@@ -528,11 +506,7 @@ impl StorageBackend for ObjectStorageBackend {
             return Ok(heights);
         }
 
-        let prefix = if self.prefix.as_ref().is_empty() {
-            None
-        } else {
-            Some(&self.prefix)
-        };
+        let prefix = if self.prefix.as_ref().is_empty() { None } else { Some(&self.prefix) };
 
         let result = self.block_on(async {
             let stream = self.store.list(prefix);
@@ -600,11 +574,7 @@ pub struct TieredConfig {
 
 impl Default for TieredConfig {
     fn default() -> Self {
-        Self {
-            hot_count: 3,
-            warm_days: 30,
-            cold_enabled: false,
-        }
+        Self { hot_count: 3, warm_days: 30, cold_enabled: false }
     }
 }
 
@@ -628,13 +598,7 @@ pub struct TieredSnapshotManager {
 impl TieredSnapshotManager {
     /// Create a new tiered manager with only hot tier.
     pub fn new_hot_only(hot: Box<dyn StorageBackend>, config: TieredConfig) -> Self {
-        Self {
-            hot,
-            warm: None,
-            cold: None,
-            config,
-            locations: RwLock::new(HashMap::new()),
-        }
+        Self { hot, warm: None, cold: None, config, locations: RwLock::new(HashMap::new()) }
     }
 
     /// Create a new tiered manager with hot and warm tiers.
@@ -643,13 +607,7 @@ impl TieredSnapshotManager {
         warm: Box<dyn StorageBackend>,
         config: TieredConfig,
     ) -> Self {
-        Self {
-            hot,
-            warm: Some(warm),
-            cold: None,
-            config,
-            locations: RwLock::new(HashMap::new()),
-        }
+        Self { hot, warm: Some(warm), cold: None, config, locations: RwLock::new(HashMap::new()) }
     }
 
     /// Store a snapshot in the hot tier.
@@ -725,22 +683,14 @@ impl TieredSnapshotManager {
         // Warm tier
         if let Some(ref warm) = self.warm {
             for height in warm.list()? {
-                locations.push(SnapshotLocation {
-                    height,
-                    tier: StorageTier::Warm,
-                    created_at: 0,
-                });
+                locations.push(SnapshotLocation { height, tier: StorageTier::Warm, created_at: 0 });
             }
         }
 
         // Cold tier
         if let Some(ref cold) = self.cold {
             for height in cold.list()? {
-                locations.push(SnapshotLocation {
-                    height,
-                    tier: StorageTier::Cold,
-                    created_at: 0,
-                });
+                locations.push(SnapshotLocation { height, tier: StorageTier::Cold, created_at: 0 });
             }
         }
 
@@ -792,11 +742,7 @@ impl TieredSnapshotManager {
     /// Returns the highest snapshot at or below the target height.
     pub fn find_snapshot_for(&self, target_height: u64) -> Result<Option<u64>> {
         let all = self.list_all()?;
-        Ok(all
-            .into_iter()
-            .filter(|l| l.height <= target_height)
-            .map(|l| l.height)
-            .max())
+        Ok(all.into_iter().filter(|l| l.height <= target_height).map(|l| l.height).max())
     }
 
     /// Get the tier where a snapshot is stored.
@@ -829,12 +775,16 @@ impl TieredSnapshotManager {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
-    use crate::bucket::NUM_BUCKETS;
-    use crate::snapshot::{SnapshotChainParams, SnapshotStateData, VaultSnapshotMeta};
-    use inferadb_ledger_types::EMPTY_HASH;
     use std::collections::HashMap as StdHashMap;
+
+    use inferadb_ledger_types::EMPTY_HASH;
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        bucket::NUM_BUCKETS,
+        snapshot::{SnapshotChainParams, SnapshotStateData, VaultSnapshotMeta},
+    };
 
     fn create_test_snapshot(height: u64) -> Snapshot {
         let vault_states = vec![VaultSnapshotMeta {
@@ -845,18 +795,10 @@ mod tests {
             key_count: 0,
         }];
 
-        let state = SnapshotStateData {
-            vault_entities: StdHashMap::new(),
-        };
+        let state = SnapshotStateData { vault_entities: StdHashMap::new() };
 
-        Snapshot::new(
-            1,
-            height,
-            vault_states,
-            state,
-            SnapshotChainParams::default(),
-        )
-        .expect("create snapshot")
+        Snapshot::new(1, height, vault_states, state, SnapshotChainParams::default())
+            .expect("create snapshot")
     }
 
     #[test]
@@ -890,10 +832,7 @@ mod tests {
         let temp = TempDir::new().expect("create temp dir");
         let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
 
-        let config = TieredConfig {
-            hot_count: 3,
-            ..Default::default()
-        };
+        let config = TieredConfig { hot_count: 3, ..Default::default() };
 
         let manager = TieredSnapshotManager::new_hot_only(hot, config);
 
@@ -927,10 +866,7 @@ mod tests {
             "snapshots".to_string(),
         ));
 
-        let config = TieredConfig {
-            hot_count: 2,
-            ..Default::default()
-        };
+        let config = TieredConfig { hot_count: 2, ..Default::default() };
 
         let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
 
@@ -977,10 +913,7 @@ mod tests {
 
         // Try to load non-existent snapshot
         let result = manager.load(999);
-        assert!(matches!(
-            result,
-            Err(TieredStorageError::SnapshotNotFound { height: 999 })
-        ));
+        assert!(matches!(result, Err(TieredStorageError::SnapshotNotFound { height: 999 })));
     }
 
     /// Test the real ObjectStorageBackend with local filesystem.
@@ -1043,10 +976,7 @@ mod tests {
         let warm: Box<dyn StorageBackend> =
             Box::new(ObjectStorageBackend::new(&url).expect("create warm backend"));
 
-        let config = TieredConfig {
-            hot_count: 2,
-            ..Default::default()
-        };
+        let config = TieredConfig { hot_count: 2, ..Default::default() };
 
         let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
 

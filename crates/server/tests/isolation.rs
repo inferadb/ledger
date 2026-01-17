@@ -13,12 +13,7 @@
 //! - Line 162: "Namespaces share physical nodes and Raft groups but maintain independent data"
 //! - Line 226: VaultId is "Sequential from `_meta:seq:vault`" - globally unique
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 mod common;
 
@@ -44,11 +39,8 @@ async fn create_namespace(
         })
         .await?;
 
-    let namespace_id = response
-        .into_inner()
-        .namespace_id
-        .map(|n| n.id)
-        .ok_or("No namespace_id in response")?;
+    let namespace_id =
+        response.into_inner().namespace_id.map(|n| n.id).ok_or("No namespace_id in response")?;
 
     Ok(namespace_id)
 }
@@ -68,11 +60,7 @@ async fn create_vault(
         })
         .await?;
 
-    let vault_id = response
-        .into_inner()
-        .vault_id
-        .map(|v| v.id)
-        .ok_or("No vault_id in response")?;
+    let vault_id = response.into_inner().vault_id.map(|v| v.id).ok_or("No vault_id in response")?;
 
     Ok(vault_id)
 }
@@ -92,9 +80,7 @@ async fn write_entity(
     let request = inferadb_ledger_raft::proto::WriteRequest {
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
-            id: client_id.to_string(),
-        }),
+        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
         sequence,
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
@@ -115,7 +101,7 @@ async fn write_entity(
         Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => Ok(s.block_height),
         Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
             Err(format!("Write error: {:?}", e).into())
-        }
+        },
         None => Err("No result in write response".into()),
     }
 }
@@ -156,66 +142,38 @@ async fn test_vault_isolation_same_namespace() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create a namespace
-    let ns_id = create_namespace(leader.addr, "isolation-test-ns")
-        .await
-        .expect("create namespace");
+    let ns_id = create_namespace(leader.addr, "isolation-test-ns").await.expect("create namespace");
 
     // Create two vaults in the same namespace
-    let vault_a = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault A");
-    let vault_b = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault B");
+    let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
+    let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Vault IDs should be different (globally unique)
     assert_ne!(vault_a, vault_b, "Vault IDs should be globally unique");
 
     // Write data to vault A
-    write_entity(
-        leader.addr,
-        ns_id,
-        vault_a,
-        "shared-key",
-        b"value-from-vault-a",
-        "client-a",
-        1,
-    )
-    .await
-    .expect("write to vault A");
+    write_entity(leader.addr, ns_id, vault_a, "shared-key", b"value-from-vault-a", "client-a", 1)
+        .await
+        .expect("write to vault A");
 
     // Write DIFFERENT data with the SAME key to vault B
-    write_entity(
-        leader.addr,
-        ns_id,
-        vault_b,
-        "shared-key",
-        b"value-from-vault-b",
-        "client-b",
-        1,
-    )
-    .await
-    .expect("write to vault B");
+    write_entity(leader.addr, ns_id, vault_b, "shared-key", b"value-from-vault-b", "client-b", 1)
+        .await
+        .expect("write to vault B");
 
     // Read from vault A - should get vault A's value
     let value_a = read_entity(leader.addr, ns_id, vault_a, "shared-key")
         .await
         .expect("read from vault A")
         .expect("should have value in vault A");
-    assert_eq!(
-        value_a, b"value-from-vault-a",
-        "Vault A should have its own value"
-    );
+    assert_eq!(value_a, b"value-from-vault-a", "Vault A should have its own value");
 
     // Read from vault B - should get vault B's value
     let value_b = read_entity(leader.addr, ns_id, vault_b, "shared-key")
         .await
         .expect("read from vault B")
         .expect("should have value in vault B");
-    assert_eq!(
-        value_b, b"value-from-vault-b",
-        "Vault B should have its own value"
-    );
+    assert_eq!(value_b, b"value-from-vault-b", "Vault B should have its own value");
 }
 
 /// Test that data in vault A is not visible when reading from vault B.
@@ -227,39 +185,23 @@ async fn test_vault_isolation_key_not_found() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and vaults
-    let ns_id = create_namespace(leader.addr, "isolation-not-found-ns")
-        .await
-        .expect("create namespace");
+    let ns_id =
+        create_namespace(leader.addr, "isolation-not-found-ns").await.expect("create namespace");
 
-    let vault_a = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault A");
-    let vault_b = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault B");
+    let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
+    let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write a unique key to vault A only
-    write_entity(
-        leader.addr,
-        ns_id,
-        vault_a,
-        "unique-to-vault-a",
-        b"secret-value",
-        "client-a",
-        1,
-    )
-    .await
-    .expect("write to vault A");
+    write_entity(leader.addr, ns_id, vault_a, "unique-to-vault-a", b"secret-value", "client-a", 1)
+        .await
+        .expect("write to vault A");
 
     // Try to read that key from vault B - should NOT be found
     let value = read_entity(leader.addr, ns_id, vault_b, "unique-to-vault-a")
         .await
         .expect("read should not error");
 
-    assert!(
-        value.is_none(),
-        "Key from vault A should NOT be visible in vault B"
-    );
+    assert!(value.is_none(), "Key from vault A should NOT be visible in vault B");
 }
 
 /// Test isolation with multiple keys across multiple vaults.
@@ -271,24 +213,17 @@ async fn test_multi_vault_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace
-    let ns_id = create_namespace(leader.addr, "multi-vault-ns")
-        .await
-        .expect("create namespace");
+    let ns_id = create_namespace(leader.addr, "multi-vault-ns").await.expect("create namespace");
 
     // Create 5 vaults
     let mut vaults = Vec::new();
     for _ in 0..5 {
-        let vault_id = create_vault(leader.addr, ns_id)
-            .await
-            .expect("create vault");
+        let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
         vaults.push(vault_id);
     }
 
     // Verify all vault IDs are unique
-    let unique_count = vaults
-        .iter()
-        .collect::<std::collections::HashSet<_>>()
-        .len();
+    let unique_count = vaults.iter().collect::<std::collections::HashSet<_>>().len();
     assert_eq!(unique_count, 5, "All vault IDs should be unique");
 
     // Write to each vault
@@ -314,12 +249,7 @@ async fn test_multi_vault_isolation() {
             .expect("should have value");
 
         let expected = format!("vault-{}-value", i);
-        assert_eq!(
-            value,
-            expected.as_bytes(),
-            "Vault {} should have its unique value",
-            i
-        );
+        assert_eq!(value, expected.as_bytes(), "Vault {} should have its unique value", i);
     }
 }
 
@@ -339,54 +269,27 @@ async fn test_namespace_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create two namespaces
-    let ns_1 = create_namespace(leader.addr, "org-alpha")
-        .await
-        .expect("create namespace 1");
-    let ns_2 = create_namespace(leader.addr, "org-beta")
-        .await
-        .expect("create namespace 2");
+    let ns_1 = create_namespace(leader.addr, "org-alpha").await.expect("create namespace 1");
+    let ns_2 = create_namespace(leader.addr, "org-beta").await.expect("create namespace 2");
 
     assert_ne!(ns_1, ns_2, "Namespace IDs should be different");
 
     // Create a vault in each namespace
-    let vault_1 = create_vault(leader.addr, ns_1)
-        .await
-        .expect("create vault in ns1");
-    let vault_2 = create_vault(leader.addr, ns_2)
-        .await
-        .expect("create vault in ns2");
+    let vault_1 = create_vault(leader.addr, ns_1).await.expect("create vault in ns1");
+    let vault_2 = create_vault(leader.addr, ns_2).await.expect("create vault in ns2");
 
     // Vault IDs are globally unique
-    assert_ne!(
-        vault_1, vault_2,
-        "Vault IDs are globally unique across namespaces"
-    );
+    assert_ne!(vault_1, vault_2, "Vault IDs are globally unique across namespaces");
 
     // Write to vault in namespace 1
-    write_entity(
-        leader.addr,
-        ns_1,
-        vault_1,
-        "org-secret",
-        b"alpha-data",
-        "alpha-client",
-        1,
-    )
-    .await
-    .expect("write to ns1 vault");
+    write_entity(leader.addr, ns_1, vault_1, "org-secret", b"alpha-data", "alpha-client", 1)
+        .await
+        .expect("write to ns1 vault");
 
     // Write to vault in namespace 2
-    write_entity(
-        leader.addr,
-        ns_2,
-        vault_2,
-        "org-secret",
-        b"beta-data",
-        "beta-client",
-        1,
-    )
-    .await
-    .expect("write to ns2 vault");
+    write_entity(leader.addr, ns_2, vault_2, "org-secret", b"beta-data", "beta-client", 1)
+        .await
+        .expect("write to ns2 vault");
 
     // Verify namespace 1's data
     let value_1 = read_entity(leader.addr, ns_1, vault_1, "org-secret")
@@ -421,49 +324,25 @@ async fn test_vault_id_is_authoritative_identifier() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and vault
-    let ns_1 = create_namespace(leader.addr, "vault-auth-ns-1")
-        .await
-        .expect("create namespace 1");
-    let vault_1 = create_vault(leader.addr, ns_1)
-        .await
-        .expect("create vault in ns1");
+    let ns_1 = create_namespace(leader.addr, "vault-auth-ns-1").await.expect("create namespace 1");
+    let vault_1 = create_vault(leader.addr, ns_1).await.expect("create vault in ns1");
 
     // Write data to vault_1
-    write_entity(
-        leader.addr,
-        ns_1,
-        vault_1,
-        "test-key",
-        b"vault1-data",
-        "client",
-        1,
-    )
-    .await
-    .expect("write to vault");
+    write_entity(leader.addr, ns_1, vault_1, "test-key", b"vault1-data", "client", 1)
+        .await
+        .expect("write to vault");
 
     // Create a second namespace with its own vault
-    let ns_2 = create_namespace(leader.addr, "vault-auth-ns-2")
-        .await
-        .expect("create namespace 2");
-    let vault_2 = create_vault(leader.addr, ns_2)
-        .await
-        .expect("create vault in ns2");
+    let ns_2 = create_namespace(leader.addr, "vault-auth-ns-2").await.expect("create namespace 2");
+    let vault_2 = create_vault(leader.addr, ns_2).await.expect("create vault in ns2");
 
     // Vault IDs are different (globally unique)
     assert_ne!(vault_1, vault_2, "Vault IDs should be globally unique");
 
     // Even with ns_2 specified, vault_2's data is independent
-    write_entity(
-        leader.addr,
-        ns_2,
-        vault_2,
-        "test-key",
-        b"vault2-data",
-        "client-2",
-        1,
-    )
-    .await
-    .expect("write to vault 2");
+    write_entity(leader.addr, ns_2, vault_2, "test-key", b"vault2-data", "client-2", 1)
+        .await
+        .expect("write to vault 2");
 
     // Key point: vault_id is the authoritative identifier
     // Reading vault_2 with correct IDs gets vault_2's data
@@ -502,16 +381,10 @@ async fn test_concurrent_vault_writes() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and vaults
-    let ns_id = create_namespace(leader.addr, "concurrent-ns")
-        .await
-        .expect("create namespace");
+    let ns_id = create_namespace(leader.addr, "concurrent-ns").await.expect("create namespace");
 
-    let vault_a = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault A");
-    let vault_b = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault B");
+    let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
+    let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     let addr = leader.addr;
 
@@ -587,15 +460,9 @@ async fn test_vault_id_global_uniqueness() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create multiple namespaces
-    let ns_1 = create_namespace(leader.addr, "uniqueness-ns-1")
-        .await
-        .expect("create ns1");
-    let ns_2 = create_namespace(leader.addr, "uniqueness-ns-2")
-        .await
-        .expect("create ns2");
-    let ns_3 = create_namespace(leader.addr, "uniqueness-ns-3")
-        .await
-        .expect("create ns3");
+    let ns_1 = create_namespace(leader.addr, "uniqueness-ns-1").await.expect("create ns1");
+    let ns_2 = create_namespace(leader.addr, "uniqueness-ns-2").await.expect("create ns2");
+    let ns_3 = create_namespace(leader.addr, "uniqueness-ns-3").await.expect("create ns3");
 
     // Collect vault IDs from all namespaces
     let mut all_vault_ids = Vec::new();
@@ -619,10 +486,7 @@ async fn test_vault_id_global_uniqueness() {
     }
 
     // Verify all IDs are unique
-    let unique_count = all_vault_ids
-        .iter()
-        .collect::<std::collections::HashSet<_>>()
-        .len();
+    let unique_count = all_vault_ids.iter().collect::<std::collections::HashSet<_>>().len();
     assert_eq!(
         unique_count,
         all_vault_ids.len(),
@@ -650,41 +514,20 @@ async fn test_isolation_across_replicas() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and vaults via leader
-    let ns_id = create_namespace(leader.addr, "replica-isolation-ns")
-        .await
-        .expect("create namespace");
+    let ns_id =
+        create_namespace(leader.addr, "replica-isolation-ns").await.expect("create namespace");
 
-    let vault_a = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault A");
-    let vault_b = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault B");
+    let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
+    let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write to each vault via leader
-    write_entity(
-        leader.addr,
-        ns_id,
-        vault_a,
-        "test-key",
-        b"value-a",
-        "client-a",
-        1,
-    )
-    .await
-    .expect("write to vault A");
+    write_entity(leader.addr, ns_id, vault_a, "test-key", b"value-a", "client-a", 1)
+        .await
+        .expect("write to vault A");
 
-    write_entity(
-        leader.addr,
-        ns_id,
-        vault_b,
-        "test-key",
-        b"value-b",
-        "client-b",
-        1,
-    )
-    .await
-    .expect("write to vault B");
+    write_entity(leader.addr, ns_id, vault_b, "test-key", b"value-b", "client-b", 1)
+        .await
+        .expect("write to vault B");
 
     // Wait for replication
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
@@ -719,17 +562,11 @@ async fn test_empty_vault_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace
-    let ns_id = create_namespace(leader.addr, "empty-vault-ns")
-        .await
-        .expect("create namespace");
+    let ns_id = create_namespace(leader.addr, "empty-vault-ns").await.expect("create namespace");
 
     // Create two vaults
-    let vault_a = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault A");
-    let vault_b = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault B");
+    let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
+    let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write to vault A only
     write_entity(leader.addr, ns_id, vault_a, "data", b"exists", "client", 1)
@@ -737,9 +574,8 @@ async fn test_empty_vault_isolation() {
         .expect("write to vault A");
 
     // Vault B should be empty (no data leakage from A)
-    let value = read_entity(leader.addr, ns_id, vault_b, "data")
-        .await
-        .expect("read from empty vault B");
+    let value =
+        read_entity(leader.addr, ns_id, vault_b, "data").await.expect("read from empty vault B");
 
     assert!(value.is_none(), "Empty vault B should have no data from A");
 }
@@ -753,41 +589,20 @@ async fn test_deletion_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create namespace and vaults
-    let ns_id = create_namespace(leader.addr, "deletion-isolation-ns")
-        .await
-        .expect("create namespace");
+    let ns_id =
+        create_namespace(leader.addr, "deletion-isolation-ns").await.expect("create namespace");
 
-    let vault_a = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault A");
-    let vault_b = create_vault(leader.addr, ns_id)
-        .await
-        .expect("create vault B");
+    let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
+    let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write same key to both vaults
-    write_entity(
-        leader.addr,
-        ns_id,
-        vault_a,
-        "to-delete",
-        b"value-a",
-        "client-a",
-        1,
-    )
-    .await
-    .expect("write to vault A");
+    write_entity(leader.addr, ns_id, vault_a, "to-delete", b"value-a", "client-a", 1)
+        .await
+        .expect("write to vault A");
 
-    write_entity(
-        leader.addr,
-        ns_id,
-        vault_b,
-        "to-delete",
-        b"value-b",
-        "client-b",
-        1,
-    )
-    .await
-    .expect("write to vault B");
+    write_entity(leader.addr, ns_id, vault_b, "to-delete", b"value-b", "client-b", 1)
+        .await
+        .expect("write to vault B");
 
     // Delete from vault A
     let mut client = create_write_client(leader.addr).await.expect("client");
@@ -795,15 +610,11 @@ async fn test_deletion_isolation() {
         .write(inferadb_ledger_raft::proto::WriteRequest {
             namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: ns_id }),
             vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_a }),
-            client_id: Some(inferadb_ledger_raft::proto::ClientId {
-                id: "client-a".to_string(),
-            }),
+            client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "client-a".to_string() }),
             sequence: 2,
             operations: vec![inferadb_ledger_raft::proto::Operation {
                 op: Some(inferadb_ledger_raft::proto::operation::Op::DeleteEntity(
-                    inferadb_ledger_raft::proto::DeleteEntity {
-                        key: "to-delete".to_string(),
-                    },
+                    inferadb_ledger_raft::proto::DeleteEntity { key: "to-delete".to_string() },
                 )),
             }],
             include_tx_proof: false,
@@ -812,9 +623,8 @@ async fn test_deletion_isolation() {
         .expect("delete from vault A");
 
     // Verify vault A key is deleted
-    let value_a = read_entity(leader.addr, ns_id, vault_a, "to-delete")
-        .await
-        .expect("read from vault A");
+    let value_a =
+        read_entity(leader.addr, ns_id, vault_a, "to-delete").await.expect("read from vault A");
     assert!(value_a.is_none(), "Key should be deleted from vault A");
 
     // Verify vault B key still exists
@@ -822,8 +632,5 @@ async fn test_deletion_isolation() {
         .await
         .expect("read from vault B")
         .expect("should still have value");
-    assert_eq!(
-        value_b, b"value-b",
-        "Deletion in vault A should not affect vault B"
-    );
+    assert_eq!(value_b, b"value-b", "Deletion in vault A should not affect vault B");
 }

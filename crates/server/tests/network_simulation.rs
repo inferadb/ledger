@@ -5,30 +5,26 @@
 //!
 //! Note: These tests use turmoil's deterministic simulation rather than real networking.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 mod turmoil_common;
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use tonic::transport::Server;
-use tonic::{Request, Response, Status};
-use turmoil::Builder;
-
-use inferadb_ledger_raft::proto::raft_service_server::{RaftService, RaftServiceServer};
 use inferadb_ledger_raft::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
     RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse,
+    raft_service_server::{RaftService, RaftServiceServer},
 };
-
+use tonic::{Request, Response, Status, transport::Server};
+use turmoil::Builder;
 use turmoil_common::incoming_stream;
 
 /// Simple counter for tracking RPC calls
@@ -39,10 +35,7 @@ struct RpcCounter {
 
 impl RpcCounter {
     fn new() -> Self {
-        Self {
-            votes_received: AtomicU64::new(0),
-            append_entries_received: AtomicU64::new(0),
-        }
+        Self { votes_received: AtomicU64::new(0), append_entries_received: AtomicU64::new(0) }
     }
 }
 
@@ -60,25 +53,15 @@ impl RaftService for MinimalRaftService {
         _request: Request<RaftVoteRequest>,
     ) -> Result<Response<RaftVoteResponse>, Status> {
         self.counter.votes_received.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(RaftVoteResponse {
-            vote: None,
-            vote_granted: false,
-            last_log_id: None,
-        }))
+        Ok(Response::new(RaftVoteResponse { vote: None, vote_granted: false, last_log_id: None }))
     }
 
     async fn append_entries(
         &self,
         _request: Request<RaftAppendEntriesRequest>,
     ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-        self.counter
-            .append_entries_received
-            .fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(RaftAppendEntriesResponse {
-            success: true,
-            conflict: false,
-            vote: None,
-        }))
+        self.counter.append_entries_received.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(RaftAppendEntriesResponse { success: true, conflict: false, vote: None }))
     }
 
     async fn install_snapshot(
@@ -169,24 +152,11 @@ fn test_network_partition_blocks_communication() {
             let mut client3 = create_raft_client("node3").await.expect("connect to node3");
 
             // Send vote requests to all nodes
-            let vote_req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
+            let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
 
-            client1
-                .vote(vote_req)
-                .await
-                .expect("vote to node1 should succeed");
-            client2
-                .vote(vote_req)
-                .await
-                .expect("vote to node2 should succeed");
-            client3
-                .vote(vote_req)
-                .await
-                .expect("vote to node3 should succeed");
+            client1.vote(vote_req).await.expect("vote to node1 should succeed");
+            client2.vote(vote_req).await.expect("vote to node2 should succeed");
+            client3.vote(vote_req).await.expect("vote to node3 should succeed");
         }
 
         // Phase 2: Partition node3 from nodes 1 and 2, and from test client
@@ -204,40 +174,24 @@ fn test_network_partition_blocks_communication() {
             let result = create_raft_client("node3").await;
             match result {
                 Ok(mut client) => {
-                    let vote_req = RaftVoteRequest {
-                        vote: None,
-                        last_log_id: None,
-                        shard_id: None,
-                    };
+                    let vote_req =
+                        RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
                     let vote_result = client.vote(vote_req).await;
                     // The connection or RPC should fail due to partition
-                    assert!(
-                        vote_result.is_err(),
-                        "vote to partitioned node3 should fail"
-                    );
-                }
+                    assert!(vote_result.is_err(), "vote to partitioned node3 should fail");
+                },
                 Err(_) => {
                     // Connection failed - expected behavior during partition
-                }
+                },
             }
 
             // Communication to nodes 1 and 2 should still work
             let mut client1 = create_raft_client("node1").await.expect("connect to node1");
             let mut client2 = create_raft_client("node2").await.expect("connect to node2");
 
-            let vote_req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
-            client1
-                .vote(vote_req)
-                .await
-                .expect("vote to node1 should succeed during partition");
-            client2
-                .vote(vote_req)
-                .await
-                .expect("vote to node2 should succeed during partition");
+            let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
+            client1.vote(vote_req).await.expect("vote to node1 should succeed during partition");
+            client2.vote(vote_req).await.expect("vote to node2 should succeed during partition");
         }
 
         // Phase 3: Heal partition
@@ -249,18 +203,10 @@ fn test_network_partition_blocks_communication() {
         {
             tokio::time::sleep(Duration::from_millis(50)).await;
 
-            let mut client3 = create_raft_client("node3")
-                .await
-                .expect("connect to node3 after heal");
-            let vote_req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
-            client3
-                .vote(vote_req)
-                .await
-                .expect("vote to node3 should succeed after heal");
+            let mut client3 =
+                create_raft_client("node3").await.expect("connect to node3 after heal");
+            let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
+            client3.vote(vote_req).await.expect("vote to node3 should succeed after heal");
         }
 
         Ok(())
@@ -390,24 +336,15 @@ fn test_majority_partition_continues_operating() {
                         shard_id: None,
                     };
                     client.append_entries(req).await.is_ok()
-                }
+                },
                 Err(_) => false,
             }
         }
 
         // Before partition: all nodes should receive append_entries
-        assert!(
-            send_append_entries("node1").await,
-            "node1 should receive AE"
-        );
-        assert!(
-            send_append_entries("node2").await,
-            "node2 should receive AE"
-        );
-        assert!(
-            send_append_entries("node3").await,
-            "node3 should receive AE"
-        );
+        assert!(send_append_entries("node1").await, "node1 should receive AE");
+        assert!(send_append_entries("node2").await, "node2 should receive AE");
+        assert!(send_append_entries("node3").await, "node3 should receive AE");
 
         // Partition node3 (minority)
         turmoil::partition("node3", "node1");
@@ -418,14 +355,8 @@ fn test_majority_partition_continues_operating() {
         // Majority partition (nodes 1 and 2) should still work
         // Send multiple AE to majority to create a count difference
         for _ in 0..3 {
-            assert!(
-                send_append_entries("node1").await,
-                "node1 should receive AE during partition"
-            );
-            assert!(
-                send_append_entries("node2").await,
-                "node2 should receive AE during partition"
-            );
+            assert!(send_append_entries("node1").await, "node1 should receive AE during partition");
+            assert!(send_append_entries("node2").await, "node2 should receive AE during partition");
         }
 
         // Minority partition (node3) should not receive append_entries
@@ -441,10 +372,7 @@ fn test_majority_partition_continues_operating() {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // After healing, node3 should be reachable again
-        assert!(
-            send_append_entries("node3").await,
-            "node3 should receive AE after heal"
-        );
+        assert!(send_append_entries("node3").await, "node3 should receive AE after heal");
 
         Ok(())
     });
@@ -500,11 +428,7 @@ fn test_message_hold_and_release() {
         // First, verify connection works
         {
             let mut client = create_raft_client("node1").await.expect("connect");
-            let vote_req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
+            let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
             let resp = client.vote(vote_req).await;
             assert!(resp.is_ok(), "initial request should succeed");
         }
@@ -516,22 +440,16 @@ fn test_message_hold_and_release() {
         let partition_result: Result<(), ()> = async {
             match create_raft_client("node1").await {
                 Ok(mut client) => {
-                    let vote_req = RaftVoteRequest {
-                        vote: None,
-                        last_log_id: None,
-                        shard_id: None,
-                    };
+                    let vote_req =
+                        RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
                     client.vote(vote_req).await.map(|_| ()).map_err(|_| ())
-                }
+                },
                 Err(_) => Err(()),
             }
         }
         .await;
         // Partition should cause failure
-        assert!(
-            partition_result.is_err(),
-            "request during partition should fail"
-        );
+        assert!(partition_result.is_err(), "request during partition should fail");
 
         // Repair the network
         turmoil::repair("test", "node1");
@@ -540,11 +458,7 @@ fn test_message_hold_and_release() {
         // Requests should succeed after repair
         {
             let mut client = create_raft_client("node1").await.expect("reconnect");
-            let vote_req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
+            let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
             let resp = client.vote(vote_req).await;
             assert!(resp.is_ok(), "request after repair should succeed");
         }
@@ -640,13 +554,10 @@ fn test_intermittent_connectivity() {
             let result: Result<(), ()> = async {
                 match create_raft_client("node1").await {
                     Ok(mut client) => {
-                        let vote_req = RaftVoteRequest {
-                            vote: None,
-                            last_log_id: None,
-                            shard_id: None,
-                        };
+                        let vote_req =
+                            RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
                         client.vote(vote_req).await.map(|_| ()).map_err(|_| ())
-                    }
+                    },
                     Err(_) => Err(()),
                 }
             }
@@ -675,13 +586,10 @@ fn test_intermittent_connectivity() {
         let final_result: Result<(), ()> = async {
             match create_raft_client("node1").await {
                 Ok(mut client) => {
-                    let vote_req = RaftVoteRequest {
-                        vote: None,
-                        last_log_id: None,
-                        shard_id: None,
-                    };
+                    let vote_req =
+                        RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
                     client.vote(vote_req).await.map(|_| ()).map_err(|_| ())
-                }
+                },
                 Err(_) => Err(()),
             }
         }
@@ -706,10 +614,7 @@ fn test_intermittent_connectivity() {
 
     // Verify server received some requests
     let received = final_counter.load(Ordering::SeqCst);
-    assert!(
-        received >= 1,
-        "server should have received at least 1 request"
-    );
+    assert!(received >= 1, "server should have received at least 1 request");
 }
 
 /// Test asymmetric network partition.
@@ -750,11 +655,7 @@ fn test_asymmetric_partition() {
             let mut c1 = create_raft_client("node1").await.expect("connect node1");
             let mut c2 = create_raft_client("node2").await.expect("connect node2");
 
-            let vote_req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
+            let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
 
             c1.vote(vote_req).await.expect("vote to node1");
             c2.vote(vote_req).await.expect("vote to node2");
@@ -769,47 +670,26 @@ fn test_asymmetric_partition() {
         let n1_result = create_raft_client("node1").await;
         match n1_result {
             Ok(mut client) => {
-                let vote_req = RaftVoteRequest {
-                    vote: None,
-                    last_log_id: None,
-                    shard_id: None,
-                };
-                assert!(
-                    client.vote(vote_req).await.is_err(),
-                    "node1 should be unreachable"
-                );
-            }
+                let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
+                assert!(client.vote(vote_req).await.is_err(), "node1 should be unreachable");
+            },
             Err(_) => {
                 // Connection failed - expected
-            }
+            },
         }
 
         // node2 should still be reachable
         let mut c2 = create_raft_client("node2").await.expect("connect node2");
-        let vote_req = RaftVoteRequest {
-            vote: None,
-            last_log_id: None,
-            shard_id: None,
-        };
-        c2.vote(vote_req)
-            .await
-            .expect("node2 should still be reachable");
+        let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
+        c2.vote(vote_req).await.expect("node2 should still be reachable");
 
         // Repair and verify node1 is reachable again
         turmoil::repair("test", "node1");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let mut c1 = create_raft_client("node1")
-            .await
-            .expect("reconnect node1 after repair");
-        let vote_req = RaftVoteRequest {
-            vote: None,
-            last_log_id: None,
-            shard_id: None,
-        };
-        c1.vote(vote_req)
-            .await
-            .expect("node1 should be reachable after repair");
+        let mut c1 = create_raft_client("node1").await.expect("reconnect node1 after repair");
+        let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
+        c1.vote(vote_req).await.expect("node1 should be reachable after repair");
 
         Ok(())
     });
@@ -842,11 +722,7 @@ fn test_connection_timeout_handling() {
         // Verify node is reachable first
         {
             let mut client = create_raft_client("node1").await.expect("connect");
-            let vote_req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
+            let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
             client.vote(vote_req).await.expect("initial vote");
         }
 
@@ -859,17 +735,11 @@ fn test_connection_timeout_handling() {
             let client_result = create_raft_client("node1").await;
             match client_result {
                 Ok(mut client) => {
-                    let vote_req = RaftVoteRequest {
-                        vote: None,
-                        last_log_id: None,
-                        shard_id: None,
-                    };
+                    let vote_req =
+                        RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
                     client.vote(vote_req).await
-                }
-                Err(e) => Err(tonic::Status::unavailable(format!(
-                    "Connection failed: {}",
-                    e
-                ))),
+                },
+                Err(e) => Err(tonic::Status::unavailable(format!("Connection failed: {}", e))),
             }
         })
         .await;
@@ -880,10 +750,10 @@ fn test_connection_timeout_handling() {
             Ok(Ok(_)) => panic!("request should not succeed during partition"),
             Ok(Err(_)) => {
                 // Operation failed with error - expected
-            }
+            },
             Err(_) => {
                 // Timeout occurred - also acceptable
-            }
+            },
         }
 
         // Repair and verify recovery
@@ -894,17 +764,11 @@ fn test_connection_timeout_handling() {
             tokio::time::timeout(Duration::from_millis(500), async {
                 match create_raft_client("node1").await {
                     Ok(mut client) => {
-                        let vote_req = RaftVoteRequest {
-                            vote: None,
-                            last_log_id: None,
-                            shard_id: None,
-                        };
+                        let vote_req =
+                            RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
                         client.vote(vote_req).await
-                    }
-                    Err(e) => Err(tonic::Status::unavailable(format!(
-                        "Connection failed: {}",
-                        e
-                    ))),
+                    },
+                    Err(e) => Err(tonic::Status::unavailable(format!("Connection failed: {}", e))),
                 }
             })
             .await;

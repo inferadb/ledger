@@ -18,25 +18,25 @@
 //!       +-- AdminService (system)  --+
 //! ```
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
-use crate::IdempotencyCache;
-use crate::multi_raft::MultiRaftManager;
-use crate::proto::admin_service_server::AdminServiceServer;
-use crate::proto::health_service_server::HealthServiceServer;
-use crate::proto::raft_service_server::RaftServiceServer;
-use crate::proto::read_service_server::ReadServiceServer;
-use crate::proto::system_discovery_service_server::SystemDiscoveryServiceServer;
-use crate::proto::write_service_server::WriteServiceServer;
-use crate::rate_limit::NamespaceRateLimiter;
-use crate::services::{
-    AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, MultiShardRaftService,
-    MultiShardReadService, MultiShardResolver, MultiShardWriteService,
+use crate::{
+    IdempotencyCache,
+    multi_raft::MultiRaftManager,
+    proto::{
+        admin_service_server::AdminServiceServer, health_service_server::HealthServiceServer,
+        raft_service_server::RaftServiceServer, read_service_server::ReadServiceServer,
+        system_discovery_service_server::SystemDiscoveryServiceServer,
+        write_service_server::WriteServiceServer,
+    },
+    rate_limit::NamespaceRateLimiter,
+    services::{
+        AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, MultiShardRaftService,
+        MultiShardReadService, MultiShardResolver, MultiShardWriteService,
+    },
 };
 
 /// Multi-shard Ledger gRPC server.
@@ -82,9 +82,8 @@ impl MultiShardLedgerServer {
 
     /// Configure per-namespace rate limiting.
     pub fn with_namespace_rate_limit(mut self, requests_per_second: u64) -> Self {
-        self.namespace_rate_limiter = Some(Arc::new(NamespaceRateLimiter::with_limit(
-            requests_per_second,
-        )));
+        self.namespace_rate_limiter =
+            Some(Arc::new(NamespaceRateLimiter::with_limit(requests_per_second)));
         self
     }
 
@@ -129,10 +128,8 @@ impl MultiShardLedgerServer {
         // Admin, Health, and Discovery services use the system shard
         // These handle global operations like namespace management
         let system_shard = self.manager.system_shard().map_err(|e| {
-            Box::new(std::io::Error::other(format!(
-                "System shard not available: {}",
-                e
-            ))) as Box<dyn std::error::Error>
+            Box::new(std::io::Error::other(format!("System shard not available: {}", e)))
+                as Box<dyn std::error::Error>
         })?;
 
         let admin_service = AdminServiceImpl::with_block_archive(

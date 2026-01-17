@@ -204,20 +204,12 @@ impl DatabaseHeader {
 
     /// Get a reference to the primary (active) commit slot.
     pub fn primary_slot(&self) -> &CommitSlot {
-        if self.primary_slot_index() == 0 {
-            &self.slot0
-        } else {
-            &self.slot1
-        }
+        if self.primary_slot_index() == 0 { &self.slot0 } else { &self.slot1 }
     }
 
     /// Get a mutable reference to the secondary (inactive) commit slot.
     pub fn secondary_slot_mut(&mut self) -> &mut CommitSlot {
-        if self.secondary_slot_index() == 0 {
-            &mut self.slot0
-        } else {
-            &mut self.slot1
-        }
+        if self.secondary_slot_index() == 0 { &mut self.slot0 } else { &mut self.slot1 }
     }
 
     /// Get a reference to a slot by index.
@@ -270,9 +262,7 @@ impl DatabaseHeader {
         use crate::error::Error;
 
         if buf.len() < Self::SIZE {
-            return Err(Error::Corrupted {
-                reason: "Header too short".to_string(),
-            });
+            return Err(Error::Corrupted { reason: "Header too short".to_string() });
         }
 
         let magic: [u8; 8] = buf[0..8].try_into().unwrap();
@@ -293,25 +283,13 @@ impl DatabaseHeader {
 
         // Parse slots
         let slot0 = CommitSlot::from_bytes(&buf[16..16 + CommitSlot::SIZE]).ok_or_else(|| {
-            Error::Corrupted {
-                reason: "Failed to parse commit slot 0".to_string(),
-            }
+            Error::Corrupted { reason: "Failed to parse commit slot 0".to_string() }
         })?;
         let slot1 = CommitSlot::from_bytes(&buf[80..80 + CommitSlot::SIZE]).ok_or_else(|| {
-            Error::Corrupted {
-                reason: "Failed to parse commit slot 1".to_string(),
-            }
+            Error::Corrupted { reason: "Failed to parse commit slot 1".to_string() }
         })?;
 
-        Ok(Self {
-            magic,
-            version,
-            page_size_power,
-            reserved,
-            god_byte,
-            slot0,
-            slot1,
-        })
+        Ok(Self { magic, version, page_size_power, reserved, god_byte, slot0, slot1 })
     }
 
     /// Validate the header and determine which slot to use.
@@ -336,9 +314,7 @@ impl DatabaseHeader {
         }
 
         // Both slots are corrupt - unrecoverable
-        Err(Error::Corrupted {
-            reason: "Both commit slots have invalid checksums".to_string(),
-        })
+        Err(Error::Corrupted { reason: "Both commit slots have invalid checksums".to_string() })
     }
 
     /// Get the page size in bytes.

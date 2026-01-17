@@ -31,21 +31,28 @@
 //! discovery.refresh_peers().await?;
 //! ```
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
-
-use parking_lot::RwLock;
-use tokio::sync::Notify;
-use tokio::time::{Duration, interval};
-use tracing::{debug, info, warn};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::SystemTime,
+};
 
 use inferadb_ledger_raft::proto;
+use parking_lot::RwLock;
+use tokio::{
+    sync::Notify,
+    time::{Duration, interval},
+};
+use tracing::{debug, info, warn};
 
-use crate::config::DiscoveryConfig;
-use crate::connection::ConnectionPool;
-use crate::error::{Result, RpcSnafu};
-use crate::retry::with_retry;
+use crate::{
+    config::DiscoveryConfig,
+    connection::ConnectionPool,
+    error::{Result, RpcSnafu},
+    retry::with_retry,
+};
 
 /// Information about a discovered peer in the cluster.
 ///
@@ -79,12 +86,7 @@ impl PeerInfo {
             Some(SystemTime::UNIX_EPOCH + Duration::new(secs, nanos))
         });
 
-        Self {
-            node_id,
-            addresses: proto.addresses,
-            grpc_port: proto.grpc_port,
-            last_seen,
-        }
+        Self { node_id, addresses: proto.addresses, grpc_port: proto.grpc_port, last_seen }
     }
 
     /// Generates endpoint URLs from this peer's addresses and port.
@@ -92,10 +94,7 @@ impl PeerInfo {
     /// Returns URLs in the format `http://{address}:{port}`.
     #[must_use]
     pub fn endpoint_urls(&self) -> Vec<String> {
-        self.addresses
-            .iter()
-            .map(|addr| format!("http://{}:{}", addr, self.grpc_port))
-            .collect()
+        self.addresses.iter().map(|addr| format!("http://{}:{}", addr, self.grpc_port)).collect()
     }
 }
 
@@ -113,8 +112,8 @@ pub struct DiscoveryResult {
 ///
 /// The `DiscoveryService` can operate in two modes:
 /// - **Manual refresh**: Call [`refresh_peers()`](Self::refresh_peers) to update endpoints
-/// - **Background refresh**: Call [`start_background_refresh()`](Self::start_background_refresh)
-///   to periodically update endpoints
+/// - **Background refresh**: Call [`start_background_refresh()`](Self::start_background_refresh) to
+///   periodically update endpoints
 ///
 /// # Thread Safety
 ///
@@ -211,20 +210,13 @@ impl DiscoveryService {
 
             let request = proto::GetPeersRequest { max_peers };
             let response = client.get_peers(request).await.map_err(|status| {
-                RpcSnafu {
-                    code: status.code(),
-                    message: status.message().to_string(),
-                }
-                .build()
+                RpcSnafu { code: status.code(), message: status.message().to_string() }.build()
             })?;
 
             let inner = response.into_inner();
             let peers = inner.peers.into_iter().map(PeerInfo::from_proto).collect();
 
-            Ok(DiscoveryResult {
-                peers,
-                system_version: inner.system_version,
-            })
+            Ok(DiscoveryResult { peers, system_version: inner.system_version })
         })
         .await?;
 
@@ -260,11 +252,8 @@ impl DiscoveryService {
         }
 
         // Collect all endpoint URLs from discovered peers
-        let endpoints: Vec<String> = result
-            .peers
-            .iter()
-            .flat_map(|peer| peer.endpoint_urls())
-            .collect();
+        let endpoints: Vec<String> =
+            result.peers.iter().flat_map(|peer| peer.endpoint_urls()).collect();
 
         if endpoints.is_empty() {
             warn!("Discovered peers have no valid addresses, keeping existing endpoints");
@@ -292,7 +281,8 @@ impl DiscoveryService {
     /// This method is idempotent; calling it multiple times has no effect
     /// if the task is already running.
     ///
-    /// To stop the background task, call [`stop_background_refresh()`](Self::stop_background_refresh).
+    /// To stop the background task, call
+    /// [`stop_background_refresh()`](Self::stop_background_refresh).
     pub fn start_background_refresh(&self) {
         if !self.config.is_enabled() {
             debug!("Discovery is disabled, not starting background refresh");
@@ -308,10 +298,7 @@ impl DiscoveryService {
         let refresh_interval = self.config.refresh_interval();
 
         tokio::spawn(async move {
-            info!(
-                "Starting discovery background refresh (interval: {:?})",
-                refresh_interval
-            );
+            info!("Starting discovery background refresh (interval: {:?})", refresh_interval);
 
             let mut ticker = interval(refresh_interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -386,16 +373,12 @@ impl DiscoveryService {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::config::ClientConfig;
-    use std::time::Duration;
 
     fn test_config() -> ClientConfig {
         ClientConfig::builder()
@@ -413,15 +396,10 @@ mod tests {
     #[test]
     fn peer_info_from_proto() {
         let proto_peer = proto::PeerInfo {
-            node_id: Some(proto::NodeId {
-                id: "node-1".to_string(),
-            }),
+            node_id: Some(proto::NodeId { id: "node-1".to_string() }),
             addresses: vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()],
             grpc_port: 5000,
-            last_seen: Some(prost_types::Timestamp {
-                seconds: 1000,
-                nanos: 500,
-            }),
+            last_seen: Some(prost_types::Timestamp { seconds: 1000, nanos: 500 }),
         };
 
         let peer = PeerInfo::from_proto(proto_peer);
@@ -611,15 +589,10 @@ mod tests {
         let service = DiscoveryService::new(pool.clone(), config);
 
         // Update endpoints via discovery service
-        service
-            .pool()
-            .update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
+        service.pool().update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
 
         // Original pool should see the update
-        assert_eq!(
-            pool.active_endpoints(),
-            vec!["http://10.0.0.1:5000".to_string()]
-        );
+        assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
     }
 
     #[test]

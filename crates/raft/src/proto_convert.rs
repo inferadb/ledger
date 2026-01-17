@@ -21,10 +21,10 @@
 //! let domain_vote: Vote<LedgerNodeId> = proto_vote.into();
 //! ```
 
-use crate::proto;
-use crate::types::LedgerNodeId;
 use inferadb_ledger_types::merkle::MerkleProof as InternalMerkleProof;
 use openraft::Vote;
+
+use crate::{proto, types::LedgerNodeId};
 
 // =============================================================================
 // Vote conversions (openraft::Vote <-> proto::RaftVote)
@@ -72,34 +72,21 @@ impl From<&inferadb_ledger_types::Operation> for proto::Operation {
         use proto::operation::Op;
 
         match op {
-            LedgerOp::CreateRelationship {
-                resource,
-                relation,
-                subject,
-            } => proto::Operation {
+            LedgerOp::CreateRelationship { resource, relation, subject } => proto::Operation {
                 op: Some(Op::CreateRelationship(proto::CreateRelationship {
                     resource: resource.clone(),
                     relation: relation.clone(),
                     subject: subject.clone(),
                 })),
             },
-            LedgerOp::DeleteRelationship {
-                resource,
-                relation,
-                subject,
-            } => proto::Operation {
+            LedgerOp::DeleteRelationship { resource, relation, subject } => proto::Operation {
                 op: Some(Op::DeleteRelationship(proto::DeleteRelationship {
                     resource: resource.clone(),
                     relation: relation.clone(),
                     subject: subject.clone(),
                 })),
             },
-            LedgerOp::SetEntity {
-                key,
-                value,
-                condition,
-                expires_at,
-            } => {
+            LedgerOp::SetEntity { key, value, condition, expires_at } => {
                 let condition_proto = condition.as_ref().map(|c| c.into());
 
                 proto::Operation {
@@ -110,7 +97,7 @@ impl From<&inferadb_ledger_types::Operation> for proto::Operation {
                         expires_at: *expires_at,
                     })),
                 }
-            }
+            },
             LedgerOp::DeleteEntity { key } => proto::Operation {
                 op: Some(Op::DeleteEntity(proto::DeleteEntity { key: key.clone() })),
             },
@@ -143,16 +130,14 @@ impl From<&inferadb_ledger_types::SetCondition> for proto::SetCondition {
             inferadb_ledger_types::SetCondition::MustExist => {
                 // Proto uses must_exists field for this
                 Condition::MustExists(true)
-            }
+            },
             inferadb_ledger_types::SetCondition::VersionEquals(v) => Condition::Version(*v),
             inferadb_ledger_types::SetCondition::ValueEquals(bytes) => {
                 Condition::ValueEquals(bytes.clone())
-            }
+            },
         };
 
-        proto::SetCondition {
-            condition: Some(condition),
-        }
+        proto::SetCondition { condition: Some(condition) }
     }
 }
 
@@ -188,9 +173,7 @@ impl From<&InternalMerkleProof> for proto::MerkleProof {
             };
 
             siblings.push(proto::MerkleSibling {
-                hash: Some(proto::Hash {
-                    value: hash.to_vec(),
-                }),
+                hash: Some(proto::Hash { value: hash.to_vec() }),
                 direction: direction.into(),
             });
 
@@ -199,9 +182,7 @@ impl From<&InternalMerkleProof> for proto::MerkleProof {
         }
 
         proto::MerkleProof {
-            leaf_hash: Some(proto::Hash {
-                value: internal.leaf_hash.to_vec(),
-            }),
+            leaf_hash: Some(proto::Hash { value: internal.leaf_hash.to_vec() }),
             siblings,
         }
     }
@@ -233,9 +214,7 @@ pub fn vault_entry_to_proto_block(
         .iter()
         .map(|tx| proto::Transaction {
             id: Some(proto::TxId { id: tx.id.to_vec() }),
-            client_id: Some(proto::ClientId {
-                id: tx.client_id.clone(),
-            }),
+            client_id: Some(proto::ClientId { id: tx.client_id.clone() }),
             sequence: tx.sequence,
             operations: tx.operations.iter().map(|op| op.into()).collect(),
             timestamp: Some(Timestamp {
@@ -249,34 +228,21 @@ pub fn vault_entry_to_proto_block(
     // Build block header
     let header = proto::BlockHeader {
         height: entry.vault_height,
-        namespace_id: Some(proto::NamespaceId {
-            id: entry.namespace_id,
-        }),
+        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id }),
         vault_id: Some(proto::VaultId { id: entry.vault_id }),
-        previous_hash: Some(proto::Hash {
-            value: entry.previous_vault_hash.to_vec(),
-        }),
-        tx_merkle_root: Some(proto::Hash {
-            value: entry.tx_merkle_root.to_vec(),
-        }),
-        state_root: Some(proto::Hash {
-            value: entry.state_root.to_vec(),
-        }),
+        previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
+        tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
+        state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),
         timestamp: Some(Timestamp {
             seconds: shard_block.timestamp.timestamp(),
             nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
         }),
-        leader_id: Some(proto::NodeId {
-            id: shard_block.leader_id.clone(),
-        }),
+        leader_id: Some(proto::NodeId { id: shard_block.leader_id.clone() }),
         term: shard_block.term,
         committed_index: shard_block.committed_index,
     };
 
-    proto::Block {
-        header: Some(header),
-        transactions,
-    }
+    proto::Block { header: Some(header), transactions }
 }
 
 // =============================================================================
@@ -285,15 +251,11 @@ pub fn vault_entry_to_proto_block(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::disallowed_methods
-    )]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
+
+    use inferadb_ledger_types::hash::Hash;
 
     use super::*;
-    use inferadb_ledger_types::hash::Hash;
 
     // -------------------------------------------------------------------------
     // Vote conversion tests
@@ -321,11 +283,7 @@ mod tests {
 
     #[test]
     fn test_proto_to_vote_uncommitted() {
-        let proto = proto::RaftVote {
-            term: 7,
-            node_id: 123,
-            committed: false,
-        };
+        let proto = proto::RaftVote { term: 7, node_id: 123, committed: false };
         let vote: Vote<LedgerNodeId> = proto.into();
 
         assert_eq!(vote.leader_id.term, 7);
@@ -335,11 +293,7 @@ mod tests {
 
     #[test]
     fn test_proto_to_vote_committed() {
-        let proto = proto::RaftVote {
-            term: 15,
-            node_id: 456,
-            committed: true,
-        };
+        let proto = proto::RaftVote { term: 15, node_id: 456, committed: true };
         let vote: Vote<LedgerNodeId> = proto.into();
 
         assert_eq!(vote.leader_id.term, 15);
@@ -363,14 +317,8 @@ mod tests {
         let proto_committed: proto::RaftVote = (&original_committed).into();
         let recovered_committed: Vote<LedgerNodeId> = proto_committed.into();
 
-        assert_eq!(
-            original_committed.leader_id.term,
-            recovered_committed.leader_id.term
-        );
-        assert_eq!(
-            original_committed.leader_id.node_id,
-            recovered_committed.leader_id.node_id
-        );
+        assert_eq!(original_committed.leader_id.term, recovered_committed.leader_id.term);
+        assert_eq!(original_committed.leader_id.node_id, recovered_committed.leader_id.node_id);
         assert_eq!(original_committed.committed, recovered_committed.committed);
     }
 
@@ -383,10 +331,7 @@ mod tests {
         let condition = inferadb_ledger_types::SetCondition::MustNotExist;
         let proto: proto::SetCondition = (&condition).into();
 
-        assert!(matches!(
-            proto.condition,
-            Some(proto::set_condition::Condition::NotExists(true))
-        ));
+        assert!(matches!(proto.condition, Some(proto::set_condition::Condition::NotExists(true))));
     }
 
     #[test]
@@ -394,10 +339,7 @@ mod tests {
         let condition = inferadb_ledger_types::SetCondition::MustExist;
         let proto: proto::SetCondition = (&condition).into();
 
-        assert!(matches!(
-            proto.condition,
-            Some(proto::set_condition::Condition::MustExists(true))
-        ));
+        assert!(matches!(proto.condition, Some(proto::set_condition::Condition::MustExists(true))));
     }
 
     #[test]
@@ -405,10 +347,7 @@ mod tests {
         let condition = inferadb_ledger_types::SetCondition::VersionEquals(42);
         let proto: proto::SetCondition = (&condition).into();
 
-        assert!(matches!(
-            proto.condition,
-            Some(proto::set_condition::Condition::Version(42))
-        ));
+        assert!(matches!(proto.condition, Some(proto::set_condition::Condition::Version(42))));
     }
 
     #[test]
@@ -419,7 +358,7 @@ mod tests {
         match proto.condition {
             Some(proto::set_condition::Condition::ValueEquals(bytes)) => {
                 assert_eq!(bytes, vec![1, 2, 3, 4]);
-            }
+            },
             _ => panic!("Expected ValueEquals condition"),
         }
     }
@@ -442,7 +381,7 @@ mod tests {
                 assert_eq!(cr.resource, "doc:123");
                 assert_eq!(cr.relation, "viewer");
                 assert_eq!(cr.subject, "user:456");
-            }
+            },
             _ => panic!("Expected CreateRelationship operation"),
         }
     }
@@ -461,7 +400,7 @@ mod tests {
                 assert_eq!(dr.resource, "folder:abc");
                 assert_eq!(dr.relation, "editor");
                 assert_eq!(dr.subject, "team:xyz");
-            }
+            },
             _ => panic!("Expected DeleteRelationship operation"),
         }
     }
@@ -482,7 +421,7 @@ mod tests {
                 assert_eq!(se.value, vec![0, 0, 0, 30]);
                 assert!(se.condition.is_none());
                 assert!(se.expires_at.is_none());
-            }
+            },
             _ => panic!("Expected SetEntity operation"),
         }
     }
@@ -503,22 +442,20 @@ mod tests {
                 assert_eq!(se.value, vec![1, 2, 3]);
                 assert!(se.condition.is_some());
                 assert_eq!(se.expires_at, Some(1700000000));
-            }
+            },
             _ => panic!("Expected SetEntity operation"),
         }
     }
 
     #[test]
     fn test_operation_delete_entity() {
-        let op = inferadb_ledger_types::Operation::DeleteEntity {
-            key: "temp:data".to_string(),
-        };
+        let op = inferadb_ledger_types::Operation::DeleteEntity { key: "temp:data".to_string() };
         let proto: proto::Operation = (&op).into();
 
         match proto.op {
             Some(proto::operation::Op::DeleteEntity(de)) => {
                 assert_eq!(de.key, "temp:data");
-            }
+            },
             _ => panic!("Expected DeleteEntity operation"),
         }
     }
@@ -535,7 +472,7 @@ mod tests {
             Some(proto::operation::Op::ExpireEntity(ee)) => {
                 assert_eq!(ee.key, "cache:item");
                 assert_eq!(ee.expired_at, 1699999999);
-            }
+            },
             _ => panic!("Expected ExpireEntity operation"),
         }
     }

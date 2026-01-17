@@ -7,13 +7,14 @@
 //! requiring more sophisticated rate limiting (token bucket, leaky bucket),
 //! this module can be extended.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-use parking_lot::Mutex;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_types::NamespaceId;
+use parking_lot::Mutex;
 
 /// Default requests per second per namespace.
 const DEFAULT_REQUESTS_PER_SECOND: u64 = 1000;
@@ -71,10 +72,7 @@ impl NamespaceRateLimiter {
 
         let counter = counters
             .entry(namespace_id)
-            .or_insert_with(|| WindowCounter {
-                window_start: now,
-                count: 0,
-            });
+            .or_insert_with(|| WindowCounter { window_start: now, count: 0 });
 
         // If we're in a new window, reset the counter
         if now.duration_since(counter.window_start) >= self.window_size {
@@ -209,11 +207,8 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = RateLimitExceeded {
-            namespace_id: 42,
-            limit: 100,
-            window_size: Duration::from_secs(1),
-        };
+        let err =
+            RateLimitExceeded { namespace_id: 42, limit: 100, window_size: Duration::from_secs(1) };
         let msg = format!("{}", err);
         assert!(msg.contains("42"));
         assert!(msg.contains("100"));

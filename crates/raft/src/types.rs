@@ -6,14 +6,11 @@
 //! - Response types
 //! - Snapshot data format
 
-use std::fmt;
-use std::io::Cursor;
-
-use openraft::BasicNode;
-use openraft::impls::OneshotResponder;
-use serde::{Deserialize, Serialize};
+use std::{fmt, io::Cursor};
 
 use inferadb_ledger_types::{Hash, NamespaceId, SetCondition, ShardId, Transaction, VaultId};
+use openraft::{BasicNode, impls::OneshotResponder};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Type Configuration
@@ -86,10 +83,7 @@ pub struct BlockRetentionPolicy {
 
 impl Default for BlockRetentionPolicy {
     fn default() -> Self {
-        Self {
-            mode: BlockRetentionMode::Full,
-            retention_blocks: 10_000,
-        }
+        Self { mode: BlockRetentionMode::Full, retention_blocks: 10_000 }
     }
 }
 
@@ -307,52 +301,40 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Empty => write!(f, "Empty"),
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
-            }
-            LedgerResponse::NamespaceCreated {
-                namespace_id,
-                shard_id,
-            } => {
-                write!(
-                    f,
-                    "NamespaceCreated(id={}, shard={})",
-                    namespace_id, shard_id
-                )
-            }
+            },
+            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
+                write!(f, "NamespaceCreated(id={}, shard={})", namespace_id, shard_id)
+            },
             LedgerResponse::VaultCreated { vault_id } => {
                 write!(f, "VaultCreated(id={})", vault_id)
-            }
+            },
             LedgerResponse::UserCreated { user_id } => {
                 write!(f, "UserCreated(id={})", user_id)
-            }
+            },
             LedgerResponse::NamespaceDeleted { success } => {
                 write!(f, "NamespaceDeleted(success={})", success)
-            }
+            },
             LedgerResponse::VaultDeleted { success } => {
                 write!(f, "VaultDeleted(success={})", success)
-            }
+            },
             LedgerResponse::VaultHealthUpdated { success } => {
                 write!(f, "VaultHealthUpdated(success={})", success)
-            }
+            },
             LedgerResponse::Error { message } => {
                 write!(f, "Error({})", message)
-            }
+            },
             LedgerResponse::PreconditionFailed { key, .. } => {
                 write!(f, "PreconditionFailed(key={})", key)
-            }
+            },
             LedgerResponse::BatchWrite { responses } => {
                 write!(f, "BatchWrite(count={})", responses.len())
-            }
+            },
         }
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -370,17 +352,14 @@ mod tests {
             LedgerRequest::CreateNamespace { name, shard_id } => {
                 assert_eq!(name, "test-namespace");
                 assert_eq!(shard_id, Some(1));
-            }
+            },
             _ => panic!("unexpected variant"),
         }
     }
 
     #[test]
     fn test_ledger_response_display() {
-        let response = LedgerResponse::Write {
-            block_height: 42,
-            block_hash: [0u8; 32],
-        };
+        let response = LedgerResponse::Write { block_height: 42, block_hash: [0u8; 32] };
         assert_eq!(format!("{}", response), "Write(height=42)");
     }
 
@@ -398,7 +377,7 @@ mod tests {
             SystemRequest::CreateUser { name, email } => {
                 assert_eq!(name, "Alice");
                 assert_eq!(email, "alice@example.com");
-            }
+            },
             _ => panic!("unexpected variant"),
         }
     }

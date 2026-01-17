@@ -16,25 +16,27 @@
 //! - Exponential backoff on failures (1s, 2s, 4s... up to 5 min)
 //! - Max 10 retries before marking saga as permanently failed
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use inferadb_ledger_state::{
+    StateLayer,
+    system::{
+        CreateOrgSaga, CreateOrgSagaState, DeleteUserSaga, DeleteUserSagaState, SAGA_POLL_INTERVAL,
+        Saga,
+    },
+};
+use inferadb_ledger_store::StorageBackend;
+use inferadb_ledger_types::{Operation, Transaction};
 use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use inferadb_ledger_state::StateLayer;
-use inferadb_ledger_state::system::{
-    CreateOrgSaga, CreateOrgSagaState, DeleteUserSaga, DeleteUserSagaState, SAGA_POLL_INTERVAL,
-    Saga,
+use crate::{
+    error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu},
+    log_storage::AppliedStateAccessor,
+    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
 };
-use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, Transaction};
-
-use crate::error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu};
-use crate::log_storage::AppliedStateAccessor;
-use crate::types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig};
 
 /// Key prefix for saga records in _system namespace.
 const SAGA_KEY_PREFIX: &str = "saga:";
@@ -72,13 +74,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         state: Arc<StateLayer<B>>,
         applied_state: AppliedStateAccessor,
     ) -> Self {
-        Self {
-            raft,
-            node_id,
-            state,
-            applied_state,
-            interval: SAGA_POLL_INTERVAL,
-        }
+        Self { raft, node_id, state, applied_state, interval: SAGA_POLL_INTERVAL }
     }
 
     /// Create with custom interval (for testing).
@@ -99,15 +95,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
         // List all entities with saga: prefix in _system (vault_id=0)
-        let entities = match self
-            .state
-            .list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000)
-        {
+        let entities = match self.state.list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000) {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Failed to list sagas");
                 return Vec::new();
-            }
+            },
         };
 
         entities
@@ -121,12 +114,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         } else {
                             None
                         }
-                    }
+                    },
                     Err(e) => {
                         let key = String::from_utf8_lossy(&entity.key);
                         warn!(key = %key, error = %e, "Failed to deserialize saga");
                         None
-                    }
+                    },
                 }
             })
             .collect()
@@ -137,12 +130,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let key = format!("{}{}", SAGA_KEY_PREFIX, saga.id());
         let value = serde_json::to_vec(saga).context(SerializationSnafu)?;
 
-        let operation = Operation::SetEntity {
-            key,
-            value,
-            expires_at: None,
-            condition: None,
-        };
+        let operation = Operation::SetEntity { key, value, expires_at: None, condition: None };
 
         let transaction = Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
@@ -162,13 +150,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             transactions: vec![transaction],
         };
 
-        self.raft
-            .client_write(request)
-            .await
-            .map_err(|e| SagaError::SagaRaftWrite {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
+        self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
+            message: format!("{:?}", e),
+            backtrace: snafu::Backtrace::generate(),
+        })?;
 
         Ok(())
     }
@@ -200,8 +185,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         "created_at": chrono::Utc::now().to_rfc3339(),
                     });
 
-                    self.write_entity(SYSTEM_NAMESPACE_ID, 0, &user_key, &user_value)
-                        .await?;
+                    self.write_entity(SYSTEM_NAMESPACE_ID, 0, &user_key, &user_value).await?;
 
                     // Also write email index
                     let email_idx_key = format!("_idx:user:email:{}", saga.input.user_email);
@@ -213,7 +197,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     info!(saga_id = %saga.id, user_id, "CreateOrg: user created");
                 }
                 Ok(())
-            }
+            },
 
             CreateOrgSagaState::UserCreated { user_id } => {
                 // Step 2: Create namespace
@@ -227,27 +211,19 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     "created_at": chrono::Utc::now().to_rfc3339(),
                 });
 
-                self.write_entity(SYSTEM_NAMESPACE_ID, 0, &ns_key, &ns_value)
-                    .await?;
+                self.write_entity(SYSTEM_NAMESPACE_ID, 0, &ns_key, &ns_value).await?;
 
                 // Write namespace name index
                 let name_idx_key = format!("_idx:namespace:name:{}", saga.input.org_name);
                 let name_idx_value = serde_json::json!({ "namespace_id": namespace_id });
-                self.write_entity(SYSTEM_NAMESPACE_ID, 0, &name_idx_key, &name_idx_value)
-                    .await?;
+                self.write_entity(SYSTEM_NAMESPACE_ID, 0, &name_idx_key, &name_idx_value).await?;
 
-                saga.transition(CreateOrgSagaState::NamespaceCreated {
-                    user_id,
-                    namespace_id,
-                });
+                saga.transition(CreateOrgSagaState::NamespaceCreated { user_id, namespace_id });
                 info!(saga_id = %saga.id, namespace_id, "CreateOrg: namespace created");
                 Ok(())
-            }
+            },
 
-            CreateOrgSagaState::NamespaceCreated {
-                user_id,
-                namespace_id,
-            } => {
+            CreateOrgSagaState::NamespaceCreated { user_id, namespace_id } => {
                 // Step 3: Create membership record in the new namespace
                 let member_key = format!("member:{}", user_id);
                 let member_value = serde_json::json!({
@@ -257,13 +233,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 });
 
                 // Write to the new namespace (not _system)
-                self.write_entity(namespace_id, 0, &member_key, &member_value)
-                    .await?;
+                self.write_entity(namespace_id, 0, &member_key, &member_value).await?;
 
-                saga.transition(CreateOrgSagaState::Completed {
-                    user_id,
-                    namespace_id,
-                });
+                saga.transition(CreateOrgSagaState::Completed { user_id, namespace_id });
                 info!(
                     saga_id = %saga.id,
                     user_id,
@@ -271,14 +243,14 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     "CreateOrg: saga completed"
                 );
                 Ok(())
-            }
+            },
 
             CreateOrgSagaState::Completed { .. }
             | CreateOrgSagaState::Failed { .. }
             | CreateOrgSagaState::Compensated { .. } => {
                 // Terminal states - nothing to do
                 Ok(())
-            }
+            },
         }
     }
 
@@ -293,25 +265,20 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 let user_key = format!("user:{}", saga.input.user_id);
 
                 // Read current user value (StateLayer is internally thread-safe)
-                let user_entity =
-                    self.state
-                        .get_entity(0, user_key.as_bytes())
-                        .context(StateReadSnafu {
-                            entity_type: "User".to_string(),
-                        })?;
+                let user_entity = self
+                    .state
+                    .get_entity(0, user_key.as_bytes())
+                    .context(StateReadSnafu { entity_type: "User".to_string() })?;
 
                 if let Some(entity) = user_entity {
                     let mut user_data: serde_json::Value = serde_json::from_slice(&entity.value)
-                        .context(DeserializationSnafu {
-                            entity_type: "User".to_string(),
-                        })?;
+                        .context(DeserializationSnafu { entity_type: "User".to_string() })?;
 
                     // Set deleted_at timestamp
                     user_data["deleted_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
                     user_data["status"] = serde_json::json!("DELETING");
 
-                    self.write_entity(SYSTEM_NAMESPACE_ID, 0, &user_key, &user_data)
-                        .await?;
+                    self.write_entity(SYSTEM_NAMESPACE_ID, 0, &user_key, &user_data).await?;
 
                     saga.transition(DeleteUserSagaState::MarkingDeleted {
                         user_id: saga.input.user_id,
@@ -324,17 +291,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     );
                 } else {
                     // User already doesn't exist - skip to completed
-                    saga.transition(DeleteUserSagaState::Completed {
-                        user_id: saga.input.user_id,
-                    });
+                    saga.transition(DeleteUserSagaState::Completed { user_id: saga.input.user_id });
                 }
                 Ok(())
-            }
+            },
 
-            DeleteUserSagaState::MarkingDeleted {
-                user_id,
-                remaining_namespaces,
-            } => {
+            DeleteUserSagaState::MarkingDeleted { user_id, remaining_namespaces } => {
                 // Step 2: Remove memberships from each namespace
                 if let Some(namespace_id) = remaining_namespaces.first() {
                     let member_key = format!("member:{}", user_id);
@@ -368,13 +330,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     saga.transition(DeleteUserSagaState::MembershipsRemoved { user_id: *user_id });
                 }
                 Ok(())
-            }
+            },
 
             DeleteUserSagaState::MembershipsRemoved { user_id } => {
                 // Step 3: Delete user record
                 let user_key = format!("user:{}", user_id);
-                self.delete_entity(SYSTEM_NAMESPACE_ID, 0, &user_key)
-                    .await?;
+                self.delete_entity(SYSTEM_NAMESPACE_ID, 0, &user_key).await?;
 
                 // Delete email index (need to look up email first)
                 // In production, we'd read the user first to get their email
@@ -383,12 +344,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 saga.transition(DeleteUserSagaState::Completed { user_id: *user_id });
                 info!(saga_id = %saga.id, user_id, "DeleteUser: saga completed");
                 Ok(())
-            }
+            },
 
             DeleteUserSagaState::Completed { .. } | DeleteUserSagaState::Failed { .. } => {
                 // Terminal states
                 Ok(())
-            }
+            },
         }
     }
 
@@ -400,9 +361,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let current = self
             .state
             .get_entity(0, seq_key.as_bytes())
-            .context(StateReadSnafu {
-                entity_type: "Sequence".to_string(),
-            })?
+            .context(StateReadSnafu { entity_type: "Sequence".to_string() })?
             .and_then(|e| e.value.get(..8)?.try_into().ok().map(i64::from_le_bytes))
             .unwrap_or(1);
 
@@ -435,13 +394,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             transactions: vec![transaction],
         };
 
-        self.raft
-            .client_write(request)
-            .await
-            .map_err(|e| SagaError::SequenceAllocation {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
+        self.raft.client_write(request).await.map_err(|e| SagaError::SequenceAllocation {
+            message: format!("{:?}", e),
+            backtrace: snafu::Backtrace::generate(),
+        })?;
 
         Ok(next_id)
     }
@@ -475,19 +431,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             actor: SAGA_ACTOR.to_string(),
         };
 
-        let request = LedgerRequest::Write {
-            namespace_id,
-            vault_id,
-            transactions: vec![transaction],
-        };
+        let request =
+            LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
 
-        self.raft
-            .client_write(request)
-            .await
-            .map_err(|e| SagaError::SagaRaftWrite {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
+        self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
+            message: format!("{:?}", e),
+            backtrace: snafu::Backtrace::generate(),
+        })?;
 
         Ok(())
     }
@@ -499,9 +449,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         vault_id: i64,
         key: &str,
     ) -> Result<(), SagaError> {
-        let operation = Operation::DeleteEntity {
-            key: key.to_string(),
-        };
+        let operation = Operation::DeleteEntity { key: key.to_string() };
 
         let transaction = Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
@@ -515,19 +463,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             actor: SAGA_ACTOR.to_string(),
         };
 
-        let request = LedgerRequest::Write {
-            namespace_id,
-            vault_id,
-            transactions: vec![transaction],
-        };
+        let request =
+            LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
 
-        self.raft
-            .client_write(request)
-            .await
-            .map_err(|e| SagaError::SagaRaftWrite {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
+        self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
+            message: format!("{:?}", e),
+            backtrace: snafu::Backtrace::generate(),
+        })?;
 
         Ok(())
     }
@@ -551,7 +493,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 if let Err(e) = self.save_saga(&saga).await {
                     warn!(saga_id = %saga_id, error = %e, "Failed to save saga state");
                 }
-            }
+            },
             Err(e) => {
                 warn!(saga_id = %saga_id, error = %e, "Saga step failed");
 
@@ -585,7 +527,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         "Failed to save saga failure state"
                     );
                 }
-            }
+            },
         }
     }
 
@@ -628,15 +570,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use super::*;
     use inferadb_ledger_state::system::{CreateOrgInput, DeleteUserInput};
+
+    use super::*;
 
     #[test]
     fn test_saga_key_format() {
@@ -666,10 +604,7 @@ mod tests {
 
     #[test]
     fn test_delete_user_saga_serialization() {
-        let input = DeleteUserInput {
-            user_id: 42,
-            namespace_ids: vec![1, 2, 3],
-        };
+        let input = DeleteUserInput { user_id: 42, namespace_ids: vec![1, 2, 3] };
 
         let saga = DeleteUserSaga::new("delete-456".to_string(), input);
         let wrapped = Saga::DeleteUser(saga);

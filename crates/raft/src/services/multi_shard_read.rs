@@ -4,24 +4,25 @@
 //! Per DESIGN.md §4.6: Each namespace is assigned to a shard, and requests
 //! are routed to the state layer for that shard.
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use tonic::{Request, Response, Status};
 use tracing::{debug, instrument, warn};
 
-use crate::log_storage::VaultHealthStatus;
-use crate::metrics;
-use crate::proto::read_service_server::ReadService;
-use crate::proto::{
-    BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
-    GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest, GetTipResponse,
-    HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
-    ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
-    ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse, VerifiedReadRequest,
-    VerifiedReadResponse, WatchBlocksRequest,
+use crate::{
+    log_storage::VaultHealthStatus,
+    metrics,
+    proto::{
+        BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
+        GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest,
+        GetTipResponse, HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest,
+        ListEntitiesResponse, ListRelationshipsRequest, ListRelationshipsResponse,
+        ListResourcesRequest, ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse,
+        VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
+        read_service_server::ReadService,
+    },
+    services::shard_resolver::ShardResolver,
 };
-use crate::services::shard_resolver::ShardResolver;
 
 /// Multi-shard read service implementation.
 ///
@@ -58,11 +59,11 @@ impl MultiShardReadService {
                 // For true linearizability, we'd need to check if THIS node is leader
                 // For now, we allow reads if there's any leader (weaker guarantee)
                 Ok(())
-            }
+            },
             ReadConsistency::Eventual | ReadConsistency::Unspecified => {
                 // Eventual reads can be served by any node
                 Ok(())
-            }
+            },
         }
     }
 }
@@ -96,10 +97,7 @@ impl ReadService for MultiShardReadService {
         // Check vault health - diverged vaults cannot be read
         let health = ctx.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(
-                namespace_id,
-                vault_id, at_height, "Read rejected: vault has diverged"
-            );
+            warn!(namespace_id, vault_id, at_height, "Read rejected: vault has diverged");
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
                 namespace_id, vault_id, at_height
@@ -107,14 +105,11 @@ impl ReadService for MultiShardReadService {
         }
 
         // Read from the shard's state layer (internally thread-safe via inferadb-ledger-store MVCC)
-        let entity = ctx
-            .state
-            .get_entity(vault_id, req.key.as_bytes())
-            .map_err(|e| {
-                warn!(error = %e, "Read failed");
-                metrics::record_read(false, start.elapsed().as_secs_f64());
-                Status::internal(format!("Storage error: {}", e))
-            })?;
+        let entity = ctx.state.get_entity(vault_id, req.key.as_bytes()).map_err(|e| {
+            warn!(error = %e, "Read failed");
+            metrics::record_read(false, start.elapsed().as_secs_f64());
+            Status::internal(format!("Storage error: {}", e))
+        })?;
 
         let latency = start.elapsed().as_secs_f64();
         let found = entity.is_some();
@@ -124,10 +119,7 @@ impl ReadService for MultiShardReadService {
         // Get current block height for this vault
         let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
 
-        Ok(Response::new(ReadResponse {
-            value: entity.map(|e| e.value),
-            block_height,
-        }))
+        Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
     }
 
     /// Batch read multiple keys in a single RPC call.
@@ -173,10 +165,7 @@ impl ReadService for MultiShardReadService {
         // Check vault health - diverged vaults cannot be read
         let health = ctx.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(
-                namespace_id,
-                vault_id, at_height, "BatchRead rejected: vault has diverged"
-            );
+            warn!(namespace_id, vault_id, at_height, "BatchRead rejected: vault has diverged");
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
                 namespace_id, vault_id, at_height
@@ -187,13 +176,10 @@ impl ReadService for MultiShardReadService {
         let mut results = Vec::with_capacity(req.keys.len());
 
         for key in &req.keys {
-            let entity = ctx
-                .state
-                .get_entity(vault_id, key.as_bytes())
-                .map_err(|e| {
-                    warn!(error = %e, key = key, "BatchRead key failed");
-                    Status::internal(format!("Storage error: {}", e))
-                })?;
+            let entity = ctx.state.get_entity(vault_id, key.as_bytes()).map_err(|e| {
+                warn!(error = %e, key = key, "BatchRead key failed");
+                Status::internal(format!("Storage error: {}", e))
+            })?;
 
             let found = entity.is_some();
             results.push(BatchReadResult {
@@ -205,11 +191,7 @@ impl ReadService for MultiShardReadService {
 
         let latency = start.elapsed().as_secs_f64();
         let batch_size = results.len();
-        debug!(
-            batch_size,
-            latency_ms = latency * 1000.0,
-            "BatchRead completed"
-        );
+        debug!(batch_size, latency_ms = latency * 1000.0, "BatchRead completed");
 
         // Record metrics
         for _ in 0..batch_size {
@@ -219,10 +201,7 @@ impl ReadService for MultiShardReadService {
         // Get current block height
         let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
 
-        Ok(Response::new(BatchReadResponse {
-            results,
-            block_height,
-        }))
+        Ok(Response::new(BatchReadResponse { results, block_height }))
     }
 
     #[instrument(skip(self, request), fields(namespace_id, vault_id, key))]
@@ -251,10 +230,7 @@ impl ReadService for MultiShardReadService {
         // Check vault health
         let health = ctx.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(
-                namespace_id,
-                vault_id, at_height, "Verified read rejected: vault has diverged"
-            );
+            warn!(namespace_id, vault_id, at_height, "Verified read rejected: vault has diverged");
             metrics::record_verified_read(false, start.elapsed().as_secs_f64());
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
@@ -263,22 +239,15 @@ impl ReadService for MultiShardReadService {
         }
 
         // Read from state layer (internally thread-safe via inferadb-ledger-store MVCC)
-        let entity = ctx
-            .state
-            .get_entity(vault_id, req.key.as_bytes())
-            .map_err(|e| {
-                warn!(error = %e, "Verified read failed");
-                metrics::record_verified_read(false, start.elapsed().as_secs_f64());
-                Status::internal(format!("Storage error: {}", e))
-            })?;
+        let entity = ctx.state.get_entity(vault_id, req.key.as_bytes()).map_err(|e| {
+            warn!(error = %e, "Verified read failed");
+            metrics::record_verified_read(false, start.elapsed().as_secs_f64());
+            Status::internal(format!("Storage error: {}", e))
+        })?;
 
         let latency = start.elapsed().as_secs_f64();
         let found = entity.is_some();
-        debug!(
-            found,
-            latency_ms = latency * 1000.0,
-            "Verified read completed"
-        );
+        debug!(found, latency_ms = latency * 1000.0, "Verified read completed");
         metrics::record_verified_read(true, latency);
 
         // Get block height
@@ -338,11 +307,7 @@ impl ReadService for MultiShardReadService {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-        let limit = if req.limit == 0 {
-            100
-        } else {
-            req.limit as usize
-        };
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -416,16 +381,8 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let limit = if req.limit == 0 {
-            100
-        } else {
-            req.limit as usize
-        };
-        let prefix = if req.key_prefix.is_empty() {
-            None
-        } else {
-            Some(req.key_prefix.as_str())
-        };
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
         tracing::Span::current().record("namespace_id", namespace_id);
 
@@ -458,11 +415,7 @@ impl ReadService for MultiShardReadService {
                 key: String::from_utf8_lossy(&e.key).to_string(),
                 value: e.value,
                 version: e.version,
-                expires_at: if e.expires_at == 0 {
-                    None
-                } else {
-                    Some(e.expires_at)
-                },
+                expires_at: if e.expires_at == 0 { None } else { Some(e.expires_at) },
             })
             .collect();
 
@@ -488,11 +441,7 @@ impl ReadService for MultiShardReadService {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-        let limit = if req.limit == 0 {
-            100
-        } else {
-            req.limit as usize
-        };
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -544,11 +493,7 @@ impl ReadService for MultiShardReadService {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-        let client_id = req
-            .client_id
-            .as_ref()
-            .map(|c| c.id.as_str())
-            .unwrap_or_default();
+        let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or_default();
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -558,12 +503,9 @@ impl ReadService for MultiShardReadService {
 
         // Get client sequence from applied state
         let last_committed_sequence =
-            ctx.applied_state
-                .client_sequence(namespace_id, vault_id, client_id);
+            ctx.applied_state.client_sequence(namespace_id, vault_id, client_id);
 
-        Ok(Response::new(GetClientStateResponse {
-            last_committed_sequence,
-        }))
+        Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }
 
     // Block-related methods - simplified implementations
@@ -584,10 +526,7 @@ impl ReadService for MultiShardReadService {
 
         // Block retrieval is complex for multi-shard
         // Return None for now - full implementation would use vault_entry_to_proto_block helper
-        warn!(
-            namespace_id,
-            "get_block: block retrieval not yet fully implemented for multi-shard"
-        );
+        warn!(namespace_id, "get_block: block retrieval not yet fully implemented for multi-shard");
 
         Ok(Response::new(GetBlockResponse { block: None }))
     }
@@ -610,16 +549,10 @@ impl ReadService for MultiShardReadService {
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
         let current_tip = ctx.applied_state.vault_height(namespace_id, vault_id);
 
-        warn!(
-            namespace_id,
-            "get_block_range: not yet optimized for multi-shard"
-        );
+        warn!(namespace_id, "get_block_range: not yet optimized for multi-shard");
 
         // Return empty for now - full implementation would iterate blocks
-        Ok(Response::new(GetBlockRangeResponse {
-            blocks: vec![],
-            current_tip,
-        }))
+        Ok(Response::new(GetBlockRangeResponse { blocks: vec![], current_tip }))
     }
 
     #[instrument(skip(self, request))]
@@ -636,10 +569,7 @@ impl ReadService for MultiShardReadService {
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
         // Historical reads require snapshot reconstruction which is complex
-        warn!(
-            namespace_id,
-            "Historical reads not yet implemented for multi-shard"
-        );
+        warn!(namespace_id, "Historical reads not yet implemented for multi-shard");
         Err(Status::unimplemented(
             "Historical reads not yet implemented for multi-shard deployments",
         ))
@@ -662,13 +592,8 @@ impl ReadService for MultiShardReadService {
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
         // Block watching requires broadcast channel per shard which is complex
-        warn!(
-            namespace_id,
-            "Block watching not yet implemented for multi-shard"
-        );
-        Err(Status::unimplemented(
-            "Block watching not yet implemented for multi-shard deployments",
-        ))
+        warn!(namespace_id, "Block watching not yet implemented for multi-shard");
+        Err(Status::unimplemented("Block watching not yet implemented for multi-shard deployments"))
     }
 }
 

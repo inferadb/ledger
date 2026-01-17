@@ -7,8 +7,10 @@
 //! - Range queries
 
 use super::node::SearchResult;
-use crate::error::{PageId, Result};
-use crate::page::Page;
+use crate::{
+    error::{PageId, Result},
+    page::Page,
+};
 
 /// Stack entry for tracking position during tree traversal.
 #[derive(Debug, Clone)]
@@ -38,22 +40,12 @@ pub struct CursorPosition {
 impl CursorPosition {
     /// Create a new empty cursor position.
     pub fn new() -> Self {
-        Self {
-            stack: Vec::new(),
-            leaf_page_id: None,
-            leaf_index: 0,
-            valid: false,
-        }
+        Self { stack: Vec::new(), leaf_page_id: None, leaf_index: 0, valid: false }
     }
 
     /// Create a cursor positioned at the start of the tree.
     pub fn at_start() -> Self {
-        Self {
-            stack: Vec::new(),
-            leaf_page_id: None,
-            leaf_index: 0,
-            valid: true,
-        }
+        Self { stack: Vec::new(), leaf_page_id: None, leaf_index: 0, valid: true }
     }
 
     /// Check if cursor is valid (positioned on an entry).
@@ -97,26 +89,17 @@ pub struct Range<'a> {
 impl<'a> Range<'a> {
     /// Create a range covering all keys.
     pub fn all() -> Self {
-        Self {
-            start: Bound::Unbounded,
-            end: Bound::Unbounded,
-        }
+        Self { start: Bound::Unbounded, end: Bound::Unbounded }
     }
 
     /// Create a range from start (inclusive) to end (exclusive).
     pub fn new(start: &'a [u8], end: &'a [u8]) -> Self {
-        Self {
-            start: Bound::Included(start),
-            end: Bound::Excluded(end),
-        }
+        Self { start: Bound::Included(start), end: Bound::Excluded(end) }
     }
 
     /// Create a range starting from a key (inclusive).
     pub fn from(start: &'a [u8]) -> Self {
-        Self {
-            start: Bound::Included(start),
-            end: Bound::Unbounded,
-        }
+        Self { start: Bound::Included(start), end: Bound::Unbounded }
     }
 
     /// Create a range with a prefix (all keys starting with prefix).
@@ -170,11 +153,7 @@ pub struct RangeIterState<'a> {
 impl<'a> RangeIterState<'a> {
     /// Create a new range iterator state.
     pub fn new(range: Range<'a>) -> Self {
-        Self {
-            range,
-            position: CursorPosition::new(),
-            started: false,
-        }
+        Self { range, position: CursorPosition::new(), started: false }
     }
 
     /// Create an iterator over all entries.
@@ -205,8 +184,7 @@ pub enum SeekResult {
 /// and page data provided externally. The actual B-tree struct will use
 /// these to implement cursor operations.
 pub mod cursor_ops {
-    use super::super::node::LeafNodeRef;
-    use super::*;
+    use super::{super::node::LeafNodeRef, *};
 
     /// Move to the first entry in a leaf node.
     pub fn move_to_first_in_leaf(position: &mut CursorPosition, page: &Page) -> Result<bool> {
@@ -260,7 +238,7 @@ pub mod cursor_ops {
                 position.leaf_index = idx;
                 position.valid = true;
                 Ok(SeekResult::Found)
-            }
+            },
             SearchResult::NotFound(idx) => {
                 if idx >= count as usize {
                     position.valid = false;
@@ -270,7 +248,7 @@ pub mod cursor_ops {
                     position.valid = true;
                     Ok(SeekResult::NotFound)
                 }
-            }
+            },
         }
     }
 

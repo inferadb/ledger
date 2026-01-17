@@ -27,8 +27,9 @@
 // Examples are allowed to use expect/unwrap for brevity
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 
-use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Result, TlsConfig};
 use std::time::Duration;
+
+use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Result, TlsConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,30 +42,20 @@ async fn main() -> Result<()> {
         .map(String::as_str)
         .unwrap_or("https://localhost:50051");
 
-    let ca_cert = args
-        .iter()
-        .position(|a| a == "--ca-cert")
-        .and_then(|i| args.get(i + 1).cloned());
+    let ca_cert = args.iter().position(|a| a == "--ca-cert").and_then(|i| args.get(i + 1).cloned());
 
-    let client_cert = args
-        .iter()
-        .position(|a| a == "--client-cert")
-        .and_then(|i| args.get(i + 1).cloned());
+    let client_cert =
+        args.iter().position(|a| a == "--client-cert").and_then(|i| args.get(i + 1).cloned());
 
-    let client_key = args
-        .iter()
-        .position(|a| a == "--client-key")
-        .and_then(|i| args.get(i + 1).cloned());
+    let client_key =
+        args.iter().position(|a| a == "--client-key").and_then(|i| args.get(i + 1).cloned());
 
     let use_native_roots = args.iter().any(|a| a == "--native-roots");
 
     println!("=== TLS Connection Example ===\n");
     println!("Endpoint: {endpoint}");
     println!("CA cert: {}", ca_cert.as_deref().unwrap_or("(none)"));
-    println!(
-        "Client cert: {}",
-        client_cert.as_deref().unwrap_or("(none)")
-    );
+    println!("Client cert: {}", client_cert.as_deref().unwrap_or("(none)"));
     println!("Native roots: {use_native_roots}");
     println!();
 
@@ -181,10 +172,10 @@ async fn perform_health_check(client: &LedgerClient) -> Result<()> {
             } else {
                 println!("⚠ Server is degraded");
             }
-        }
+        },
         Err(e) => {
             println!("✗ Health check failed: {e}");
-        }
+        },
     }
 
     // Get detailed health status
@@ -198,10 +189,10 @@ async fn perform_health_check(client: &LedgerClient) -> Result<()> {
             for (key, value) in &result.details {
                 println!("  {key}: {value}");
             }
-        }
+        },
         Err(e) => {
             println!("Could not get detailed health: {e}");
-        }
+        },
     }
 
     Ok(())

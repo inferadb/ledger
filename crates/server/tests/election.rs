@@ -24,15 +24,9 @@ async fn test_single_node_self_election() {
     let cluster = TestCluster::new(1).await;
 
     // Should quickly elect itself
-    let leader_id = cluster
-        .wait_for_leader_timeout(Duration::from_secs(5))
-        .await;
+    let leader_id = cluster.wait_for_leader_timeout(Duration::from_secs(5)).await;
 
-    assert_eq!(
-        leader_id,
-        Some(1),
-        "single node should elect itself as leader"
-    );
+    assert_eq!(leader_id, Some(1), "single node should elect itself as leader");
 }
 
 /// Test that a three-node cluster elects a leader.
@@ -96,9 +90,7 @@ async fn test_leader_term_dominance() {
     let leader_id = cluster.wait_for_leader().await;
 
     // Get leader node by ID (more reliable than leader() which depends on is_leader())
-    let leader = cluster
-        .node(leader_id)
-        .expect("leader node should exist in cluster");
+    let leader = cluster.node(leader_id).expect("leader node should exist in cluster");
     let leader_term = leader.current_term();
 
     // Check all other nodes have term <= leader term

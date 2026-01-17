@@ -5,8 +5,10 @@
 //! distributed between the original and new node.
 
 use super::node::{BranchNode, BranchNodeRef, LeafNode, LeafNodeRef};
-use crate::error::{Error, PageId, Result};
-use crate::page::Page;
+use crate::{
+    error::{Error, PageId, Result},
+    page::Page,
+};
 
 /// Result of splitting a leaf node.
 #[derive(Debug)]
@@ -60,10 +62,7 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
         LeafNode::init(new_page);
         // Return an empty separator key - the caller will insert the new key
         // into either the left or right page based on comparison
-        return Ok(LeafSplitResult {
-            new_page_id: new_page.id,
-            separator_key: Vec::new(),
-        });
+        return Ok(LeafSplitResult { new_page_id: new_page.id, separator_key: Vec::new() });
     }
 
     // Calculate split point (middle)
@@ -93,10 +92,7 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
         }
     }
 
-    Ok(LeafSplitResult {
-        new_page_id: new_page.id,
-        separator_key,
-    })
+    Ok(LeafSplitResult { new_page_id: new_page.id, separator_key })
 }
 
 /// Split a leaf node with awareness of the key being inserted.
@@ -133,10 +129,7 @@ pub fn split_leaf_for_key(
     if entries.is_empty() {
         LeafNode::init(original);
         LeafNode::init(new_page);
-        return Ok(LeafSplitResult {
-            new_page_id: new_page.id,
-            separator_key: Vec::new(),
-        });
+        return Ok(LeafSplitResult { new_page_id: new_page.id, separator_key: Vec::new() });
     }
 
     // Helper function to test if a split point works
@@ -194,10 +187,7 @@ pub fn split_leaf_for_key(
 
     for offset in 0..=max_offset {
         // Try split points at mid-offset and mid+offset
-        let candidates = [
-            mid.saturating_sub(offset),
-            (mid + offset).min(entries.len()),
-        ];
+        let candidates = [mid.saturating_sub(offset), (mid + offset).min(entries.len())];
 
         for &split_at in &candidates {
             // Determine separator key based on split point
@@ -231,10 +221,7 @@ pub fn split_leaf_for_key(
                 new_key,
                 new_value,
             )? {
-                return Ok(LeafSplitResult {
-                    new_page_id: new_page.id,
-                    separator_key,
-                });
+                return Ok(LeafSplitResult { new_page_id: new_page.id, separator_key });
             }
         }
     }
@@ -295,10 +282,7 @@ pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSp
         }
     }
 
-    Ok(BranchSplitResult {
-        new_page_id: new_page.id,
-        separator_key,
-    })
+    Ok(BranchSplitResult { new_page_id: new_page.id, separator_key })
 }
 
 /// Check if a leaf node needs splitting based on remaining free space.
@@ -359,8 +343,7 @@ pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::DEFAULT_PAGE_SIZE;
-    use crate::error::PageType;
+    use crate::{backend::DEFAULT_PAGE_SIZE, error::PageType};
 
     fn make_leaf_page(id: PageId) -> Page {
         Page::new(id, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1)

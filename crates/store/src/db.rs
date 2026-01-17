@@ -25,24 +25,28 @@
 //! }
 //! ```
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::Arc;
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use arc_swap::ArcSwap;
 use parking_lot::{Mutex, RwLock};
 
-use crate::backend::{
-    CommitSlot, DEFAULT_PAGE_SIZE, DatabaseHeader, FileBackend, HEADER_SIZE, InMemoryBackend,
-    StorageBackend,
+use crate::{
+    backend::{
+        CommitSlot, DEFAULT_PAGE_SIZE, DatabaseHeader, FileBackend, HEADER_SIZE, InMemoryBackend,
+        StorageBackend,
+    },
+    btree::{BTree, PageProvider},
+    error::{Error, PageId, PageType, Result},
+    page::{Page, PageAllocator, PageCache},
+    tables::{Table, TableEntry, TableId},
+    transaction::{CommittedState, PendingFrees, SnapshotId, TransactionTracker},
+    types::{Key, Value},
 };
-use crate::btree::{BTree, PageProvider};
-use crate::error::{Error, PageId, PageType, Result};
-use crate::page::{Page, PageAllocator, PageCache};
-use crate::tables::{Table, TableEntry, TableId};
-use crate::transaction::{CommittedState, PendingFrees, SnapshotId, TransactionTracker};
-use crate::types::{Key, Value};
 
 /// Database configuration options.
 #[derive(Debug, Clone)]
@@ -103,10 +107,7 @@ impl Database<FileBackend> {
     /// Open an existing database at the given path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let backend = FileBackend::open(path)?;
-        let config = DatabaseConfig {
-            page_size: backend.page_size(),
-            ..Default::default()
-        };
+        let config = DatabaseConfig { page_size: backend.page_size(), ..Default::default() };
         Self::from_backend(backend, config)
     }
 
@@ -188,8 +189,8 @@ impl<B: StorageBackend> Database<B> {
     /// to secondary if primary is corrupt (indicates crash during commit).
     ///
     /// Returns `(state, next_page, recovery_required, free_list_head)`:
-    /// - `recovery_required` is true if we detected a crash (fell back to secondary slot
-    ///   or recovery flag was set). This triggers free list rebuild.
+    /// - `recovery_required` is true if we detected a crash (fell back to secondary slot or
+    ///   recovery flag was set). This triggers free list rebuild.
     /// - `free_list_head` is the persisted free list head (0 if none).
     fn load_state_from_disk(
         backend: &B,
@@ -241,17 +242,11 @@ impl<B: StorageBackend> Database<B> {
             slot.total_pages
         } else {
             let file_size = backend.file_size()?;
-            std::cmp::max(
-                2,
-                ((file_size - HEADER_SIZE as u64) / config.page_size as u64) as PageId,
-            )
+            std::cmp::max(2, ((file_size - HEADER_SIZE as u64) / config.page_size as u64) as PageId)
         };
 
         Ok((
-            CommittedState {
-                table_roots,
-                snapshot_id,
-            },
+            CommittedState { table_roots, snapshot_id },
             next_page,
             recovery_required,
             slot.free_list_head,
@@ -474,7 +469,7 @@ impl<B: StorageBackend> Database<B> {
         match page_type {
             PageType::BTreeLeaf => {
                 // Leaf nodes have no children - we're done
-            }
+            },
             PageType::BTreeBranch => {
                 // Branch nodes have children we need to visit
                 use crate::btree::node::BranchNodeRef;
@@ -490,10 +485,10 @@ impl<B: StorageBackend> Database<B> {
                 // Visit rightmost child
                 let rightmost = branch.rightmost_child();
                 self.collect_reachable_pages(rightmost, reachable)?;
-            }
+            },
             _ => {
                 // Unknown page type - skip (could be corruption)
-            }
+            },
         }
 
         Ok(())
@@ -682,10 +677,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
             return Ok(None);
         }
 
-        let provider = CachingReadPageProvider {
-            db: self.db,
-            page_cache: &self.page_cache,
-        };
+        let provider = CachingReadPageProvider { db: self.db, page_cache: &self.page_cache };
         let btree = BTree::new(root, provider);
 
         let mut key_bytes = Vec::new();
@@ -709,10 +701,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
             return Ok(None);
         }
 
-        let provider = CachingReadPageProvider {
-            db: self.db,
-            page_cache: &self.page_cache,
-        };
+        let provider = CachingReadPageProvider { db: self.db, page_cache: &self.page_cache };
         let btree = BTree::new(root, provider);
         btree.first()
     }
@@ -724,10 +713,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
             return Ok(None);
         }
 
-        let provider = CachingReadPageProvider {
-            db: self.db,
-            page_cache: &self.page_cache,
-        };
+        let provider = CachingReadPageProvider { db: self.db, page_cache: &self.page_cache };
         let btree = BTree::new(root, provider);
         btree.last()
     }
@@ -767,14 +753,12 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     }
 }
 
-impl<'db, B: StorageBackend> Drop for ReadTransaction<'db, B> {
+impl<B: StorageBackend> Drop for ReadTransaction<'_, B> {
     fn drop(&mut self) {
         // Unregister from tracker to allow page cleanup
         // This is critical for COW - pages can only be freed when all
         // readers that might reference them have finished
-        self.db
-            .tracker
-            .unregister_read_transaction(self.snapshot_id);
+        self.db.tracker.unregister_read_transaction(self.snapshot_id);
 
         // Attempt to free pending pages now that this reader is done
         self.db.try_free_pending_pages();
@@ -876,10 +860,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             return Ok(None);
         }
 
-        let provider = BufferedReadPageProvider {
-            db: self.db,
-            dirty_pages: &self.dirty_pages,
-        };
+        let provider = BufferedReadPageProvider { db: self.db, dirty_pages: &self.dirty_pages };
         let btree = BTree::new(root, provider);
 
         let mut key_bytes = Vec::new();
@@ -895,10 +876,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             return Ok(None);
         }
 
-        let provider = BufferedReadPageProvider {
-            db: self.db,
-            dirty_pages: &self.dirty_pages,
-        };
+        let provider = BufferedReadPageProvider { db: self.db, dirty_pages: &self.dirty_pages };
         let btree = BTree::new(root, provider);
         btree.first()
     }
@@ -910,10 +888,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             return Ok(None);
         }
 
-        let provider = BufferedReadPageProvider {
-            db: self.db,
-            dirty_pages: &self.dirty_pages,
-        };
+        let provider = BufferedReadPageProvider { db: self.db, dirty_pages: &self.dirty_pages };
         let btree = BTree::new(root, provider);
         btree.last()
     }
@@ -955,13 +930,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
 
         // Persist table directory and header using dual-slot commit protocol
         // This includes the necessary syncs for crash safety
-        self.db
-            .persist_state_to_disk(&self.table_roots, self.snapshot_id)?;
+        self.db.persist_state_to_disk(&self.table_roots, self.snapshot_id)?;
 
-        let new_state = CommittedState {
-            table_roots: self.table_roots,
-            snapshot_id: self.snapshot_id,
-        };
+        let new_state =
+            CommittedState { table_roots: self.table_roots, snapshot_id: self.snapshot_id };
 
         // Atomically swap the committed state - this is the magic moment
         // where our changes become visible to new read transactions
@@ -971,10 +943,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         // These can only be freed once no readers reference this snapshot
         if !self.pages_to_free.is_empty() {
             let pages = std::mem::take(&mut self.pages_to_free);
-            self.db
-                .pending_frees
-                .lock()
-                .record_freed_pages(self.snapshot_id, pages);
+            self.db.pending_frees.lock().record_freed_pages(self.snapshot_id, pages);
         }
 
         // Attempt to free old pages that are no longer referenced
@@ -1001,7 +970,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     }
 }
 
-impl<'db, B: StorageBackend> Drop for WriteTransaction<'db, B> {
+impl<B: StorageBackend> Drop for WriteTransaction<'_, B> {
     fn drop(&mut self) {
         if !self.committed {
             // Transaction was not committed or aborted - this is likely a bug
@@ -1027,7 +996,7 @@ struct CachingReadPageProvider<'txn, 'db, B: StorageBackend> {
     page_cache: &'txn RefCell<HashMap<PageId, Page>>,
 }
 
-impl<'txn, 'db, B: StorageBackend> PageProvider for CachingReadPageProvider<'txn, 'db, B> {
+impl<B: StorageBackend> PageProvider for CachingReadPageProvider<'_, '_, B> {
     fn read_page(&self, page_id: PageId) -> Result<Page> {
         if let Some(page) = self.page_cache.borrow().get(&page_id) {
             return Ok(page.clone());
@@ -1077,7 +1046,7 @@ struct BufferedWritePageProvider<'txn, 'db, B: StorageBackend> {
     pages_to_free: &'txn mut Vec<PageId>,
 }
 
-impl<'txn, 'db, B: StorageBackend> PageProvider for BufferedWritePageProvider<'txn, 'db, B> {
+impl<B: StorageBackend> PageProvider for BufferedWritePageProvider<'_, '_, B> {
     fn read_page(&self, page_id: PageId) -> Result<Page> {
         // Check our local buffer first (read-your-own-writes)
         if let Some(page) = self.dirty_pages.get(&page_id) {
@@ -1130,7 +1099,7 @@ struct BufferedReadPageProvider<'txn, 'db, B: StorageBackend> {
     dirty_pages: &'txn HashMap<PageId, Page>,
 }
 
-impl<'txn, 'db, B: StorageBackend> PageProvider for BufferedReadPageProvider<'txn, 'db, B> {
+impl<B: StorageBackend> PageProvider for BufferedReadPageProvider<'_, '_, B> {
     fn read_page(&self, page_id: PageId) -> Result<Page> {
         // Check our local buffer first (read-your-own-writes)
         if let Some(page) = self.dirty_pages.get(&page_id) {
@@ -1223,21 +1192,16 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
             return Ok(());
         }
 
-        let provider = CachingReadPageProvider {
-            db: self.db,
-            page_cache: self.page_cache,
-        };
+        let provider = CachingReadPageProvider { db: self.db, page_cache: self.page_cache };
         let btree = BTree::new(self.root, provider);
 
         let range = match (&self.start_bytes, &self.end_bytes) {
             (None, None) => Range::all(),
-            (Some(start), None) => Range {
-                start: Bound::Included(start.as_slice()),
-                end: Bound::Unbounded,
+            (Some(start), None) => {
+                Range { start: Bound::Included(start.as_slice()), end: Bound::Unbounded }
             },
-            (None, Some(end)) => Range {
-                start: Bound::Unbounded,
-                end: Bound::Excluded(end.as_slice()),
+            (None, Some(end)) => {
+                Range { start: Bound::Unbounded, end: Bound::Excluded(end.as_slice()) }
             },
             (Some(start), Some(end)) => Range {
                 start: Bound::Included(start.as_slice()),
@@ -1274,7 +1238,7 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
     }
 }
 
-impl<'a, 'db, B: StorageBackend, T: Table> Iterator for TableIterator<'a, 'db, B, T> {
+impl<B: StorageBackend, T: Table> Iterator for TableIterator<'_, '_, B, T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1301,10 +1265,8 @@ mod tests {
         // Write
         {
             let mut txn = db.write().unwrap();
-            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3])
-                .unwrap();
-            txn.insert::<tables::RaftLog>(&2u64, &vec![4u8, 5, 6])
-                .unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3]).unwrap();
+            txn.insert::<tables::RaftLog>(&2u64, &vec![4u8, 5, 6]).unwrap();
             txn.commit().unwrap();
         }
 
@@ -1329,8 +1291,7 @@ mod tests {
         // Insert
         {
             let mut txn = db.write().unwrap();
-            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3])
-                .unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3]).unwrap();
             txn.commit().unwrap();
         }
 
@@ -1358,8 +1319,7 @@ mod tests {
         {
             let mut txn = db.write().unwrap();
             txn.insert::<tables::RaftLog>(&1u64, &vec![1u8]).unwrap();
-            txn.insert::<tables::RaftState>(&"term".to_string(), &vec![0u8, 0, 0, 1])
-                .unwrap();
+            txn.insert::<tables::RaftState>(&"term".to_string(), &vec![0u8, 0, 0, 1]).unwrap();
             txn.commit().unwrap();
         }
 
@@ -1367,11 +1327,7 @@ mod tests {
         {
             let txn = db.read().unwrap();
             assert!(txn.get::<tables::RaftLog>(&1u64).unwrap().is_some());
-            assert!(
-                txn.get::<tables::RaftState>(&"term".to_string())
-                    .unwrap()
-                    .is_some()
-            );
+            assert!(txn.get::<tables::RaftState>(&"term".to_string()).unwrap().is_some());
         }
     }
 
@@ -1386,8 +1342,7 @@ mod tests {
             let mut txn = db.write().unwrap();
             let key = i as u64;
             let value = format!("value-{}", i).into_bytes();
-            txn.insert::<tables::Entities>(&key.to_be_bytes().to_vec(), &value)
-                .unwrap();
+            txn.insert::<tables::Entities>(&key.to_be_bytes().to_vec(), &value).unwrap();
             txn.commit().unwrap();
         }
 
@@ -1397,16 +1352,13 @@ mod tests {
         for i in 0..num_keys {
             let key = i as u64;
             let expected = format!("value-{}", i).into_bytes();
-            match txn
-                .get::<tables::Entities>(&key.to_be_bytes().to_vec())
-                .unwrap()
-            {
+            match txn.get::<tables::Entities>(&key.to_be_bytes().to_vec()).unwrap() {
                 Some(value) => {
                     assert_eq!(value, expected, "Value mismatch for key {}", i);
-                }
+                },
                 None => {
                     missing.push(i);
-                }
+                },
             }
         }
 
@@ -1432,8 +1384,7 @@ mod tests {
             // Simulate storage layer key format: prefix + bucket + local_key
             let key = format!("\x00\x00\x00\x00\x00\x00\x00\x01\x42stress-key-{}", i);
             let value = format!("value-{}", i).into_bytes();
-            txn.insert::<tables::Entities>(&key.into_bytes(), &value)
-                .unwrap();
+            txn.insert::<tables::Entities>(&key.into_bytes(), &value).unwrap();
             txn.commit().unwrap();
         }
 
@@ -1446,10 +1397,10 @@ mod tests {
             match txn.get::<tables::Entities>(&key.into_bytes()).unwrap() {
                 Some(value) => {
                     assert_eq!(value, expected, "Value mismatch for key {}", i);
-                }
+                },
                 None => {
                     missing.push(i);
-                }
+                },
             }
         }
 
@@ -1465,8 +1416,7 @@ mod tests {
     /// Stress test with concurrent threads writing different keys
     #[test]
     fn test_concurrent_writes_from_threads() {
-        use std::sync::Arc;
-        use std::thread;
+        use std::{sync::Arc, thread};
 
         let db = Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
         let num_threads = 4;
@@ -1480,8 +1430,7 @@ mod tests {
                     let mut txn = db.write().unwrap();
                     let key = format!("key-{}-{}", thread_id, i);
                     let value = format!("value-{}-{}", thread_id, i).into_bytes();
-                    txn.insert::<tables::Entities>(&key.into_bytes(), &value)
-                        .unwrap();
+                    txn.insert::<tables::Entities>(&key.into_bytes(), &value).unwrap();
                     txn.commit().unwrap();
                 }
             });
@@ -1504,10 +1453,10 @@ mod tests {
                 match txn.get::<tables::Entities>(&key_bytes).unwrap() {
                     Some(value) => {
                         assert_eq!(value, expected, "Value mismatch for key {}", key);
-                    }
+                    },
                     None => {
                         missing.push(key);
-                    }
+                    },
                 }
             }
         }
@@ -1555,10 +1504,10 @@ mod tests {
                 match txn.get::<tables::RaftLog>(&(i as u64)).unwrap() {
                     Some(value) => {
                         assert_eq!(value, expected, "Value mismatch for key {}", i);
-                    }
+                    },
                     None => {
                         missing.push(i);
-                    }
+                    },
                 }
             }
 
@@ -1582,10 +1531,8 @@ mod tests {
             let db = Database::<FileBackend>::create(&db_path).unwrap();
             let mut txn = db.write().unwrap();
 
-            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3])
-                .unwrap();
-            txn.insert::<tables::RaftState>(&"term".to_string(), &vec![0u8, 0, 0, 42])
-                .unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3]).unwrap();
+            txn.insert::<tables::RaftState>(&"term".to_string(), &vec![0u8, 0, 0, 42]).unwrap();
             txn.insert::<tables::Entities>(&b"entity-key".to_vec(), &b"entity-value".to_vec())
                 .unwrap();
 
@@ -1608,8 +1555,7 @@ mod tests {
                 "RaftState data missing"
             );
             assert_eq!(
-                txn.get::<tables::Entities>(&b"entity-key".to_vec())
-                    .unwrap(),
+                txn.get::<tables::Entities>(&b"entity-key".to_vec()).unwrap(),
                 Some(b"entity-value".to_vec()),
                 "Entities data missing"
             );
@@ -1633,23 +1579,19 @@ mod tests {
         {
             let db = Database::<FileBackend>::create(&db_path).unwrap();
             let mut txn = db.write().unwrap();
-            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3])
-                .unwrap();
-            txn.insert::<tables::RaftLog>(&2u64, &vec![4u8, 5, 6])
-                .unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3]).unwrap();
+            txn.insert::<tables::RaftLog>(&2u64, &vec![4u8, 5, 6]).unwrap();
             txn.commit().unwrap();
         }
 
         // Simulate crash by setting recovery flag
         {
-            use crate::backend::DatabaseHeader;
             use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&db_path)
-                .unwrap();
+            use crate::backend::DatabaseHeader;
+
+            let mut file =
+                std::fs::OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
 
             // Read header
             let mut header_bytes = vec![0u8; HEADER_SIZE];
@@ -1672,14 +1614,8 @@ mod tests {
 
             // Data should still be accessible
             let txn = db.read().unwrap();
-            assert_eq!(
-                txn.get::<tables::RaftLog>(&1u64).unwrap(),
-                Some(vec![1u8, 2, 3])
-            );
-            assert_eq!(
-                txn.get::<tables::RaftLog>(&2u64).unwrap(),
-                Some(vec![4u8, 5, 6])
-            );
+            assert_eq!(txn.get::<tables::RaftLog>(&1u64).unwrap(), Some(vec![1u8, 2, 3]));
+            assert_eq!(txn.get::<tables::RaftLog>(&2u64).unwrap(), Some(vec![4u8, 5, 6]));
         }
     }
 
@@ -1699,30 +1635,26 @@ mod tests {
             // First commit
             {
                 let mut txn = db.write().unwrap();
-                txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3])
-                    .unwrap();
+                txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3]).unwrap();
                 txn.commit().unwrap();
             }
 
             // Second commit - this will flip the primary slot
             {
                 let mut txn = db.write().unwrap();
-                txn.insert::<tables::RaftLog>(&2u64, &vec![4u8, 5, 6])
-                    .unwrap();
+                txn.insert::<tables::RaftLog>(&2u64, &vec![4u8, 5, 6]).unwrap();
                 txn.commit().unwrap();
             }
         }
 
         // Corrupt the primary slot's checksum
         {
-            use crate::backend::DatabaseHeader;
             use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&db_path)
-                .unwrap();
+            use crate::backend::DatabaseHeader;
+
+            let mut file =
+                std::fs::OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
 
             // Read header
             let mut header_bytes = vec![0u8; HEADER_SIZE];
@@ -1772,8 +1704,7 @@ mod tests {
         {
             let db = Database::<FileBackend>::create(&db_path).unwrap();
             let mut txn = db.write().unwrap();
-            txn.insert::<tables::RaftLog>(&1u64, &vec![0xAA; 100])
-                .unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![0xAA; 100]).unwrap();
             txn.commit().unwrap();
         }
 
@@ -1781,8 +1712,7 @@ mod tests {
         {
             let db = Database::<FileBackend>::open(&db_path).unwrap();
             let mut txn = db.write().unwrap();
-            txn.insert::<tables::RaftLog>(&2u64, &vec![0xBB; 100])
-                .unwrap();
+            txn.insert::<tables::RaftLog>(&2u64, &vec![0xBB; 100]).unwrap();
             txn.commit().unwrap();
         }
 
@@ -1819,8 +1749,7 @@ mod tests {
             {
                 let mut txn = db.write().unwrap();
                 for i in 0..10 {
-                    txn.insert::<tables::RaftLog>(&(i as u64), &vec![0xAA; 50])
-                        .unwrap();
+                    txn.insert::<tables::RaftLog>(&(i as u64), &vec![0xAA; 50]).unwrap();
                 }
                 txn.commit().unwrap();
             }
@@ -1848,8 +1777,7 @@ mod tests {
                 // Need to persist this - do a dummy write to trigger commit
                 {
                     let mut txn = db.write().unwrap();
-                    txn.insert::<tables::RaftState>(&"test".to_string(), &vec![1])
-                        .unwrap();
+                    txn.insert::<tables::RaftState>(&"test".to_string(), &vec![1]).unwrap();
                     txn.commit().unwrap();
                 }
             }

@@ -10,8 +10,10 @@
 //! The peer tracker should be periodically maintained via `prune_stale()` to prevent
 //! unbounded memory growth from departed peers.
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use prost_types::Timestamp;
 
@@ -62,10 +64,7 @@ impl PeerTracker {
 
     /// Create a new peer tracker with custom configuration.
     pub fn with_config(config: PeerTrackerConfig) -> Self {
-        Self {
-            last_seen: HashMap::new(),
-            config,
-        }
+        Self { last_seen: HashMap::new(), config }
     }
 
     /// Record that a peer was seen now.
@@ -89,10 +88,7 @@ impl PeerTracker {
                     seconds: duration.as_secs() as i64,
                     nanos: duration.subsec_nanos() as i32,
                 },
-                Err(_) => Timestamp {
-                    seconds: 0,
-                    nanos: 0,
-                },
+                Err(_) => Timestamp { seconds: 0, nanos: 0 },
             }
         })
     }
@@ -119,8 +115,7 @@ impl PeerTracker {
         let threshold = self.config.staleness_threshold;
         let before_count = self.last_seen.len();
 
-        self.last_seen
-            .retain(|_, instant| instant.elapsed() <= threshold);
+        self.last_seen.retain(|_, instant| instant.elapsed() <= threshold);
 
         let pruned = before_count - self.last_seen.len();
 
@@ -141,8 +136,7 @@ impl PeerTracker {
     pub fn prune_older_than(&mut self, max_age: Duration) -> usize {
         let before_count = self.last_seen.len();
 
-        self.last_seen
-            .retain(|_, instant| instant.elapsed() <= max_age);
+        self.last_seen.retain(|_, instant| instant.elapsed() <= max_age);
 
         before_count - self.last_seen.len()
     }
@@ -169,12 +163,7 @@ impl PeerTracker {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -312,10 +301,9 @@ mod tests {
         let ts = tracker.get_last_seen("node-1").unwrap();
 
         // Timestamp should be recent (within last minute)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+                as i64;
 
         assert!(
             ts.seconds >= now - 60 && ts.seconds <= now + 1,

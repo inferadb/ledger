@@ -10,14 +10,14 @@
 use std::sync::Arc;
 
 use inferadb_ledger_store::StorageBackend;
+use inferadb_ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId, decode, encode};
 use snafu::{ResultExt, Snafu};
 
-use inferadb_ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId, decode, encode};
-
+use super::{
+    keys::SystemKeys,
+    types::{NamespaceRegistry, NamespaceStatus, NodeInfo},
+};
 use crate::state::{StateError, StateLayer};
-
-use super::keys::SystemKeys;
-use super::types::{NamespaceRegistry, NamespaceStatus, NodeInfo};
 
 /// The reserved namespace ID for _system.
 pub const SYSTEM_NAMESPACE_ID: NamespaceId = 0;
@@ -88,13 +88,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
             Ok(Some(entity)) => {
                 let value_str = String::from_utf8_lossy(&entity.value);
                 value_str.parse::<i64>().unwrap_or(start_value)
-            }
+            },
             Ok(None) => start_value,
             Err(e) => {
-                return Err(SystemError::State {
-                    source: Box::new(e),
-                });
-            }
+                return Err(SystemError::State { source: Box::new(e) });
+            },
         };
 
         // Increment and save
@@ -133,16 +131,9 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         let key = SystemKeys::node_key(&node.node_id);
         let value = encode(node).context(CodecSnafu)?;
 
-        let ops = vec![Operation::SetEntity {
-            key,
-            value,
-            condition: None,
-            expires_at: None,
-        }];
+        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
 
-        self.state
-            .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-            .context(StateSnafu)?;
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -155,11 +146,9 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
             Ok(Some(entity)) => {
                 let node: NodeInfo = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(node))
-            }
+            },
             Ok(None) => Ok(None),
-            Err(e) => Err(SystemError::State {
-                source: Box::new(e),
-            }),
+            Err(e) => Err(SystemError::State { source: Box::new(e) }),
         }
     }
 
@@ -185,15 +174,9 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         let key = SystemKeys::node_key(node_id);
         let ops = vec![Operation::DeleteEntity { key }];
 
-        let statuses = self
-            .state
-            .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-            .context(StateSnafu)?;
+        let statuses = self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
-        Ok(matches!(
-            statuses.first(),
-            Some(inferadb_ledger_types::WriteStatus::Deleted)
-        ))
+        Ok(matches!(statuses.first(), Some(inferadb_ledger_types::WriteStatus::Deleted)))
     }
 
     // =========================================================================
@@ -210,12 +193,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         let name_index_value = registry.namespace_id.to_string().into_bytes();
 
         let ops = vec![
-            Operation::SetEntity {
-                key,
-                value,
-                condition: None,
-                expires_at: None,
-            },
+            Operation::SetEntity { key, value, condition: None, expires_at: None },
             Operation::SetEntity {
                 key: name_index_key,
                 value: name_index_value,
@@ -224,9 +202,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
             },
         ];
 
-        self.state
-            .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-            .context(StateSnafu)?;
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -239,11 +215,9 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
             Ok(Some(entity)) => {
                 let registry: NamespaceRegistry = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(registry))
-            }
+            },
             Ok(None) => Ok(None),
-            Err(e) => Err(SystemError::State {
-                source: Box::new(e),
-            }),
+            Err(e) => Err(SystemError::State { source: Box::new(e) }),
         }
     }
 
@@ -256,13 +230,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
             Ok(Some(entity)) => {
                 let id_str = String::from_utf8_lossy(&entity.value);
                 id_str.parse::<NamespaceId>().ok()
-            }
+            },
             Ok(None) => None,
             Err(e) => {
-                return Err(SystemError::State {
-                    source: Box::new(e),
-                });
-            }
+                return Err(SystemError::State { source: Box::new(e) });
+            },
         };
 
         match namespace_id {
@@ -275,12 +247,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceRegistry>> {
         let entities = self
             .state
-            .list_entities(
-                SYSTEM_VAULT_ID,
-                Some(SystemKeys::NAMESPACE_PREFIX),
-                None,
-                10000,
-            )
+            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::NAMESPACE_PREFIX), None, 10000)
             .context(StateSnafu)?;
 
         let mut namespaces = Vec::new();
@@ -300,11 +267,9 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         status: NamespaceStatus,
     ) -> Result<()> {
         // Get existing registry
-        let mut registry =
-            self.get_namespace(namespace_id)?
-                .ok_or_else(|| SystemError::NotFound {
-                    entity: format!("namespace:{}", namespace_id),
-                })?;
+        let mut registry = self.get_namespace(namespace_id)?.ok_or_else(|| {
+            SystemError::NotFound { entity: format!("namespace:{}", namespace_id) }
+        })?;
 
         // Update status
         registry.status = status;
@@ -320,8 +285,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
 
     /// Get the shard ID for a namespace.
     pub fn get_shard_for_namespace(&self, namespace_id: NamespaceId) -> Result<Option<ShardId>> {
-        self.get_namespace(namespace_id)
-            .map(|opt| opt.map(|r| r.shard_id))
+        self.get_namespace(namespace_id).map(|opt| opt.map(|r| r.shard_id))
     }
 
     /// Assign a namespace to a shard.
@@ -331,11 +295,9 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         shard_id: ShardId,
         member_nodes: Vec<NodeId>,
     ) -> Result<()> {
-        let mut registry =
-            self.get_namespace(namespace_id)?
-                .ok_or_else(|| SystemError::NotFound {
-                    entity: format!("namespace:{}", namespace_id),
-                })?;
+        let mut registry = self.get_namespace(namespace_id)?.ok_or_else(|| {
+            SystemError::NotFound { entity: format!("namespace:{}", namespace_id) }
+        })?;
 
         registry.shard_id = shard_id;
         registry.member_nodes = member_nodes;
@@ -352,10 +314,8 @@ mod tests {
 
     use chrono::Utc;
 
+    use super::{super::types::NodeRole, *};
     use crate::engine::InMemoryStorageEngine;
-
-    use super::super::types::NodeRole;
-    use super::*;
 
     fn create_test_service() -> SystemNamespaceService<inferadb_ledger_store::InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().unwrap();
@@ -483,8 +443,7 @@ mod tests {
         };
         svc.register_namespace(&registry).unwrap();
 
-        svc.update_namespace_status(1, NamespaceStatus::Suspended)
-            .unwrap();
+        svc.update_namespace_status(1, NamespaceStatus::Suspended).unwrap();
 
         let updated = svc.get_namespace(1).unwrap().unwrap();
         assert_eq!(updated.status, NamespaceStatus::Suspended);

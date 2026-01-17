@@ -5,13 +5,14 @@
 //! - `CommittedState`: The visible state (table roots) at a snapshot
 //! - `TransactionTracker`: Reference counting for safe page deallocation
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use parking_lot::Mutex;
 
-use crate::error::PageId;
-use crate::tables::TableId;
+use crate::{error::PageId, tables::TableId};
 
 /// Unique identifier for a committed database snapshot.
 ///
@@ -51,10 +52,7 @@ pub struct CommittedState {
 
 impl Default for CommittedState {
     fn default() -> Self {
-        Self {
-            table_roots: [0; TableId::COUNT],
-            snapshot_id: SnapshotId::default(),
-        }
+        Self { table_roots: [0; TableId::COUNT], snapshot_id: SnapshotId::default() }
     }
 }
 
@@ -68,8 +66,8 @@ impl Default for CommittedState {
 /// 1. When a read transaction starts, it registers with its snapshot ID
 /// 2. The tracker maintains a reference count for each snapshot ID
 /// 3. When a read transaction ends, it decrements the count
-/// 4. Pages freed by a commit can only be deallocated when no readers
-///    reference that snapshot ID or earlier
+/// 4. Pages freed by a commit can only be deallocated when no readers reference that snapshot ID or
+///    earlier
 ///
 /// # Example
 ///
@@ -224,11 +222,8 @@ impl PendingFrees {
     pub fn drain_freeable(&mut self, oldest_reader: Option<SnapshotId>) -> Vec<PageId> {
         let cutoff = oldest_reader.unwrap_or(SnapshotId(u64::MAX));
 
-        let to_free: Vec<SnapshotId> = self
-            .freed_by_snapshot
-            .range(..cutoff)
-            .map(|(k, _)| *k)
-            .collect();
+        let to_free: Vec<SnapshotId> =
+            self.freed_by_snapshot.range(..cutoff).map(|(k, _)| *k).collect();
 
         let mut pages = Vec::new();
         for snapshot_id in to_free {

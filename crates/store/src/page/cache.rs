@@ -3,10 +3,12 @@
 //! The cache stores recently accessed pages to reduce I/O.
 //! It uses a simple LRU eviction policy.
 
+use std::collections::HashMap;
+
+use parking_lot::RwLock;
+
 use super::Page;
 use crate::error::PageId;
-use parking_lot::RwLock;
-use std::collections::HashMap;
 
 /// LRU page cache.
 ///
@@ -97,13 +99,7 @@ impl PageCache {
         let mut page_order = self.page_order.write();
         page_order.push(page_id);
 
-        pages.insert(
-            page_id,
-            CacheEntry {
-                page,
-                accessed: true,
-            },
-        );
+        pages.insert(page_id, CacheEntry { page, accessed: true });
     }
 
     /// Remove a page from the cache.
@@ -201,12 +197,7 @@ impl PageCache {
 
     /// Get all dirty pages (for flushing).
     pub fn dirty_pages(&self) -> Vec<Page> {
-        self.pages
-            .read()
-            .values()
-            .filter(|e| e.page.dirty)
-            .map(|e| e.page.clone())
-            .collect()
+        self.pages.read().values().filter(|e| e.page.dirty).map(|e| e.page.clone()).collect()
     }
 
     /// Mark a page as clean (after flushing).

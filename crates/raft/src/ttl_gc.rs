@@ -10,19 +10,19 @@
 //! - Uses `ExpireEntity` operation (distinct from user deletion)
 //! - Actor recorded as `system:gc` for audit trail
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use openraft::Raft;
-use tokio::time::interval;
-use tracing::{debug, info, warn};
+use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{Operation, Transaction, VaultId};
+use openraft::Raft;
+use tokio::time::interval;
+use tracing::{debug, info, warn};
 
-use crate::log_storage::AppliedStateAccessor;
-use crate::types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig};
+use crate::{
+    log_storage::AppliedStateAccessor,
+    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
+};
 
 /// Default interval between GC cycles.
 const GC_INTERVAL: Duration = Duration::from_secs(60);
@@ -94,10 +94,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         // List all entities including expired ones
-        match self
-            .state
-            .list_entities(vault_id, None, None, self.max_batch_size * 2)
-        {
+        match self.state.list_entities(vault_id, None, None, self.max_batch_size * 2) {
             Ok(entities) => entities
                 .into_iter()
                 .filter(|e| e.expires_at > 0 && e.expires_at < now)
@@ -110,7 +107,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             Err(e) => {
                 warn!(vault_id, error = %e, "Failed to list entities for GC");
                 Vec::new()
-            }
+            },
         }
     }
 
@@ -145,23 +142,12 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             actor: GC_ACTOR.to_string(),
         };
 
-        let request = LedgerRequest::Write {
-            namespace_id,
-            vault_id,
-            transactions: vec![transaction],
-        };
+        let request =
+            LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
 
-        self.raft
-            .client_write(request)
-            .await
-            .map_err(|e| format!("Raft write failed: {}", e))?;
+        self.raft.client_write(request).await.map_err(|e| format!("Raft write failed: {}", e))?;
 
-        info!(
-            namespace_id,
-            vault_id,
-            count = expired.len(),
-            "GC expired entities"
-        );
+        info!(namespace_id, vault_id, count = expired.len(), "GC expired entities");
 
         Ok(())
     }
@@ -185,12 +171,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
                 continue;
             }
 
-            debug!(
-                namespace_id,
-                vault_id,
-                count = expired.len(),
-                "Found expired entities"
-            );
+            debug!(namespace_id, vault_id, count = expired.len(), "Found expired entities");
 
             if let Err(e) = self.expire_entities(namespace_id, vault_id, expired).await {
                 warn!(namespace_id, vault_id, error = %e, "GC cycle failed");
@@ -221,10 +202,8 @@ mod tests {
 
     #[test]
     fn test_expiration_check() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
         // Entity expired 1 hour ago
         let expired_at = now - 3600;

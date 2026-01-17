@@ -11,37 +11,35 @@
 //!
 //! Use linearizable reads when you need read-after-write consistency guarantees.
 
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{pin::Pin, sync::Arc, time::Instant};
 
 use futures::StreamExt;
+use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_store::{Database, FileBackend};
 use openraft::Raft;
+use tempfile::TempDir;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, instrument, warn};
 
-use crate::metrics;
-use crate::proto::read_service_server::ReadService;
-use crate::proto::{
-    BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
-    GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest, GetTipResponse,
-    HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
-    ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
-    ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse, VerifiedReadRequest,
-    VerifiedReadResponse, WatchBlocksRequest,
+use crate::{
+    IdempotencyCache,
+    log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    metrics,
+    pagination::{PageToken, PageTokenCodec},
+    proto::{
+        BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
+        GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest,
+        GetTipResponse, HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest,
+        ListEntitiesResponse, ListRelationshipsRequest, ListRelationshipsResponse,
+        ListResourcesRequest, ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse,
+        VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
+        read_service_server::ReadService,
+    },
+    proto_convert::vault_entry_to_proto_block,
+    types::{LedgerNodeId, LedgerTypeConfig},
 };
-
-use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
-use inferadb_ledger_store::{Database, FileBackend};
-use tempfile::TempDir;
-
-use crate::IdempotencyCache;
-use crate::log_storage::{AppliedStateAccessor, VaultHealthStatus};
-use crate::pagination::{PageToken, PageTokenCodec};
-use crate::proto_convert::vault_entry_to_proto_block;
-use crate::types::{LedgerNodeId, LedgerTypeConfig};
 
 /// Read service implementation.
 pub struct ReadServiceImpl {
@@ -187,7 +185,7 @@ impl ReadServiceImpl {
             (Some(raft), Some(node_id)) => {
                 let metrics = raft.metrics().borrow().clone();
                 metrics.current_leader == Some(*node_id)
-            }
+            },
             _ => false,
         }
     }
@@ -215,11 +213,11 @@ impl ReadServiceImpl {
                     ));
                 }
                 Ok(())
-            }
+            },
             ReadConsistency::Eventual | ReadConsistency::Unspecified => {
                 // Eventual reads can be served by any node
                 Ok(())
-            }
+            },
         }
     }
 
@@ -239,10 +237,8 @@ impl ReadServiceImpl {
         }
 
         // Find the shard height containing this vault block
-        let shard_height = archive
-            .find_shard_height(namespace_id, vault_id, vault_height)
-            .ok()
-            .flatten()?;
+        let shard_height =
+            archive.find_shard_height(namespace_id, vault_id, vault_height).ok().flatten()?;
 
         // Read the shard block
         let shard_block = archive.read_block(shard_height).ok()?;
@@ -256,26 +252,16 @@ impl ReadServiceImpl {
         // Build proto block header
         Some(crate::proto::BlockHeader {
             height: entry.vault_height,
-            namespace_id: Some(crate::proto::NamespaceId {
-                id: entry.namespace_id,
-            }),
+            namespace_id: Some(crate::proto::NamespaceId { id: entry.namespace_id }),
             vault_id: Some(crate::proto::VaultId { id: entry.vault_id }),
-            previous_hash: Some(crate::proto::Hash {
-                value: entry.previous_vault_hash.to_vec(),
-            }),
-            tx_merkle_root: Some(crate::proto::Hash {
-                value: entry.tx_merkle_root.to_vec(),
-            }),
-            state_root: Some(crate::proto::Hash {
-                value: entry.state_root.to_vec(),
-            }),
+            previous_hash: Some(crate::proto::Hash { value: entry.previous_vault_hash.to_vec() }),
+            tx_merkle_root: Some(crate::proto::Hash { value: entry.tx_merkle_root.to_vec() }),
+            state_root: Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
             timestamp: Some(prost_types::Timestamp {
                 seconds: shard_block.timestamp.timestamp(),
                 nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
             }),
-            leader_id: Some(crate::proto::NodeId {
-                id: shard_block.leader_id.clone(),
-            }),
+            leader_id: Some(crate::proto::NodeId { id: shard_block.leader_id.clone() }),
             term: shard_block.term,
             committed_index: shard_block.committed_index,
         })
@@ -292,14 +278,11 @@ impl ReadServiceImpl {
         vault_height: u64,
     ) -> (Option<crate::proto::Hash>, Option<crate::proto::Hash>) {
         // Find the shard height containing this vault block
-        let shard_height = match archive
-            .find_shard_height(namespace_id, vault_id, vault_height)
-            .ok()
-            .flatten()
-        {
-            Some(h) => h,
-            None => return (None, None),
-        };
+        let shard_height =
+            match archive.find_shard_height(namespace_id, vault_id, vault_height).ok().flatten() {
+                Some(h) => h,
+                None => return (None, None),
+            };
 
         // Read the shard block
         let shard_block = match archive.read_block(shard_height) {
@@ -321,12 +304,8 @@ impl ReadServiceImpl {
         let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
         (
-            Some(crate::proto::Hash {
-                value: block_hash.to_vec(),
-            }),
-            Some(crate::proto::Hash {
-                value: entry.state_root.to_vec(),
-            }),
+            Some(crate::proto::Hash { value: block_hash.to_vec() }),
+            Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
         )
     }
 
@@ -362,11 +341,8 @@ impl ReadServiceImpl {
             };
 
             // Find the vault's height in this snapshot
-            if let Some(vault_meta) = snapshot
-                .header
-                .vault_states
-                .iter()
-                .find(|v| v.vault_id == vault_id)
+            if let Some(vault_meta) =
+                snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id)
             {
                 if vault_meta.vault_height <= target_height {
                     // This snapshot is usable - load its entities into temp_state
@@ -467,7 +443,7 @@ impl ReadServiceImpl {
             None => {
                 debug!("No block archive configured; cannot replay historical blocks");
                 return vec![];
-            }
+            },
         };
 
         let mut announcements = Vec::with_capacity((end_height - start_height + 1) as usize);
@@ -479,11 +455,11 @@ impl ReadServiceImpl {
                 Ok(None) => {
                     debug!(height, "Vault block not found in archive");
                     continue;
-                }
+                },
                 Err(e) => {
                     warn!(height, error = %e, "Error finding shard height");
                     continue;
-                }
+                },
             };
 
             // Read the shard block
@@ -492,7 +468,7 @@ impl ReadServiceImpl {
                 Err(e) => {
                     warn!(shard_height, error = %e, "Error reading shard block");
                     continue;
-                }
+                },
             };
 
             // Find the vault entry in the shard block
@@ -503,17 +479,11 @@ impl ReadServiceImpl {
                 let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
                 announcements.push(BlockAnnouncement {
-                    namespace_id: Some(crate::proto::NamespaceId {
-                        id: entry.namespace_id,
-                    }),
+                    namespace_id: Some(crate::proto::NamespaceId { id: entry.namespace_id }),
                     vault_id: Some(crate::proto::VaultId { id: entry.vault_id }),
                     height: entry.vault_height,
-                    block_hash: Some(crate::proto::Hash {
-                        value: block_hash.to_vec(),
-                    }),
-                    state_root: Some(crate::proto::Hash {
-                        value: entry.state_root.to_vec(),
-                    }),
+                    block_hash: Some(crate::proto::Hash { value: block_hash.to_vec() }),
+                    state_root: Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
                     timestamp: Some(Timestamp {
                         seconds: shard_block.timestamp.timestamp(),
                         nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
@@ -548,14 +518,9 @@ impl ReadService for ReadServiceImpl {
         tracing::Span::current().record("key", &req.key);
 
         // Check vault health - diverged vaults cannot be read
-        let health = self
-            .applied_state
-            .vault_health(namespace_id, vault_id as i64);
+        let health = self.applied_state.vault_health(namespace_id, vault_id as i64);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(
-                namespace_id,
-                vault_id, at_height, "Read rejected: vault has diverged"
-            );
+            warn!(namespace_id, vault_id, at_height, "Read rejected: vault has diverged");
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
                 namespace_id, vault_id, at_height
@@ -564,13 +529,11 @@ impl ReadService for ReadServiceImpl {
 
         // Read from state layer
         let state = &*self.state;
-        let entity = state
-            .get_entity(vault_id as i64, req.key.as_bytes())
-            .map_err(|e| {
-                warn!(error = %e, "Read failed");
-                metrics::record_read(false, start.elapsed().as_secs_f64());
-                Status::internal(format!("Storage error: {}", e))
-            })?;
+        let entity = state.get_entity(vault_id as i64, req.key.as_bytes()).map_err(|e| {
+            warn!(error = %e, "Read failed");
+            metrics::record_read(false, start.elapsed().as_secs_f64());
+            Status::internal(format!("Storage error: {}", e))
+        })?;
 
         let latency = start.elapsed().as_secs_f64();
         let found = entity.is_some();
@@ -579,14 +542,9 @@ impl ReadService for ReadServiceImpl {
 
         // Get current block height for this vault
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let block_height = self
-            .applied_state
-            .vault_height(namespace_id, vault_id as i64);
+        let block_height = self.applied_state.vault_height(namespace_id, vault_id as i64);
 
-        Ok(Response::new(ReadResponse {
-            value: entity.map(|e| e.value),
-            block_height,
-        }))
+        Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
     }
 
     /// Batch read multiple keys in a single RPC call.
@@ -628,14 +586,9 @@ impl ReadService for ReadServiceImpl {
         tracing::Span::current().record("batch_size", req.keys.len());
 
         // Check vault health - diverged vaults cannot be read
-        let health = self
-            .applied_state
-            .vault_health(namespace_id, vault_id as i64);
+        let health = self.applied_state.vault_health(namespace_id, vault_id as i64);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(
-                namespace_id,
-                vault_id, at_height, "BatchRead rejected: vault has diverged"
-            );
+            warn!(namespace_id, vault_id, at_height, "BatchRead rejected: vault has diverged");
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
                 namespace_id, vault_id, at_height
@@ -647,12 +600,10 @@ impl ReadService for ReadServiceImpl {
         let mut results = Vec::with_capacity(req.keys.len());
 
         for key in &req.keys {
-            let entity = state
-                .get_entity(vault_id as i64, key.as_bytes())
-                .map_err(|e| {
-                    warn!(error = %e, key = key, "BatchRead key failed");
-                    Status::internal(format!("Storage error: {}", e))
-                })?;
+            let entity = state.get_entity(vault_id as i64, key.as_bytes()).map_err(|e| {
+                warn!(error = %e, key = key, "BatchRead key failed");
+                Status::internal(format!("Storage error: {}", e))
+            })?;
 
             let found = entity.is_some();
             results.push(BatchReadResult {
@@ -664,11 +615,7 @@ impl ReadService for ReadServiceImpl {
 
         let latency = start.elapsed().as_secs_f64();
         let batch_size = results.len();
-        debug!(
-            batch_size,
-            latency_ms = latency * 1000.0,
-            "BatchRead completed"
-        );
+        debug!(batch_size, latency_ms = latency * 1000.0, "BatchRead completed");
 
         // Record metrics for each read in the batch
         for _ in 0..batch_size {
@@ -676,14 +623,9 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Get current block height for this vault
-        let block_height = self
-            .applied_state
-            .vault_height(namespace_id, vault_id as i64);
+        let block_height = self.applied_state.vault_height(namespace_id, vault_id as i64);
 
-        Ok(Response::new(BatchReadResponse {
-            results,
-            block_height,
-        }))
+        Ok(Response::new(BatchReadResponse { results, block_height }))
     }
 
     #[instrument(
@@ -708,10 +650,7 @@ impl ReadService for ReadServiceImpl {
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(
-                namespace_id,
-                vault_id, at_height, "Verified read rejected: vault has diverged"
-            );
+            warn!(namespace_id, vault_id, at_height, "Verified read rejected: vault has diverged");
             metrics::record_verified_read(false, start.elapsed().as_secs_f64());
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
@@ -721,13 +660,11 @@ impl ReadService for ReadServiceImpl {
 
         // Read from state layer
         let state = &*self.state;
-        let entity = state
-            .get_entity(vault_id, req.key.as_bytes())
-            .map_err(|e| {
-                warn!(error = %e, "Verified read failed");
-                metrics::record_verified_read(false, start.elapsed().as_secs_f64());
-                Status::internal(format!("Storage error: {}", e))
-            })?;
+        let entity = state.get_entity(vault_id, req.key.as_bytes()).map_err(|e| {
+            warn!(error = %e, "Verified read failed");
+            metrics::record_verified_read(false, start.elapsed().as_secs_f64());
+            Status::internal(format!("Storage error: {}", e))
+        })?;
 
         // Get current block height for this vault
         let block_height = self.applied_state.vault_height(namespace_id, vault_id);
@@ -743,10 +680,7 @@ impl ReadService for ReadServiceImpl {
         // so we can't generate individual key inclusion proofs. The state_root in the
         // block header commits to the entire vault state. Clients must trust the
         // state_root or reconstruct the full bucket hash to verify.
-        let merkle_proof = crate::proto::MerkleProof {
-            leaf_hash: None,
-            siblings: vec![],
-        };
+        let merkle_proof = crate::proto::MerkleProof { leaf_hash: None, siblings: vec![] };
 
         // Build chain proof if requested
         let chain_proof = if req.include_chain_proof {
@@ -768,11 +702,7 @@ impl ReadService for ReadServiceImpl {
 
         let latency = start.elapsed().as_secs_f64();
         let found = entity.is_some();
-        debug!(
-            found,
-            latency_ms = latency * 1000.0,
-            "Verified read completed"
-        );
+        debug!(found, latency_ms = latency * 1000.0, "Verified read completed");
         metrics::record_verified_read(true, latency);
 
         Ok(Response::new(VerifiedReadResponse {
@@ -793,9 +723,7 @@ impl ReadService for ReadServiceImpl {
 
         // Historical read requires at_height
         if req.at_height == 0 {
-            return Err(Status::invalid_argument(
-                "at_height is required for historical reads",
-            ));
+            return Err(Status::invalid_argument("at_height is required for historical reads"));
         }
 
         // Extract IDs
@@ -809,7 +737,7 @@ impl ReadService for ReadServiceImpl {
                 return Err(Status::unavailable(
                     "Block archive not configured for historical reads",
                 ));
-            }
+            },
         };
 
         // Check that requested height doesn't exceed current tip
@@ -901,13 +829,7 @@ impl ReadService for ReadServiceImpl {
         // Build chain proof if requested (requires include_proof to be useful)
         let chain_proof = if req.include_chain_proof && req.include_proof {
             let trusted_height = req.trusted_height.unwrap_or(0);
-            self.build_chain_proof(
-                archive,
-                namespace_id,
-                vault_id,
-                trusted_height,
-                req.at_height,
-            )
+            self.build_chain_proof(archive, namespace_id, vault_id, trusted_height, req.at_height)
         } else {
             None
         };
@@ -1000,11 +922,7 @@ impl ReadService for ReadServiceImpl {
                     match result {
                         Ok(announcement) => {
                             // Filter by namespace
-                            if announcement
-                                .namespace_id
-                                .as_ref()
-                                .map(|n| n.id)
-                                .unwrap_or(0)
+                            if announcement.namespace_id.as_ref().map(|n| n.id).unwrap_or(0)
                                 != namespace_id
                             {
                                 return None;
@@ -1019,7 +937,7 @@ impl ReadService for ReadServiceImpl {
                                 return None;
                             }
                             Some(Ok(announcement))
-                        }
+                        },
                         Err(_) => Some(Err(Status::internal("Stream error"))),
                     }
                 }
@@ -1082,11 +1000,8 @@ impl ReadService for ReadServiceImpl {
         let archive = match &self.block_archive {
             Some(a) => a,
             None => {
-                return Ok(Response::new(GetBlockRangeResponse {
-                    blocks: vec![],
-                    current_tip: 0,
-                }));
-            }
+                return Ok(Response::new(GetBlockRangeResponse { blocks: vec![], current_tip: 0 }));
+            },
         };
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
@@ -1127,10 +1042,7 @@ impl ReadService for ReadServiceImpl {
         // Get current tip for this vault
         let current_tip = self.applied_state.vault_height(namespace_id, vault_id);
 
-        Ok(Response::new(GetBlockRangeResponse {
-            blocks,
-            current_tip,
-        }))
+        Ok(Response::new(GetBlockRangeResponse { blocks, current_tip }))
     }
 
     async fn get_tip(
@@ -1157,12 +1069,7 @@ impl ReadService for ReadServiceImpl {
                 .unwrap_or(0)
         } else {
             // No filter - return max height across all vaults
-            self.applied_state
-                .all_vault_heights()
-                .values()
-                .copied()
-                .max()
-                .unwrap_or(0)
+            self.applied_state.all_vault_heights().values().copied().max().unwrap_or(0)
         };
 
         // Get block_hash and state_root from archive if available and a specific vault is requested
@@ -1173,11 +1080,7 @@ impl ReadService for ReadServiceImpl {
                 (None, None)
             };
 
-        Ok(Response::new(GetTipResponse {
-            height,
-            block_hash,
-            state_root,
-        }))
+        Ok(Response::new(GetTipResponse { height, block_hash, state_root }))
     }
 
     async fn get_client_state(
@@ -1204,13 +1107,10 @@ impl ReadService for ReadServiceImpl {
             cached_sequence
         } else {
             // Fall back to persistent AppliedState (survives restarts)
-            self.applied_state
-                .client_sequence(namespace_id, vault_id, client_id)
+            self.applied_state.client_sequence(namespace_id, vault_id, client_id)
         };
 
-        Ok(Response::new(GetClientStateResponse {
-            last_committed_sequence,
-        }))
+        Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }
 
     async fn list_relationships(
@@ -1224,11 +1124,7 @@ impl ReadService for ReadServiceImpl {
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-        let limit = if req.limit == 0 {
-            100
-        } else {
-            req.limit as usize
-        };
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from all filter parameters for token validation
         let query_params = format!(
@@ -1256,10 +1152,7 @@ impl ReadService for ReadServiceImpl {
                 .validate_context(&token, namespace_id, vault_id, query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-            (
-                Some(String::from_utf8_lossy(&token.last_key).to_string()),
-                token.at_height,
-            )
+            (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
         };
 
         let state = &*self.state;
@@ -1353,11 +1246,7 @@ impl ReadService for ReadServiceImpl {
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-        let limit = if req.limit == 0 {
-            100
-        } else {
-            req.limit as usize
-        };
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from filter parameters for token validation
         let query_params = format!("resource_type:{}", req.resource_type);
@@ -1380,10 +1269,7 @@ impl ReadService for ReadServiceImpl {
                 .validate_context(&token, namespace_id, vault_id, query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-            (
-                Some(String::from_utf8_lossy(&token.last_key).to_string()),
-                token.at_height,
-            )
+            (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
         };
 
         // List relationships and extract unique resources matching the type prefix
@@ -1424,11 +1310,7 @@ impl ReadService for ReadServiceImpl {
             String::new()
         };
 
-        Ok(Response::new(ListResourcesResponse {
-            resources,
-            next_page_token,
-            block_height,
-        }))
+        Ok(Response::new(ListResourcesResponse { resources, next_page_token, block_height }))
     }
 
     async fn list_entities(
@@ -1441,26 +1323,16 @@ impl ReadService for ReadServiceImpl {
         self.check_consistency(req.consistency)?;
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let limit = if req.limit == 0 {
-            100
-        } else {
-            req.limit as usize
-        };
-        let prefix = if req.key_prefix.is_empty() {
-            None
-        } else {
-            Some(req.key_prefix.as_str())
-        };
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
         // Entities are namespace-level (stored in vault_id=0 by convention)
         let vault_id = 0i64;
 
         // Compute query hash from filter parameters for token validation
         // This prevents clients from changing filters mid-pagination
-        let query_params = format!(
-            "prefix:{},include_expired:{}",
-            req.key_prefix, req.include_expired
-        );
+        let query_params =
+            format!("prefix:{},include_expired:{}", req.key_prefix, req.include_expired);
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
@@ -1487,10 +1359,7 @@ impl ReadService for ReadServiceImpl {
                 .validate_context(&token, namespace_id, vault_id, query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-            (
-                Some(String::from_utf8_lossy(&token.last_key).to_string()),
-                token.at_height,
-            )
+            (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
         };
 
         // Get entities from state layer
@@ -1522,11 +1391,7 @@ impl ReadService for ReadServiceImpl {
                 value: e.value.clone(),
                 version: e.version,
                 // Convert 0 (never expires) to None
-                expires_at: if e.expires_at == 0 {
-                    None
-                } else {
-                    Some(e.expires_at)
-                },
+                expires_at: if e.expires_at == 0 { None } else { Some(e.expires_at) },
             })
             .collect();
 
@@ -1550,10 +1415,6 @@ impl ReadService for ReadServiceImpl {
             String::new()
         };
 
-        Ok(Response::new(ListEntitiesResponse {
-            entities,
-            next_page_token,
-            block_height,
-        }))
+        Ok(Response::new(ListEntitiesResponse { entities, next_page_token, block_height }))
     }
 }

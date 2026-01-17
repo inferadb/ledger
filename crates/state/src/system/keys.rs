@@ -206,10 +206,7 @@ mod tests {
     #[test]
     fn test_node_key() {
         assert_eq!(SystemKeys::node_key(&"node-1".to_string()), "node:node-1");
-        assert_eq!(
-            SystemKeys::parse_node_key("node:node-1"),
-            Some("node-1".to_string())
-        );
+        assert_eq!(SystemKeys::parse_node_key("node:node-1"), Some("node-1".to_string()));
     }
 
     #[test]
@@ -220,10 +217,7 @@ mod tests {
 
     #[test]
     fn test_saga_key() {
-        assert_eq!(
-            SystemKeys::saga_key("create-org-abc123"),
-            "saga:create-org-abc123"
-        );
+        assert_eq!(SystemKeys::saga_key("create-org-abc123"), "saga:create-org-abc123");
     }
 
     #[test]

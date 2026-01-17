@@ -20,8 +20,7 @@ mod config;
 mod discovery;
 mod shutdown;
 
-use std::env;
-use std::net::SocketAddr;
+use std::{env, net::SocketAddr};
 
 use config::{Config, ConfigError};
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -71,9 +70,7 @@ async fn main() -> Result<(), ServerError> {
         init_metrics_exporter(metrics_addr)?;
     }
 
-    let node = bootstrap::bootstrap_node(&config)
-        .await
-        .map_err(ServerError::Bootstrap)?;
+    let node = bootstrap::bootstrap_node(&config).await.map_err(ServerError::Bootstrap)?;
 
     let shutdown_coordinator = shutdown::ShutdownCoordinator::new();
     let shutdown_handle = {
@@ -105,16 +102,16 @@ fn parse_args() -> Option<String> {
                 if i + 1 < args.len() {
                     return Some(args[i + 1].clone());
                 }
-            }
+            },
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
-            }
+            },
             "--version" | "-V" => {
                 println!("ledger {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
-            }
-            _ => {}
+            },
+            _ => {},
         }
         i += 1;
     }

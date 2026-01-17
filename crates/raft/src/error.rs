@@ -12,9 +12,8 @@
 // Snafu generates struct fields for context selectors that don't need documentation
 #![allow(missing_docs)]
 
-use snafu::{Backtrace, GenerateImplicitData, Snafu};
-
 use inferadb_ledger_state::{BlockArchiveError, StateError};
+use snafu::{Backtrace, GenerateImplicitData, Snafu};
 
 // ============================================================================
 // Recovery Errors
@@ -32,19 +31,11 @@ pub enum RecoveryError {
     #[snafu(display(
         "Index lookup failed for namespace {namespace_id}, vault {vault_id}, height {height}: {source}"
     ))]
-    IndexLookup {
-        namespace_id: i64,
-        vault_id: i64,
-        height: u64,
-        source: BlockArchiveError,
-    },
+    IndexLookup { namespace_id: i64, vault_id: i64, height: u64, source: BlockArchiveError },
 
     /// Failed to read block from archive.
     #[snafu(display("Block read failed at shard height {shard_height}: {source}"))]
-    BlockRead {
-        shard_height: u64,
-        source: BlockArchiveError,
-    },
+    BlockRead { shard_height: u64, source: BlockArchiveError },
 
     /// Failed to apply operations during replay.
     #[snafu(display("Apply operations failed at height {height}: {source}"))]
@@ -56,10 +47,7 @@ pub enum RecoveryError {
 
     /// Raft consensus write failed.
     #[snafu(display("Raft consensus write failed: {message}"))]
-    RaftConsensus {
-        message: String,
-        backtrace: Backtrace,
-    },
+    RaftConsensus { message: String, backtrace: Backtrace },
 
     /// Health update was rejected by the state machine.
     #[snafu(display("Health update rejected: {reason}"))]
@@ -84,38 +72,23 @@ pub enum SagaError {
 
     /// Failed to deserialize saga or entity.
     #[snafu(display("Deserialization failed for {entity_type}: {source}"))]
-    Deserialization {
-        entity_type: String,
-        source: serde_json::Error,
-    },
+    Deserialization { entity_type: String, source: serde_json::Error },
 
     /// Raft consensus write failed.
     #[snafu(display("Raft write failed for saga operation: {message}"))]
-    SagaRaftWrite {
-        message: String,
-        backtrace: Backtrace,
-    },
+    SagaRaftWrite { message: String, backtrace: Backtrace },
 
     /// Entity read from state failed.
     #[snafu(display("Failed to read {entity_type} from state: {source}"))]
-    StateRead {
-        entity_type: String,
-        source: StateError,
-    },
+    StateRead { entity_type: String, source: StateError },
 
     /// Entity not found.
     #[snafu(display("{entity_type} not found: {identifier}"))]
-    EntityNotFound {
-        entity_type: String,
-        identifier: String,
-    },
+    EntityNotFound { entity_type: String, identifier: String },
 
     /// Sequence allocation failed.
     #[snafu(display("Sequence allocation failed: {message}"))]
-    SequenceAllocation {
-        message: String,
-        backtrace: Backtrace,
-    },
+    SequenceAllocation { message: String, backtrace: Backtrace },
 
     /// Unexpected response from state machine.
     #[snafu(display("Unexpected saga response: {description}"))]
@@ -132,10 +105,7 @@ pub enum SagaError {
 pub enum OrphanCleanupError {
     /// Raft consensus write failed.
     #[snafu(display("Raft write failed during orphan cleanup: {message}"))]
-    OrphanRaftWrite {
-        message: String,
-        backtrace: Backtrace,
-    },
+    OrphanRaftWrite { message: String, backtrace: Backtrace },
 
     /// Failed to delete orphaned entity.
     #[snafu(display("Failed to delete orphan entity {key}: {reason}"))]
@@ -154,10 +124,7 @@ pub enum OrphanCleanupError {
 pub enum ServiceError {
     /// Raft consensus operation failed.
     #[snafu(display("Raft operation failed: {message}"))]
-    Raft {
-        message: String,
-        backtrace: Backtrace,
-    },
+    Raft { message: String, backtrace: Backtrace },
 
     /// Storage operation failed.
     #[snafu(display("Storage operation failed: {source}"))]
@@ -177,10 +144,7 @@ pub enum ServiceError {
 
     /// Resource not found.
     #[snafu(display("{resource_type} not found: {identifier}"))]
-    ResourceNotFound {
-        resource_type: String,
-        identifier: String,
-    },
+    ResourceNotFound { resource_type: String, identifier: String },
 
     /// Precondition failed.
     #[snafu(display("Precondition failed: {message}"))]
@@ -193,21 +157,20 @@ impl From<ServiceError> for tonic::Status {
             ServiceError::Raft { message, .. } => tonic::Status::internal(message),
             ServiceError::Storage { source } => {
                 tonic::Status::internal(format!("Storage error: {}", source))
-            }
+            },
             ServiceError::BlockArchive { source } => {
                 tonic::Status::internal(format!("Block archive error: {}", source))
-            }
+            },
             ServiceError::Snapshot { message } => {
                 tonic::Status::internal(format!("Snapshot error: {}", message))
-            }
+            },
             ServiceError::InvalidArgument { message } => tonic::Status::invalid_argument(message),
-            ServiceError::ResourceNotFound {
-                resource_type,
-                identifier,
-            } => tonic::Status::not_found(format!("{} not found: {}", resource_type, identifier)),
+            ServiceError::ResourceNotFound { resource_type, identifier } => {
+                tonic::Status::not_found(format!("{} not found: {}", resource_type, identifier))
+            },
             ServiceError::PreconditionFailed { message } => {
                 tonic::Status::failed_precondition(message)
-            }
+            },
         }
     }
 }
@@ -219,17 +182,12 @@ impl From<ServiceError> for tonic::Status {
 impl ServiceError {
     /// Create a Raft error from any error type.
     pub fn raft<E: std::fmt::Debug>(err: E) -> Self {
-        ServiceError::Raft {
-            message: format!("{:?}", err),
-            backtrace: Backtrace::generate(),
-        }
+        ServiceError::Raft { message: format!("{:?}", err), backtrace: Backtrace::generate() }
     }
 
     /// Create an invalid argument error.
     pub fn invalid_arg(message: impl Into<String>) -> Self {
-        ServiceError::InvalidArgument {
-            message: message.into(),
-        }
+        ServiceError::InvalidArgument { message: message.into() }
     }
 
     /// Create a resource not found error.
@@ -242,29 +200,24 @@ impl ServiceError {
 
     /// Create a precondition failed error.
     pub fn precondition(message: impl Into<String>) -> Self {
-        ServiceError::PreconditionFailed {
-            message: message.into(),
-        }
+        ServiceError::PreconditionFailed { message: message.into() }
     }
 
     /// Create a snapshot error.
     pub fn snapshot(message: impl Into<String>) -> Self {
-        ServiceError::Snapshot {
-            message: message.into(),
-        }
+        ServiceError::Snapshot { message: message.into() }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use snafu::GenerateImplicitData;
+
+    use super::*;
 
     #[test]
     fn test_recovery_error_display() {
-        let err = RecoveryError::BlockArchiveNotConfigured {
-            backtrace: Backtrace::generate(),
-        };
+        let err = RecoveryError::BlockArchiveNotConfigured { backtrace: Backtrace::generate() };
         assert!(err.to_string().contains("Block archive not configured"));
     }
 
@@ -279,9 +232,7 @@ mod tests {
 
     #[test]
     fn test_service_error_to_status() {
-        let err = ServiceError::InvalidArgument {
-            message: "missing field".to_string(),
-        };
+        let err = ServiceError::InvalidArgument { message: "missing field".to_string() };
         let status: tonic::Status = err.into();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
         assert!(status.message().contains("missing field"));

@@ -2,8 +2,7 @@
 //!
 //! Uses rs_merkle with SHA-256 for transaction merkle roots and proofs.
 
-use rs_merkle::MerkleTree as RsMerkleTree;
-use rs_merkle::algorithms::Sha256 as RsSha256;
+use rs_merkle::{MerkleTree as RsMerkleTree, algorithms::Sha256 as RsSha256};
 
 use crate::hash::{EMPTY_HASH, Hash, sha256};
 
@@ -19,10 +18,7 @@ impl MerkleTree {
     /// For empty input, the root is EMPTY_HASH.
     pub fn from_leaves(leaves: &[Hash]) -> Self {
         let tree = RsMerkleTree::<RsSha256>::from_leaves(leaves);
-        Self {
-            tree,
-            leaves: leaves.to_vec(),
-        }
+        Self { tree, leaves: leaves.to_vec() }
     }
 
     /// Get the merkle root.

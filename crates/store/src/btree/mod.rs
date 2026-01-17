@@ -16,11 +16,14 @@ pub mod cursor;
 pub mod node;
 pub mod split;
 
-use crate::error::{Error, PageId, PageType, Result};
-use crate::page::Page;
 use cursor::{Range, RangeIterState, SeekResult, cursor_ops};
 use node::{BranchNode, LeafNode, SearchResult};
 use split::{split_branch, split_leaf_for_key};
+
+use crate::{
+    error::{Error, PageId, PageType, Result},
+    page::Page,
+};
 
 /// Trait for providing page operations to the B-tree.
 ///
@@ -61,10 +64,7 @@ pub struct BTree<P: PageProvider> {
 impl<P: PageProvider> BTree<P> {
     /// Create a new B-tree accessor.
     pub fn new(root_page: PageId, provider: P) -> Self {
-        Self {
-            provider,
-            root_page,
-        }
+        Self { provider, root_page }
     }
 
     /// Check if the tree is empty.
@@ -127,13 +127,13 @@ impl<P: PageProvider> BTree<P> {
                     let mut page = page;
                     let branch = BranchNode::from_page(&mut page)?;
                     current = branch.child_for_key(key);
-                }
+                },
                 _ => {
                     return Err(Error::PageTypeMismatch {
                         expected: PageType::BTreeLeaf,
                         found: page_type,
                     });
-                }
+                },
             }
         }
     }
@@ -199,7 +199,7 @@ impl<P: PageProvider> BTree<P> {
                                 match leaf.search(key) {
                                     SearchResult::NotFound(new_idx) => {
                                         leaf.insert(new_idx, key, value);
-                                    }
+                                    },
                                     _ => unreachable!(),
                                 }
                             } else {
@@ -212,7 +212,7 @@ impl<P: PageProvider> BTree<P> {
                         drop(leaf);
                         self.provider.write_page(page);
                         Ok((None, old_value))
-                    }
+                    },
                     SearchResult::NotFound(idx) => {
                         old_value = None;
                         if leaf.can_insert(key, value) {
@@ -224,9 +224,9 @@ impl<P: PageProvider> BTree<P> {
                             drop(leaf);
                             self.insert_and_split_leaf(&mut page, key, value, old_value)
                         }
-                    }
+                    },
                 }
-            }
+            },
             PageType::BTreeBranch => {
                 let child_page_id = {
                     let branch = BranchNode::from_page(&mut page)?;
@@ -254,8 +254,9 @@ impl<P: PageProvider> BTree<P> {
                         // Insert the separator with the original child (left half) as left child.
                         // Then update the next child pointer to be new_child (right half).
                         if insert_idx == count {
-                            // Inserting at end: original child (left half) becomes left child of sep,
-                            // new_child (right half) becomes new rightmost
+                            // Inserting at end: original child (left half) becomes left child of
+                            // sep, new_child (right half) becomes new
+                            // rightmost
                             branch.insert(insert_idx, &sep_key, child_page_id);
                             branch.set_rightmost_child(new_child);
                         } else {
@@ -284,11 +285,8 @@ impl<P: PageProvider> BTree<P> {
                 } else {
                     Ok((None, old_value))
                 }
-            }
-            _ => Err(Error::PageTypeMismatch {
-                expected: PageType::BTreeLeaf,
-                found: page_type,
-            }),
+            },
+            _ => Err(Error::PageTypeMismatch { expected: PageType::BTreeLeaf, found: page_type }),
         }
     }
 
@@ -316,26 +314,23 @@ impl<P: PageProvider> BTree<P> {
             match leaf.search(key) {
                 SearchResult::NotFound(idx) => {
                     leaf.insert(idx, key, value);
-                }
-                SearchResult::Found(_) => {}
+                },
+                SearchResult::Found(_) => {},
             }
         } else {
             let mut leaf = LeafNode::from_page(&mut new_page)?;
             match leaf.search(key) {
                 SearchResult::NotFound(idx) => {
                     leaf.insert(idx, key, value);
-                }
-                SearchResult::Found(_) => {}
+                },
+                SearchResult::Found(_) => {},
             }
         }
 
         self.provider.write_page(page.clone());
         self.provider.write_page(new_page);
 
-        Ok((
-            Some((split_result.separator_key, split_result.new_page_id)),
-            old_value,
-        ))
+        Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
 
     /// Insert into branch and split if necessary.
@@ -404,10 +399,7 @@ impl<P: PageProvider> BTree<P> {
         self.provider.write_page(page.clone());
         self.provider.write_page(new_page);
 
-        Ok((
-            Some((split_result.separator_key, split_result.new_page_id)),
-            old_value,
-        ))
+        Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
 
     /// Delete a key from the tree.
@@ -444,7 +436,7 @@ impl<P: PageProvider> BTree<P> {
                 }
 
                 Ok(Some(old_value))
-            }
+            },
             SearchResult::NotFound(_) => Ok(None),
         }
     }
@@ -508,13 +500,13 @@ impl<P: PageProvider> BTree<P> {
                     let mut page = page;
                     let branch = BranchNode::from_page(&mut page)?;
                     current = branch.child(0);
-                }
+                },
                 pt => {
                     return Err(Error::PageTypeMismatch {
                         expected: PageType::BTreeLeaf,
                         found: pt,
                     });
-                }
+                },
             }
         }
     }
@@ -532,13 +524,13 @@ impl<P: PageProvider> BTree<P> {
                     let branch = BranchNode::from_page(&mut page)?;
                     // Rightmost child is stored separately
                     current = branch.rightmost_child();
-                }
+                },
                 pt => {
                     return Err(Error::PageTypeMismatch {
                         expected: PageType::BTreeLeaf,
                         found: pt,
                     });
-                }
+                },
             }
         }
     }
@@ -575,11 +567,7 @@ pub struct BTreeIterator<'a, P: PageProvider> {
 
 impl<'a, P: PageProvider> BTreeIterator<'a, P> {
     fn new(tree: &'a BTree<P>, range: Range<'a>) -> Result<Self> {
-        let mut iter = Self {
-            tree,
-            state: RangeIterState::new(range),
-            current_leaf: None,
-        };
+        let mut iter = Self { tree, state: RangeIterState::new(range), current_leaf: None };
 
         iter.seek_to_start()?;
 
@@ -630,9 +618,10 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             return Ok(false);
         }
 
-        let page = self.current_leaf.as_ref().ok_or(Error::Corrupted {
-            reason: "No current leaf in iterator".to_string(),
-        })?;
+        let page = self
+            .current_leaf
+            .as_ref()
+            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
 
         // Try to advance within current leaf
         if cursor_ops::next_in_leaf(&mut self.state.position, page)? {
@@ -641,9 +630,10 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
 
         // Current leaf exhausted - try to move to next leaf
         // Get the last key in current leaf to find the next leaf
-        let page = self.current_leaf.as_mut().ok_or(Error::Corrupted {
-            reason: "No current leaf in iterator".to_string(),
-        })?;
+        let page = self
+            .current_leaf
+            .as_mut()
+            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
         let current_page_id = page.id;
         let leaf = LeafNode::from_page(page)?;
         let count = leaf.cell_count() as usize;
@@ -665,7 +655,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
                 // Key is all 0xFF - no successor exists
                 self.state.position.valid = false;
                 return Ok(false);
-            }
+            },
         };
 
         // Find the leaf that would contain the successor key
@@ -691,9 +681,10 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             return Ok(None);
         }
 
-        let page = self.current_leaf.as_ref().ok_or(Error::Corrupted {
-            reason: "No current leaf".to_string(),
-        })?;
+        let page = self
+            .current_leaf
+            .as_ref()
+            .ok_or(Error::Corrupted { reason: "No current leaf".to_string() })?;
 
         let key = cursor_ops::current_key(&self.state.position, page)?;
         let value = cursor_ops::current_value(&self.state.position, page)?;
@@ -701,12 +692,8 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         match (key, value) {
             (Some(k), Some(v)) => {
                 // Check if still within range
-                if self.state.range.should_continue(&k) {
-                    Ok(Some((k, v)))
-                } else {
-                    Ok(None)
-                }
-            }
+                if self.state.range.should_continue(&k) { Ok(Some((k, v))) } else { Ok(None) }
+            },
             _ => Ok(None),
         }
     }
@@ -721,7 +708,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             Some((k, v)) => {
                 self.advance()?;
                 Ok(Some((k, v)))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -753,10 +740,7 @@ mod tests {
 
     impl PageProvider for TestPageProvider {
         fn read_page(&self, page_id: PageId) -> Result<Page> {
-            self.pages
-                .get(&page_id)
-                .cloned()
-                .ok_or(Error::PageNotFound { page_id })
+            self.pages.get(&page_id).cloned().ok_or(Error::PageNotFound { page_id })
         }
 
         fn write_page(&mut self, page: Page) {
@@ -869,8 +853,9 @@ mod tests {
 
     #[test]
     fn test_range_iteration_cross_leaf() {
-        use super::cursor::Range;
         use byteorder::{BigEndian, ByteOrder};
+
+        use super::cursor::Range;
 
         let mut tree = make_tree();
 

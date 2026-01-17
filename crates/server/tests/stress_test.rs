@@ -34,28 +34,26 @@
 //! Raft consensus overhead (~16-30ms) limits single-shard throughput to ~60 ops/sec.
 //! To achieve 5000 tx/sec, InferaDB uses two strategies:
 //!
-//! 1. **Write Batching**: Multiple operations in a single Raft entry amortizes
-//!    consensus overhead. With 16KB pages, batch_size=100 achieves ~6000 ops/sec.
+//! 1. **Write Batching**: Multiple operations in a single Raft entry amortizes consensus overhead.
+//!    With 16KB pages, batch_size=100 achieves ~6000 ops/sec.
 //!
-//! 2. **Multi-Shard**: Multiple parallel Raft groups via MultiRaftManager.
-//!    Each shard has independent consensus, enabling parallel writes.
-//!    MultiShardTestCluster is implemented (see test_stress_multi_shard_*).
-//!    NOTE: Namespace→shard assignment needed for true parallel writes.
+//! 2. **Multi-Shard**: Multiple parallel Raft groups via MultiRaftManager. Each shard has
+//!    independent consensus, enabling parallel writes. MultiShardTestCluster is implemented (see
+//!    test_stress_multi_shard_*). NOTE: Namespace→shard assignment needed for true parallel writes.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 mod common;
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use common::{MultiShardTestCluster, TestCluster};
 use parking_lot::Mutex;
@@ -194,9 +192,7 @@ async fn setup_namespace_and_vault(
 
     // Create vault (replication_factor=1 for test simplicity)
     let vault_request = inferadb_ledger_raft::proto::CreateVaultRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
-            id: config.namespace_id,
-        }),
+        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: config.namespace_id }),
         replication_factor: 1,
         initial_nodes: vec![],
         retention_policy: None,
@@ -269,12 +265,7 @@ async fn setup_multi_shard_namespaces(
         let vault_response = admin_client
             .create_vault(vault_request)
             .await
-            .map_err(|e| {
-                format!(
-                    "Failed to create vault in namespace {}: {}",
-                    namespace_id, e
-                )
-            })?;
+            .map_err(|e| format!("Failed to create vault in namespace {}: {}", namespace_id, e))?;
 
         let vault_id = vault_response
             .into_inner()
@@ -282,11 +273,7 @@ async fn setup_multi_shard_namespaces(
             .map(|v| v.id)
             .ok_or_else(|| format!("No vault_id in response for namespace {}", namespace_id))?;
 
-        assignments.push(ShardAssignment {
-            shard_id: shard_id_u32,
-            namespace_id,
-            vault_id,
-        });
+        assignments.push(ShardAssignment { shard_id: shard_id_u32, namespace_id, vault_id });
     }
 
     Ok(assignments)
@@ -314,14 +301,9 @@ impl StressMetrics {
     ) {
         self.write_count.fetch_add(1, Ordering::Relaxed);
         self.write_latencies.lock().push(latency.as_micros() as u64);
-        self.written_values_with_location.lock().insert(
-            key,
-            WrittenValue {
-                namespace_id,
-                vault_id,
-                value,
-            },
-        );
+        self.written_values_with_location
+            .lock()
+            .insert(key, WrittenValue { namespace_id, vault_id, value });
     }
 
     fn record_write_error(&self) {
@@ -369,10 +351,7 @@ impl StressMetrics {
         println!("\n╔══════════════════════════════════════════════════════════════╗");
         println!("║                    STRESS TEST RESULTS                       ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
-        println!(
-            "║ Duration: {:>10.2}s                                       ║",
-            secs
-        );
+        println!("║ Duration: {:>10.2}s                                       ║", secs);
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║                         WRITES                               ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
@@ -383,21 +362,11 @@ impl StressMetrics {
         println!(
             "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%              ║",
             write_errors,
-            if writes > 0 {
-                write_errors as f64 / writes as f64 * 100.0
-            } else {
-                0.0
-            }
+            if writes > 0 { write_errors as f64 / writes as f64 * 100.0 } else { 0.0 }
         );
         println!("║ Latency (µs):                                                ║");
-        println!(
-            "║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║",
-            w_p50, w_p95, w_p99
-        );
-        println!(
-            "║   max: {:>8}                                              ║",
-            w_max
-        );
+        println!("║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║", w_p50, w_p95, w_p99);
+        println!("║   max: {:>8}                                              ║", w_max);
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║                          READS                               ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
@@ -408,21 +377,11 @@ impl StressMetrics {
         println!(
             "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%              ║",
             read_errors,
-            if reads > 0 {
-                read_errors as f64 / reads as f64 * 100.0
-            } else {
-                0.0
-            }
+            if reads > 0 { read_errors as f64 / reads as f64 * 100.0 } else { 0.0 }
         );
         println!("║ Latency (µs):                                                ║");
-        println!(
-            "║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║",
-            r_p50, r_p95, r_p99
-        );
-        println!(
-            "║   max: {:>8}                                              ║",
-            r_max
-        );
+        println!("║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║", r_p50, r_p95, r_p99);
+        println!("║   max: {:>8}                                              ║", r_max);
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║                    DESIGN.md TARGETS                         ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
@@ -438,29 +397,17 @@ impl StressMetrics {
         println!(
             "║ Write p99 <50ms:   {:>5}ms  │  Target: 50ms    │  {}  ║",
             w_p99 / 1000,
-            if write_latency_pass {
-                "✅ PASS"
-            } else {
-                "❌ FAIL"
-            }
+            if write_latency_pass { "✅ PASS" } else { "❌ FAIL" }
         );
         println!(
             "║ Read p99 <2ms:     {:>5}ms  │  Target: 2ms     │  {}  ║",
             r_p99 / 1000,
-            if read_latency_pass {
-                "✅ PASS"
-            } else {
-                "❌ FAIL"
-            }
+            if read_latency_pass { "✅ PASS" } else { "❌ FAIL" }
         );
         println!(
             "║ Write throughput:  {:>5.0}/s  │  Target: 5000/s  │  {}  ║",
             write_throughput,
-            if write_throughput_pass {
-                "✅ PASS"
-            } else {
-                "❌ FAIL"
-            }
+            if write_throughput_pass { "✅ PASS" } else { "❌ FAIL" }
         );
         println!("╚══════════════════════════════════════════════════════════════╝\n");
     }
@@ -489,7 +436,7 @@ async fn write_worker(
             Err(e) => {
                 eprintln!("Write worker {} failed to connect: {}", worker_id, e);
                 return;
-            }
+            },
         };
 
     let client_id = format!("stress-writer-{}", worker_id);
@@ -540,32 +487,26 @@ async fn write_worker(
             // Build BatchWriteRequest with operations grouped
             let operations: Vec<inferadb_ledger_raft::proto::BatchWriteOperation> = keys_and_values
                 .iter()
-                .map(
-                    |(key, value)| inferadb_ledger_raft::proto::BatchWriteOperation {
-                        operations: vec![inferadb_ledger_raft::proto::Operation {
-                            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                                inferadb_ledger_raft::proto::SetEntity {
-                                    key: key.clone(),
-                                    value: value.clone(),
-                                    expires_at: None,
-                                    condition: None,
-                                },
-                            )),
-                        }],
-                    },
-                )
+                .map(|(key, value)| inferadb_ledger_raft::proto::BatchWriteOperation {
+                    operations: vec![inferadb_ledger_raft::proto::Operation {
+                        op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
+                            inferadb_ledger_raft::proto::SetEntity {
+                                key: key.clone(),
+                                value: value.clone(),
+                                expires_at: None,
+                                condition: None,
+                            },
+                        )),
+                    }],
+                })
                 .collect();
 
             let request = inferadb_ledger_raft::proto::BatchWriteRequest {
                 namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId {
-                    id: config.vault_id,
-                }),
-                client_id: Some(inferadb_ledger_raft::proto::ClientId {
-                    id: client_id.clone(),
-                }),
+                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
+                client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
                 sequence,
                 operations,
                 include_tx_proofs: false,
@@ -597,7 +538,7 @@ async fn write_worker(
                                 }
                             }
                             consecutive_errors = 0;
-                        }
+                        },
                         Some(inferadb_ledger_raft::proto::batch_write_response::Result::Error(
                             e,
                         )) => {
@@ -610,15 +551,15 @@ async fn write_worker(
                                 sequence += 1;
                                 continue;
                             }
-                        }
+                        },
                         None => {
                             for _ in 0..batch_size {
                                 metrics.record_write_error();
                             }
                             consecutive_errors += 1;
-                        }
+                        },
                     }
-                }
+                },
                 Err(e) => {
                     let error_msg = e.to_string();
 
@@ -657,22 +598,18 @@ async fn write_worker(
                     {
                         client = new_client;
                     }
-                }
+                },
             }
         } else {
             // Single-operation write uses regular Write RPC
             let (key, value) = keys_and_values.into_iter().next().unwrap();
             let request = inferadb_ledger_raft::proto::WriteRequest {
-                client_id: Some(inferadb_ledger_raft::proto::ClientId {
-                    id: client_id.clone(),
-                }),
+                client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
                 sequence,
                 namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId {
-                    id: config.vault_id,
-                }),
+                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
                 operations: vec![inferadb_ledger_raft::proto::Operation {
                     op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
                         inferadb_ledger_raft::proto::SetEntity {
@@ -704,7 +641,7 @@ async fn write_worker(
                                 metrics.record_write(latency, key, value);
                             }
                             consecutive_errors = 0;
-                        }
+                        },
                         Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
                             if !e.message.contains("Sequence gap") {
                                 metrics.record_write_error();
@@ -713,13 +650,13 @@ async fn write_worker(
                                 sequence += 1;
                                 continue;
                             }
-                        }
+                        },
                         None => {
                             metrics.record_write_error();
                             consecutive_errors += 1;
-                        }
+                        },
                     }
-                }
+                },
                 Err(e) => {
                     let error_msg = e.to_string();
 
@@ -756,7 +693,7 @@ async fn write_worker(
                     {
                         client = new_client;
                     }
-                }
+                },
             }
         }
 
@@ -788,7 +725,7 @@ async fn read_worker(
         Err(e) => {
             eprintln!("Read worker {} failed to connect: {}", worker_id, e);
             return;
-        }
+        },
     };
 
     let mut client =
@@ -820,9 +757,7 @@ async fn read_worker(
                 namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId {
-                    id: config.vault_id,
-                }),
+                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
                 keys,
                 consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual as i32,
             };
@@ -837,7 +772,7 @@ async fn read_worker(
                     for _ in 0..batch_size {
                         metrics.record_read(per_read_latency);
                     }
-                }
+                },
                 Err(e) => {
                     // Only count real errors, not NOT_FOUND
                     if e.code() != tonic::Code::NotFound {
@@ -854,24 +789,19 @@ async fn read_worker(
                             metrics.record_read(per_read_latency);
                         }
                     }
-                }
+                },
             }
             key_counter += read_batch_size as u64;
         } else {
             // Single read - use regular Read RPC
-            let key = format!(
-                "stress-key-{}-{}-0",
-                worker_id % config.write_workers,
-                key_counter % 1000
-            );
+            let key =
+                format!("stress-key-{}-{}-0", worker_id % config.write_workers, key_counter % 1000);
 
             let request = inferadb_ledger_raft::proto::ReadRequest {
                 namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId {
-                    id: config.vault_id,
-                }),
+                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
                 key,
                 consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual as i32,
             };
@@ -879,14 +809,14 @@ async fn read_worker(
             match client.read(request).await {
                 Ok(_) => {
                     metrics.record_read(start.elapsed());
-                }
+                },
                 Err(e) => {
                     if e.code() != tonic::Code::NotFound {
                         metrics.record_read_error();
                     } else {
                         metrics.record_read(start.elapsed());
                     }
-                }
+                },
             }
             key_counter += 1;
         }
@@ -918,9 +848,7 @@ async fn verify_consistency(
             namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
                 id: config.namespace_id,
             }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId {
-                id: config.vault_id,
-            }),
+            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
             key: key.clone(),
             // Use eventual consistency for verification - linearizable reads require
             // additional Raft configuration that isn't always enabled in test clusters.
@@ -954,13 +882,13 @@ async fn verify_consistency(
                         eprintln!("  ❌ Key '{}' not found but was written", key);
                     }
                 }
-            }
+            },
             Ok(Err(e)) => {
                 mismatches += 1;
                 if mismatches <= 5 {
                     eprintln!("  ❌ Error reading key '{}': {}", key, e);
                 }
-            }
+            },
             Err(_) => {
                 // Timeout - server is unresponsive
                 mismatches += 1;
@@ -972,7 +900,7 @@ async fn verify_consistency(
                     eprintln!("  ⚠️  Too many timeouts, skipping remaining verifications");
                     break;
                 }
-            }
+            },
         }
 
         if (i + 1) % 100 == 0 {
@@ -988,10 +916,7 @@ async fn verify_consistency(
             mismatches, sample_size
         ))
     } else {
-        println!(
-            "  ✅ All {} sampled keys verified successfully",
-            sample_size
-        );
+        println!("  ✅ All {} sampled keys verified successfully", sample_size);
         Ok(())
     }
 }
@@ -1034,9 +959,7 @@ async fn verify_multi_shard_consistency(
             namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
                 id: written_value.namespace_id,
             }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId {
-                id: written_value.vault_id,
-            }),
+            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: written_value.vault_id }),
             key: key.clone(),
             consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual as i32,
         };
@@ -1071,7 +994,7 @@ async fn verify_multi_shard_consistency(
                         );
                     }
                 }
-            }
+            },
             Ok(Err(e)) => {
                 mismatches += 1;
                 if mismatches <= 5 {
@@ -1080,7 +1003,7 @@ async fn verify_multi_shard_consistency(
                         key, written_value.namespace_id, written_value.vault_id, e
                     );
                 }
-            }
+            },
             Err(_) => {
                 mismatches += 1;
                 if mismatches <= 5 {
@@ -1090,7 +1013,7 @@ async fn verify_multi_shard_consistency(
                     eprintln!("  ⚠️  Too many timeouts, skipping remaining verifications");
                     break;
                 }
-            }
+            },
         }
 
         if (i + 1) % 100 == 0 {
@@ -1109,10 +1032,7 @@ async fn verify_multi_shard_consistency(
             mismatches, sample_size
         ))
     } else {
-        println!(
-            "  ✅ All {} sampled keys verified successfully across all shards",
-            sample_size
-        );
+        println!("  ✅ All {} sampled keys verified successfully across all shards", sample_size);
         Ok(())
     }
 }
@@ -1154,10 +1074,7 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, config: StressCo
         eprintln!("   ⚠️ Setup failed (may already exist): {}", e);
         // Continue anyway - they might already exist
     } else {
-        println!(
-            "   ✅ Namespace {} and vault {} created",
-            config.namespace_id, config.vault_id
-        );
+        println!("   ✅ Namespace {} and vault {} created", config.namespace_id, config.vault_id);
     }
 
     // Metrics and control
@@ -1241,23 +1158,11 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, config: StressCo
     // Final assertions
     let writes = metrics.write_count.load(Ordering::Relaxed);
     let write_errors = metrics.write_errors.load(Ordering::Relaxed);
-    let error_rate = if writes > 0 {
-        write_errors as f64 / writes as f64
-    } else {
-        0.0
-    };
+    let error_rate = if writes > 0 { write_errors as f64 / writes as f64 } else { 0.0 };
 
     assert!(writes > 0, "Should have completed some writes");
-    assert!(
-        error_rate < 0.01,
-        "Write error rate should be <1%, was {:.2}%",
-        error_rate * 100.0
-    );
-    assert!(
-        consistency_result.is_ok(),
-        "Consistency check failed: {:?}",
-        consistency_result.err()
-    );
+    assert!(error_rate < 0.01, "Write error rate should be <1%, was {:.2}%", error_rate * 100.0);
+    assert!(consistency_result.is_ok(), "Consistency check failed: {:?}", consistency_result.err());
 }
 
 /// Quick smoke test - fast validation.
@@ -1286,7 +1191,8 @@ async fn test_stress_single_node() {
         1, // Single node - no replication
         StressConfig {
             write_workers: 2, // Multiple writers now that RwLock contention is fixed
-            read_workers: 4, // Multiple readers - StateLayer is internally thread-safe via inferadb-ledger-store MVCC
+            read_workers: 4,  /* Multiple readers - StateLayer is internally thread-safe via
+                               * inferadb-ledger-store MVCC */
             duration: Duration::from_secs(10),
             batch_size: 1,
             max_concurrent_writes: 20,
@@ -1442,10 +1348,7 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     println!();
 
     // Start multi-shard cluster
-    println!(
-        "📦 Creating {}-node, {}-shard cluster...",
-        num_nodes, num_shards
-    );
+    println!("📦 Creating {}-node, {}-shard cluster...", num_nodes, num_shards);
     let cluster = MultiShardTestCluster::new(num_nodes, num_shards).await;
 
     // Wait for all shards to have leaders
@@ -1474,10 +1377,10 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
                 );
             }
             assignments
-        }
+        },
         Err(e) => {
             panic!("Failed to setup multi-shard namespaces: {}", e);
-        }
+        },
     };
 
     // Metrics and control
@@ -1488,10 +1391,7 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 
     // Spawn write workers - DISTRIBUTED ACROSS SHARDS
     // Each worker is assigned to a specific shard to enable parallel consensus
-    println!(
-        "🔥 Spawning {} write workers across {} shards...",
-        config.write_workers, num_shards
-    );
+    println!("🔥 Spawning {} write workers across {} shards...", config.write_workers, num_shards);
     let mut handles = Vec::new();
     for i in 0..config.write_workers {
         // Distribute workers round-robin across shards
@@ -1565,10 +1465,7 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 
     // Report metrics - reuse existing report() for detailed output
     let actual_duration = start.elapsed();
-    println!(
-        "\n📊 Multi-Shard Stress Test Results ({} nodes, {} shards)",
-        num_nodes, num_shards
-    );
+    println!("\n📊 Multi-Shard Stress Test Results ({} nodes, {} shards)", num_nodes, num_shards);
     metrics.report(actual_duration);
 
     // Verify consistency across all shards - reads from each key's recorded namespace/vault
@@ -1580,38 +1477,23 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     // Final assertions
     let writes = metrics.write_count.load(Ordering::Relaxed);
     let write_errors = metrics.write_errors.load(Ordering::Relaxed);
-    let error_rate = if writes > 0 {
-        write_errors as f64 / writes as f64
-    } else {
-        0.0
-    };
+    let error_rate = if writes > 0 { write_errors as f64 / writes as f64 } else { 0.0 };
 
     // Calculate effective throughput accounting for batch size
     let actual_secs = start.elapsed().as_secs_f64();
     let ops_per_sec = writes as f64 / actual_secs;
 
     assert!(writes > 0, "Should have completed some writes");
-    assert!(
-        error_rate < 0.01,
-        "Write error rate should be <1%, was {:.2}%",
-        error_rate * 100.0
-    );
+    assert!(error_rate < 0.01, "Write error rate should be <1%, was {:.2}%", error_rate * 100.0);
 
     // Report multi-shard specific summary
     println!("\n🎯 Multi-Shard Summary:");
     println!("   Shards: {} data shards + 1 system shard", num_shards);
-    println!(
-        "   Per-shard throughput: {:.0} ops/sec",
-        ops_per_sec / num_shards as f64
-    );
+    println!("   Per-shard throughput: {:.0} ops/sec", ops_per_sec / num_shards as f64);
     println!("   Total throughput: {:.0} ops/sec", ops_per_sec);
     println!(
         "   Target (5000 ops/sec): {}",
-        if ops_per_sec >= 5000.0 {
-            "✅ PASS"
-        } else {
-            "❌ FAIL"
-        }
+        if ops_per_sec >= 5000.0 { "✅ PASS" } else { "❌ FAIL" }
     );
 }
 

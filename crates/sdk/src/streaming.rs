@@ -3,18 +3,22 @@
 //! Provides stream wrappers that automatically reconnect on
 //! disconnect and resume from the last position.
 
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::Duration;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use futures::Stream;
 use inferadb_ledger_raft::proto;
 use tonic::Status;
 use tracing::{debug, warn};
 
-use crate::config::RetryPolicy;
-use crate::error::{Result, StreamDisconnectedSnafu};
+use crate::{
+    config::RetryPolicy,
+    error::{Result, StreamDisconnectedSnafu},
+};
 
 /// Position tracker for stream resumption.
 ///
@@ -42,9 +46,7 @@ pub struct HeightTracker {
 impl HeightTracker {
     /// Create a new height tracker starting at the given height.
     pub fn new(start_height: u64) -> Self {
-        Self {
-            last_height: start_height.saturating_sub(1),
-        }
+        Self { last_height: start_height.saturating_sub(1) }
     }
 
     /// Get the last seen height.
@@ -214,7 +216,7 @@ where
                             // Restore stream state
                             self.state = StreamState::Active(stream);
                             return Poll::Ready(Some(Ok(item)));
-                        }
+                        },
                         Poll::Ready(Some(Err(status))) => {
                             // Stream error - check if retryable
                             if self.should_retry(&status)
@@ -239,7 +241,7 @@ where
                                 message: status.to_string(),
                             }
                             .build())));
-                        }
+                        },
                         Poll::Ready(None) => {
                             // Stream ended - attempt reconnection
                             if self.reconnect_attempt < self.retry_policy.max_attempts {
@@ -258,13 +260,13 @@ where
                             // Exhausted reconnection attempts
                             self.state = StreamState::Exhausted;
                             return Poll::Ready(None);
-                        }
+                        },
                         Poll::Pending => {
                             self.state = StreamState::Active(stream);
                             return Poll::Pending;
-                        }
+                        },
                     }
-                }
+                },
                 StreamState::Backoff(mut sleep) => {
                     match Pin::new(&mut sleep).poll(cx) {
                         Poll::Ready(()) => {
@@ -275,13 +277,13 @@ where
                             self.state = StreamState::Connecting(Box::pin(fut));
                             // Continue loop to poll connecting
                             continue;
-                        }
+                        },
                         Poll::Pending => {
                             self.state = StreamState::Backoff(sleep);
                             return Poll::Pending;
-                        }
+                        },
                     }
-                }
+                },
                 StreamState::Connecting(mut fut) => {
                     match Pin::new(&mut fut).poll(cx) {
                         Poll::Ready(Ok(stream)) => {
@@ -293,7 +295,7 @@ where
                             self.state = StreamState::Active(Box::new(stream));
                             // Continue loop to poll new stream
                             continue;
-                        }
+                        },
                         Poll::Ready(Err(e)) => {
                             // Reconnection failed
                             warn!(
@@ -312,17 +314,17 @@ where
                             // Exhausted
                             self.state = StreamState::Exhausted;
                             return Poll::Ready(Some(Err(e)));
-                        }
+                        },
                         Poll::Pending => {
                             self.state = StreamState::Connecting(fut);
                             return Poll::Pending;
-                        }
+                        },
                     }
-                }
+                },
                 StreamState::Exhausted => {
                     self.state = StreamState::Exhausted;
                     return Poll::Ready(None);
-                }
+                },
                 StreamState::Transitioning => {
                     // This should never happen - indicates a bug
                     self.state = StreamState::Exhausted;
@@ -330,7 +332,7 @@ where
                         message: "internal state error".to_string(),
                     }
                     .build())));
-                }
+                },
             }
         }
     }
@@ -357,16 +359,14 @@ fn apply_jitter(duration: Duration, factor: f64) -> Duration {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Simple test tracker that just counts items.
     #[derive(Clone)]
@@ -376,9 +376,7 @@ mod tests {
 
     impl CountTracker {
         fn new() -> Self {
-            Self {
-                count: Arc::new(AtomicU32::new(0)),
-            }
+            Self { count: Arc::new(AtomicU32::new(0)) }
         }
 
         fn count(&self) -> u32 {
@@ -466,11 +464,7 @@ mod tests {
             let result = apply_jitter(dur, 1.5);
             let millis = result.as_millis();
             // Clamped to 1.0: 0ms to 200ms
-            assert!(
-                millis <= 200,
-                "jittered value {} exceeds clamped maximum",
-                millis
-            );
+            assert!(millis <= 200, "jittered value {} exceeds clamped maximum", millis);
         }
     }
 

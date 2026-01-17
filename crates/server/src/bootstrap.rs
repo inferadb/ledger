@@ -4,27 +4,20 @@
 //! - Bootstrap a new cluster with this node as the initial leader
 //! - Join an existing cluster by contacting the leader
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use inferadb_ledger_store::{Database, FileBackend};
-use openraft::storage::Adaptor;
-use openraft::{BasicNode, Raft};
-use tonic::transport::Channel;
-use tracing::info;
-
-use inferadb_ledger_raft::proto::JoinClusterRequest;
-use inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
     LedgerServer, LedgerTypeConfig, RaftLogStore, TtlGarbageCollector,
+    proto::{JoinClusterRequest, admin_service_client::AdminServiceClient},
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_store::{Database, FileBackend};
+use openraft::{BasicNode, Raft, storage::Adaptor};
+use tonic::transport::Channel;
+use tracing::info;
 
-use crate::config::Config;
-use crate::discovery::resolve_bootstrap_peers;
+use crate::{config::Config, discovery::resolve_bootstrap_peers};
 
 /// Error type for bootstrap operations.
 #[derive(Debug)]
@@ -155,10 +148,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         Some(block_archive),
         config.listen_addr,
     )
-    .with_rate_limit(
-        config.rate_limit.max_concurrent,
-        config.rate_limit.timeout_secs,
-    );
+    .with_rate_limit(config.rate_limit.max_concurrent, config.rate_limit.timeout_secs);
 
     let gc = TtlGarbageCollector::new(
         raft.clone(),
@@ -218,30 +208,17 @@ async fn bootstrap_cluster(
     config: &Config,
 ) -> Result<(), BootstrapError> {
     let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
-    members.insert(
-        config.node_id,
-        BasicNode {
-            addr: config.listen_addr.to_string(),
-        },
-    );
+    members.insert(config.node_id, BasicNode { addr: config.listen_addr.to_string() });
 
     for peer in &config.peers {
-        members.insert(
-            peer.node_id,
-            BasicNode {
-                addr: peer.addr.clone(),
-            },
-        );
+        members.insert(peer.node_id, BasicNode { addr: peer.addr.clone() });
     }
 
     raft.initialize(members)
         .await
         .map_err(|e| BootstrapError::Initialize(format!("failed to initialize: {}", e)))?;
 
-    tracing::info!(
-        node_id = config.node_id,
-        "Bootstrapped new cluster as initial leader"
-    );
+    tracing::info!(node_id = config.node_id, "Bootstrapped new cluster as initial leader");
 
     Ok(())
 }
@@ -268,10 +245,7 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
         ));
     }
 
-    info!(
-        peer_count = peer_addresses.len(),
-        "Resolved bootstrap peers for cluster join"
-    );
+    info!(peer_count = peer_addresses.len(), "Resolved bootstrap peers for cluster join");
 
     let my_address = config.listen_addr.to_string();
 
@@ -283,9 +257,7 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
         return Ok(());
     }
 
-    Err(BootstrapError::Join(
-        "Failed to join cluster via any discovered peer".to_string(),
-    ))
+    Err(BootstrapError::Join("Failed to join cluster via any discovered peer".to_string()))
 }
 
 /// Attempt to join the cluster via a specific peer address.
@@ -300,22 +272,14 @@ async fn try_join_via_peer(
         .map_err(|e| format!("Invalid peer address: {}", e))?
         .connect_timeout(Duration::from_secs(5));
 
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| format!("Failed to connect: {}", e))?;
+    let channel = endpoint.connect().await.map_err(|e| format!("Failed to connect: {}", e))?;
 
     let mut client = AdminServiceClient::new(channel);
 
-    let request = JoinClusterRequest {
-        node_id,
-        address: my_address.to_string(),
-    };
+    let request = JoinClusterRequest { node_id, address: my_address.to_string() };
 
-    let response = client
-        .join_cluster(request)
-        .await
-        .map_err(|e| format!("Join RPC failed: {}", e))?;
+    let response =
+        client.join_cluster(request).await.map_err(|e| format!("Join RPC failed: {}", e))?;
 
     let resp = response.into_inner();
     if resp.success {
@@ -327,10 +291,8 @@ async fn try_join_via_peer(
     if !resp.leader_address.is_empty() {
         tracing::info!(leader_addr = %resp.leader_address, "Peer redirected to leader");
 
-        let leader_addr: SocketAddr = resp
-            .leader_address
-            .parse()
-            .map_err(|e| format!("Invalid leader address: {}", e))?;
+        let leader_addr: SocketAddr =
+            resp.leader_address.parse().map_err(|e| format!("Invalid leader address: {}", e))?;
 
         return try_join_via_leader(node_id, my_address, leader_addr).await;
     }
@@ -348,16 +310,11 @@ async fn try_join_via_leader(
         .map_err(|e| format!("Invalid leader address: {}", e))?
         .connect_timeout(Duration::from_secs(5));
 
-    let leader_channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| format!("Failed to connect to leader: {}", e))?;
+    let leader_channel =
+        endpoint.connect().await.map_err(|e| format!("Failed to connect to leader: {}", e))?;
 
     let mut leader_client = AdminServiceClient::new(leader_channel);
-    let leader_request = JoinClusterRequest {
-        node_id,
-        address: my_address.to_string(),
-    };
+    let leader_request = JoinClusterRequest { node_id, address: my_address.to_string() };
 
     let leader_response = leader_client
         .join_cluster(leader_request)
@@ -375,8 +332,9 @@ async fn try_join_via_leader(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_bootstrap_single_node() {
@@ -384,10 +342,6 @@ mod tests {
         let config = Config::for_test(1, 50051, temp_dir.path().to_path_buf());
 
         let result = bootstrap_node(&config).await;
-        assert!(
-            result.is_ok(),
-            "bootstrap should succeed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "bootstrap should succeed: {:?}", result.err());
     }
 }

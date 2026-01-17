@@ -9,11 +9,12 @@
 //! 2. Static config (from peers configuration)
 //! 3. DNS SRV lookup (if srv_domain is configured)
 
-use std::net::SocketAddr;
-use std::path::Path;
+use std::{net::SocketAddr, path::Path};
 
-use hickory_resolver::TokioAsyncResolver;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::{
+    TokioAsyncResolver,
+    config::{ResolverConfig, ResolverOpts},
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -63,10 +64,10 @@ pub async fn resolve_bootstrap_peers(
                         addresses.push(addr);
                     }
                 }
-            }
+            },
             Err(e) => {
                 debug!(error = %e, "No valid cached peers");
-            }
+            },
         }
     }
 
@@ -92,9 +93,7 @@ pub async fn resolve_bootstrap_peers(
 
                 let mut sorted_peers = srv_peers;
                 sorted_peers.sort_by(|a, b| {
-                    a.priority
-                        .cmp(&b.priority)
-                        .then_with(|| b.weight.cmp(&a.weight))
+                    a.priority.cmp(&b.priority).then_with(|| b.weight.cmp(&a.weight))
                 });
 
                 for peer in sorted_peers {
@@ -102,10 +101,10 @@ pub async fn resolve_bootstrap_peers(
                         addresses.push(addr);
                     }
                 }
-            }
+            },
             Err(e) => {
                 warn!(error = %e, domain = %domain, "DNS SRV lookup failed");
-            }
+            },
         }
     }
 
@@ -144,10 +143,10 @@ async fn dns_srv_lookup(domain: &str) -> Result<Vec<DiscoveredPeer>, DiscoveryEr
                         weight: record.weight(),
                     });
                 }
-            }
+            },
             Err(e) => {
                 warn!(target = %host, error = %e, "Failed to resolve SRV target");
-            }
+            },
         }
     }
 
@@ -181,10 +180,7 @@ fn save_cached_peers(path: &str, peers: &[DiscoveredPeer]) -> Result<(), Discove
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let cached = CachedPeers {
-        cached_at: now,
-        peers: peers.to_vec(),
-    };
+    let cached = CachedPeers { cached_at: now, peers: peers.to_vec() };
 
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent).map_err(|e| DiscoveryError::CacheWrite(e.to_string()))?;
@@ -229,15 +225,11 @@ impl std::fmt::Display for DiscoveryError {
 impl std::error::Error for DiscoveryError {}
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn test_cache_roundtrip() {
@@ -246,16 +238,8 @@ mod tests {
         let path_str = path.to_str().expect("path to string");
 
         let peers = vec![
-            DiscoveredPeer {
-                addr: "192.168.1.1:50051".to_string(),
-                priority: 10,
-                weight: 100,
-            },
-            DiscoveredPeer {
-                addr: "192.168.1.2:50051".to_string(),
-                priority: 20,
-                weight: 50,
-            },
+            DiscoveredPeer { addr: "192.168.1.1:50051".to_string(), priority: 10, weight: 100 },
+            DiscoveredPeer { addr: "192.168.1.2:50051".to_string(), priority: 20, weight: 50 },
         ];
 
         // Save

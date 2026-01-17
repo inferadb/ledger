@@ -4,8 +4,7 @@
 //! - Database lifecycle management
 //! - Convenient constructors
 
-use std::path::Path;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use inferadb_ledger_store::{Database, FileBackend, InMemoryBackend};
 use snafu::Snafu;
@@ -15,15 +14,10 @@ use snafu::Snafu;
 #[snafu(visibility(pub(crate)))]
 pub enum EngineError {
     #[snafu(display("Failed to open database at {path}: {source}"))]
-    Open {
-        path: String,
-        source: inferadb_ledger_store::Error,
-    },
+    Open { path: String, source: inferadb_ledger_store::Error },
 
     #[snafu(display("Storage operation failed: {source}"))]
-    Storage {
-        source: inferadb_ledger_store::Error,
-    },
+    Storage { source: inferadb_ledger_store::Error },
 }
 
 /// Storage engine backed by inferadb-ledger-store (file-based).
@@ -38,15 +32,8 @@ impl StorageEngine {
     /// Open or create a database at the given path.
     pub fn open(path: impl AsRef<Path>) -> std::result::Result<Self, EngineError> {
         let path = path.as_ref();
-        let db = if path.exists() {
-            Database::open(path)
-        } else {
-            Database::create(path)
-        }
-        .map_err(|e| EngineError::Open {
-            path: path.display().to_string(),
-            source: e,
-        })?;
+        let db = if path.exists() { Database::open(path) } else { Database::create(path) }
+            .map_err(|e| EngineError::Open { path: path.display().to_string(), source: e })?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -59,9 +46,7 @@ impl StorageEngine {
 
 impl Clone for StorageEngine {
     fn clone(&self) -> Self {
-        Self {
-            db: Arc::clone(&self.db),
-        }
+        Self { db: Arc::clone(&self.db) }
     }
 }
 
@@ -76,10 +61,8 @@ pub struct InMemoryStorageEngine {
 impl InMemoryStorageEngine {
     /// Create a new in-memory database.
     pub fn open() -> std::result::Result<Self, EngineError> {
-        let db = Database::open_in_memory().map_err(|e| EngineError::Open {
-            path: ":memory:".to_string(),
-            source: e,
-        })?;
+        let db = Database::open_in_memory()
+            .map_err(|e| EngineError::Open { path: ":memory:".to_string(), source: e })?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -92,22 +75,16 @@ impl InMemoryStorageEngine {
 
 impl Clone for InMemoryStorageEngine {
     fn clone(&self) -> Self {
-        Self {
-            db: Arc::clone(&self.db),
-        }
+        Self { db: Arc::clone(&self.db) }
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    unused_mut
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, unused_mut)]
 mod tests {
-    use super::*;
     use inferadb_ledger_store::tables;
+
+    use super::*;
 
     #[test]
     fn test_open_in_memory() {
@@ -133,9 +110,7 @@ mod tests {
         // Read it back
         {
             let txn = db.read().expect("should begin read");
-            let value = txn
-                .get::<tables::Entities>(&b"test_key".to_vec())
-                .expect("get");
+            let value = txn.get::<tables::Entities>(&b"test_key".to_vec()).expect("get");
             assert!(value.is_some());
             assert_eq!(value.unwrap(), b"test_value");
         }

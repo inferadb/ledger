@@ -38,6 +38,16 @@
 //! }
 //! ```
 
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
 use inferadb_ledger_raft::proto::{
     self,
     admin_service_server::{AdminService, AdminServiceServer},
@@ -47,11 +57,6 @@ use inferadb_ledger_raft::proto::{
     write_service_server::{WriteService, WriteServiceServer},
 };
 use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, transport::Server};
 
@@ -190,24 +195,16 @@ impl MockLedgerServer {
 
         // Bind to localhost with specified port
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().map_err(|e| {
-            crate::error::ConfigSnafu {
-                message: format!("Invalid port: {}", e),
-            }
-            .build()
+            crate::error::ConfigSnafu { message: format!("Invalid port: {}", e) }.build()
         })?;
 
         // Get the actual bound address (important for ephemeral ports)
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-            crate::error::ConnectionSnafu {
-                message: format!("Failed to bind: {}", e),
-            }
-            .build()
+            crate::error::ConnectionSnafu { message: format!("Failed to bind: {}", e) }.build()
         })?;
         let local_addr = listener.local_addr().map_err(|e| {
-            crate::error::ConnectionSnafu {
-                message: format!("Failed to get local addr: {}", e),
-            }
-            .build()
+            crate::error::ConnectionSnafu { message: format!("Failed to get local addr: {}", e) }
+                .build()
         })?;
 
         let endpoint = format!("http://{}", local_addr);
@@ -241,11 +238,7 @@ impl MockLedgerServer {
             }
         });
 
-        Ok(Self {
-            state,
-            endpoint,
-            shutdown_tx: Some(shutdown_tx),
-        })
+        Ok(Self { state, endpoint, shutdown_tx: Some(shutdown_tx) })
     }
 
     /// Get the endpoint URL for connecting to this server.
@@ -299,9 +292,7 @@ impl MockLedgerServer {
         client_id: &str,
     ) -> Option<u64> {
         let sequences = self.state.client_sequences.read();
-        sequences
-            .get(&(namespace_id, vault_id, client_id.to_string()))
-            .copied()
+        sequences.get(&(namespace_id, vault_id, client_id.to_string())).copied()
     }
 
     /// Inject UNAVAILABLE errors for the next N requests.
@@ -381,9 +372,7 @@ impl MockLedgerServer {
     pub fn add_peer(&self, node_id: &str, addresses: Vec<String>, grpc_port: u32) {
         let mut peers = self.state.peers.write();
         peers.push(proto::PeerInfo {
-            node_id: Some(proto::NodeId {
-                id: node_id.to_string(),
-            }),
+            node_id: Some(proto::NodeId { id: node_id.to_string() }),
             addresses,
             grpc_port,
             last_seen: None,
@@ -456,17 +445,11 @@ impl ReadService for MockReadService {
         let key = (namespace_id, vault_id, req.key);
 
         let (value, block_height) = match entities.get(&key) {
-            Some((v, _, _)) => (
-                Some(v.clone()),
-                self.state.block_height.load(Ordering::SeqCst),
-            ),
+            Some((v, ..)) => (Some(v.clone()), self.state.block_height.load(Ordering::SeqCst)),
             None => (None, self.state.block_height.load(Ordering::SeqCst)),
         };
 
-        Ok(Response::new(proto::ReadResponse {
-            value,
-            block_height,
-        }))
+        Ok(Response::new(proto::ReadResponse { value, block_height }))
     }
 
     async fn batch_read(
@@ -491,16 +474,12 @@ impl ReadService for MockReadService {
             .map(|key| {
                 let entity_key = (namespace_id, vault_id, key.clone());
                 match entities.get(&entity_key) {
-                    Some((v, _, _)) => proto::BatchReadResult {
+                    Some((v, ..)) => proto::BatchReadResult {
                         key: key.clone(),
                         value: Some(v.clone()),
                         found: true,
                     },
-                    None => proto::BatchReadResult {
-                        key: key.clone(),
-                        value: None,
-                        found: false,
-                    },
+                    None => proto::BatchReadResult { key: key.clone(), value: None, found: false },
                 }
             })
             .collect();
@@ -530,7 +509,7 @@ impl ReadService for MockReadService {
         let key = (namespace_id, vault_id, req.key);
         let block_height = self.state.block_height.load(Ordering::SeqCst);
 
-        let value = entities.get(&key).map(|(v, _, _)| v.clone());
+        let value = entities.get(&key).map(|(v, ..)| v.clone());
 
         // Create minimal valid proofs for testing
         let state_root = vec![0u8; 32];
@@ -538,19 +517,11 @@ impl ReadService for MockReadService {
             height: block_height,
             namespace_id: Some(proto::NamespaceId { id: namespace_id }),
             vault_id: Some(proto::VaultId { id: vault_id }),
-            previous_hash: Some(proto::Hash {
-                value: vec![0u8; 32],
-            }),
-            tx_merkle_root: Some(proto::Hash {
-                value: vec![0u8; 32],
-            }),
-            state_root: Some(proto::Hash {
-                value: state_root.clone(),
-            }),
+            previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
+            tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
+            state_root: Some(proto::Hash { value: state_root.clone() }),
             timestamp: None,
-            leader_id: Some(proto::NodeId {
-                id: "mock-node".to_string(),
-            }),
+            leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
             term: 1,
             committed_index: block_height,
         };
@@ -587,7 +558,7 @@ impl ReadService for MockReadService {
 
         let entities = self.state.entities.read();
         let key = (namespace_id, vault_id, req.key);
-        let value = entities.get(&key).map(|(v, _, _)| v.clone());
+        let value = entities.get(&key).map(|(v, ..)| v.clone());
 
         Ok(Response::new(proto::HistoricalReadResponse {
             value,
@@ -631,28 +602,18 @@ impl ReadService for MockReadService {
                 height: req.height,
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
-                previous_hash: Some(proto::Hash {
-                    value: vec![0u8; 32],
-                }),
-                tx_merkle_root: Some(proto::Hash {
-                    value: vec![0u8; 32],
-                }),
-                state_root: Some(proto::Hash {
-                    value: vec![0u8; 32],
-                }),
+                previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
+                tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
+                state_root: Some(proto::Hash { value: vec![0u8; 32] }),
                 timestamp: None,
-                leader_id: Some(proto::NodeId {
-                    id: "mock-node".to_string(),
-                }),
+                leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
                 term: 1,
                 committed_index: req.height,
             }),
             transactions: vec![],
         };
 
-        Ok(Response::new(proto::GetBlockResponse {
-            block: Some(block),
-        }))
+        Ok(Response::new(proto::GetBlockResponse { block: Some(block) }))
     }
 
     async fn get_block_range(
@@ -674,19 +635,11 @@ impl ReadService for MockReadService {
                     height,
                     namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                     vault_id: Some(proto::VaultId { id: vault_id }),
-                    previous_hash: Some(proto::Hash {
-                        value: vec![0u8; 32],
-                    }),
-                    tx_merkle_root: Some(proto::Hash {
-                        value: vec![0u8; 32],
-                    }),
-                    state_root: Some(proto::Hash {
-                        value: vec![0u8; 32],
-                    }),
+                    previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
+                    tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
+                    state_root: Some(proto::Hash { value: vec![0u8; 32] }),
                     timestamp: None,
-                    leader_id: Some(proto::NodeId {
-                        id: "mock-node".to_string(),
-                    }),
+                    leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
                     term: 1,
                     committed_index: height,
                 }),
@@ -714,12 +667,8 @@ impl ReadService for MockReadService {
 
         Ok(Response::new(proto::GetTipResponse {
             height,
-            block_hash: Some(proto::Hash {
-                value: vec![0u8; 32],
-            }),
-            state_root: Some(proto::Hash {
-                value: vec![0u8; 32],
-            }),
+            block_hash: Some(proto::Hash { value: vec![0u8; 32] }),
+            state_root: Some(proto::Hash { value: vec![0u8; 32] }),
         }))
     }
 
@@ -738,14 +687,9 @@ impl ReadService for MockReadService {
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
 
         let sequences = self.state.client_sequences.read();
-        let last_seq = sequences
-            .get(&(namespace_id, vault_id, client_id))
-            .copied()
-            .unwrap_or(0);
+        let last_seq = sequences.get(&(namespace_id, vault_id, client_id)).copied().unwrap_or(0);
 
-        Ok(Response::new(proto::GetClientStateResponse {
-            last_committed_sequence: last_seq,
-        }))
+        Ok(Response::new(proto::GetClientStateResponse { last_committed_sequence: last_seq }))
     }
 
     async fn list_relationships(
@@ -764,10 +708,7 @@ impl ReadService for MockReadService {
         let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
 
         let relationships = self.state.relationships.read();
-        let rels = relationships
-            .get(&(namespace_id, vault_id))
-            .cloned()
-            .unwrap_or_default();
+        let rels = relationships.get(&(namespace_id, vault_id)).cloned().unwrap_or_default();
 
         // Apply filters
         let filtered: Vec<proto::Relationship> = rels
@@ -841,14 +782,12 @@ impl ReadService for MockReadService {
             .filter(|((ns, _vault, key), _)| {
                 *ns == namespace_id && key.starts_with(&req.key_prefix)
             })
-            .map(
-                |((_, _, key), (value, version, expires_at))| proto::Entity {
-                    key: key.clone(),
-                    value: value.clone(),
-                    expires_at: *expires_at,
-                    version: *version,
-                },
-            )
+            .map(|((_, _, key), (value, version, expires_at))| proto::Entity {
+                key: key.clone(),
+                value: value.clone(),
+                expires_at: *expires_at,
+                version: *version,
+            })
             .take(req.limit.max(100) as usize)
             .collect();
 
@@ -916,9 +855,7 @@ impl WriteService for MockWriteService {
                             current_version: None,
                             current_value: None,
                             message: "Already committed".to_string(),
-                            committed_tx_id: Some(proto::TxId {
-                                id: Self::generate_tx_id(),
-                            }),
+                            committed_tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
                             committed_block_height: Some(
                                 self.state.block_height.load(Ordering::SeqCst),
                             ),
@@ -973,10 +910,10 @@ impl WriteService for MockWriteService {
                                 (namespace_id, vault_id, set.key),
                                 (set.value, block_height, set.expires_at),
                             );
-                        }
+                        },
                         proto::operation::Op::DeleteEntity(del) => {
                             entities.remove(&(namespace_id, vault_id, del.key));
-                        }
+                        },
                         proto::operation::Op::CreateRelationship(rel) => {
                             let mut relationships = self.state.relationships.write();
                             let entry = relationships.entry((namespace_id, vault_id)).or_default();
@@ -985,7 +922,7 @@ impl WriteService for MockWriteService {
                                 relation: rel.relation,
                                 subject: rel.subject,
                             });
-                        }
+                        },
                         proto::operation::Op::DeleteRelationship(del) => {
                             let mut relationships = self.state.relationships.write();
                             if let Some(rels) = relationships.get_mut(&(namespace_id, vault_id)) {
@@ -995,10 +932,10 @@ impl WriteService for MockWriteService {
                                         || r.subject != del.subject
                                 });
                             }
-                        }
+                        },
                         proto::operation::Op::ExpireEntity(expire) => {
                             entities.remove(&(namespace_id, vault_id, expire.key));
-                        }
+                        },
                     }
                 }
             }
@@ -1011,16 +948,12 @@ impl WriteService for MockWriteService {
         }
 
         Ok(Response::new(proto::WriteResponse {
-            result: Some(proto::write_response::Result::Success(
-                proto::WriteSuccess {
-                    tx_id: Some(proto::TxId {
-                        id: Self::generate_tx_id(),
-                    }),
-                    block_height,
-                    block_header: None,
-                    tx_proof: None,
-                },
-            )),
+            result: Some(proto::write_response::Result::Success(proto::WriteSuccess {
+                tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
+                block_height,
+                block_header: None,
+                tx_proof: None,
+            })),
         }))
     }
 
@@ -1055,9 +988,7 @@ impl WriteService for MockWriteService {
                                 current_version: None,
                                 current_value: None,
                                 message: "Already committed".to_string(),
-                                committed_tx_id: Some(proto::TxId {
-                                    id: Self::generate_tx_id(),
-                                }),
+                                committed_tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
                                 committed_block_height: Some(
                                     self.state.block_height.load(Ordering::SeqCst),
                                 ),
@@ -1087,18 +1018,16 @@ impl WriteService for MockWriteService {
                 }
             } else if sequence != 1 {
                 return Ok(Response::new(proto::BatchWriteResponse {
-                    result: Some(proto::batch_write_response::Result::Error(
-                        proto::WriteError {
-                            code: proto::WriteErrorCode::SequenceGap as i32,
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message: format!("First sequence must be 1, got {}", sequence),
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            last_committed_sequence: Some(0),
-                        },
-                    )),
+                    result: Some(proto::batch_write_response::Result::Error(proto::WriteError {
+                        code: proto::WriteErrorCode::SequenceGap as i32,
+                        key: String::new(),
+                        current_version: None,
+                        current_value: None,
+                        message: format!("First sequence must be 1, got {}", sequence),
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        last_committed_sequence: Some(0),
+                    })),
                 }));
             }
         }
@@ -1116,10 +1045,10 @@ impl WriteService for MockWriteService {
                                     (namespace_id, vault_id, set.key),
                                     (set.value, block_height, set.expires_at),
                                 );
-                            }
+                            },
                             proto::operation::Op::DeleteEntity(del) => {
                                 entities.remove(&(namespace_id, vault_id, del.key));
-                            }
+                            },
                             proto::operation::Op::CreateRelationship(rel) => {
                                 let mut relationships = self.state.relationships.write();
                                 let entry =
@@ -1129,7 +1058,7 @@ impl WriteService for MockWriteService {
                                     relation: rel.relation,
                                     subject: rel.subject,
                                 });
-                            }
+                            },
                             proto::operation::Op::DeleteRelationship(del) => {
                                 let mut relationships = self.state.relationships.write();
                                 if let Some(rels) = relationships.get_mut(&(namespace_id, vault_id))
@@ -1140,10 +1069,10 @@ impl WriteService for MockWriteService {
                                             || r.subject != del.subject
                                     });
                                 }
-                            }
+                            },
                             proto::operation::Op::ExpireEntity(expire) => {
                                 entities.remove(&(namespace_id, vault_id, expire.key));
-                            }
+                            },
                         }
                     }
                 }
@@ -1157,16 +1086,12 @@ impl WriteService for MockWriteService {
         }
 
         Ok(Response::new(proto::BatchWriteResponse {
-            result: Some(proto::batch_write_response::Result::Success(
-                proto::BatchWriteSuccess {
-                    tx_id: Some(proto::TxId {
-                        id: Self::generate_tx_id(),
-                    }),
-                    block_height,
-                    block_header: None,
-                    tx_proof: None,
-                },
-            )),
+            result: Some(proto::batch_write_response::Result::Success(proto::BatchWriteSuccess {
+                tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
+                block_height,
+                block_header: None,
+                tx_proof: None,
+            })),
         }))
     }
 }
@@ -1226,9 +1151,7 @@ impl AdminService for MockAdminService {
             return Err(Status::unavailable("Injected error"));
         }
 
-        Ok(Response::new(proto::DeleteNamespaceResponse {
-            deleted_at: None,
-        }))
+        Ok(Response::new(proto::DeleteNamespaceResponse { deleted_at: None }))
     }
 
     async fn get_namespace(
@@ -1250,7 +1173,7 @@ impl AdminService for MockAdminService {
                     .find(|(_, data)| data.name == name)
                     .map(|(id, _)| *id)
                     .ok_or_else(|| Status::not_found("Namespace not found"))?
-            }
+            },
             None => return Err(Status::invalid_argument("Missing lookup")),
         };
 
@@ -1331,16 +1254,10 @@ impl AdminService for MockAdminService {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
                 previous_hash: None,
-                tx_merkle_root: Some(proto::Hash {
-                    value: vec![0u8; 32],
-                }),
-                state_root: Some(proto::Hash {
-                    value: vec![0u8; 32],
-                }),
+                tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
+                state_root: Some(proto::Hash { value: vec![0u8; 32] }),
                 timestamp: None,
-                leader_id: Some(proto::NodeId {
-                    id: "mock-node".to_string(),
-                }),
+                leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
                 term: 1,
                 committed_index: 0,
             }),
@@ -1356,9 +1273,7 @@ impl AdminService for MockAdminService {
             return Err(Status::unavailable("Injected error"));
         }
 
-        Ok(Response::new(proto::DeleteVaultResponse {
-            deleted_at: None,
-        }))
+        Ok(Response::new(proto::DeleteVaultResponse { deleted_at: None }))
     }
 
     async fn get_vault(
@@ -1383,13 +1298,9 @@ impl AdminService for MockAdminService {
             namespace_id: Some(proto::NamespaceId { id: namespace_id }),
             vault_id: Some(proto::VaultId { id: vault_id }),
             height: data.height,
-            state_root: Some(proto::Hash {
-                value: data.state_root.clone(),
-            }),
+            state_root: Some(proto::Hash { value: data.state_root.clone() }),
             nodes: vec![],
-            leader: Some(proto::NodeId {
-                id: "mock-node".to_string(),
-            }),
+            leader: Some(proto::NodeId { id: "mock-node".to_string() }),
             status: data.status,
             retention_policy: None,
         }))
@@ -1411,21 +1322,15 @@ impl AdminService for MockAdminService {
                 namespace_id: Some(proto::NamespaceId { id: *namespace_id }),
                 vault_id: Some(proto::VaultId { id: *vault_id }),
                 height: data.height,
-                state_root: Some(proto::Hash {
-                    value: data.state_root.clone(),
-                }),
+                state_root: Some(proto::Hash { value: data.state_root.clone() }),
                 nodes: vec![],
-                leader: Some(proto::NodeId {
-                    id: "mock-node".to_string(),
-                }),
+                leader: Some(proto::NodeId { id: "mock-node".to_string() }),
                 status: data.status,
                 retention_policy: None,
             })
             .collect();
 
-        Ok(Response::new(proto::ListVaultsResponse {
-            vaults: responses,
-        }))
+        Ok(Response::new(proto::ListVaultsResponse { vaults: responses }))
     }
 
     async fn join_cluster(
@@ -1493,9 +1398,7 @@ impl AdminService for MockAdminService {
         let _req = request.into_inner();
         Ok(Response::new(proto::CreateSnapshotResponse {
             block_height: self.state.block_height.load(Ordering::SeqCst),
-            state_root: Some(proto::Hash {
-                value: vec![0u8; 32],
-            }),
+            state_root: Some(proto::Hash { value: vec![0u8; 32] }),
             snapshot_path: "/tmp/mock-snapshot".to_string(),
         }))
     }
@@ -1509,10 +1412,7 @@ impl AdminService for MockAdminService {
             return Err(Status::unavailable("Injected error"));
         }
 
-        Ok(Response::new(proto::CheckIntegrityResponse {
-            healthy: true,
-            issues: vec![],
-        }))
+        Ok(Response::new(proto::CheckIntegrityResponse { healthy: true, issues: vec![] }))
     }
 
     async fn recover_vault(
@@ -1529,9 +1429,7 @@ impl AdminService for MockAdminService {
             message: "Recovered".to_string(),
             health_status: proto::VaultHealthProto::Healthy as i32,
             final_height: self.state.block_height.load(Ordering::SeqCst),
-            final_state_root: Some(proto::Hash {
-                value: vec![0u8; 32],
-            }),
+            final_state_root: Some(proto::Hash { value: vec![0u8; 32] }),
         }))
     }
 
@@ -1628,10 +1526,7 @@ impl SystemDiscoveryService for MockDiscoveryService {
         }
 
         let peers = self.state.peers.read();
-        Ok(Response::new(proto::GetPeersResponse {
-            peers: peers.clone(),
-            system_version: 1,
-        }))
+        Ok(Response::new(proto::GetPeersResponse { peers: peers.clone(), system_version: 1 }))
     }
 
     async fn announce_peer(
@@ -1649,9 +1544,7 @@ impl SystemDiscoveryService for MockDiscoveryService {
             peers.push(peer);
         }
 
-        Ok(Response::new(proto::AnnouncePeerResponse {
-            accepted: true,
-        }))
+        Ok(Response::new(proto::AnnouncePeerResponse { accepted: true }))
     }
 
     async fn get_system_state(
@@ -1672,12 +1565,7 @@ impl SystemDiscoveryService for MockDiscoveryService {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -1708,7 +1596,8 @@ mod tests {
 
             server.set_entity_with_options(1, 0, "test-key", b"value", 42, Some(1000000));
 
-            // Entity should be stored (we can't directly read it without a client, but we verify no panic)
+            // Entity should be stored (we can't directly read it without a client, but we verify no
+            // panic)
         }
 
         #[tokio::test]
@@ -1885,9 +1774,10 @@ mod tests {
     /// These tests verify the full stack: client creates request, mock server processes,
     /// client parses response. Validates serialization, error handling, and protocol behavior.
     mod integration_tests {
+        use std::time::Duration;
+
         use super::*;
         use crate::{ClientConfig, LedgerClient, Operation, RetryPolicy};
-        use std::time::Duration;
 
         /// Helper to create a client connected to a mock server.
         async fn create_client_for_mock(server: &MockLedgerServer) -> LedgerClient {
@@ -1968,11 +1858,7 @@ mod tests {
             server.set_entity(1, 0, "exists2", b"value2");
             let client = create_client_for_mock(&server).await;
 
-            let keys = vec![
-                "exists1".to_string(),
-                "missing".to_string(),
-                "exists2".to_string(),
-            ];
+            let keys = vec!["exists1".to_string(), "missing".to_string(), "exists2".to_string()];
             let result = client.batch_read(1, Some(0), keys).await.unwrap();
 
             assert_eq!(result.len(), 3);
@@ -1989,10 +1875,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let keys = vec!["a".to_string(), "b".to_string()];
-            let result = client
-                .batch_read_consistent(1, Some(0), keys)
-                .await
-                .unwrap();
+            let result = client.batch_read_consistent(1, Some(0), keys).await.unwrap();
 
             assert_eq!(result.len(), 2);
             assert_eq!(result[0], ("a".to_string(), Some(b"1".to_vec())));
@@ -2056,18 +1939,9 @@ mod tests {
             assert!(!result.tx_id.is_empty());
 
             // All three should be readable
-            assert_eq!(
-                client.read(1, Some(0), "k1").await.unwrap(),
-                Some(b"v1".to_vec())
-            );
-            assert_eq!(
-                client.read(1, Some(0), "k2").await.unwrap(),
-                Some(b"v2".to_vec())
-            );
-            assert_eq!(
-                client.read(1, Some(0), "k3").await.unwrap(),
-                Some(b"v3".to_vec())
-            );
+            assert_eq!(client.read(1, Some(0), "k1").await.unwrap(), Some(b"v1".to_vec()));
+            assert_eq!(client.read(1, Some(0), "k2").await.unwrap(), Some(b"v2".to_vec()));
+            assert_eq!(client.read(1, Some(0), "k3").await.unwrap(), Some(b"v3".to_vec()));
         }
 
         #[tokio::test]
@@ -2077,13 +1951,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             // Verify it exists
-            assert!(
-                client
-                    .read(1, Some(0), "to_delete")
-                    .await
-                    .unwrap()
-                    .is_some()
-            );
+            assert!(client.read(1, Some(0), "to_delete").await.unwrap().is_some());
 
             // Delete it
             let ops = vec![Operation::delete_entity("to_delete")];
@@ -2098,11 +1966,7 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let ops = vec![Operation::create_relationship(
-                "document:123",
-                "viewer",
-                "user:456",
-            )];
+            let ops = vec![Operation::create_relationship("document:123", "viewer", "user:456")];
             client.write(1, Some(0), ops).await.unwrap();
 
             // Relationship was created (verified by write count, detailed check via list)
@@ -2127,18 +1991,9 @@ mod tests {
             assert_eq!(server.write_count(), 1); // Single batch write
 
             // All entities from all batches should be readable
-            assert_eq!(
-                client.read(1, Some(0), "batch1:a").await.unwrap(),
-                Some(b"a".to_vec())
-            );
-            assert_eq!(
-                client.read(1, Some(0), "batch2:b").await.unwrap(),
-                Some(b"b".to_vec())
-            );
-            assert_eq!(
-                client.read(1, Some(0), "batch2:c").await.unwrap(),
-                Some(b"c".to_vec())
-            );
+            assert_eq!(client.read(1, Some(0), "batch1:a").await.unwrap(), Some(b"a".to_vec()));
+            assert_eq!(client.read(1, Some(0), "batch2:b").await.unwrap(), Some(b"b".to_vec()));
+            assert_eq!(client.read(1, Some(0), "batch2:c").await.unwrap(), Some(b"c".to_vec()));
         }
 
         // ==================== Idempotency ====================
@@ -2196,10 +2051,7 @@ mod tests {
             assert!(!result2.tx_id.is_empty());
 
             // This write actually stored the data
-            assert_eq!(
-                client.read(1, Some(0), "newkey").await.unwrap(),
-                Some(b"newdata".to_vec())
-            );
+            assert_eq!(client.read(1, Some(0), "newkey").await.unwrap(), Some(b"newdata".to_vec()));
         }
 
         #[tokio::test]
@@ -2334,12 +2186,7 @@ mod tests {
         async fn test_concurrent_reads() {
             let server = MockLedgerServer::start().await.unwrap();
             for i in 0..100 {
-                server.set_entity(
-                    1,
-                    0,
-                    &format!("key:{}", i),
-                    format!("value:{}", i).as_bytes(),
-                );
+                server.set_entity(1, 0, &format!("key:{}", i), format!("value:{}", i).as_bytes());
             }
             let client = create_client_for_mock(&server).await;
 
@@ -2450,10 +2297,8 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             use crate::ListEntitiesOpts;
-            let result = client
-                .list_entities(1, ListEntitiesOpts::with_prefix("user:"))
-                .await
-                .unwrap();
+            let result =
+                client.list_entities(1, ListEntitiesOpts::with_prefix("user:")).await.unwrap();
 
             assert_eq!(result.items.len(), 2);
             assert!(result.items.iter().all(|e| e.key.starts_with("user:")));
@@ -2467,10 +2312,8 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             use crate::ListRelationshipsOpts;
-            let result = client
-                .list_relationships(1, 0, ListRelationshipsOpts::new())
-                .await
-                .unwrap();
+            let result =
+                client.list_relationships(1, 0, ListRelationshipsOpts::new()).await.unwrap();
 
             assert_eq!(result.items.len(), 2);
         }
@@ -2512,11 +2355,7 @@ mod tests {
 
             // Connection should fail after shutdown
             let result = client.health_check().await;
-            assert!(
-                result.is_err(),
-                "Expected error after shutdown, endpoint was: {}",
-                endpoint
-            );
+            assert!(result.is_err(), "Expected error after shutdown, endpoint was: {}", endpoint);
         }
 
         #[tokio::test]
@@ -2524,10 +2363,7 @@ mod tests {
             // Start first server
             let server1 = MockLedgerServer::start().await.unwrap();
             let endpoint = server1.endpoint().to_string();
-            let port: u16 = endpoint
-                .trim_start_matches("http://127.0.0.1:")
-                .parse()
-                .unwrap();
+            let port: u16 = endpoint.trim_start_matches("http://127.0.0.1:").parse().unwrap();
 
             let client = create_client_for_mock(&server1).await;
             assert!(client.health_check().await.unwrap());
@@ -2547,11 +2383,7 @@ mod tests {
             client.pool().reset();
 
             let result = client.health_check().await;
-            assert!(
-                result.is_ok(),
-                "Expected success after restart: {:?}",
-                result
-            );
+            assert!(result.is_ok(), "Expected success after restart: {:?}", result);
 
             server2.shutdown();
         }
@@ -2660,10 +2492,7 @@ mod tests {
             // The key point is it doesn't hang forever
             let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
 
-            assert!(
-                result.is_ok(),
-                "Request should complete within timeout after shutdown"
-            );
+            assert!(result.is_ok(), "Request should complete within timeout after shutdown");
         }
 
         #[tokio::test]

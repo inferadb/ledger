@@ -22,16 +22,16 @@
 //! let channel = pool.get_channel().await?;
 //! ```
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use parking_lot::RwLock;
+use snafu::ResultExt;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
-use snafu::ResultExt;
-
-use crate::config::ClientConfig;
-use crate::error::{ConnectionSnafu, InvalidUrlSnafu, Result, TransportSnafu};
+use crate::{
+    config::ClientConfig,
+    error::{ConnectionSnafu, InvalidUrlSnafu, Result, TransportSnafu},
+};
 
 /// HTTP/2 keep-alive interval for idle connections.
 const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -125,10 +125,7 @@ impl ConnectionPool {
         };
 
         let endpoint_url = endpoint_url.ok_or_else(|| {
-            ConnectionSnafu {
-                message: "No endpoints configured".to_string(),
-            }
-            .build()
+            ConnectionSnafu { message: "No endpoints configured".to_string() }.build()
         })?;
 
         // Parse the endpoint URL
@@ -168,10 +165,7 @@ impl ConnectionPool {
         let endpoint = if let Some(ref tls_config) = self.config.tls {
             let tls = self.build_tls_config(tls_config)?;
             endpoint.tls_config(tls).map_err(|e| {
-                ConnectionSnafu {
-                    message: format!("TLS configuration error: {e}"),
-                }
-                .build()
+                ConnectionSnafu { message: format!("TLS configuration error: {e}") }.build()
             })?
         } else {
             endpoint
@@ -273,15 +267,11 @@ impl ConnectionPool {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     fn test_config() -> ClientConfig {
         ClientConfig::builder()
@@ -401,10 +391,8 @@ mod tests {
         assert!(pool.dynamic_endpoints.read().is_none());
 
         // Update endpoints
-        let new_endpoints = vec![
-            "http://10.0.0.1:5000".to_string(),
-            "http://10.0.0.2:5000".to_string(),
-        ];
+        let new_endpoints =
+            vec!["http://10.0.0.1:5000".to_string(), "http://10.0.0.2:5000".to_string()];
         pool.update_endpoints(new_endpoints.clone());
 
         // Dynamic endpoints should be set
@@ -448,9 +436,6 @@ mod tests {
         pool.update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
         pool.update_endpoints(vec!["http://10.0.0.2:5000".to_string()]);
 
-        assert_eq!(
-            pool.active_endpoints(),
-            vec!["http://10.0.0.2:5000".to_string()]
-        );
+        assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.2:5000".to_string()]);
     }
 }

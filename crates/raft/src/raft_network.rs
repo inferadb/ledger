@@ -3,23 +3,25 @@
 //! This module implements the `RaftNetwork` trait for OpenRaft, enabling
 //! inter-node communication for vote requests, log replication, and snapshots.
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::sync::Arc;
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use inferadb_ledger_types::encode;
-use openraft::error::{Fatal, RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable};
-use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
-use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    SnapshotResponse, VoteRequest, VoteResponse,
+use openraft::{
+    BasicNode, Snapshot, Vote,
+    error::{Fatal, RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable},
+    network::{RPCOption, RaftNetwork, RaftNetworkFactory},
+    raft::{
+        AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
+        InstallSnapshotResponse, SnapshotResponse, VoteRequest, VoteResponse,
+    },
 };
-use openraft::{BasicNode, Snapshot, Vote};
 use parking_lot::RwLock;
 use tonic::transport::Channel;
 
-use crate::proto::raft_service_client::RaftServiceClient;
-use crate::types::{LedgerNodeId, LedgerTypeConfig};
+use crate::{
+    proto::raft_service_client::RaftServiceClient,
+    types::{LedgerNodeId, LedgerTypeConfig},
+};
 
 /// Error type for network operations.
 #[derive(Debug, Clone)]
@@ -46,9 +48,7 @@ pub struct GrpcRaftNetwork {
 impl GrpcRaftNetwork {
     /// Create a new gRPC Raft network.
     pub fn new() -> Self {
-        Self {
-            clients: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self { clients: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Get or create a client connection to a peer node.
@@ -88,9 +88,7 @@ pub struct GrpcRaftNetworkFactory {
 impl GrpcRaftNetworkFactory {
     /// Create a new network factory.
     pub fn new() -> Self {
-        Self {
-            network: GrpcRaftNetwork::new(),
-        }
+        Self { network: GrpcRaftNetwork::new() }
     }
 }
 
@@ -104,11 +102,7 @@ impl RaftNetworkFactory<LedgerTypeConfig> for GrpcRaftNetworkFactory {
     type Network = GrpcRaftNetworkConnection;
 
     async fn new_client(&mut self, target: LedgerNodeId, node: &BasicNode) -> Self::Network {
-        GrpcRaftNetworkConnection {
-            target,
-            node: node.clone(),
-            network: self.network.clone(),
-        }
+        GrpcRaftNetworkConnection { target, node: node.clone(), network: self.network.clone() }
     }
 }
 
@@ -136,10 +130,9 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
 
         let request = crate::proto::RaftVoteRequest {
             vote: Some((&rpc.vote).into()),
-            last_log_id: rpc.last_log_id.map(|id| crate::proto::RaftLogId {
-                term: id.leader_id.term,
-                index: id.index,
-            }),
+            last_log_id: rpc
+                .last_log_id
+                .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
             shard_id: None, // Default to system shard (0)
         };
 
@@ -178,23 +171,18 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-        let entries: Vec<Vec<u8>> = rpc
-            .entries
-            .iter()
-            .map(|e| encode(e).unwrap_or_default())
-            .collect();
+        let entries: Vec<Vec<u8>> =
+            rpc.entries.iter().map(|e| encode(e).unwrap_or_default()).collect();
 
         let request = crate::proto::RaftAppendEntriesRequest {
             vote: Some((&rpc.vote).into()),
-            prev_log_id: rpc.prev_log_id.map(|id| crate::proto::RaftLogId {
-                term: id.leader_id.term,
-                index: id.index,
-            }),
+            prev_log_id: rpc
+                .prev_log_id
+                .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
             entries,
-            leader_commit: rpc.leader_commit.map(|id| crate::proto::RaftLogId {
-                term: id.leader_id.term,
-                index: id.index,
-            }),
+            leader_commit: rpc
+                .leader_commit
+                .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
             shard_id: None, // Default to system shard (0)
         };
 
@@ -237,10 +225,10 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         let request = crate::proto::RaftInstallSnapshotRequest {
             vote: Some((&rpc.vote).into()),
             meta: Some(crate::proto::RaftSnapshotMeta {
-                last_log_id: rpc.meta.last_log_id.map(|id| crate::proto::RaftLogId {
-                    term: id.leader_id.term,
-                    index: id.index,
-                }),
+                last_log_id: rpc
+                    .meta
+                    .last_log_id
+                    .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
                 last_membership: Some(crate::proto::RaftMembership {
                     configs: {
                         let members: std::collections::HashMap<u64, String> = rpc
@@ -272,9 +260,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             )))
         })?;
 
-        Ok(InstallSnapshotResponse {
-            vote: (&vote).into(),
-        })
+        Ok(InstallSnapshotResponse { vote: (&vote).into() })
     }
 
     async fn full_snapshot(
@@ -286,8 +272,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
     ) -> Result<SnapshotResponse<LedgerNodeId>, StreamingError<LedgerTypeConfig, Fatal<LedgerNodeId>>>
     {
         // Use the default chunked implementation
-        use openraft::network::snapshot_transport::Chunked;
-        use openraft::network::snapshot_transport::SnapshotTransport;
+        use openraft::network::snapshot_transport::{Chunked, SnapshotTransport};
 
         Chunked::send_snapshot(self, vote, snapshot, cancel, option).await
     }

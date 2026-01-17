@@ -3,13 +3,16 @@
 //! Provides the high-level API for interacting with the Ledger service,
 //! orchestrating connection pool, sequence tracker, and retry logic.
 
-use crate::config::ClientConfig;
-use crate::connection::ConnectionPool;
-use crate::error::{self, Result};
-use crate::idempotency::SequenceTracker;
-use crate::retry::with_retry;
-use crate::streaming::{HeightTracker, ReconnectingStream};
 use inferadb_ledger_raft::proto;
+
+use crate::{
+    config::ClientConfig,
+    connection::ConnectionPool,
+    error::{self, Result},
+    idempotency::SequenceTracker,
+    retry::with_retry,
+    streaming::{HeightTracker, ReconnectingStream},
+};
 
 /// Read consistency level for read operations.
 ///
@@ -367,11 +370,7 @@ impl MerkleProof {
     fn from_proto(proto: proto::MerkleProof) -> Self {
         Self {
             leaf_hash: proto.leaf_hash.map(|h| h.value).unwrap_or_default(),
-            siblings: proto
-                .siblings
-                .into_iter()
-                .map(MerkleSibling::from_proto)
-                .collect(),
+            siblings: proto.siblings.into_iter().map(MerkleSibling::from_proto).collect(),
         }
     }
 
@@ -404,12 +403,12 @@ impl MerkleProof {
                     // Sibling is on left: hash(sibling || current)
                     hasher.update(&sibling.hash);
                     hasher.update(&current_hash);
-                }
+                },
                 Direction::Right => {
                     // Sibling is on right: hash(current || sibling)
                     hasher.update(&current_hash);
                     hasher.update(&sibling.hash);
-                }
+                },
             }
             current_hash = hasher.finalize().to_vec();
         }
@@ -481,13 +480,7 @@ pub struct ChainProof {
 impl ChainProof {
     /// Create from proto type.
     fn from_proto(proto: proto::ChainProof) -> Self {
-        Self {
-            headers: proto
-                .headers
-                .into_iter()
-                .map(BlockHeader::from_proto)
-                .collect(),
-        }
+        Self { headers: proto.headers.into_iter().map(BlockHeader::from_proto).collect() }
     }
 
     /// Verify the chain of blocks links correctly.
@@ -519,7 +512,8 @@ impl ChainProof {
             let curr = &self.headers[i];
 
             // Compute hash of previous header
-            // Note: This is a simplified hash - real implementation would hash the canonical encoding
+            // Note: This is a simplified hash - real implementation would hash the canonical
+            // encoding
             let mut hasher = Sha256::new();
             hasher.update(&prev.previous_hash);
             hasher.update(&prev.tx_merkle_root);
@@ -648,20 +642,12 @@ impl Relationship {
         relation: impl Into<String>,
         subject: impl Into<String>,
     ) -> Self {
-        Self {
-            resource: resource.into(),
-            relation: relation.into(),
-            subject: subject.into(),
-        }
+        Self { resource: resource.into(), relation: relation.into(), subject: subject.into() }
     }
 
     /// Convert from proto Relationship.
     pub fn from_proto(proto: proto::Relationship) -> Self {
-        Self {
-            resource: proto.resource,
-            relation: proto.relation,
-            subject: proto.subject,
-        }
+        Self { resource: proto.resource, relation: proto.relation, subject: proto.subject }
     }
 }
 
@@ -687,10 +673,7 @@ pub struct ListEntitiesOpts {
 impl ListEntitiesOpts {
     /// Create options with a key prefix filter.
     pub fn with_prefix(prefix: impl Into<String>) -> Self {
-        Self {
-            key_prefix: prefix.into(),
-            ..Default::default()
-        }
+        Self { key_prefix: prefix.into(), ..Default::default() }
     }
 
     /// Read at a specific block height.
@@ -827,10 +810,7 @@ pub struct ListResourcesOpts {
 impl ListResourcesOpts {
     /// Create options with a resource type filter.
     pub fn with_type(resource_type: impl Into<String>) -> Self {
-        Self {
-            resource_type: resource_type.into(),
-            ..Default::default()
-        }
+        Self { resource_type: resource_type.into(), ..Default::default() }
     }
 
     /// Read at a specific block height.
@@ -1005,12 +985,7 @@ impl Operation {
     /// let op = Operation::set_entity("user:123", b"data".to_vec());
     /// ```
     pub fn set_entity(key: impl Into<String>, value: Vec<u8>) -> Self {
-        Operation::SetEntity {
-            key: key.into(),
-            value,
-            expires_at: None,
-            condition: None,
-        }
+        Operation::SetEntity { key: key.into(), value, expires_at: None, condition: None }
     }
 
     /// Create a set entity operation with expiration.
@@ -1085,38 +1060,31 @@ impl Operation {
     /// Convert to proto operation.
     fn to_proto(&self) -> proto::Operation {
         let op = match self {
-            Operation::SetEntity {
-                key,
-                value,
-                expires_at,
-                condition,
-            } => proto::operation::Op::SetEntity(proto::SetEntity {
-                key: key.clone(),
-                value: value.clone(),
-                expires_at: *expires_at,
-                condition: condition.as_ref().map(SetCondition::to_proto),
-            }),
+            Operation::SetEntity { key, value, expires_at, condition } => {
+                proto::operation::Op::SetEntity(proto::SetEntity {
+                    key: key.clone(),
+                    value: value.clone(),
+                    expires_at: *expires_at,
+                    condition: condition.as_ref().map(SetCondition::to_proto),
+                })
+            },
             Operation::DeleteEntity { key } => {
                 proto::operation::Op::DeleteEntity(proto::DeleteEntity { key: key.clone() })
-            }
-            Operation::CreateRelationship {
-                resource,
-                relation,
-                subject,
-            } => proto::operation::Op::CreateRelationship(proto::CreateRelationship {
-                resource: resource.clone(),
-                relation: relation.clone(),
-                subject: subject.clone(),
-            }),
-            Operation::DeleteRelationship {
-                resource,
-                relation,
-                subject,
-            } => proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
-                resource: resource.clone(),
-                relation: relation.clone(),
-                subject: subject.clone(),
-            }),
+            },
+            Operation::CreateRelationship { resource, relation, subject } => {
+                proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                    resource: resource.clone(),
+                    relation: relation.clone(),
+                    subject: subject.clone(),
+                })
+            },
+            Operation::DeleteRelationship { resource, relation, subject } => {
+                proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
+                    resource: resource.clone(),
+                    relation: relation.clone(),
+                    subject: subject.clone(),
+                })
+            },
         };
         proto::Operation { op: Some(op) }
     }
@@ -1131,9 +1099,7 @@ impl SetCondition {
             SetCondition::Version(v) => proto::set_condition::Condition::Version(*v),
             SetCondition::ValueEquals(v) => proto::set_condition::Condition::ValueEquals(v.clone()),
         };
-        proto::SetCondition {
-            condition: Some(condition),
-        }
+        proto::SetCondition { condition: Some(condition) }
     }
 }
 
@@ -1204,11 +1170,7 @@ impl LedgerClient {
         let sequences = SequenceTracker::new(client_id);
         let cancellation = tokio_util::sync::CancellationToken::new();
 
-        Ok(Self {
-            pool,
-            sequences,
-            cancellation,
-        })
+        Ok(Self { pool, sequences, cancellation })
     }
 
     /// Convenience constructor for connecting to a single endpoint.
@@ -1230,10 +1192,8 @@ impl LedgerClient {
         endpoint: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Result<Self> {
-        let config = ClientConfig::builder()
-            .with_endpoint(endpoint)
-            .with_client_id(client_id)
-            .build()?;
+        let config =
+            ClientConfig::builder().with_endpoint(endpoint).with_client_id(client_id).build()?;
 
         Self::new(config).await
     }
@@ -1417,13 +1377,7 @@ impl LedgerClient {
         vault_id: Option<i64>,
         key: impl Into<String>,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(
-            namespace_id,
-            vault_id,
-            key.into(),
-            ReadConsistency::Eventual,
-        )
-        .await
+        self.read_internal(namespace_id, vault_id, key.into(), ReadConsistency::Eventual).await
     }
 
     /// Read a value by key with linearizable (strong) consistency.
@@ -1458,13 +1412,7 @@ impl LedgerClient {
         vault_id: Option<i64>,
         key: impl Into<String>,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(
-            namespace_id,
-            vault_id,
-            key.into(),
-            ReadConsistency::Linearizable,
-        )
-        .await
+        self.read_internal(namespace_id, vault_id, key.into(), ReadConsistency::Linearizable).await
     }
 
     /// Batch read multiple keys in a single RPC call.
@@ -1576,10 +1524,7 @@ impl LedgerClient {
                 consistency: consistency.to_proto() as i32,
             };
 
-            let response = client
-                .read(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.read(tonic::Request::new(request)).await?.into_inner();
 
             Ok(response.value)
         })
@@ -1610,17 +1555,10 @@ impl LedgerClient {
                 consistency: consistency.to_proto() as i32,
             };
 
-            let response = client
-                .batch_read(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.batch_read(tonic::Request::new(request)).await?.into_inner();
 
             // Convert results to (key, Option<value>) pairs
-            let results = response
-                .results
-                .into_iter()
-                .map(|r| (r.key, r.value))
-                .collect();
+            let results = response.results.into_iter().map(|r| (r.key, r.value)).collect();
 
             Ok(results)
         })
@@ -1705,9 +1643,7 @@ impl LedgerClient {
         let mut gap_recovery_attempts = 0;
 
         loop {
-            let result = self
-                .execute_write(namespace_id, vault_id, &operations, sequence)
-                .await;
+            let result = self.execute_write(namespace_id, vault_id, &operations, sequence).await;
 
             match result {
                 Ok(success) => return Ok(success),
@@ -1721,10 +1657,9 @@ impl LedgerClient {
 
                     // Recover: update local sequence and retry
                     gap_recovery_attempts += 1;
-                    self.sequences
-                        .set_sequence(vault_key.0, vault_key.1, server_has);
+                    self.sequences.set_sequence(vault_key.0, vault_key.1, server_has);
                     sequence = self.sequences.next_sequence(vault_key.0, vault_key.1);
-                }
+                },
                 Err(e) => return Err(e),
             }
         }
@@ -1764,10 +1699,7 @@ impl LedgerClient {
                     include_tx_proof: false,
                 };
 
-                let response = write_client
-                    .write(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
+                let response = write_client.write(tonic::Request::new(request)).await?.into_inner();
 
                 Self::process_write_response(response)
             }
@@ -1795,16 +1727,12 @@ impl LedgerClient {
                             tx_id: Self::tx_id_to_hex(error.committed_tx_id),
                             block_height: error.committed_block_height.unwrap_or(0),
                         })
-                    }
+                    },
                     proto::WriteErrorCode::SequenceGap => {
                         // Need recovery - return error with context
                         let server_has = error.last_committed_sequence.unwrap_or(0);
-                        SequenceGapSnafu {
-                            expected: server_has + 1,
-                            server_has,
-                        }
-                        .fail()
-                    }
+                        SequenceGapSnafu { expected: server_has + 1, server_has }.fail()
+                    },
                     _ => {
                         // Other write errors (CAS failures, etc.)
                         crate::error::RpcSnafu {
@@ -1812,9 +1740,9 @@ impl LedgerClient {
                             message: error.message,
                         }
                         .fail()
-                    }
+                    },
                 }
-            }
+            },
             None => crate::error::RpcSnafu {
                 code: tonic::Code::Internal,
                 message: "Empty write response".to_string(),
@@ -1863,8 +1791,8 @@ impl LedgerClient {
     ///
     /// * `namespace_id` - The namespace to write to
     /// * `vault_id` - Optional vault ID (required for relationships)
-    /// * `batches` - Groups of operations to apply atomically. Each inner `Vec<Operation>`
-    ///   is a logical group processed in order.
+    /// * `batches` - Groups of operations to apply atomically. Each inner `Vec<Operation>` is a
+    ///   logical group processed in order.
     ///
     /// # Returns
     ///
@@ -1925,9 +1853,7 @@ impl LedgerClient {
         let mut gap_recovery_attempts = 0;
 
         loop {
-            let result = self
-                .execute_batch_write(namespace_id, vault_id, &batches, sequence)
-                .await;
+            let result = self.execute_batch_write(namespace_id, vault_id, &batches, sequence).await;
 
             match result {
                 Ok(success) => return Ok(success),
@@ -1941,10 +1867,9 @@ impl LedgerClient {
 
                     // Recover: update local sequence and retry
                     gap_recovery_attempts += 1;
-                    self.sequences
-                        .set_sequence(vault_key.0, vault_key.1, server_has);
+                    self.sequences.set_sequence(vault_key.0, vault_key.1, server_has);
                     sequence = self.sequences.next_sequence(vault_key.0, vault_key.1);
-                }
+                },
                 Err(e) => return Err(e),
             }
         }
@@ -1988,10 +1913,8 @@ impl LedgerClient {
                     include_tx_proofs: false,
                 };
 
-                let response = write_client
-                    .batch_write(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
+                let response =
+                    write_client.batch_write(tonic::Request::new(request)).await?.into_inner();
 
                 Self::process_batch_write_response(response)
             }
@@ -2019,16 +1942,12 @@ impl LedgerClient {
                             tx_id: Self::tx_id_to_hex(error.committed_tx_id),
                             block_height: error.committed_block_height.unwrap_or(0),
                         })
-                    }
+                    },
                     proto::WriteErrorCode::SequenceGap => {
                         // Need recovery - return error with context
                         let server_has = error.last_committed_sequence.unwrap_or(0);
-                        SequenceGapSnafu {
-                            expected: server_has + 1,
-                            server_has,
-                        }
-                        .fail()
-                    }
+                        SequenceGapSnafu { expected: server_has + 1, server_has }.fail()
+                    },
                     _ => {
                         // Other write errors (CAS failures, etc.)
                         crate::error::RpcSnafu {
@@ -2036,9 +1955,9 @@ impl LedgerClient {
                             message: error.message,
                         }
                         .fail()
-                    }
+                    },
                 }
-            }
+            },
             None => crate::error::RpcSnafu {
                 code: tonic::Code::Internal,
                 message: "Empty batch write response".to_string(),
@@ -2107,9 +2026,8 @@ impl LedgerClient {
         self.check_shutdown()?;
 
         // Get the initial stream
-        let initial_stream = self
-            .create_watch_blocks_stream(namespace_id, vault_id, start_height)
-            .await?;
+        let initial_stream =
+            self.create_watch_blocks_stream(namespace_id, vault_id, start_height).await?;
 
         // Create position tracker starting at the requested height
         let position = HeightTracker::new(start_height);
@@ -2140,10 +2058,8 @@ impl LedgerClient {
                         start_height: next_height,
                     };
 
-                    let response = client
-                        .watch_blocks(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
+                    let response =
+                        client.watch_blocks(tonic::Request::new(request)).await?.into_inner();
 
                     Ok(response)
                 })
@@ -2172,10 +2088,7 @@ impl LedgerClient {
             start_height,
         };
 
-        let response = client
-            .watch_blocks(tonic::Request::new(request))
-            .await?
-            .into_inner();
+        let response = client.watch_blocks(tonic::Request::new(request)).await?.into_inner();
 
         Ok(response)
     }
@@ -2225,10 +2138,8 @@ impl LedgerClient {
                 shard_id: None, // Auto-assigned
             };
 
-            let response = client
-                .create_namespace(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response =
+                client.create_namespace(tonic::Request::new(request)).await?.into_inner();
 
             Ok(response.namespace_id.map(|n| n.id).unwrap_or(0))
         })
@@ -2273,10 +2184,7 @@ impl LedgerClient {
                 )),
             };
 
-            let response = client
-                .get_namespace(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.get_namespace(tonic::Request::new(request)).await?.into_inner();
 
             Ok(NamespaceInfo::from_proto(response))
         })
@@ -2319,16 +2227,9 @@ impl LedgerClient {
                 page_size: 0, // Use default
             };
 
-            let response = client
-                .list_namespaces(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.list_namespaces(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(response
-                .namespaces
-                .into_iter()
-                .map(NamespaceInfo::from_proto)
-                .collect())
+            Ok(response.namespaces.into_iter().map(NamespaceInfo::from_proto).collect())
         })
         .await
     }
@@ -2375,10 +2276,7 @@ impl LedgerClient {
                 retention_policy: None, // Default: FULL
             };
 
-            let response = client
-                .create_vault(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.create_vault(tonic::Request::new(request)).await?.into_inner();
 
             // Build VaultInfo from CreateVaultResponse
             // Note: CreateVaultResponse has limited fields compared to GetVaultResponse
@@ -2433,10 +2331,7 @@ impl LedgerClient {
                 vault_id: Some(proto::VaultId { id: vault_id }),
             };
 
-            let response = client
-                .get_vault(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.get_vault(tonic::Request::new(request)).await?.into_inner();
 
             Ok(VaultInfo::from_proto(response))
         })
@@ -2475,16 +2370,9 @@ impl LedgerClient {
 
             let request = proto::ListVaultsRequest {};
 
-            let response = client
-                .list_vaults(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.list_vaults(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(response
-                .vaults
-                .into_iter()
-                .map(VaultInfo::from_proto)
-                .collect())
+            Ok(response.vaults.into_iter().map(VaultInfo::from_proto).collect())
         })
         .await
     }
@@ -2523,10 +2411,7 @@ impl LedgerClient {
         match result.status {
             HealthStatus::Healthy => Ok(true),
             HealthStatus::Degraded => Ok(false),
-            HealthStatus::Unavailable => error::UnavailableSnafu {
-                message: result.message,
-            }
-            .fail(),
+            HealthStatus::Unavailable => error::UnavailableSnafu { message: result.message }.fail(),
             HealthStatus::Unspecified => Ok(false),
         }
     }
@@ -2563,15 +2448,9 @@ impl LedgerClient {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_health_client(channel, pool.compression_enabled());
 
-            let request = proto::HealthCheckRequest {
-                namespace_id: None,
-                vault_id: None,
-            };
+            let request = proto::HealthCheckRequest { namespace_id: None, vault_id: None };
 
-            let response = client
-                .check(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.check(tonic::Request::new(request)).await?.into_inner();
 
             Ok(HealthCheckResult::from_proto(response))
         })
@@ -2624,10 +2503,7 @@ impl LedgerClient {
                 vault_id: Some(proto::VaultId { id: vault_id }),
             };
 
-            let response = client
-                .check(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.check(tonic::Request::new(request)).await?.into_inner();
 
             Ok(HealthCheckResult::from_proto(response))
         })
@@ -2693,10 +2569,7 @@ impl LedgerClient {
                 trusted_height: opts.trusted_height,
             };
 
-            let response = client
-                .verified_read(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.verified_read(tonic::Request::new(request)).await?.into_inner();
 
             // If no value and no block header, key was not found
             if response.value.is_none() && response.block_header.is_none() {
@@ -2765,16 +2638,9 @@ impl LedgerClient {
                 consistency: opts.consistency.to_proto() as i32,
             };
 
-            let response = client
-                .list_entities(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.list_entities(tonic::Request::new(request)).await?.into_inner();
 
-            let items = response
-                .entities
-                .into_iter()
-                .map(Entity::from_proto)
-                .collect();
+            let items = response.entities.into_iter().map(Entity::from_proto).collect();
 
             let next_page_token = if response.next_page_token.is_empty() {
                 None
@@ -2782,11 +2648,7 @@ impl LedgerClient {
                 Some(response.next_page_token)
             };
 
-            Ok(PagedResult {
-                items,
-                next_page_token,
-                block_height: response.block_height,
-            })
+            Ok(PagedResult { items, next_page_token, block_height: response.block_height })
         })
         .await
     }
@@ -2845,16 +2707,10 @@ impl LedgerClient {
                 consistency: opts.consistency.to_proto() as i32,
             };
 
-            let response = client
-                .list_relationships(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response =
+                client.list_relationships(tonic::Request::new(request)).await?.into_inner();
 
-            let items = response
-                .relationships
-                .into_iter()
-                .map(Relationship::from_proto)
-                .collect();
+            let items = response.relationships.into_iter().map(Relationship::from_proto).collect();
 
             let next_page_token = if response.next_page_token.is_empty() {
                 None
@@ -2862,11 +2718,7 @@ impl LedgerClient {
                 Some(response.next_page_token)
             };
 
-            Ok(PagedResult {
-                items,
-                next_page_token,
-                block_height: response.block_height,
-            })
+            Ok(PagedResult { items, next_page_token, block_height: response.block_height })
         })
         .await
     }
@@ -2923,10 +2775,7 @@ impl LedgerClient {
                 consistency: opts.consistency.to_proto() as i32,
             };
 
-            let response = client
-                .list_resources(tonic::Request::new(request))
-                .await?
-                .into_inner();
+            let response = client.list_resources(tonic::Request::new(request)).await?.into_inner();
 
             let next_page_token = if response.next_page_token.is_empty() {
                 None
@@ -2975,16 +2824,12 @@ impl LedgerClient {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::config::RetryPolicy;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_new_with_valid_config() {
@@ -3107,19 +2952,13 @@ mod tests {
     #[test]
     fn test_read_consistency_to_proto_eventual() {
         let consistency = ReadConsistency::Eventual;
-        assert_eq!(
-            consistency.to_proto() as i32,
-            proto::ReadConsistency::Eventual as i32
-        );
+        assert_eq!(consistency.to_proto() as i32, proto::ReadConsistency::Eventual as i32);
     }
 
     #[test]
     fn test_read_consistency_to_proto_linearizable() {
         let consistency = ReadConsistency::Linearizable;
-        assert_eq!(
-            consistency.to_proto() as i32,
-            proto::ReadConsistency::Linearizable as i32
-        );
+        assert_eq!(consistency.to_proto() as i32, proto::ReadConsistency::Linearizable as i32);
     }
 
     // =========================================================================
@@ -3189,9 +3028,7 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let result = client
-            .batch_read(1, Some(0), vec!["key1", "key2", "key3"])
-            .await;
+        let result = client.batch_read(1, Some(0), vec!["key1", "key2", "key3"]).await;
         assert!(result.is_err(), "expected connection error");
     }
 
@@ -3212,9 +3049,7 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let result = client
-            .batch_read_consistent(1, Some(0), vec!["key1", "key2"])
-            .await;
+        let result = client.batch_read_consistent(1, Some(0), vec!["key1", "key2"]).await;
         assert!(result.is_err(), "expected connection error");
     }
 
@@ -3249,17 +3084,12 @@ mod tests {
     fn test_operation_set_entity() {
         let op = Operation::set_entity("user:123", b"data".to_vec());
         match op {
-            Operation::SetEntity {
-                key,
-                value,
-                expires_at,
-                condition,
-            } => {
+            Operation::SetEntity { key, value, expires_at, condition } => {
                 assert_eq!(key, "user:123");
                 assert_eq!(value, b"data");
                 assert!(expires_at.is_none());
                 assert!(condition.is_none());
-            }
+            },
             _ => panic!("Expected SetEntity"),
         }
     }
@@ -3268,17 +3098,12 @@ mod tests {
     fn test_operation_set_entity_with_expiry() {
         let op = Operation::set_entity_with_expiry("session:abc", b"token".to_vec(), 1700000000);
         match op {
-            Operation::SetEntity {
-                key,
-                value,
-                expires_at,
-                condition,
-            } => {
+            Operation::SetEntity { key, value, expires_at, condition } => {
                 assert_eq!(key, "session:abc");
                 assert_eq!(value, b"token");
                 assert_eq!(expires_at, Some(1700000000));
                 assert!(condition.is_none());
-            }
+            },
             _ => panic!("Expected SetEntity"),
         }
     }
@@ -3287,13 +3112,9 @@ mod tests {
     fn test_operation_set_entity_if_not_exists() {
         let op = Operation::set_entity_if("lock:xyz", b"owner".to_vec(), SetCondition::NotExists);
         match op {
-            Operation::SetEntity {
-                key,
-                condition: Some(SetCondition::NotExists),
-                ..
-            } => {
+            Operation::SetEntity { key, condition: Some(SetCondition::NotExists), .. } => {
                 assert_eq!(key, "lock:xyz");
-            }
+            },
             _ => panic!("Expected SetEntity with NotExists condition"),
         }
     }
@@ -3302,12 +3123,9 @@ mod tests {
     fn test_operation_set_entity_if_version() {
         let op = Operation::set_entity_if("counter", b"42".to_vec(), SetCondition::Version(100));
         match op {
-            Operation::SetEntity {
-                condition: Some(SetCondition::Version(v)),
-                ..
-            } => {
+            Operation::SetEntity { condition: Some(SetCondition::Version(v)), .. } => {
                 assert_eq!(v, 100);
-            }
+            },
             _ => panic!("Expected SetEntity with Version condition"),
         }
     }
@@ -3320,12 +3138,9 @@ mod tests {
             SetCondition::ValueEquals(b"old".to_vec()),
         );
         match op {
-            Operation::SetEntity {
-                condition: Some(SetCondition::ValueEquals(v)),
-                ..
-            } => {
+            Operation::SetEntity { condition: Some(SetCondition::ValueEquals(v)), .. } => {
                 assert_eq!(v, b"old");
-            }
+            },
             _ => panic!("Expected SetEntity with ValueEquals condition"),
         }
     }
@@ -3336,7 +3151,7 @@ mod tests {
         match op {
             Operation::DeleteEntity { key } => {
                 assert_eq!(key, "obsolete:key");
-            }
+            },
             _ => panic!("Expected DeleteEntity"),
         }
     }
@@ -3345,15 +3160,11 @@ mod tests {
     fn test_operation_create_relationship() {
         let op = Operation::create_relationship("doc:456", "viewer", "user:123");
         match op {
-            Operation::CreateRelationship {
-                resource,
-                relation,
-                subject,
-            } => {
+            Operation::CreateRelationship { resource, relation, subject } => {
                 assert_eq!(resource, "doc:456");
                 assert_eq!(relation, "viewer");
                 assert_eq!(subject, "user:123");
-            }
+            },
             _ => panic!("Expected CreateRelationship"),
         }
     }
@@ -3362,15 +3173,11 @@ mod tests {
     fn test_operation_delete_relationship() {
         let op = Operation::delete_relationship("doc:456", "editor", "team:admins#member");
         match op {
-            Operation::DeleteRelationship {
-                resource,
-                relation,
-                subject,
-            } => {
+            Operation::DeleteRelationship { resource, relation, subject } => {
                 assert_eq!(resource, "doc:456");
                 assert_eq!(relation, "editor");
                 assert_eq!(subject, "team:admins#member");
-            }
+            },
             _ => panic!("Expected DeleteRelationship"),
         }
     }
@@ -3385,7 +3192,7 @@ mod tests {
             proto::operation::Op::SetEntity(set) => {
                 assert_eq!(set.key, "key");
                 assert_eq!(set.value, b"value");
-            }
+            },
             _ => panic!("Expected SetEntity proto"),
         }
     }
@@ -3400,7 +3207,7 @@ mod tests {
                 assert_eq!(rel.resource, "res");
                 assert_eq!(rel.relation, "rel");
                 assert_eq!(rel.subject, "sub");
-            }
+            },
             _ => panic!("Expected CreateRelationship proto"),
         }
     }
@@ -3423,17 +3230,14 @@ mod tests {
 
         let version = SetCondition::Version(42);
         let proto_cond = version.to_proto();
-        assert!(matches!(
-            proto_cond.condition,
-            Some(proto::set_condition::Condition::Version(42))
-        ));
+        assert!(matches!(proto_cond.condition, Some(proto::set_condition::Condition::Version(42))));
 
         let value_eq = SetCondition::ValueEquals(b"test".to_vec());
         let proto_cond = value_eq.to_proto();
         match proto_cond.condition {
             Some(proto::set_condition::Condition::ValueEquals(v)) => {
                 assert_eq!(v, b"test");
-            }
+            },
             _ => panic!("Expected ValueEquals"),
         }
     }
@@ -3444,10 +3248,7 @@ mod tests {
 
     #[test]
     fn test_write_success_fields() {
-        let success = WriteSuccess {
-            tx_id: "abc123".to_string(),
-            block_height: 42,
-        };
+        let success = WriteSuccess { tx_id: "abc123".to_string(), block_height: 42 };
 
         assert_eq!(success.tx_id, "abc123");
         assert_eq!(success.block_height, 42);
@@ -3456,9 +3257,7 @@ mod tests {
     #[test]
     fn test_tx_id_to_hex() {
         // Test with Some(TxId)
-        let tx_id = proto::TxId {
-            id: vec![0x12, 0x34, 0xab, 0xcd],
-        };
+        let tx_id = proto::TxId { id: vec![0x12, 0x34, 0xab, 0xcd] };
         let hex = LedgerClient::tx_id_to_hex(Some(tx_id));
         assert_eq!(hex, "1234abcd");
 
@@ -3523,22 +3322,10 @@ mod tests {
             .expect("client creation");
 
         // Write to vault 1
-        let _ = client
-            .write(
-                1,
-                Some(1),
-                vec![Operation::set_entity("k1", b"v1".to_vec())],
-            )
-            .await;
+        let _ = client.write(1, Some(1), vec![Operation::set_entity("k1", b"v1".to_vec())]).await;
 
         // Write to vault 2
-        let _ = client
-            .write(
-                1,
-                Some(2),
-                vec![Operation::set_entity("k2", b"v2".to_vec())],
-            )
-            .await;
+        let _ = client.write(1, Some(2), vec![Operation::set_entity("k2", b"v2".to_vec())]).await;
 
         // Each vault should have its own sequence
         assert_eq!(client.sequences().current_sequence(1, 1), 1);
@@ -3552,20 +3339,11 @@ mod tests {
             .expect("client creation");
 
         // Write with None vault_id (namespace-level)
-        let _ = client
-            .write(
-                1,
-                None,
-                vec![Operation::set_entity("entity", b"data".to_vec())],
-            )
-            .await;
+        let _ =
+            client.write(1, None, vec![Operation::set_entity("entity", b"data".to_vec())]).await;
 
         // Should use vault_id 0 internally for sequence tracking
-        assert_eq!(
-            client.sequences().current_sequence(1, 0),
-            1,
-            "None vault_id should map to 0"
-        );
+        assert_eq!(client.sequences().current_sequence(1, 0), 1, "None vault_id should map to 0");
     }
 
     #[tokio::test]
@@ -3642,10 +3420,7 @@ mod tests {
 
         // Sequence should have been incremented
         let new_seq = client.sequences().current_sequence(1, 0);
-        assert_eq!(
-            new_seq, 1,
-            "sequence should increment on batch write attempt"
-        );
+        assert_eq!(new_seq, 1, "sequence should increment on batch write attempt");
     }
 
     #[tokio::test]
@@ -3681,11 +3456,7 @@ mod tests {
         let _ = client.batch_write(1, None, batches).await;
 
         // Should use vault_id 0 internally for sequence tracking
-        assert_eq!(
-            client.sequences().current_sequence(1, 0),
-            1,
-            "None vault_id should map to 0"
-        );
+        assert_eq!(client.sequences().current_sequence(1, 0), 1, "None vault_id should map to 0");
     }
 
     #[tokio::test]
@@ -3696,20 +3467,12 @@ mod tests {
 
         // Batch write to vault 1
         let _ = client
-            .batch_write(
-                1,
-                Some(1),
-                vec![vec![Operation::set_entity("k1", b"v1".to_vec())]],
-            )
+            .batch_write(1, Some(1), vec![vec![Operation::set_entity("k1", b"v1".to_vec())]])
             .await;
 
         // Batch write to vault 2
         let _ = client
-            .batch_write(
-                1,
-                Some(2),
-                vec![vec![Operation::set_entity("k2", b"v2".to_vec())]],
-            )
+            .batch_write(1, Some(2), vec![vec![Operation::set_entity("k2", b"v2".to_vec())]])
             .await;
 
         // Each vault should have its own sequence
@@ -3781,16 +3544,9 @@ mod tests {
             namespace_id: Some(proto::NamespaceId { id: 1 }),
             vault_id: Some(proto::VaultId { id: 2 }),
             height: 100,
-            block_hash: Some(proto::Hash {
-                value: vec![0x12, 0x34],
-            }),
-            state_root: Some(proto::Hash {
-                value: vec![0xab, 0xcd],
-            }),
-            timestamp: Some(Timestamp {
-                seconds: 1700000000,
-                nanos: 123_456_789,
-            }),
+            block_hash: Some(proto::Hash { value: vec![0x12, 0x34] }),
+            state_root: Some(proto::Hash { value: vec![0xab, 0xcd] }),
+            timestamp: Some(Timestamp { seconds: 1700000000, nanos: 123_456_789 }),
         };
 
         let announcement = BlockAnnouncement::from_proto(proto_announcement);
@@ -4017,16 +3773,10 @@ mod tests {
             name: "test-namespace".to_string(),
             shard_id: Some(proto::ShardId { id: 1 }),
             member_nodes: vec![
-                proto::NodeId {
-                    id: "node-100".to_string(),
-                },
-                proto::NodeId {
-                    id: "node-101".to_string(),
-                },
+                proto::NodeId { id: "node-100".to_string() },
+                proto::NodeId { id: "node-101".to_string() },
             ],
-            leader_hint: Some(proto::NodeId {
-                id: "node-100".to_string(),
-            }),
+            leader_hint: Some(proto::NodeId { id: "node-100".to_string() }),
             config_version: 5,
             status: proto::NamespaceStatus::Active as i32,
         };
@@ -4071,20 +3821,12 @@ mod tests {
             namespace_id: Some(proto::NamespaceId { id: 1 }),
             vault_id: Some(proto::VaultId { id: 10 }),
             height: 1000,
-            state_root: Some(proto::Hash {
-                value: vec![1, 2, 3, 4],
-            }),
+            state_root: Some(proto::Hash { value: vec![1, 2, 3, 4] }),
             nodes: vec![
-                proto::NodeId {
-                    id: "node-200".to_string(),
-                },
-                proto::NodeId {
-                    id: "node-201".to_string(),
-                },
+                proto::NodeId { id: "node-200".to_string() },
+                proto::NodeId { id: "node-201".to_string() },
             ],
-            leader: Some(proto::NodeId {
-                id: "node-200".to_string(),
-            }),
+            leader: Some(proto::NodeId { id: "node-200".to_string() }),
             status: proto::VaultStatus::Active as i32,
             retention_policy: None,
         };
@@ -4477,9 +4219,7 @@ mod tests {
     fn test_merkle_sibling_from_proto() {
         use inferadb_ledger_raft::proto;
         let proto_sibling = proto::MerkleSibling {
-            hash: Some(proto::Hash {
-                value: vec![1, 2, 3, 4],
-            }),
+            hash: Some(proto::Hash { value: vec![1, 2, 3, 4] }),
             direction: proto::Direction::Left as i32,
         };
         let sibling = MerkleSibling::from_proto(proto_sibling);
@@ -4523,10 +4263,7 @@ mod tests {
 
     #[test]
     fn test_merkle_proof_verify_single_element_tree_mismatch() {
-        let proof = MerkleProof {
-            leaf_hash: vec![1, 2, 3, 4],
-            siblings: vec![],
-        };
+        let proof = MerkleProof { leaf_hash: vec![1, 2, 3, 4], siblings: vec![] };
         let wrong_root = vec![5, 6, 7, 8];
         assert!(!proof.verify(&wrong_root));
     }
@@ -4547,10 +4284,7 @@ mod tests {
 
         let proof = MerkleProof {
             leaf_hash: leaf_hash.clone(),
-            siblings: vec![MerkleSibling {
-                hash: sibling_hash,
-                direction: Direction::Right,
-            }],
+            siblings: vec![MerkleSibling { hash: sibling_hash, direction: Direction::Right }],
         };
 
         assert!(proof.verify(&expected_root));
@@ -4572,10 +4306,7 @@ mod tests {
 
         let proof = MerkleProof {
             leaf_hash: leaf_hash.clone(),
-            siblings: vec![MerkleSibling {
-                hash: sibling_hash,
-                direction: Direction::Left,
-            }],
+            siblings: vec![MerkleSibling { hash: sibling_hash, direction: Direction::Left }],
         };
 
         assert!(proof.verify(&expected_root));
@@ -4598,10 +4329,7 @@ mod tests {
         let tampered_sibling = vec![2u8; 32];
         let proof = MerkleProof {
             leaf_hash: leaf_hash.clone(),
-            siblings: vec![MerkleSibling {
-                hash: tampered_sibling,
-                direction: Direction::Right,
-            }],
+            siblings: vec![MerkleSibling { hash: tampered_sibling, direction: Direction::Right }],
         };
 
         // Should not verify against correct root
@@ -4645,13 +4373,8 @@ mod tests {
             previous_hash: Some(proto::Hash { value: vec![1; 32] }),
             tx_merkle_root: Some(proto::Hash { value: vec![2; 32] }),
             state_root: Some(proto::Hash { value: vec![3; 32] }),
-            timestamp: Some(prost_types::Timestamp {
-                seconds: 1704067200,
-                nanos: 0,
-            }),
-            leader_id: Some(proto::NodeId {
-                id: "node-1".to_string(),
-            }),
+            timestamp: Some(prost_types::Timestamp { seconds: 1704067200, nanos: 0 }),
+            leader_id: Some(proto::NodeId { id: "node-1".to_string() }),
             term: 5,
             committed_index: 99,
         };
@@ -4971,9 +4694,7 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client
-            .verified_read(1, Some(0), "key", VerifyOpts::new())
-            .await;
+        let result = client.verified_read(1, Some(0), "key", VerifyOpts::new()).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -5030,12 +4751,8 @@ mod tests {
 
     #[test]
     fn test_entity_is_expired_at() {
-        let entity = Entity {
-            key: "key".to_string(),
-            value: vec![],
-            expires_at: Some(1000),
-            version: 1,
-        };
+        let entity =
+            Entity { key: "key".to_string(), value: vec![], expires_at: Some(1000), version: 1 };
 
         // Before expiration
         assert!(!entity.is_expired_at(999));
@@ -5047,12 +4764,7 @@ mod tests {
 
     #[test]
     fn test_entity_is_expired_at_no_expiration() {
-        let entity = Entity {
-            key: "key".to_string(),
-            value: vec![],
-            expires_at: None,
-            version: 1,
-        };
+        let entity = Entity { key: "key".to_string(), value: vec![], expires_at: None, version: 1 };
 
         // Never expires
         assert!(!entity.is_expired_at(u64::MAX));
@@ -5238,9 +4950,7 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client
-            .list_entities(1, ListEntitiesOpts::with_prefix("user:"))
-            .await;
+        let result = client.list_entities(1, ListEntitiesOpts::with_prefix("user:")).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -5261,9 +4971,7 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client
-            .list_relationships(1, 0, ListRelationshipsOpts::new())
-            .await;
+        let result = client.list_relationships(1, 0, ListRelationshipsOpts::new()).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -5284,9 +4992,7 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client
-            .list_resources(1, 0, ListResourcesOpts::with_type("document"))
-            .await;
+        let result = client.list_resources(1, 0, ListResourcesOpts::with_type("document")).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -5308,7 +5014,8 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        // Test with various options - should still fail on connection but validates options are passed
+        // Test with various options - should still fail on connection but validates options are
+        // passed
         let opts = ListEntitiesOpts::with_prefix("session:")
             .at_height(100)
             .include_expired()
@@ -5337,10 +5044,8 @@ mod tests {
         let client = LedgerClient::new(config).await.expect("client creation");
 
         // Test with filters
-        let opts = ListRelationshipsOpts::new()
-            .resource("document:1")
-            .relation("viewer")
-            .limit(100);
+        let opts =
+            ListRelationshipsOpts::new().resource("document:1").relation("viewer").limit(100);
 
         let result = client.list_relationships(1, 0, opts).await;
         assert!(result.is_err(), "expected connection error");
@@ -5356,10 +5061,7 @@ mod tests {
             .await
             .expect("client creation");
 
-        assert!(
-            !client.is_shutdown(),
-            "client should not be shutdown initially"
-        );
+        assert!(!client.is_shutdown(), "client should not be shutdown initially");
     }
 
     #[tokio::test]
@@ -5370,10 +5072,7 @@ mod tests {
 
         client.shutdown().await;
 
-        assert!(
-            client.is_shutdown(),
-            "client should be shutdown after calling shutdown()"
-        );
+        assert!(client.is_shutdown(), "client should be shutdown after calling shutdown()");
     }
 
     #[tokio::test]
@@ -5406,10 +5105,7 @@ mod tests {
 
         // Both should reflect shutdown state
         assert!(client1.is_shutdown());
-        assert!(
-            client2.is_shutdown(),
-            "cloned client should share shutdown state"
-        );
+        assert!(client2.is_shutdown(), "cloned client should share shutdown state");
     }
 
     #[tokio::test]
@@ -5456,13 +5152,8 @@ mod tests {
 
         client.shutdown().await;
 
-        let result = client
-            .write(
-                1,
-                Some(0),
-                vec![Operation::set_entity("key", vec![1, 2, 3])],
-            )
-            .await;
+        let result =
+            client.write(1, Some(0), vec![Operation::set_entity("key", vec![1, 2, 3])]).await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
 
@@ -5486,11 +5177,7 @@ mod tests {
         client.shutdown().await;
 
         let result = client
-            .batch_write(
-                1,
-                Some(0),
-                vec![vec![Operation::set_entity("key", vec![1, 2, 3])]],
-            )
+            .batch_write(1, Some(0), vec![vec![Operation::set_entity("key", vec![1, 2, 3])]])
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
@@ -5514,9 +5201,8 @@ mod tests {
 
         client.shutdown().await;
 
-        let result = client
-            .batch_read(1, Some(0), vec!["key1".to_string(), "key2".to_string()])
-            .await;
+        let result =
+            client.batch_read(1, Some(0), vec!["key1".to_string(), "key2".to_string()]).await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
 
@@ -5567,26 +5253,11 @@ mod tests {
             client.create_namespace("test").await,
             Err(crate::error::SdkError::Shutdown)
         ));
-        assert!(matches!(
-            client.get_namespace(1).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.list_namespaces().await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.create_vault(1).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.get_vault(1, 0).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.list_vaults().await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
+        assert!(matches!(client.get_namespace(1).await, Err(crate::error::SdkError::Shutdown)));
+        assert!(matches!(client.list_namespaces().await, Err(crate::error::SdkError::Shutdown)));
+        assert!(matches!(client.create_vault(1).await, Err(crate::error::SdkError::Shutdown)));
+        assert!(matches!(client.get_vault(1, 0).await, Err(crate::error::SdkError::Shutdown)));
+        assert!(matches!(client.list_vaults().await, Err(crate::error::SdkError::Shutdown)));
     }
 
     #[tokio::test]
@@ -5608,10 +5279,7 @@ mod tests {
 
         client.shutdown().await;
 
-        assert!(matches!(
-            client.health_check().await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
+        assert!(matches!(client.health_check().await, Err(crate::error::SdkError::Shutdown)));
         assert!(matches!(
             client.health_check_detailed().await,
             Err(crate::error::SdkError::Shutdown)
@@ -5642,9 +5310,7 @@ mod tests {
         client.shutdown().await;
 
         assert!(matches!(
-            client
-                .verified_read(1, Some(0), "key", VerifyOpts::new())
-                .await,
+            client.verified_read(1, Some(0), "key", VerifyOpts::new()).await,
             Err(crate::error::SdkError::Shutdown)
         ));
     }
@@ -5669,21 +5335,15 @@ mod tests {
         client.shutdown().await;
 
         assert!(matches!(
-            client
-                .list_entities(1, ListEntitiesOpts::with_prefix("key"))
-                .await,
+            client.list_entities(1, ListEntitiesOpts::with_prefix("key")).await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
-            client
-                .list_relationships(1, 0, ListRelationshipsOpts::new())
-                .await,
+            client.list_relationships(1, 0, ListRelationshipsOpts::new()).await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
-            client
-                .list_resources(1, 0, ListResourcesOpts::with_type("doc"))
-                .await,
+            client.list_resources(1, 0, ListResourcesOpts::with_type("doc")).await,
             Err(crate::error::SdkError::Shutdown)
         ));
     }

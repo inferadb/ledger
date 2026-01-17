@@ -4,9 +4,8 @@
 //! for efficient lookups in both directions.
 
 use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
-use snafu::{ResultExt, Snafu};
-
 use inferadb_ledger_types::{CodecError, Relationship, VaultId, decode, encode};
+use snafu::{ResultExt, Snafu};
 
 use crate::keys::{encode_storage_key, vault_prefix};
 
@@ -14,9 +13,7 @@ use crate::keys::{encode_storage_key, vault_prefix};
 #[derive(Debug, Snafu)]
 pub enum RelationshipError {
     #[snafu(display("Storage error: {source}"))]
-    Storage {
-        source: inferadb_ledger_store::Error,
-    },
+    Storage { source: inferadb_ledger_store::Error },
 
     #[snafu(display("Codec error: {source}"))]
     Codec { source: CodecError },
@@ -41,14 +38,11 @@ impl RelationshipStore {
         let local_key = rel.to_key();
         let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
 
-        match txn
-            .get::<tables::Relationships>(&storage_key)
-            .context(StorageSnafu)?
-        {
+        match txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)? {
             Some(data) => {
                 let relationship = decode(&data).context(CodecSnafu)?;
                 Ok(Some(relationship))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -65,10 +59,7 @@ impl RelationshipStore {
         let local_key = rel.to_key();
         let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
 
-        Ok(txn
-            .get::<tables::Relationships>(&storage_key)
-            .context(StorageSnafu)?
-            .is_some())
+        Ok(txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some())
     }
 
     /// Create a relationship.
@@ -86,18 +77,13 @@ impl RelationshipStore {
         let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
 
         // Check if already exists
-        if txn
-            .get::<tables::Relationships>(&storage_key)
-            .context(StorageSnafu)?
-            .is_some()
-        {
+        if txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some() {
             return Ok(false);
         }
 
         let encoded = encode(&rel).context(CodecSnafu)?;
 
-        txn.insert::<tables::Relationships>(&storage_key, &encoded)
-            .context(StorageSnafu)?;
+        txn.insert::<tables::Relationships>(&storage_key, &encoded).context(StorageSnafu)?;
 
         Ok(true)
     }
@@ -116,9 +102,7 @@ impl RelationshipStore {
         let local_key = rel.to_key();
         let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
 
-        let existed = txn
-            .delete::<tables::Relationships>(&storage_key)
-            .context(StorageSnafu)?;
+        let existed = txn.delete::<tables::Relationships>(&storage_key).context(StorageSnafu)?;
         Ok(existed)
     }
 
@@ -224,12 +208,7 @@ impl RelationshipStore {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    unused_mut
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, unused_mut)]
 mod tests {
     use super::*;
     use crate::engine::InMemoryStorageEngine;

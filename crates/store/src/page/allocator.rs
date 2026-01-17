@@ -5,8 +5,9 @@
 //! - Single-writer model simplifies state management
 //! - Free list can be rebuilt from B-tree scan on recovery
 
-use crate::error::PageId;
 use parking_lot::Mutex;
+
+use crate::error::PageId;
 
 /// Simple free-list based page allocator.
 ///

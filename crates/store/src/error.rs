@@ -1,7 +1,8 @@
 //! Error types for Inkwell storage engine.
 
-use snafu::Snafu;
 use std::io;
+
+use snafu::Snafu;
 
 /// Page identifier type.
 pub type PageId = u64;
@@ -158,9 +159,7 @@ impl TryFrom<u8> for PageType {
             3 => Ok(Self::Overflow),
             4 => Ok(Self::FreeList),
             5 => Ok(Self::TableDirectory),
-            _ => Err(Error::Corrupted {
-                reason: format!("Invalid page type: {}", value),
-            }),
+            _ => Err(Error::Corrupted { reason: format!("Invalid page type: {}", value) }),
         }
     }
 }
@@ -179,9 +178,7 @@ mod tests {
 
     #[test]
     fn test_error_display_corrupted() {
-        let err = Error::Corrupted {
-            reason: "bad header".to_string(),
-        };
+        let err = Error::Corrupted { reason: "bad header".to_string() };
         assert_eq!(format!("{err}"), "Corrupted database: bad header");
     }
 
@@ -211,10 +208,8 @@ mod tests {
 
     #[test]
     fn test_error_display_page_type_mismatch() {
-        let err = Error::PageTypeMismatch {
-            expected: PageType::BTreeLeaf,
-            found: PageType::BTreeBranch,
-        };
+        let err =
+            Error::PageTypeMismatch { expected: PageType::BTreeLeaf, found: PageType::BTreeBranch };
         let display = format!("{err}");
         assert!(display.contains("BTreeLeaf"), "got: {display}");
         assert!(display.contains("BTreeBranch"), "got: {display}");
@@ -258,19 +253,13 @@ mod tests {
 
     #[test]
     fn test_error_display_key_too_large() {
-        let err = Error::KeyTooLarge {
-            size: 1000,
-            max: 500,
-        };
+        let err = Error::KeyTooLarge { size: 1000, max: 500 };
         assert_eq!(format!("{err}"), "Key too large: 1000 bytes (max 500)");
     }
 
     #[test]
     fn test_error_display_value_too_large() {
-        let err = Error::ValueTooLarge {
-            size: 2000,
-            max: 1000,
-        };
+        let err = Error::ValueTooLarge { size: 2000, max: 1000 };
         assert_eq!(format!("{err}"), "Value too large: 2000 bytes (max 1000)");
     }
 

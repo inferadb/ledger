@@ -84,26 +84,21 @@ async fn main() -> Result<()> {
     match value {
         Some(bytes) => {
             let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");
-            println!(
-                "Read (eventual): {}",
-                serde_json::to_string_pretty(&parsed).expect("format")
-            );
-        }
+            println!("Read (eventual): {}", serde_json::to_string_pretty(&parsed).expect("format"));
+        },
         None => println!("Key not found (eventual read)"),
     }
 
     // -------------------------------------------------------------------------
     // 5. Read with linearizable consistency (strong, reads from leader)
     // -------------------------------------------------------------------------
-    let value = client
-        .read_consistent(namespace_id, Some(vault_id), user_key)
-        .await?;
+    let value = client.read_consistent(namespace_id, Some(vault_id), user_key).await?;
 
     match value {
         Some(bytes) => {
             let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");
             println!("Read (linearizable): name = {}", parsed["name"]);
-        }
+        },
         None => println!("Key not found (linearizable read)"),
     }
 
@@ -117,21 +112,14 @@ async fn main() -> Result<()> {
         Operation::create_relationship("doc:readme", "editor", "user:bob"),
     ];
 
-    let result = client
-        .write(namespace_id, Some(vault_id), operations)
-        .await?;
-    println!(
-        "Multi-entity write at block {}, tx: {}",
-        result.block_height, result.tx_id
-    );
+    let result = client.write(namespace_id, Some(vault_id), operations).await?;
+    println!("Multi-entity write at block {}, tx: {}", result.block_height, result.tx_id);
 
     // -------------------------------------------------------------------------
     // 7. Batch read multiple keys
     // -------------------------------------------------------------------------
     let keys = vec!["user:alice", "user:bob", "user:charlie", "user:nonexistent"];
-    let results = client
-        .batch_read(namespace_id, Some(vault_id), keys)
-        .await?;
+    let results = client.batch_read(namespace_id, Some(vault_id), keys).await?;
 
     println!("Batch read results:");
     for (key, value) in results {

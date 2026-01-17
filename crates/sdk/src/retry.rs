@@ -3,14 +3,15 @@
 //! Provides retry wrappers using the `backon` crate with
 //! configurable backoff policies.
 
-use std::future::Future;
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use backon::{ExponentialBuilder, Retryable};
 use rand::Rng;
 
-use crate::config::RetryPolicy;
-use crate::error::{Result, RetryExhaustedSnafu, SdkError};
+use crate::{
+    config::RetryPolicy,
+    error::{Result, RetryExhaustedSnafu, SdkError},
+};
 
 /// Execute an async operation with retry using exponential backoff.
 ///
@@ -92,11 +93,7 @@ where
             // Otherwise, return the original error (non-retryable)
             if e.is_retryable() {
                 let attempts = attempt_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                RetryExhaustedSnafu {
-                    attempts,
-                    last_error: e.to_string(),
-                }
-                .build()
+                RetryExhaustedSnafu { attempts, last_error: e.to_string() }.build()
             } else {
                 e
             }
@@ -124,19 +121,19 @@ fn apply_jitter(dur: Duration, factor: f64) -> Duration {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        },
+        time::Duration,
+    };
+
     use tonic::Code;
 
+    use super::*;
     use crate::error::RpcSnafu;
 
     fn test_policy() -> RetryPolicy {
@@ -210,11 +207,8 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Always fail with retryable error
                 Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::Unavailable,
-                        message: "always unavailable".to_string(),
-                    }
-                    .build(),
+                    RpcSnafu { code: Code::Unavailable, message: "always unavailable".to_string() }
+                        .build(),
                 )
             }
         })
@@ -224,11 +218,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, SdkError::RetryExhausted { .. }));
 
-        if let SdkError::RetryExhausted {
-            attempts,
-            last_error,
-        } = err
-        {
+        if let SdkError::RetryExhausted { attempts, last_error } = err {
             assert_eq!(attempts, 3);
             assert!(last_error.contains("always unavailable"));
         }
@@ -248,11 +238,8 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Fail with non-retryable error
                 Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::InvalidArgument,
-                        message: "bad request".to_string(),
-                    }
-                    .build(),
+                    RpcSnafu { code: Code::InvalidArgument, message: "bad request".to_string() }
+                        .build(),
                 )
             }
         })
@@ -261,13 +248,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         // Should NOT be RetryExhausted - should be the original error
-        assert!(matches!(
-            err,
-            SdkError::Rpc {
-                code: Code::InvalidArgument,
-                ..
-            }
-        ));
+        assert!(matches!(err, SdkError::Rpc { code: Code::InvalidArgument, .. }));
         // Should only have been called once (no retries)
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
@@ -295,11 +276,8 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::Unavailable,
-                        message: "unavailable".to_string(),
-                    }
-                    .build(),
+                    RpcSnafu { code: Code::Unavailable, message: "unavailable".to_string() }
+                        .build(),
                 )
             }
         })
@@ -356,29 +334,24 @@ mod tests {
             let jittered_ms = jittered.as_millis();
 
             // With factor clamped to 1.0, should be within [0, 2000]
-            assert!(
-                jittered_ms <= 2000,
-                "jittered duration {}ms exceeds maximum",
-                jittered_ms
-            );
+            assert!(jittered_ms <= 2000, "jittered duration {}ms exceeds maximum", jittered_ms);
         }
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod proptest_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+
+    use proptest::prelude::*;
+    use tonic::Code;
+
     use super::*;
     use crate::error::RpcSnafu;
-    use proptest::prelude::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use tonic::Code;
 
     proptest! {
         /// Property: Jittered duration never exceeds base * (1 + factor)

@@ -22,23 +22,24 @@
 
 mod turmoil_common;
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use parking_lot::Mutex;
-use tonic::transport::Server;
-use tonic::{Request, Response, Status};
-use turmoil::Builder;
-
-use inferadb_ledger_raft::proto::raft_service_server::{RaftService, RaftServiceServer};
 use inferadb_ledger_raft::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
     RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse,
+    raft_service_server::{RaftService, RaftServiceServer},
 };
-
+use parking_lot::Mutex;
+use tonic::{Request, Response, Status, transport::Server};
+use turmoil::Builder;
 use turmoil_common::incoming_stream;
 
 /// Operation types for consistency checking.
@@ -47,11 +48,7 @@ pub enum Operation {
     /// Write operation with key and value.
     Write { key: String, value: u64, node: u64 },
     /// Read operation with key.
-    Read {
-        key: String,
-        node: u64,
-        result: Option<u64>,
-    },
+    Read { key: String, node: u64, result: Option<u64> },
     /// Vote request received.
     VoteRequest { from: u64, to: u64, term: u64 },
     /// Vote granted.
@@ -89,12 +86,8 @@ impl OperationHistory {
             match op {
                 Operation::Write { key, value, .. } => {
                     committed_state.insert(key.clone(), *value);
-                }
-                Operation::Read {
-                    key,
-                    result: Some(read_value),
-                    ..
-                } => {
+                },
+                Operation::Read { key, result: Some(read_value), .. } => {
                     if let Some(committed_value) = committed_state.get(key) {
                         // Read should return committed value or earlier
                         // (stale reads are acceptable during partition)
@@ -106,9 +99,9 @@ impl OperationHistory {
                             });
                         }
                     }
-                }
-                Operation::Read { result: None, .. } => {}
-                _ => {}
+                },
+                Operation::Read { result: None, .. } => {},
+                _ => {},
             }
         }
 
@@ -127,11 +120,7 @@ impl OperationHistory {
 #[derive(Debug)]
 pub enum ConsistencyViolation {
     /// Read returned a value from the future (not yet committed).
-    FutureRead {
-        key: String,
-        read_value: u64,
-        committed_value: u64,
-    },
+    FutureRead { key: String, read_value: u64, committed_value: u64 },
     /// A committed write was lost.
     LostWrite { key: String, value: u64 },
     /// Split-brain detected (multiple leaders in same term).
@@ -168,9 +157,7 @@ impl RaftService for SplitBrainDetectionService {
         // Standard Raft voting logic (simplified)
         let vote_granted = if request_term > current_term {
             // Higher term - grant vote
-            self.state
-                .current_term
-                .store(request_term, Ordering::SeqCst);
+            self.state.current_term.store(request_term, Ordering::SeqCst);
             *self.state.voted_for.lock() = Some(request_term);
             true
         } else if request_term == current_term {
@@ -185,22 +172,14 @@ impl RaftService for SplitBrainDetectionService {
             self.state.votes_received.fetch_add(1, Ordering::SeqCst);
         }
 
-        Ok(Response::new(RaftVoteResponse {
-            vote: None,
-            vote_granted,
-            last_log_id: None,
-        }))
+        Ok(Response::new(RaftVoteResponse { vote: None, vote_granted, last_log_id: None }))
     }
 
     async fn append_entries(
         &self,
         _request: Request<RaftAppendEntriesRequest>,
     ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-        Ok(Response::new(RaftAppendEntriesResponse {
-            success: true,
-            conflict: false,
-            vote: None,
-        }))
+        Ok(Response::new(RaftAppendEntriesResponse { success: true, conflict: false, vote: None }))
     }
 
     async fn install_snapshot(
@@ -235,11 +214,8 @@ fn test_minority_cannot_elect_leader() {
             let cluster = cluster_ref.clone();
             async move {
                 let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
-                let service = SplitBrainDetectionService {
-                    node_id,
-                    state,
-                    cluster_states: cluster,
-                };
+                let service =
+                    SplitBrainDetectionService { node_id, state, cluster_states: cluster };
                 Server::builder()
                     .add_service(RaftServiceServer::new(service))
                     .serve_with_incoming(incoming_stream(addr))
@@ -280,15 +256,8 @@ fn test_minority_cannot_elect_leader() {
             .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
             .expect("connect to node3");
 
-        let vote_req = RaftVoteRequest {
-            vote: None,
-            last_log_id: None,
-            shard_id: None,
-        };
-        client3
-            .vote(vote_req)
-            .await
-            .expect("majority should still be operational");
+        let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
+        client3.vote(vote_req).await.expect("majority should still be operational");
 
         // Repair partition
         turmoil::repair("node1", "node3");
@@ -310,20 +279,10 @@ fn test_minority_cannot_elect_leader() {
     let leaders: Vec<u64> = final_cluster
         .iter()
         .enumerate()
-        .filter_map(|(i, state)| {
-            if *state.is_leader.lock() {
-                Some(i as u64 + 1)
-            } else {
-                None
-            }
-        })
+        .filter_map(|(i, state)| if *state.is_leader.lock() { Some(i as u64 + 1) } else { None })
         .collect();
 
-    assert!(
-        leaders.len() <= 1,
-        "Split-brain detected! Multiple leaders: {:?}",
-        leaders
-    );
+    assert!(leaders.len() <= 1, "Split-brain detected! Multiple leaders: {:?}", leaders);
 }
 
 /// Test that writes to minority partition fail while majority continues.
@@ -442,10 +401,7 @@ fn test_write_fails_in_minority_partition() {
                 shard_id: None,
             };
             let resp = client.append_entries(req).await.expect("should succeed");
-            assert!(
-                resp.into_inner().success,
-                "write before partition should succeed"
-            );
+            assert!(resp.into_inner().success, "write before partition should succeed");
         }
 
         // Phase 2: Simulate partition (set flag to make writes fail)
@@ -465,14 +421,8 @@ fn test_write_fails_in_minority_partition() {
                 leader_commit: None,
                 shard_id: None,
             };
-            let resp = client
-                .append_entries(req)
-                .await
-                .expect("rpc should complete");
-            assert!(
-                !resp.into_inner().success,
-                "write during partition should fail"
-            );
+            let resp = client.append_entries(req).await.expect("rpc should complete");
+            assert!(!resp.into_inner().success, "write during partition should fail");
         }
 
         // Phase 3: Heal partition
@@ -636,10 +586,7 @@ fn test_consistency_after_partition_heals() {
                 leader_commit: None,
                 shard_id: None,
             };
-            client
-                .append_entries(req)
-                .await
-                .expect("write during partition");
+            client.append_entries(req).await.expect("write during partition");
         }
 
         // Heal partition
@@ -699,10 +646,7 @@ struct SimulatedStateLayer {
 
 impl SimulatedStateLayer {
     fn new() -> Self {
-        Self {
-            bucket_roots: [EMPTY_HASH; 256],
-            entities: HashMap::new(),
-        }
+        Self { bucket_roots: [EMPTY_HASH; 256], entities: HashMap::new() }
     }
 
     fn compute_state_root(&self) -> Hash {
@@ -712,12 +656,7 @@ impl SimulatedStateLayer {
     fn set_entity(&mut self, key: &str, value: Vec<u8>, bucket: u8) {
         self.entities.insert(
             key.to_string(),
-            Entity {
-                key: key.as_bytes().to_vec(),
-                value,
-                expires_at: 0,
-                version: 1,
-            },
+            Entity { key: key.as_bytes().to_vec(), value, expires_at: 0, version: 1 },
         );
         // Simulate updating bucket root
         self.bucket_roots[bucket as usize] = [bucket; 32]; // Simple deterministic root
@@ -754,10 +693,7 @@ fn test_bit_flip_detected_via_state_root_mismatch() {
     // Verify initial state matches
     let leader_root = leader.compute_state_root();
     let follower_root = follower.compute_state_root();
-    assert_eq!(
-        leader_root, follower_root,
-        "State roots should match before corruption"
-    );
+    assert_eq!(leader_root, follower_root, "State roots should match before corruption");
 
     // Simulate bit flip (e.g., from cosmic ray, disk error)
     follower.inject_bit_flip(20);
@@ -771,10 +707,7 @@ fn test_bit_flip_detected_via_state_root_mismatch() {
     );
 
     // This is the critical assertion: the detection works
-    assert_eq!(
-        leader_root_after, leader_root,
-        "Leader state should be unchanged"
-    );
+    assert_eq!(leader_root_after, leader_root, "Leader state should be unchanged");
 }
 
 /// Test detection of corrupted entity value.
@@ -786,18 +719,8 @@ fn test_bit_flip_detected_via_state_root_mismatch() {
 #[test]
 fn test_corrupted_entity_detected_on_rehash() {
     let entities_original = vec![
-        Entity {
-            key: b"entity1".to_vec(),
-            value: b"value1".to_vec(),
-            expires_at: 0,
-            version: 1,
-        },
-        Entity {
-            key: b"entity2".to_vec(),
-            value: b"value2".to_vec(),
-            expires_at: 100,
-            version: 2,
-        },
+        Entity { key: b"entity1".to_vec(), value: b"value1".to_vec(), expires_at: 0, version: 1 },
+        Entity { key: b"entity2".to_vec(), value: b"value2".to_vec(), expires_at: 100, version: 2 },
     ];
 
     // Compute original bucket root
@@ -813,12 +736,7 @@ fn test_corrupted_entity_detected_on_rehash() {
             expires_at: 0,
             version: 1,
         },
-        Entity {
-            key: b"entity2".to_vec(),
-            value: b"value2".to_vec(),
-            expires_at: 100,
-            version: 2,
-        },
+        Entity { key: b"entity2".to_vec(), value: b"value2".to_vec(), expires_at: 100, version: 2 },
     ];
 
     // Recompute bucket root with corrupted data
@@ -863,10 +781,7 @@ fn test_disk_full_graceful_degradation() {
 
     impl SimulatedStorage {
         fn new() -> Self {
-            Self {
-                disk_full: AtomicBool::new(false),
-                data: Mutex::new(HashMap::new()),
-            }
+            Self { disk_full: AtomicBool::new(false), data: Mutex::new(HashMap::new()) }
         }
 
         fn write(&self, key: &str, value: Vec<u8>) -> Result<(), DiskFullError> {
@@ -894,11 +809,7 @@ fn test_disk_full_graceful_degradation() {
         storage.write("key1", b"value1".to_vec()).is_ok(),
         "Write should succeed when disk has space"
     );
-    assert_eq!(
-        storage.read("key1"),
-        Some(b"value1".to_vec()),
-        "Read should return written value"
-    );
+    assert_eq!(storage.read("key1"), Some(b"value1".to_vec()), "Read should return written value");
 
     // Phase 2: Disk becomes full
     storage.set_disk_full(true);
@@ -988,10 +899,7 @@ fn test_network_delay_request_completion() {
         let completed = fast_completed.clone();
         async move {
             let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
-            let service = SlowService {
-                delay_ms: 10,
-                requests_completed: completed,
-            };
+            let service = SlowService { delay_ms: 10, requests_completed: completed };
             Server::builder()
                 .add_service(RaftServiceServer::new(service))
                 .serve_with_incoming(incoming_stream(addr))
@@ -1007,10 +915,7 @@ fn test_network_delay_request_completion() {
         let completed = slow_completed.clone();
         async move {
             let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
-            let service = SlowService {
-                delay_ms: 500,
-                requests_completed: completed,
-            };
+            let service = SlowService { delay_ms: 500, requests_completed: completed };
             Server::builder()
                 .add_service(RaftServiceServer::new(service))
                 .serve_with_incoming(incoming_stream(addr))
@@ -1030,11 +935,7 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to fast node");
 
-            let req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
+            let req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
             client.vote(req).await.expect("fast node should respond");
         }
 
@@ -1045,15 +946,8 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to slow node");
 
-            let req = RaftVoteRequest {
-                vote: None,
-                last_log_id: None,
-                shard_id: None,
-            };
-            client
-                .vote(req)
-                .await
-                .expect("slow node should eventually respond");
+            let req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
+            client.vote(req).await.expect("slow node should eventually respond");
         }
 
         Ok(())

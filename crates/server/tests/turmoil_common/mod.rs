@@ -3,19 +3,16 @@
 //! This module provides utilities for testing distributed system behavior
 //! under simulated network conditions like partitions, delays, and message loss.
 
-#![allow(
-    dead_code,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods
-)]
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 
-use std::future::Future;
-use std::io;
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::Duration;
+use std::{
+    future::Future,
+    io,
+    net::SocketAddr,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use hyper_util::rt::TokioIo;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -139,9 +136,7 @@ pub async fn create_turmoil_channel(
     port: u16,
 ) -> Result<Channel, tonic::transport::Error> {
     let uri = format!("http://{}:{}", host, port);
-    Endpoint::new(uri)?
-        .connect_with_connector(TurmoilConnector)
-        .await
+    Endpoint::new(uri)?.connect_with_connector(TurmoilConnector).await
 }
 
 /// Create a turmoil-compatible TCP listener stream for tonic servers.
@@ -172,11 +167,7 @@ pub struct SimulatedNode {
 
 impl SimulatedNode {
     pub fn new(id: u64) -> Self {
-        Self {
-            id,
-            host: format!("node{}", id),
-            port: 9999,
-        }
+        Self { id, host: format!("node{}", id), port: 9999 }
     }
 
     pub fn addr(&self) -> SocketAddr {

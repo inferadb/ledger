@@ -13,8 +13,7 @@
 //! handle.abort(); // to stop maintenance
 //! ```
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use tokio::time::interval;
 use tracing::{debug, info};
@@ -38,10 +37,7 @@ impl PeerMaintenance {
     /// Create a new peer maintenance task.
     pub fn new(discovery: Arc<DiscoveryServiceImpl>) -> Self {
         let interval = discovery.maintenance_interval();
-        Self {
-            discovery,
-            interval,
-        }
+        Self { discovery, interval }
     }
 
     /// Create with a custom interval (for testing).
@@ -63,10 +59,7 @@ impl PeerMaintenance {
                 "Peer maintenance: pruned stale peers"
             );
         } else {
-            debug!(
-                remaining_peers = remaining,
-                "Peer maintenance: no stale peers"
-            );
+            debug!(remaining_peers = remaining, "Peer maintenance: no stale peers");
         }
     }
 
@@ -74,10 +67,7 @@ impl PeerMaintenance {
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
-        info!(
-            interval_secs = self.interval.as_secs(),
-            "Starting peer maintenance task"
-        );
+        info!(interval_secs = self.interval.as_secs(), "Starting peer maintenance task");
 
         tokio::spawn(async move {
             let mut ticker = interval(self.interval);
@@ -91,12 +81,7 @@ impl PeerMaintenance {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     // Note: Full tests require setting up DiscoveryServiceImpl with mocked Raft.
     // The maintenance logic is simple enough that it's exercised through

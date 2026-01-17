@@ -8,8 +8,9 @@
 
 use std::time::Duration;
 
-use crate::error::{ConfigSnafu, InvalidUrlSnafu, Result};
 use snafu::ensure;
+
+use crate::error::{ConfigSnafu, InvalidUrlSnafu, Result};
 
 /// Default request timeout (30 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -206,43 +207,26 @@ impl ClientConfigBuilder {
     pub fn build(self) -> Result<ClientConfig> {
         ensure!(
             !self.endpoints.is_empty(),
-            ConfigSnafu {
-                message: "at least one endpoint is required"
-            }
+            ConfigSnafu { message: "at least one endpoint is required" }
         );
 
         for endpoint in &self.endpoints {
             validate_url(endpoint)?;
         }
 
-        let client_id = self.client_id.ok_or_else(|| {
-            ConfigSnafu {
-                message: "client_id is required",
-            }
-            .build()
-        })?;
+        let client_id = self
+            .client_id
+            .ok_or_else(|| ConfigSnafu { message: "client_id is required" }.build())?;
 
-        ensure!(
-            !client_id.is_empty(),
-            ConfigSnafu {
-                message: "client_id cannot be empty"
-            }
-        );
+        ensure!(!client_id.is_empty(), ConfigSnafu { message: "client_id cannot be empty" });
 
         let timeout = self.timeout.unwrap_or(DEFAULT_TIMEOUT);
-        ensure!(
-            !timeout.is_zero(),
-            ConfigSnafu {
-                message: "timeout cannot be zero"
-            }
-        );
+        ensure!(!timeout.is_zero(), ConfigSnafu { message: "timeout cannot be zero" });
 
         let connect_timeout = self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
         ensure!(
             !connect_timeout.is_zero(),
-            ConfigSnafu {
-                message: "connect_timeout cannot be zero"
-            }
+            ConfigSnafu { message: "connect_timeout cannot be zero" }
         );
 
         // Validate TLS config if provided
@@ -303,10 +287,7 @@ impl RetryPolicy {
     /// Creates a policy that never retries.
     #[must_use]
     pub fn no_retry() -> Self {
-        Self {
-            max_attempts: 1,
-            ..Default::default()
-        }
+        Self { max_attempts: 1, ..Default::default() }
     }
 }
 
@@ -374,34 +355,19 @@ impl RetryPolicyBuilder {
 fn validate_url(url: &str) -> Result<()> {
     // Basic validation - must start with http:// or https://
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return InvalidUrlSnafu {
-            url,
-            message: "URL must start with http:// or https://",
-        }
-        .fail();
+        return InvalidUrlSnafu { url, message: "URL must start with http:// or https://" }.fail();
     }
 
     // Check there's something after the scheme
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or("");
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or("");
 
     if rest.is_empty() {
-        return InvalidUrlSnafu {
-            url,
-            message: "URL must have a host",
-        }
-        .fail();
+        return InvalidUrlSnafu { url, message: "URL must have a host" }.fail();
     }
 
     // Check for invalid characters
     if rest.contains(char::is_whitespace) {
-        return InvalidUrlSnafu {
-            url,
-            message: "URL cannot contain whitespace",
-        }
-        .fail();
+        return InvalidUrlSnafu { url, message: "URL cannot contain whitespace" }.fail();
     }
 
     Ok(())
@@ -507,7 +473,7 @@ impl CertificateData {
                 }
                 writeln!(pem, "-----END CERTIFICATE-----").ok();
                 pem
-            }
+            },
         }
     }
 }
@@ -560,10 +526,7 @@ impl TlsConfig {
     /// well-known certificate authorities.
     #[must_use]
     pub fn with_native_roots() -> Self {
-        Self {
-            use_native_roots: true,
-            ..Self::default()
-        }
+        Self { use_native_roots: true, ..Self::default() }
     }
 
     /// Sets the CA certificate from a PEM file path.
@@ -617,10 +580,9 @@ impl TlsConfig {
         cert_path: impl Into<std::path::PathBuf>,
         key_path: impl Into<std::path::PathBuf>,
     ) -> Self {
-        if let (Ok(cert), Ok(key)) = (
-            std::fs::read(cert_path.into()),
-            std::fs::read(key_path.into()),
-        ) {
+        if let (Ok(cert), Ok(key)) =
+            (std::fs::read(cert_path.into()), std::fs::read(key_path.into()))
+        {
             self.client_cert = Some(CertificateData::Pem(cert));
             self.client_key = Some(key);
         }
@@ -649,10 +611,9 @@ impl TlsConfig {
         cert_path: impl Into<std::path::PathBuf>,
         key_path: impl Into<std::path::PathBuf>,
     ) -> Self {
-        if let (Ok(cert), Ok(key)) = (
-            std::fs::read(cert_path.into()),
-            std::fs::read(key_path.into()),
-        ) {
+        if let (Ok(cert), Ok(key)) =
+            (std::fs::read(cert_path.into()), std::fs::read(key_path.into()))
+        {
             self.client_cert = Some(CertificateData::Der(cert));
             self.client_key = Some(key);
         }
@@ -707,18 +668,13 @@ impl TlsConfig {
     pub fn validate(&self) -> Result<()> {
         // If client cert is set, key must also be set
         if self.client_cert.is_some() && self.client_key.is_none() {
-            return ConfigSnafu {
-                message: "client certificate requires a private key",
-            }
-            .fail();
+            return ConfigSnafu { message: "client certificate requires a private key" }.fail();
         }
 
         // Must have some way to verify server certificate
         if self.ca_cert.is_none() && !self.use_native_roots {
-            return ConfigSnafu {
-                message: "TLS requires either a CA certificate or native roots",
-            }
-            .fail();
+            return ConfigSnafu { message: "TLS requires either a CA certificate or native roots" }
+                .fail();
         }
 
         Ok(())
@@ -727,10 +683,7 @@ impl TlsConfig {
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
-        Self {
-            enabled: false,
-            refresh_interval: DEFAULT_DISCOVERY_REFRESH_INTERVAL,
-        }
+        Self { enabled: false, refresh_interval: DEFAULT_DISCOVERY_REFRESH_INTERVAL }
     }
 }
 
@@ -744,10 +697,7 @@ impl DiscoveryConfig {
     /// Creates an enabled discovery configuration with default settings.
     #[must_use]
     pub fn enabled() -> Self {
-        Self {
-            enabled: true,
-            refresh_interval: DEFAULT_DISCOVERY_REFRESH_INTERVAL,
-        }
+        Self { enabled: true, refresh_interval: DEFAULT_DISCOVERY_REFRESH_INTERVAL }
     }
 
     /// Sets the refresh interval for peer discovery.
@@ -773,12 +723,7 @@ impl DiscoveryConfig {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -811,9 +756,7 @@ mod tests {
 
     #[test]
     fn test_missing_endpoints() {
-        let result = ClientConfig::builder()
-            .with_client_id("test-client")
-            .build();
+        let result = ClientConfig::builder().with_client_id("test-client").build();
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -822,9 +765,7 @@ mod tests {
 
     #[test]
     fn test_missing_client_id() {
-        let result = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .build();
+        let result = ClientConfig::builder().with_endpoint("http://localhost:50051").build();
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -855,10 +796,8 @@ mod tests {
 
     #[test]
     fn test_invalid_url_empty_host() {
-        let result = ClientConfig::builder()
-            .with_endpoint("http://")
-            .with_client_id("test-client")
-            .build();
+        let result =
+            ClientConfig::builder().with_endpoint("http://").with_client_id("test-client").build();
 
         assert!(result.is_err());
     }
@@ -970,10 +909,7 @@ mod tests {
     fn test_discovery_config_default_disabled() {
         let config = DiscoveryConfig::default();
         assert!(!config.is_enabled());
-        assert_eq!(
-            config.refresh_interval(),
-            DEFAULT_DISCOVERY_REFRESH_INTERVAL
-        );
+        assert_eq!(config.refresh_interval(), DEFAULT_DISCOVERY_REFRESH_INTERVAL);
     }
 
     #[test]
@@ -986,10 +922,7 @@ mod tests {
     fn test_discovery_config_enabled() {
         let config = DiscoveryConfig::enabled();
         assert!(config.is_enabled());
-        assert_eq!(
-            config.refresh_interval(),
-            DEFAULT_DISCOVERY_REFRESH_INTERVAL
-        );
+        assert_eq!(config.refresh_interval(), DEFAULT_DISCOVERY_REFRESH_INTERVAL);
     }
 
     #[test]
@@ -1056,9 +989,8 @@ mod tests {
 
     #[test]
     fn test_tls_config_with_domain_name() {
-        let tls = TlsConfig::new()
-            .with_ca_cert_pem_bytes(b"cert")
-            .with_domain_name("custom.example.com");
+        let tls =
+            TlsConfig::new().with_ca_cert_pem_bytes(b"cert").with_domain_name("custom.example.com");
 
         assert_eq!(tls.domain_name(), Some("custom.example.com"));
     }

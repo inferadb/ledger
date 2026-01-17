@@ -21,38 +21,33 @@
 //! The `shard_chain` lock consolidates `shard_height` and `previous_shard_hash`
 //! into a single lock to eliminate internal ordering issues.
 
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::io::Cursor;
-use std::ops::RangeBounds;
-use std::path::Path;
-use std::sync::Arc;
-
-use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
-use openraft::storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot};
-use openraft::{
-    Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
-    StoredMembership, Vote,
-};
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-
-use inferadb_ledger_types::{
-    Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root,
-    decode, encode,
-};
-
-use crate::metrics;
-use crate::types::{
-    BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
-    SystemRequest,
-};
+use std::{collections::HashMap, fmt::Debug, io::Cursor, ops::RangeBounds, path::Path, sync::Arc};
 
 // Re-export storage types used in this module
 use inferadb_ledger_state::system::{
     NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys,
 };
 use inferadb_ledger_state::{BlockArchive, StateError, StateLayer};
+use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
+use inferadb_ledger_types::{
+    Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root,
+    decode, encode,
+};
+use openraft::{
+    Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
+    StoredMembership, Vote,
+    storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot},
+};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    metrics,
+    types::{
+        BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
+        SystemRequest,
+    },
+};
 
 // ============================================================================
 // Metadata Keys
@@ -176,11 +171,7 @@ pub struct SequenceCounters {
 impl SequenceCounters {
     /// Create new counters with initial values.
     pub fn new() -> Self {
-        Self {
-            namespace: 1,
-            vault: 1,
-            user: 1,
-        }
+        Self { namespace: 1, vault: 1, user: 1 }
     }
 
     /// Get and increment the next namespace ID.
@@ -248,22 +239,12 @@ pub struct AppliedStateAccessor {
 impl AppliedStateAccessor {
     /// Get the current height for a vault.
     pub fn vault_height(&self, namespace_id: NamespaceId, vault_id: VaultId) -> u64 {
-        self.state
-            .read()
-            .vault_heights
-            .get(&(namespace_id, vault_id))
-            .copied()
-            .unwrap_or(0)
+        self.state.read().vault_heights.get(&(namespace_id, vault_id)).copied().unwrap_or(0)
     }
 
     /// Get the health status for a vault.
     pub fn vault_health(&self, namespace_id: NamespaceId, vault_id: VaultId) -> VaultHealthStatus {
-        self.state
-            .read()
-            .vault_health
-            .get(&(namespace_id, vault_id))
-            .cloned()
-            .unwrap_or_default()
+        self.state.read().vault_health.get(&(namespace_id, vault_id)).cloned().unwrap_or_default()
     }
 
     /// Get all vault heights (for GetTip when no specific vault is requested).
@@ -273,43 +254,22 @@ impl AppliedStateAccessor {
 
     /// Get namespace metadata by ID.
     pub fn get_namespace(&self, namespace_id: NamespaceId) -> Option<NamespaceMeta> {
-        self.state
-            .read()
-            .namespaces
-            .get(&namespace_id)
-            .filter(|ns| !ns.deleted)
-            .cloned()
+        self.state.read().namespaces.get(&namespace_id).filter(|ns| !ns.deleted).cloned()
     }
 
     /// Get namespace metadata by name.
     pub fn get_namespace_by_name(&self, name: &str) -> Option<NamespaceMeta> {
-        self.state
-            .read()
-            .namespaces
-            .values()
-            .find(|ns| !ns.deleted && ns.name == name)
-            .cloned()
+        self.state.read().namespaces.values().find(|ns| !ns.deleted && ns.name == name).cloned()
     }
 
     /// List all active namespaces.
     pub fn list_namespaces(&self) -> Vec<NamespaceMeta> {
-        self.state
-            .read()
-            .namespaces
-            .values()
-            .filter(|ns| !ns.deleted)
-            .cloned()
-            .collect()
+        self.state.read().namespaces.values().filter(|ns| !ns.deleted).cloned().collect()
     }
 
     /// Get vault metadata by ID.
     pub fn get_vault(&self, namespace_id: NamespaceId, vault_id: VaultId) -> Option<VaultMeta> {
-        self.state
-            .read()
-            .vaults
-            .get(&(namespace_id, vault_id))
-            .filter(|v| !v.deleted)
-            .cloned()
+        self.state.read().vaults.get(&(namespace_id, vault_id)).filter(|v| !v.deleted).cloned()
     }
 
     /// List all active vaults in a namespace.
@@ -419,10 +379,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             Database::open(path.as_ref()).map_err(|e| to_storage_error(&e))?
         } else {
             // New database - use larger pages for bigger batch sizes
-            let config = DatabaseConfig {
-                page_size: Self::RAFT_PAGE_SIZE,
-                ..Default::default()
-            };
+            let config = DatabaseConfig { page_size: Self::RAFT_PAGE_SIZE, ..Default::default() };
             Database::create_with_config(path.as_ref(), config).map_err(|e| to_storage_error(&e))?
         };
 
@@ -491,9 +448,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// This accessor can be cloned and passed to services that need to read
     /// vault heights and health status.
     pub fn accessor(&self) -> AppliedStateAccessor {
-        AppliedStateAccessor {
-            state: self.applied_state.clone(),
-        }
+        AppliedStateAccessor { state: self.applied_state.clone() }
     }
 
     /// Load metadata values into caches.
@@ -539,9 +494,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ) -> Result<Option<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
-        if let Some((_, entry_data)) = read_txn
-            .last::<tables::RaftLog>()
-            .map_err(|e| to_storage_error(&e))?
+        if let Some((_, entry_data)) =
+            read_txn.last::<tables::RaftLog>().map_err(|e| to_storage_error(&e))?
         {
             let entry: Entry<LedgerTypeConfig> =
                 decode(&entry_data).map_err(|e| to_serde_error(&e))?;
@@ -562,11 +516,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         state: &mut AppliedState,
     ) -> (LedgerResponse, Option<VaultEntry>) {
         match request {
-            LedgerRequest::Write {
-                namespace_id,
-                vault_id,
-                transactions,
-            } => {
+            LedgerRequest::Write { namespace_id, vault_id, transactions } => {
                 let key = (*namespace_id, *vault_id);
                 if let Some(VaultHealthStatus::Diverged { .. }) = state.vault_health.get(&key) {
                     return (
@@ -593,14 +543,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Apply transactions to state layer if configured
                 let state_root = if let Some(state_layer) = &self.state_layer {
                     // Collect all operations from all transactions
-                    let all_ops: Vec<_> = transactions
-                        .iter()
-                        .flat_map(|tx| tx.operations.clone())
-                        .collect();
+                    let all_ops: Vec<_> =
+                        transactions.iter().flat_map(|tx| tx.operations.clone()).collect();
 
-                    // Apply operations (StateLayer is internally thread-safe via inferadb-ledger-store MVCC)
+                    // Apply operations (StateLayer is internally thread-safe via
+                    // inferadb-ledger-store MVCC)
                     if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
-                        // Per DESIGN.md §6.1: On CAS failure, return current state for conflict resolution
+                        // Per DESIGN.md §6.1: On CAS failure, return current state for conflict
+                        // resolution
                         return match e {
                             StateError::PreconditionFailed {
                                 key,
@@ -635,7 +585,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 },
                                 None,
                             );
-                        }
+                        },
                     }
                 } else {
                     // No state layer configured, use placeholder
@@ -659,11 +609,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Track the highest sequence number per client for this vault.
                 for tx in transactions {
                     let client_key = (*namespace_id, *vault_id, tx.client_id.clone());
-                    let current = state
-                        .client_sequences
-                        .get(&client_key)
-                        .copied()
-                        .unwrap_or(0);
+                    let current = state.client_sequences.get(&client_key).copied().unwrap_or(0);
                     if tx.sequence > current {
                         state.client_sequences.insert(client_key, tx.sequence);
                     }
@@ -684,14 +630,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // We temporarily build a BlockHeader to compute the hash
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
 
-                (
-                    LedgerResponse::Write {
-                        block_height: new_height,
-                        block_hash,
-                    },
-                    Some(vault_entry),
-                )
-            }
+                (LedgerResponse::Write { block_height: new_height, block_hash }, Some(vault_entry))
+            },
 
             LedgerRequest::CreateNamespace { name, shard_id } => {
                 let namespace_id = state.sequences.next_namespace();
@@ -730,12 +670,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         let key = SystemKeys::namespace_key(namespace_id);
                         let name_index_key = SystemKeys::namespace_name_index_key(name);
                         let ops = vec![
-                            Operation::SetEntity {
-                                key,
-                                value,
-                                condition: None,
-                                expires_at: None,
-                            },
+                            Operation::SetEntity { key, value, condition: None, expires_at: None },
                             Operation::SetEntity {
                                 key: name_index_key,
                                 value: namespace_id.to_string().into_bytes(),
@@ -754,20 +689,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 }
 
-                (
-                    LedgerResponse::NamespaceCreated {
-                        namespace_id,
-                        shard_id: assigned_shard,
-                    },
-                    None,
-                )
-            }
+                (LedgerResponse::NamespaceCreated { namespace_id, shard_id: assigned_shard }, None)
+            },
 
-            LedgerRequest::CreateVault {
-                namespace_id,
-                name,
-                retention_policy,
-            } => {
+            LedgerRequest::CreateVault { namespace_id, name, retention_policy } => {
                 let vault_id = state.sequences.next_vault();
                 let key = (*namespace_id, vault_id);
                 state.vault_heights.insert(key, 0);
@@ -784,14 +709,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                 );
                 (LedgerResponse::VaultCreated { vault_id }, None)
-            }
+            },
 
             LedgerRequest::DeleteNamespace { namespace_id } => {
                 // Check if namespace has active vaults
-                let has_vaults = state
-                    .vaults
-                    .iter()
-                    .any(|((ns, _), v)| *ns == *namespace_id && !v.deleted);
+                let has_vaults =
+                    state.vaults.iter().any(|((ns, _), v)| *ns == *namespace_id && !v.deleted);
 
                 let response = if has_vaults {
                     LedgerResponse::NamespaceDeleted { success: false }
@@ -804,12 +727,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 };
                 (response, None)
-            }
+            },
 
-            LedgerRequest::DeleteVault {
-                namespace_id,
-                vault_id,
-            } => {
+            LedgerRequest::DeleteVault { namespace_id, vault_id } => {
                 let key = (*namespace_id, *vault_id);
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault) = state.vaults.get_mut(&key) {
@@ -821,7 +741,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 };
                 (response, None)
-            }
+            },
 
             LedgerRequest::UpdateVaultHealth {
                 namespace_id,
@@ -864,14 +784,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     let expected = expected_root.unwrap_or(inferadb_ledger_types::ZERO_HASH);
                     let computed = computed_root.unwrap_or(inferadb_ledger_types::ZERO_HASH);
                     let at_height = diverged_at_height.unwrap_or(0);
-                    state.vault_health.insert(
-                        key,
-                        VaultHealthStatus::Diverged {
-                            expected,
-                            computed,
-                            at_height,
-                        },
-                    );
+                    state
+                        .vault_health
+                        .insert(key, VaultHealthStatus::Diverged { expected, computed, at_height });
                     tracing::warn!(
                         namespace_id,
                         vault_id,
@@ -880,20 +795,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     );
                 }
                 (LedgerResponse::VaultHealthUpdated { success: true }, None)
-            }
+            },
 
             LedgerRequest::System(system_request) => {
                 let response = match system_request {
                     SystemRequest::CreateUser { name: _, email: _ } => {
                         let user_id = state.sequences.next_user();
                         LedgerResponse::UserCreated { user_id }
-                    }
+                    },
                     SystemRequest::AddNode { .. }
                     | SystemRequest::RemoveNode { .. }
                     | SystemRequest::UpdateNamespaceRouting { .. } => LedgerResponse::Empty,
                 };
                 (response, None)
-            }
+            },
 
             LedgerRequest::BatchWrite { requests } => {
                 // Process each request in the batch sequentially, collecting responses.
@@ -911,7 +826,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
 
                 (LedgerResponse::BatchWrite { responses }, last_vault_entry)
-            }
+            },
         }
     }
 
@@ -1062,12 +977,8 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             attempts += 1;
             if attempts >= MAX_ATTEMPTS {
                 // Give up and return error - something is seriously wrong
-                let last_idx = self
-                    .get_last_entry()
-                    .ok()
-                    .flatten()
-                    .map(|e| e.log_id.index)
-                    .unwrap_or(0);
+                let last_idx =
+                    self.get_last_entry().ok().flatten().map(|e| e.log_id.index).unwrap_or(0);
                 return Err(StorageError::IO {
                     source: openraft::StorageIOError::read_logs(openraft::AnyError::error(
                         format!(
@@ -1106,11 +1017,7 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
-            self.state
-                .last_applied
-                .as_ref()
-                .map(|l| l.index)
-                .unwrap_or(0),
+            self.state.last_applied.as_ref().map(|l| l.index).unwrap_or(0),
             chrono::Utc::now().timestamp()
         );
 
@@ -1141,10 +1048,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let last_entry = self.get_last_entry()?;
         let last_log_id = last_entry.map(|e| e.log_id);
 
-        Ok(LogState {
-            last_purged_log_id: last_purged,
-            last_log_id,
-        })
+        Ok(LogState { last_purged_log_id: last_purged, last_log_id })
     }
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
@@ -1216,11 +1120,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         write_txn.commit().map_err(|e| {
-            tracing::error!(
-                "append_to_log: commit failed for entries {:?}: {:?}",
-                indices,
-                e
-            );
+            tracing::error!("append_to_log: commit failed for entries {:?}: {:?}", indices, e);
             to_storage_error(&e)
         })?;
 
@@ -1251,9 +1151,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         // Then delete in a write transaction
         let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
         for key in keys_to_remove {
-            write_txn
-                .delete::<tables::RaftLog>(&key)
-                .map_err(|e| to_storage_error(&e))?;
+            write_txn.delete::<tables::RaftLog>(&key).map_err(|e| to_storage_error(&e))?;
         }
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
 
@@ -1285,9 +1183,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         // Then delete in a write transaction
         let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
         for key in keys_to_remove {
-            write_txn
-                .delete::<tables::RaftLog>(&key)
-                .map_err(|e| to_storage_error(&e))?;
+            write_txn.delete::<tables::RaftLog>(&key).map_err(|e| to_storage_error(&e))?;
         }
 
         // Save the last purged log ID
@@ -1305,10 +1201,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     async fn last_applied_state(
         &mut self,
     ) -> Result<
-        (
-            Option<LogId<LedgerNodeId>>,
-            StoredMembership<LedgerNodeId, openraft::BasicNode>,
-        ),
+        (Option<LogId<LedgerNodeId>>, StoredMembership<LedgerNodeId, openraft::BasicNode>),
         StorageError<LedgerNodeId>,
     > {
         let state = self.applied_state.read();
@@ -1326,10 +1219,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         // Get the committed_index from the last entry (for ShardBlock metadata)
         let committed_index = entries.last().map(|e| e.log_id.index).unwrap_or(0);
         // Term is stored in the leader_id
-        let term = entries
-            .last()
-            .map(|e| e.log_id.leader_id.get_term())
-            .unwrap_or(0);
+        let term = entries.last().map(|e| e.log_id.leader_id.get_term()).unwrap_or(0);
 
         for entry in entries {
             state.last_applied = Some(entry.log_id);
@@ -1341,7 +1231,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     state.membership =
                         StoredMembership::new(Some(entry.log_id), membership.clone());
                     (LedgerResponse::Empty, None)
-                }
+                },
             };
 
             responses.push(response);
@@ -1394,10 +1284,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             // Update shard chain tracking (single lock acquisition)
             let shard_hash =
                 inferadb_ledger_types::sha256(&encode(&shard_block).unwrap_or_default());
-            *self.shard_chain.write() = ShardChainState {
-                height: new_shard_height,
-                previous_hash: shard_hash,
-            };
+            *self.shard_chain.write() =
+                ShardChainState { height: new_shard_height, previous_hash: shard_hash };
 
             // Also update AppliedState for snapshot persistence
             state.shard_height = new_shard_height;
@@ -1413,9 +1301,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        LedgerSnapshotBuilder {
-            state: self.applied_state.read().clone(),
-        }
+        LedgerSnapshotBuilder { state: self.applied_state.read().clone() }
     }
 
     async fn begin_receiving_snapshot(
@@ -1507,7 +1393,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                                 "Collected entities for snapshot"
                             );
                         }
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             namespace_id,
@@ -1515,7 +1401,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                             error = %e,
                             "Failed to list entities for snapshot"
                         );
-                    }
+                    },
                 }
             }
 
@@ -1525,10 +1411,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         };
 
         // Create combined snapshot
-        let combined = CombinedSnapshot {
-            applied_state: state.clone(),
-            vault_entities,
-        };
+        let combined = CombinedSnapshot { applied_state: state.clone(), vault_entities };
 
         let data = encode(&combined).map_err(|e| to_serde_error(&e))?;
 
@@ -1570,17 +1453,13 @@ fn to_serde_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use super::*;
     use inferadb_ledger_store::FileBackend;
     use openraft::CommittedLeaderId;
     use tempfile::tempdir;
+
+    use super::*;
 
     /// Helper to create log IDs for tests.
     #[allow(dead_code)]
@@ -1598,12 +1477,8 @@ mod tests {
         // Verify database can be read (tables exist in inferadb-ledger-store by default)
         let read_txn = store.db.read().expect("begin read");
         // Tables are fixed in inferadb-ledger-store - just verify we can get a transaction
-        let _ = read_txn
-            .get::<tables::RaftLog>(&0u64)
-            .expect("query RaftLog");
-        let _ = read_txn
-            .get::<tables::RaftState>(&"test".to_string())
-            .expect("query RaftState");
+        let _ = read_txn.get::<tables::RaftLog>(&0u64).expect("query RaftLog");
+        let _ = read_txn.get::<tables::RaftState>(&"test".to_string()).expect("query RaftState");
     }
 
     #[tokio::test]
@@ -1640,17 +1515,15 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        let request = LedgerRequest::CreateNamespace {
-            name: "test-ns".to_string(),
-            shard_id: None,
-        };
+        let request =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: None };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => {
                 assert_eq!(namespace_id, 1);
-            }
+            },
             _ => panic!("unexpected response"),
         }
     }
@@ -1675,7 +1548,7 @@ mod tests {
             LedgerResponse::VaultCreated { vault_id } => {
                 assert_eq!(vault_id, 1);
                 assert_eq!(state.vault_heights.get(&(1, 1)), Some(&0));
-            }
+            },
             _ => panic!("unexpected response"),
         }
     }
@@ -1691,25 +1564,17 @@ mod tests {
         // Mark vault as diverged
         state.vault_health.insert(
             (1, 1),
-            VaultHealthStatus::Diverged {
-                expected: [1u8; 32],
-                computed: [2u8; 32],
-                at_height: 10,
-            },
+            VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
-        let request = LedgerRequest::Write {
-            namespace_id: 1,
-            vault_id: 1,
-            transactions: vec![],
-        };
+        let request = LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
                 assert!(message.contains("diverged"));
-            }
+            },
             _ => panic!("expected error response"),
         }
     }
@@ -1725,11 +1590,7 @@ mod tests {
         // Start with a diverged vault
         state.vault_health.insert(
             (1, 1),
-            VaultHealthStatus::Diverged {
-                expected: [1u8; 32],
-                computed: [2u8; 32],
-                at_height: 10,
-            },
+            VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         // Update to healthy
@@ -1749,15 +1610,12 @@ mod tests {
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
                 assert!(success);
-            }
+            },
             _ => panic!("expected VaultHealthUpdated response"),
         }
 
         // Verify vault is now healthy
-        assert_eq!(
-            state.vault_health.get(&(1, 1)),
-            Some(&VaultHealthStatus::Healthy)
-        );
+        assert_eq!(state.vault_health.get(&(1, 1)), Some(&VaultHealthStatus::Healthy));
     }
 
     #[tokio::test]
@@ -1769,9 +1627,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Start healthy
-        state
-            .vault_health
-            .insert((1, 1), VaultHealthStatus::Healthy);
+        state.vault_health.insert((1, 1), VaultHealthStatus::Healthy);
 
         // Update to diverged
         let request = LedgerRequest::UpdateVaultHealth {
@@ -1790,21 +1646,17 @@ mod tests {
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
                 assert!(success);
-            }
+            },
             _ => panic!("expected VaultHealthUpdated response"),
         }
 
         // Verify vault is now diverged with correct values
         match state.vault_health.get(&(1, 1)) {
-            Some(VaultHealthStatus::Diverged {
-                expected,
-                computed,
-                at_height,
-            }) => {
+            Some(VaultHealthStatus::Diverged { expected, computed, at_height }) => {
                 assert_eq!(*expected, [0xAA; 32]);
                 assert_eq!(*computed, [0xBB; 32]);
                 assert_eq!(*at_height, 42);
-            }
+            },
             _ => panic!("expected Diverged health status"),
         }
     }
@@ -1820,11 +1672,7 @@ mod tests {
         // Start with a diverged vault
         state.vault_health.insert(
             (1, 1),
-            VaultHealthStatus::Diverged {
-                expected: [1u8; 32],
-                computed: [2u8; 32],
-                at_height: 10,
-            },
+            VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         // Update to recovering
@@ -1844,7 +1692,7 @@ mod tests {
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
                 assert!(success);
-            }
+            },
             _ => panic!("expected VaultHealthUpdated response"),
         }
 
@@ -1852,7 +1700,7 @@ mod tests {
         match state.vault_health.get(&(1, 1)) {
             Some(VaultHealthStatus::Recovering { attempt, .. }) => {
                 assert_eq!(*attempt, 1);
-            }
+            },
             _ => panic!("expected Recovering health status"),
         }
 
@@ -1873,14 +1721,14 @@ mod tests {
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
                 assert!(success);
-            }
+            },
             _ => panic!("expected VaultHealthUpdated response"),
         }
 
         match state.vault_health.get(&(1, 1)) {
             Some(VaultHealthStatus::Recovering { attempt, .. }) => {
                 assert_eq!(*attempt, 2);
-            }
+            },
             _ => panic!("expected Recovering health status with attempt 2"),
         }
     }
@@ -1917,14 +1765,8 @@ mod tests {
 
         // Same sequence of requests to apply
         let requests = vec![
-            LedgerRequest::CreateNamespace {
-                name: "acme-corp".to_string(),
-                shard_id: None,
-            },
-            LedgerRequest::CreateNamespace {
-                name: "startup-inc".to_string(),
-                shard_id: None,
-            },
+            LedgerRequest::CreateNamespace { name: "acme-corp".to_string(), shard_id: None },
+            LedgerRequest::CreateNamespace { name: "startup-inc".to_string(), shard_id: None },
             LedgerRequest::CreateVault {
                 namespace_id: 1,
                 name: Some("production".to_string()),
@@ -1940,21 +1782,9 @@ mod tests {
                 name: Some("main".to_string()),
                 retention_policy: None,
             },
-            LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 1,
-                transactions: vec![],
-            },
-            LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 1,
-                transactions: vec![],
-            },
-            LedgerRequest::Write {
-                namespace_id: 2,
-                vault_id: 3,
-                transactions: vec![],
-            },
+            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
+            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
+            LedgerRequest::Write { namespace_id: 2, vault_id: 3, transactions: vec![] },
             LedgerRequest::System(SystemRequest::CreateUser {
                 name: "Alice".to_string(),
                 email: "alice@example.com".to_string(),
@@ -1984,10 +1814,7 @@ mod tests {
         drop(state_b);
 
         // Results must be identical
-        assert_eq!(
-            results_a, results_b,
-            "Same inputs must produce identical results on all nodes"
-        );
+        assert_eq!(results_a, results_b, "Same inputs must produce identical results on all nodes");
 
         // Final state must be identical
         let final_state_a = store_a.applied_state.read();
@@ -2074,10 +1901,7 @@ mod tests {
 
         // Different inputs must produce different hashes
         let hash_c = store_a.compute_block_hash(1, 2, 4);
-        assert_ne!(
-            hash_a, hash_c,
-            "Different inputs should produce different hashes"
-        );
+        assert_ne!(hash_a, hash_c, "Different inputs should produce different hashes");
     }
 
     /// Verify vault height tracking is deterministic.
@@ -2107,11 +1931,7 @@ mod tests {
 
         // Apply multiple writes
         for _ in 0..5 {
-            let write = LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 1,
-                transactions: vec![],
-            };
+            let write = LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] };
             store_a.apply_request(&write, &mut state_a);
             store_b.apply_request(&write, &mut state_b);
         }
@@ -2148,10 +1968,7 @@ mod tests {
 
         // Create namespace and vaults
         let requests: Vec<LedgerRequest> = vec![
-            LedgerRequest::CreateNamespace {
-                name: "ns1".to_string(),
-                shard_id: None,
-            },
+            LedgerRequest::CreateNamespace { name: "ns1".to_string(), shard_id: None },
             LedgerRequest::CreateVault {
                 namespace_id: 1,
                 name: Some("vault-a".to_string()),
@@ -2171,31 +1988,11 @@ mod tests {
 
         // Interleaved writes to different vaults
         let interleaved: Vec<LedgerRequest> = vec![
-            LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 1,
-                transactions: vec![],
-            },
-            LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 2,
-                transactions: vec![],
-            },
-            LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 1,
-                transactions: vec![],
-            },
-            LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 2,
-                transactions: vec![],
-            },
-            LedgerRequest::Write {
-                namespace_id: 1,
-                vault_id: 1,
-                transactions: vec![],
-            },
+            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
+            LedgerRequest::Write { namespace_id: 1, vault_id: 2, transactions: vec![] },
+            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
+            LedgerRequest::Write { namespace_id: 1, vault_id: 2, transactions: vec![] },
+            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
         ];
 
         let mut results_a = Vec::new();
@@ -2209,10 +2006,7 @@ mod tests {
         }
 
         // Results must match
-        assert_eq!(
-            results_a, results_b,
-            "Interleaved operation results must match"
-        );
+        assert_eq!(results_a, results_b, "Interleaved operation results must match");
 
         // Vault 1: 3 writes, Vault 2: 2 writes
         assert_eq!(state_a.vault_heights.get(&(1, 1)), Some(&3));
@@ -2225,14 +2019,8 @@ mod tests {
     /// Snapshots must serialize to the same bytes on all nodes for the same state.
     #[tokio::test]
     async fn test_deterministic_state_serialization() {
-        let mut state_a = AppliedState {
-            sequences: SequenceCounters::new(),
-            ..Default::default()
-        };
-        let mut state_b = AppliedState {
-            sequences: SequenceCounters::new(),
-            ..Default::default()
-        };
+        let mut state_a = AppliedState { sequences: SequenceCounters::new(), ..Default::default() };
+        let mut state_b = AppliedState { sequences: SequenceCounters::new(), ..Default::default() };
 
         // Apply same mutations
         state_a.sequences.next_namespace();
@@ -2292,10 +2080,7 @@ mod tests {
 
         // Setup: create namespace and vault
         store.apply_request(
-            &LedgerRequest::CreateNamespace {
-                name: "test".to_string(),
-                shard_id: None,
-            },
+            &LedgerRequest::CreateNamespace { name: "test".to_string(), shard_id: None },
             &mut state,
         );
         store.apply_request(
@@ -2322,11 +2107,7 @@ mod tests {
             actor: "test-actor".to_string(),
         };
 
-        let request = LedgerRequest::Write {
-            namespace_id: 1,
-            vault_id: 1,
-            transactions: vec![tx],
-        };
+        let request = LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![tx] };
 
         let (response, vault_entry) = store.apply_request(&request, &mut state);
 
@@ -2334,7 +2115,7 @@ mod tests {
         match response {
             LedgerResponse::Write { block_height, .. } => {
                 assert_eq!(block_height, 1, "First write should be height 1");
-            }
+            },
             _ => panic!("Expected Write response"),
         }
 
@@ -2392,11 +2173,7 @@ mod tests {
         original.vault_heights.insert((1, 2), 50);
         original.vault_health.insert(
             (2, 1),
-            VaultHealthStatus::Diverged {
-                expected: [1u8; 32],
-                computed: [2u8; 32],
-                at_height: 10,
-            },
+            VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
         original.previous_vault_hashes.insert((1, 1), [0xCD; 32]);
         original.namespaces.insert(
@@ -2428,10 +2205,7 @@ mod tests {
         assert_eq!(restored.sequences, original.sequences);
         assert_eq!(restored.vault_heights, original.vault_heights);
         assert_eq!(restored.vault_health, original.vault_health);
-        assert_eq!(
-            restored.previous_vault_hashes,
-            original.previous_vault_hashes
-        );
+        assert_eq!(restored.previous_vault_hashes, original.previous_vault_hashes);
         assert_eq!(restored.shard_height, 42, "shard_height must be preserved");
         assert_eq!(
             restored.previous_shard_hash, [0xAB; 32],
@@ -2497,8 +2271,9 @@ mod tests {
     /// correctly restores all state including shard tracking.
     #[tokio::test]
     async fn test_snapshot_install_restores_state() {
-        use openraft::{SnapshotMeta, StoredMembership};
         use std::io::Cursor;
+
+        use openraft::{SnapshotMeta, StoredMembership};
 
         // Build a CombinedSnapshot with realistic data
         let mut applied_state = AppliedState {
@@ -2551,10 +2326,7 @@ mod tests {
             },
         );
 
-        let combined = CombinedSnapshot {
-            applied_state,
-            vault_entities: HashMap::new(),
-        };
+        let combined = CombinedSnapshot { applied_state, vault_entities: HashMap::new() };
 
         let snapshot_data = postcard::to_allocvec(&combined).expect("serialize snapshot");
 
@@ -2582,14 +2354,8 @@ mod tests {
         let restored = target_store.applied_state.read();
 
         // Check sequence counters
-        assert_eq!(
-            restored.sequences.namespace, 3,
-            "namespace counter should be restored"
-        );
-        assert_eq!(
-            restored.sequences.vault, 2,
-            "vault counter should be restored"
-        );
+        assert_eq!(restored.sequences.namespace, 3, "namespace counter should be restored");
+        assert_eq!(restored.sequences.vault, 2, "vault counter should be restored");
 
         // Check vault heights
         assert_eq!(restored.vault_heights.get(&(1, 1)), Some(&42));
@@ -2604,18 +2370,12 @@ mod tests {
 
         // Check namespace registry
         assert_eq!(restored.namespaces.len(), 2);
-        let ns1 = restored
-            .namespaces
-            .get(&1)
-            .expect("namespace 1 should exist");
+        let ns1 = restored.namespaces.get(&1).expect("namespace 1 should exist");
         assert_eq!(ns1.name, "production");
 
         // Check vault registry
         assert_eq!(restored.vaults.len(), 1);
-        let v1 = restored
-            .vaults
-            .get(&(1, 1))
-            .expect("vault (1,1) should exist");
+        let v1 = restored.vaults.get(&(1, 1)).expect("vault (1,1) should exist");
         assert_eq!(v1.name, Some("main-vault".to_string()));
 
         // Verify the target store's runtime fields are also updated
@@ -2626,19 +2386,16 @@ mod tests {
     /// Test that snapshot install on empty store works correctly.
     #[tokio::test]
     async fn test_snapshot_install_on_fresh_node() {
-        use openraft::{SnapshotMeta, StoredMembership};
         use std::io::Cursor;
+
+        use openraft::{SnapshotMeta, StoredMembership};
 
         // Create a minimal CombinedSnapshot
         let combined = CombinedSnapshot {
             applied_state: AppliedState {
                 last_applied: Some(make_log_id(2, 50)),
                 membership: StoredMembership::default(),
-                sequences: SequenceCounters {
-                    namespace: 5,
-                    vault: 10,
-                    user: 3,
-                },
+                sequences: SequenceCounters { namespace: 5, vault: 10, user: 3 },
                 vault_heights: {
                     let mut h = HashMap::new();
                     h.insert((1, 1), 25);
@@ -2672,19 +2429,13 @@ mod tests {
             last_membership: StoredMembership::default(),
             snapshot_id: "fresh-install".to_string(),
         };
-        store
-            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
-            .await
-            .expect("install");
+        store.install_snapshot(&meta, Box::new(Cursor::new(snapshot_data))).await.expect("install");
 
         // Verify state
         assert_eq!(store.current_shard_height(), 30);
         assert_eq!(store.applied_state.read().sequences.namespace, 5);
         assert_eq!(store.applied_state.read().sequences.vault, 10);
-        assert_eq!(
-            store.applied_state.read().vault_heights.get(&(1, 1)),
-            Some(&25)
-        );
+        assert_eq!(store.applied_state.read().vault_heights.get(&(1, 1)), Some(&25));
     }
 
     #[tokio::test]
@@ -2714,17 +2465,9 @@ mod tests {
         assert_eq!(log_state.last_log_id.map(|id| id.index), Some(100));
 
         // Read all entries back (what openraft does during replication)
-        let read_entries = store
-            .try_get_log_entries(1u64..=100u64)
-            .await
-            .expect("read entries");
+        let read_entries = store.try_get_log_entries(1u64..=100u64).await.expect("read entries");
 
-        assert_eq!(
-            read_entries.len(),
-            100,
-            "Expected 100 entries, got {}",
-            read_entries.len()
-        );
+        assert_eq!(read_entries.len(), 100, "Expected 100 entries, got {}", read_entries.len());
 
         // Verify each entry exists and has correct index
         for (i, entry) in read_entries.iter().enumerate() {
@@ -2737,15 +2480,7 @@ mod tests {
         }
 
         // Test partial range (what openraft does when replicating to a follower)
-        let partial = store
-            .try_get_log_entries(50u64..=75u64)
-            .await
-            .expect("read partial");
-        assert_eq!(
-            partial.len(),
-            26,
-            "Expected 26 entries, got {}",
-            partial.len()
-        );
+        let partial = store.try_get_log_entries(50u64..=75u64).await.expect("read partial");
+        assert_eq!(partial.len(), 26, "Expected 26 entries, got {}", partial.len());
     }
 }

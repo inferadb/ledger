@@ -5,26 +5,25 @@
 //! - Each vault maintains independent cryptographic chain
 //! - State root divergence in one vault doesn't cascade to others
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use inferadb_ledger_store::{Database, StorageBackend};
-use parking_lot::RwLock;
-use snafu::{ResultExt, Snafu};
-
 use inferadb_ledger_types::{
     EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultHealth, VaultId, ZERO_HASH,
     compute_chain_commitment, encode,
 };
+use parking_lot::RwLock;
+use snafu::{ResultExt, Snafu};
 
-use crate::block_archive::BlockArchive;
-use crate::bucket::NUM_BUCKETS;
-use crate::entity::EntityStore;
-use crate::snapshot::{
-    Snapshot, SnapshotChainParams, SnapshotManager, SnapshotStateData, VaultSnapshotMeta,
+use crate::{
+    block_archive::BlockArchive,
+    bucket::NUM_BUCKETS,
+    entity::EntityStore,
+    snapshot::{
+        Snapshot, SnapshotChainParams, SnapshotManager, SnapshotStateData, VaultSnapshotMeta,
+    },
+    state::StateLayer,
 };
-use crate::state::StateLayer;
 
 /// Shard manager error types.
 #[derive(Debug, Snafu)]
@@ -33,19 +32,13 @@ pub enum ShardError {
     State { source: crate::state::StateError },
 
     #[snafu(display("Block archive error: {source}"))]
-    BlockArchive {
-        source: crate::block_archive::BlockArchiveError,
-    },
+    BlockArchive { source: crate::block_archive::BlockArchiveError },
 
     #[snafu(display("Snapshot error: {source}"))]
-    Snapshot {
-        source: crate::snapshot::SnapshotError,
-    },
+    Snapshot { source: crate::snapshot::SnapshotError },
 
     #[snafu(display("Storage error: {source}"))]
-    Inkwell {
-        source: inferadb_ledger_store::Error,
-    },
+    Inkwell { source: inferadb_ledger_store::Error },
 
     #[snafu(display("Entity store error: {source}"))]
     Entity { source: crate::entity::EntityError },
@@ -56,11 +49,7 @@ pub enum ShardError {
     #[snafu(display(
         "State root mismatch for vault {vault_id}: expected {expected:?}, computed {computed:?}"
     ))]
-    StateRootMismatch {
-        vault_id: VaultId,
-        expected: Hash,
-        computed: Hash,
-    },
+    StateRootMismatch { vault_id: VaultId, expected: Hash, computed: Hash },
 }
 
 /// Result type for shard operations.
@@ -158,10 +147,7 @@ impl<B: StorageBackend> ShardManager<B> {
 
     /// Get vault health status.
     pub fn vault_health(&self, vault_id: VaultId) -> Option<VaultHealth> {
-        self.vault_meta
-            .read()
-            .get(&vault_id)
-            .map(|m| m.health.clone())
+        self.vault_meta.read().get(&vault_id).map(|m| m.health.clone())
     }
 
     /// Access the state layer.
@@ -215,7 +201,7 @@ impl<B: StorageBackend> ShardManager<B> {
                         | inferadb_ledger_types::Operation::DeleteEntity { key }
                         | inferadb_ledger_types::Operation::ExpireEntity { key, .. } => {
                             dirty_keys.push(key.as_bytes().to_vec());
-                        }
+                        },
                         inferadb_ledger_types::Operation::CreateRelationship {
                             resource,
                             relation,
@@ -230,28 +216,24 @@ impl<B: StorageBackend> ShardManager<B> {
                                 resource, relation, subject,
                             );
                             dirty_keys.push(rel.to_key().into_bytes());
-                        }
+                        },
                     }
                 }
             }
 
             // Compute and verify state root
-            let computed_root = self
-                .state
-                .compute_state_root(entry.vault_id)
-                .context(StateSnafu)?;
+            let computed_root =
+                self.state.compute_state_root(entry.vault_id).context(StateSnafu)?;
 
             if computed_root != entry.state_root {
                 // Mark vault as diverged
-                let meta = vault_meta
-                    .entry(entry.vault_id)
-                    .or_insert_with(|| VaultMeta {
-                        namespace_id: entry.namespace_id,
-                        height: 0,
-                        state_root: EMPTY_HASH,
-                        previous_hash: inferadb_ledger_types::ZERO_HASH,
-                        health: VaultHealth::Healthy,
-                    });
+                let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
+                    namespace_id: entry.namespace_id,
+                    height: 0,
+                    state_root: EMPTY_HASH,
+                    previous_hash: inferadb_ledger_types::ZERO_HASH,
+                    health: VaultHealth::Healthy,
+                });
 
                 meta.health = VaultHealth::Diverged {
                     expected: entry.state_root,
@@ -267,15 +249,13 @@ impl<B: StorageBackend> ShardManager<B> {
             }
 
             // Update vault metadata
-            let meta = vault_meta
-                .entry(entry.vault_id)
-                .or_insert_with(|| VaultMeta {
-                    namespace_id: entry.namespace_id,
-                    height: 0,
-                    state_root: EMPTY_HASH,
-                    previous_hash: inferadb_ledger_types::ZERO_HASH,
-                    health: VaultHealth::Healthy,
-                });
+            let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
+                namespace_id: entry.namespace_id,
+                height: 0,
+                state_root: EMPTY_HASH,
+                previous_hash: inferadb_ledger_types::ZERO_HASH,
+                health: VaultHealth::Healthy,
+            });
 
             meta.height = entry.vault_height;
             meta.state_root = entry.state_root;
@@ -302,10 +282,8 @@ impl<B: StorageBackend> ShardManager<B> {
 
         for (&vault_id, meta) in vault_meta.iter() {
             // Get bucket roots
-            let bucket_roots = self
-                .state
-                .get_bucket_roots(vault_id)
-                .unwrap_or([EMPTY_HASH; NUM_BUCKETS]);
+            let bucket_roots =
+                self.state.get_bucket_roots(vault_id).unwrap_or([EMPTY_HASH; NUM_BUCKETS]);
 
             // Collect entities (this is expensive but necessary for snapshot)
             let txn = self.db.read().context(InkwellSnafu)?;
@@ -328,14 +306,9 @@ impl<B: StorageBackend> ShardManager<B> {
         // Compute chain commitment for snapshot verification
         let chain_params = self.compute_chain_params(shard_height)?;
 
-        let snapshot = Snapshot::new(
-            self.shard_id,
-            shard_height,
-            vault_states,
-            state_data,
-            chain_params,
-        )
-        .context(SnapshotSnafu)?;
+        let snapshot =
+            Snapshot::new(self.shard_id, shard_height, vault_states, state_data, chain_params)
+                .context(SnapshotSnafu)?;
 
         self.snapshots.save(&snapshot).context(SnapshotSnafu)
     }
@@ -362,10 +335,8 @@ impl<B: StorageBackend> ShardManager<B> {
             };
 
         // Load block headers from (from_height..=shard_height)
-        let blocks = self
-            .blocks
-            .read_range(from_height, shard_height)
-            .context(BlockArchiveSnafu)?;
+        let blocks =
+            self.blocks.read_range(from_height, shard_height).context(BlockArchiveSnafu)?;
 
         let headers: Vec<_> = blocks.iter().map(|b| b.to_shard_header()).collect();
 
@@ -395,11 +366,11 @@ impl<B: StorageBackend> ShardManager<B> {
             Ok(block) => {
                 let header = block.to_shard_header();
                 inferadb_ledger_types::hash::block_hash(&header)
-            }
+            },
             Err(_) => {
                 // No blocks yet - use ZERO_HASH as placeholder
                 ZERO_HASH
-            }
+            },
         };
 
         // Cache the result
@@ -427,8 +398,7 @@ impl<B: StorageBackend> ShardManager<B> {
 
             // Restore bucket roots for state commitment
             if let Some(bucket_roots) = vault_state.bucket_roots_array() {
-                self.state
-                    .load_vault_commitment(vault_state.vault_id, bucket_roots);
+                self.state.load_vault_commitment(vault_state.vault_id, bucket_roots);
             }
         }
 
@@ -472,16 +442,14 @@ impl<B: StorageBackend> ShardManager<B> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
-    use crate::engine::InMemoryStorageEngine;
     use chrono::Utc;
     use inferadb_ledger_test_utils::TestDir;
     use inferadb_ledger_types::{Operation, Transaction, VaultEntry};
 
-    fn create_test_manager() -> (
-        ShardManager<inferadb_ledger_store::InMemoryBackend>,
-        TestDir,
-    ) {
+    use super::*;
+    use crate::engine::InMemoryStorageEngine;
+
+    fn create_test_manager() -> (ShardManager<inferadb_ledger_store::InMemoryBackend>, TestDir) {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
 
@@ -524,10 +492,7 @@ mod tests {
         };
 
         // Compute expected state root
-        let _ = manager
-            .state
-            .apply_operations(1, &tx.operations, 1)
-            .expect("apply");
+        let _ = manager.state.apply_operations(1, &tx.operations, 1).expect("apply");
         let expected_root = manager.state.compute_state_root(1).expect("compute root");
 
         // Reset state and apply via block

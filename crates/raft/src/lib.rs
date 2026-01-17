@@ -17,7 +17,8 @@
 //! Ledger runs behind WireGuard VPN. Authentication and authorization are handled
 //! by Engine/Control services upstream. Ledger trusts all incoming requests.
 
-// gRPC services return tonic::Status (176 bytes) - this is standard practice for gRPC error handling
+// gRPC services return tonic::Status (176 bytes) - this is standard practice for gRPC error
+// handling
 #![allow(clippy::result_large_err)]
 
 mod auto_recovery;
@@ -75,13 +76,13 @@ pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
 pub use rate_limit::{NamespaceRateLimiter, RateLimitExceeded};
 pub use saga_orchestrator::SagaOrchestrator;
 pub use server::LedgerServer;
-pub use shard_router::{
-    RouterConfig, RouterStats, RoutingError, RoutingInfo, ShardConnection, ShardRouter,
-};
 // Re-export multi-shard service types
 pub use services::{
     ForwardClient, MultiShardReadService, MultiShardResolver, MultiShardWriteService,
     RemoteShardInfo, ResolveResult, ShardContext, ShardResolver, SingleShardResolver,
+};
+pub use shard_router::{
+    RouterConfig, RouterStats, RoutingError, RoutingInfo, ShardConnection, ShardRouter,
 };
 pub use ttl_gc::TtlGarbageCollector;
 pub use types::{

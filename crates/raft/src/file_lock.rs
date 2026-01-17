@@ -10,9 +10,11 @@
 //! // Lock is held until `lock` is dropped
 //! ```
 
-use std::fs::{self, File};
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File},
+    io,
+    path::{Path, PathBuf},
+};
 
 use fs2::FileExt;
 use tracing::{debug, error, info};
@@ -32,23 +34,14 @@ impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LockError::AlreadyLocked(path) => {
-                write!(
-                    f,
-                    "Data directory is already locked by another process: {}",
-                    path.display()
-                )
-            }
+                write!(f, "Data directory is already locked by another process: {}", path.display())
+            },
             LockError::CreateFailed(path, err) => {
                 write!(f, "Failed to create lock file {}: {}", path.display(), err)
-            }
+            },
             LockError::DirectoryCreateFailed(path, err) => {
-                write!(
-                    f,
-                    "Failed to create data directory {}: {}",
-                    path.display(),
-                    err
-                )
-            }
+                write!(f, "Failed to create data directory {}: {}", path.display(), err)
+            },
         }
     }
 }
@@ -122,18 +115,15 @@ impl DataDirLock {
                     path = %lock_path.display(),
                     "Acquired exclusive lock on data directory"
                 );
-                Ok(Self {
-                    file,
-                    path: lock_path,
-                })
-            }
+                Ok(Self { file, path: lock_path })
+            },
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 error!(
                     path = %data_dir.display(),
                     "Data directory is already locked by another process"
                 );
                 Err(LockError::AlreadyLocked(data_dir.to_path_buf()))
-            }
+            },
             Err(e) => {
                 // On some systems, try_lock returns other errors for "already locked"
                 // Check raw_os_error for EWOULDBLOCK (11) or EAGAIN (11 on Linux)
@@ -152,7 +142,7 @@ impl DataDirLock {
                     );
                     Err(LockError::CreateFailed(lock_path, e))
                 }
-            }
+            },
         }
     }
 
@@ -187,15 +177,11 @@ impl Drop for DataDirLock {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::disallowed_methods
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
     use inferadb_ledger_test_utils::TestDir;
+
+    use super::*;
 
     #[test]
     fn test_acquire_lock_creates_directory() {

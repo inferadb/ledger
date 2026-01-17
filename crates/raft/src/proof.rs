@@ -7,13 +7,14 @@
 
 use std::sync::Arc;
 
-use snafu::{ResultExt, Snafu};
-
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::hash::{Hash, tx_hash};
-use inferadb_ledger_types::merkle::MerkleTree;
-use inferadb_ledger_types::{NamespaceId, Transaction, VaultId};
+use inferadb_ledger_types::{
+    NamespaceId, Transaction, VaultId,
+    hash::{Hash, tx_hash},
+    merkle::MerkleTree,
+};
+use snafu::{ResultExt, Snafu};
 
 use crate::proto;
 
@@ -112,26 +113,17 @@ pub fn generate_write_proof(
     let shard_height = archive
         .find_shard_height(namespace_id, vault_id, vault_height)
         .context(FindShardHeightSnafu)?
-        .ok_or(ProofError::BlockNotFound {
-            namespace_id,
-            vault_id,
-            vault_height,
-        })?;
+        .ok_or(ProofError::BlockNotFound { namespace_id, vault_id, vault_height })?;
 
     // Read the block
-    let block = archive
-        .read_block(shard_height)
-        .context(ReadBlockSnafu { shard_height })?;
+    let block = archive.read_block(shard_height).context(ReadBlockSnafu { shard_height })?;
 
     // Find our vault entry in the block
     let entry = block
         .vault_entries
         .iter()
         .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)
-        .ok_or(ProofError::VaultEntryNotFound {
-            namespace_id,
-            vault_id,
-        })?;
+        .ok_or(ProofError::VaultEntryNotFound { namespace_id, vault_id })?;
 
     // Validate transaction index
     if entry.transactions.is_empty() {
@@ -147,26 +139,16 @@ pub fn generate_write_proof(
     // Build block header from vault entry
     let block_header = proto::BlockHeader {
         height: entry.vault_height,
-        namespace_id: Some(proto::NamespaceId {
-            id: entry.namespace_id,
-        }),
+        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id }),
         vault_id: Some(proto::VaultId { id: entry.vault_id }),
-        previous_hash: Some(proto::Hash {
-            value: entry.previous_vault_hash.to_vec(),
-        }),
-        tx_merkle_root: Some(proto::Hash {
-            value: entry.tx_merkle_root.to_vec(),
-        }),
-        state_root: Some(proto::Hash {
-            value: entry.state_root.to_vec(),
-        }),
+        previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
+        tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
+        state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),
         timestamp: Some(prost_types::Timestamp {
             seconds: block.timestamp.timestamp(),
             nanos: block.timestamp.timestamp_subsec_nanos() as i32,
         }),
-        leader_id: Some(proto::NodeId {
-            id: block.leader_id.clone(),
-        }),
+        leader_id: Some(proto::NodeId { id: block.leader_id.clone() }),
         term: block.term,
         committed_index: block.committed_index,
     };
@@ -178,10 +160,7 @@ pub fn generate_write_proof(
             count: entry.transactions.len(),
         })?;
 
-    Ok(WriteProof {
-        block_header,
-        tx_proof,
-    })
+    Ok(WriteProof { block_header, tx_proof })
 }
 
 // ============================================================================
@@ -253,9 +232,7 @@ pub fn generate_state_proof(
     let mut other_bucket_roots: Vec<proto::Hash> = Vec::with_capacity(255);
     for (i, root) in bucket_roots.iter().enumerate() {
         if i != entity_bucket_id as usize {
-            other_bucket_roots.push(proto::Hash {
-                value: root.to_vec(),
-            });
+            other_bucket_roots.push(proto::Hash { value: root.to_vec() });
         }
     }
 
@@ -268,14 +245,10 @@ pub fn generate_state_proof(
         expires_at: entity.expires_at,
         version: entity.version,
         bucket_id: entity_bucket_id,
-        bucket_root: Some(proto::Hash {
-            value: bucket_roots[entity_bucket_id as usize].to_vec(),
-        }),
+        bucket_root: Some(proto::Hash { value: bucket_roots[entity_bucket_id as usize].to_vec() }),
         other_bucket_roots,
         block_height,
-        state_root: Some(proto::Hash {
-            value: state_root.to_vec(),
-        }),
+        state_root: Some(proto::Hash { value: state_root.to_vec() }),
     }
 }
 
@@ -370,9 +343,10 @@ pub fn verify_state_proof(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
+    use chrono::Utc;
+
     use super::*;
     use crate::proto::Direction;
-    use chrono::Utc;
 
     fn make_tx(id: u8) -> Transaction {
         Transaction {
@@ -392,10 +366,7 @@ mod tests {
 
         // Single tx: leaf_hash should be the tx hash
         assert!(proof.leaf_hash.is_some());
-        assert_eq!(
-            proof.leaf_hash.as_ref().unwrap().value,
-            tx_hash(&txs[0]).to_vec()
-        );
+        assert_eq!(proof.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[0]).to_vec());
 
         // Single tx: no siblings needed
         assert!(proof.siblings.is_empty());
@@ -407,24 +378,15 @@ mod tests {
 
         // Proof for first tx
         let proof0 = generate_tx_proof(&txs, 0).unwrap();
-        assert_eq!(
-            proof0.leaf_hash.as_ref().unwrap().value,
-            tx_hash(&txs[0]).to_vec()
-        );
+        assert_eq!(proof0.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[0]).to_vec());
         assert_eq!(proof0.siblings.len(), 1);
         // tx[0] is left child, so sibling (tx[1]) is on the right
         assert_eq!(proof0.siblings[0].direction(), Direction::Right);
-        assert_eq!(
-            proof0.siblings[0].hash.as_ref().unwrap().value,
-            tx_hash(&txs[1]).to_vec()
-        );
+        assert_eq!(proof0.siblings[0].hash.as_ref().unwrap().value, tx_hash(&txs[1]).to_vec());
 
         // Proof for second tx
         let proof1 = generate_tx_proof(&txs, 1).unwrap();
-        assert_eq!(
-            proof1.leaf_hash.as_ref().unwrap().value,
-            tx_hash(&txs[1]).to_vec()
-        );
+        assert_eq!(proof1.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[1]).to_vec());
         assert_eq!(proof1.siblings.len(), 1);
         // tx[1] is right child, so sibling (tx[0]) is on the left
         assert_eq!(proof1.siblings[0].direction(), Direction::Left);
@@ -447,10 +409,7 @@ mod tests {
         let target_id = [2u8; 16];
 
         let proof = generate_tx_proof_by_id(&txs, &target_id).unwrap();
-        assert_eq!(
-            proof.leaf_hash.as_ref().unwrap().value,
-            tx_hash(&txs[1]).to_vec()
-        );
+        assert_eq!(proof.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[1]).to_vec());
     }
 
     #[test]
@@ -478,16 +437,12 @@ mod tests {
     // State Proof Tests
     // ========================================================================
 
-    use super::{StateProofVerification, generate_state_proof, verify_state_proof};
     use inferadb_ledger_types::{EMPTY_HASH, Entity, bucket_id, sha256_concat};
 
+    use super::{StateProofVerification, generate_state_proof, verify_state_proof};
+
     fn make_entity(key: &[u8], value: &[u8]) -> Entity {
-        Entity {
-            key: key.to_vec(),
-            value: value.to_vec(),
-            expires_at: 0,
-            version: 1,
-        }
+        Entity { key: key.to_vec(), value: value.to_vec(), expires_at: 0, version: 1 }
     }
 
     fn make_bucket_roots() -> [Hash; 256] {
@@ -516,10 +471,7 @@ mod tests {
 
         // Verify state_root matches computed value
         let expected_state_root = sha256_concat(&bucket_roots);
-        assert_eq!(
-            proof.state_root.as_ref().unwrap().value,
-            expected_state_root.to_vec()
-        );
+        assert_eq!(proof.state_root.as_ref().unwrap().value, expected_state_root.to_vec());
     }
 
     #[test]
@@ -550,7 +502,7 @@ mod tests {
             StateProofVerification::InvalidBucketId { expected, actual } => {
                 assert_eq!(expected, bucket_id(b"test_key"));
                 assert_eq!(actual, (bucket_id(b"test_key") as u32 + 1) % 256);
-            }
+            },
             _ => unreachable!("Expected InvalidBucketId, got {:?}", result),
         }
     }
@@ -592,10 +544,7 @@ mod tests {
 
         let result = verify_state_proof(&proof, &expected_state_root);
 
-        assert_eq!(
-            result,
-            StateProofVerification::MissingField("other_bucket_roots (need 255)")
-        );
+        assert_eq!(result, StateProofVerification::MissingField("other_bucket_roots (need 255)"));
     }
 
     #[test]
@@ -619,13 +568,7 @@ mod tests {
         assert_eq!(proof2.bucket_id, bucket2 as u32);
 
         // Both should verify against the same state root
-        assert_eq!(
-            verify_state_proof(&proof1, &state_root),
-            StateProofVerification::Valid
-        );
-        assert_eq!(
-            verify_state_proof(&proof2, &state_root),
-            StateProofVerification::Valid
-        );
+        assert_eq!(verify_state_proof(&proof1, &state_root), StateProofVerification::Valid);
+        assert_eq!(verify_state_proof(&proof2, &state_root), StateProofVerification::Valid);
     }
 }

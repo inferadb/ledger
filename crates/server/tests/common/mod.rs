@@ -4,35 +4,26 @@
 //!
 //! ## Cluster Types
 //!
-//! - `TestCluster`: Single-shard cluster using the standard bootstrap flow.
-//!   Best for testing Raft consensus, membership changes, and basic operations.
+//! - `TestCluster`: Single-shard cluster using the standard bootstrap flow. Best for testing Raft
+//!   consensus, membership changes, and basic operations.
 //!
-//! - `MultiShardTestCluster`: Multi-shard cluster using `MultiRaftManager`.
-//!   Best for testing horizontal scaling, shard routing, and high-throughput.
+//! - `MultiShardTestCluster`: Multi-shard cluster using `MultiRaftManager`. Best for testing
+//!   horizontal scaling, shard routing, and high-throughput.
 
-#![allow(
-    dead_code,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_methods
-)]
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use inferadb_ledger_test_utils::TestDir;
-use openraft::Raft;
-use tokio::time::timeout;
-
-use inferadb_ledger_raft::LedgerTypeConfig;
-use inferadb_ledger_raft::proto::JoinClusterRequest;
-use inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient;
 use inferadb_ledger_raft::{
-    MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig, ShardGroup,
+    LedgerTypeConfig, MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig,
+    ShardGroup,
+    proto::{JoinClusterRequest, admin_service_client::AdminServiceClient},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_test_utils::TestDir;
+use openraft::Raft;
+use tokio::time::timeout;
 
 /// A test node in a cluster.
 pub struct TestNode {
@@ -69,12 +60,7 @@ impl TestNode {
 
     /// Get the last applied log index.
     pub fn last_applied(&self) -> u64 {
-        self.raft
-            .metrics()
-            .borrow()
-            .last_applied
-            .map(|id| id.index)
-            .unwrap_or(0)
+        self.raft.metrics().borrow().last_applied.map(|id| id.index).unwrap_or(0)
     }
 }
 
@@ -216,13 +202,10 @@ impl TestCluster {
                         last_error = format!("connect failed: {}", e);
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    }
+                    },
                 };
 
-                let join_request = JoinClusterRequest {
-                    node_id,
-                    address: addr.to_string(),
-                };
+                let join_request = JoinClusterRequest { node_id, address: addr.to_string() };
 
                 match client.join_cluster(join_request).await {
                     Ok(response) => {
@@ -242,11 +225,11 @@ impl TestCluster {
                             };
                             tokio::time::sleep(backoff).await;
                         }
-                    }
+                    },
                     Err(e) => {
                         last_error = format!("join RPC failed: {}", e);
                         tokio::time::sleep(Duration::from_millis(200 * (attempt + 1) as u64)).await;
-                    }
+                    },
                 }
             }
 
@@ -361,11 +344,7 @@ impl TestCluster {
     /// Uses consensus from node metrics rather than relying on a single node.
     pub fn leader(&self) -> Option<&TestNode> {
         // Find consensus leader ID from node metrics
-        let leader_id = self
-            .nodes
-            .iter()
-            .filter_map(|n| n.current_leader())
-            .next()?;
+        let leader_id = self.nodes.iter().filter_map(|n| n.current_leader()).next()?;
 
         // Return the node with that ID
         self.nodes.iter().find(|n| n.id == leader_id)
@@ -582,10 +561,7 @@ impl MultiShardTestCluster {
                 bootstrap: i == 0, // Only first node bootstraps
                 enable_background_jobs: true,
             };
-            manager
-                .start_system_shard(system_config)
-                .await
-                .expect("start system shard");
+            manager.start_system_shard(system_config).await.expect("start system shard");
 
             // Start data shards (shard 1, 2, ...)
             for shard_id in 1..=num_data_shards {
@@ -653,10 +629,7 @@ impl MultiShardTestCluster {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        Self {
-            nodes,
-            num_shards: num_data_shards,
-        }
+        Self { nodes, num_shards: num_data_shards }
     }
 
     /// Get all nodes.
