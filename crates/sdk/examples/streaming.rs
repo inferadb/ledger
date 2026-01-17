@@ -138,9 +138,13 @@ async fn main() -> Result<()> {
 
 /// Helper to show first few bytes of a hash as hex
 fn hex_preview(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     if bytes.is_empty() {
         return "empty".to_string();
     }
-    let preview: String = bytes.iter().take(4).map(|b| format!("{b:02x}")).collect();
-    format!("{}...", preview)
+    let preview = bytes.iter().take(4).fold(String::with_capacity(8), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    format!("{preview}...")
 }

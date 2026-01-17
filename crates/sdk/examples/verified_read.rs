@@ -187,8 +187,12 @@ async fn main() -> Result<()> {
 
 /// Convert bytes to hex string for display
 fn hex_string(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     if bytes.is_empty() {
         return "empty".to_string();
     }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }

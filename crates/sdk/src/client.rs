@@ -1753,8 +1753,14 @@ impl LedgerClient {
 
     /// Convert TxId bytes to hex string.
     fn tx_id_to_hex(tx_id: Option<proto::TxId>) -> String {
+        use std::fmt::Write;
         tx_id
-            .map(|t| t.id.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            .map(|t| {
+                t.id.iter().fold(String::with_capacity(t.id.len() * 2), |mut acc, b| {
+                    let _ = write!(acc, "{b:02x}");
+                    acc
+                })
+            })
             .unwrap_or_default()
     }
 
