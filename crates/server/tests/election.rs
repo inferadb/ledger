@@ -23,10 +23,14 @@ use serial_test::serial;
 async fn test_single_node_self_election() {
     let cluster = TestCluster::new(1).await;
 
+    // Get the actual node ID (Snowflake ID)
+    let node = &cluster.nodes()[0];
+    let expected_leader_id = node.id;
+
     // Should quickly elect itself
     let leader_id = cluster.wait_for_leader_timeout(Duration::from_secs(5)).await;
 
-    assert_eq!(leader_id, Some(1), "single node should elect itself as leader");
+    assert_eq!(leader_id, Some(expected_leader_id), "single node should elect itself as leader");
 }
 
 /// Test that a three-node cluster elects a leader.
@@ -34,15 +38,19 @@ async fn test_single_node_self_election() {
 async fn test_three_node_leader_election() {
     let cluster = TestCluster::new(3).await;
 
+    // Get the actual node IDs (Snowflake IDs)
+    let node_ids: Vec<u64> = cluster.nodes().iter().map(|n| n.id).collect();
+
     // Wait for leader election with agreement across all nodes
     // wait_for_leader() now waits for ALL nodes to agree
     let leader_id = cluster.wait_for_leader().await;
 
-    // Leader should be one of the nodes
+    // Leader should be one of the cluster's nodes
     assert!(
-        leader_id >= 1 && leader_id <= 3,
-        "leader should be one of the nodes, got {}",
-        leader_id
+        node_ids.contains(&leader_id),
+        "leader {} should be one of the nodes {:?}",
+        leader_id,
+        node_ids
     );
 
     // Double-check leader consistency (should pass since wait_for_leader ensures agreement)

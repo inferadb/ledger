@@ -8,3 +8,5 @@ pub mod config;
 pub mod discovery;
 pub mod node_id;
 pub mod shutdown;
+
+pub mod coordinator;

@@ -2,7 +2,7 @@
 //!
 //! Handles namespace and vault management, cluster membership, snapshots, and integrity checks.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
@@ -20,12 +20,12 @@ use crate::{
         ClusterMemberRole, CreateNamespaceRequest, CreateNamespaceResponse, CreateSnapshotRequest,
         CreateSnapshotResponse, CreateVaultRequest, CreateVaultResponse, DeleteNamespaceRequest,
         DeleteNamespaceResponse, DeleteVaultRequest, DeleteVaultResponse, GetClusterInfoRequest,
-        GetClusterInfoResponse, GetNamespaceRequest, GetNamespaceResponse, GetVaultRequest,
-        GetVaultResponse, Hash, IntegrityIssue, JoinClusterRequest, JoinClusterResponse,
-        LeaveClusterRequest, LeaveClusterResponse, ListNamespacesRequest, ListNamespacesResponse,
-        ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest,
-        RecoverVaultResponse, ShardId, VaultHealthProto, VaultId,
-        admin_service_server::AdminService,
+        GetClusterInfoResponse, GetNamespaceRequest, GetNamespaceResponse, GetNodeInfoRequest,
+        GetNodeInfoResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
+        JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
+        ListNamespacesRequest, ListNamespacesResponse, ListVaultsRequest, ListVaultsResponse,
+        NamespaceId, NodeId, RecoverVaultRequest, RecoverVaultResponse, ShardId, VaultHealthProto,
+        VaultId, admin_service_server::AdminService,
     },
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
@@ -42,16 +42,26 @@ pub struct AdminServiceImpl {
     applied_state: AppliedStateAccessor,
     /// Block archive for integrity verification.
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
+    /// The node's listen address (for GetNodeInfo RPC).
+    listen_addr: SocketAddr,
 }
 
 impl AdminServiceImpl {
     /// Create a new admin service.
+    ///
+    /// # Arguments
+    ///
+    /// * `raft` - The Raft instance for consensus operations
+    /// * `state` - The state layer for data access
+    /// * `applied_state` - Accessor for applied state (vault heights, health)
+    /// * `listen_addr` - The node's gRPC listen address (returned by GetNodeInfo)
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
+        listen_addr: SocketAddr,
     ) -> Self {
-        Self { raft, state, applied_state, block_archive: None }
+        Self { raft, state, applied_state, block_archive: None, listen_addr }
     }
 
     /// Create with block archive for integrity verification.
@@ -60,8 +70,9 @@ impl AdminServiceImpl {
         state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
         block_archive: Arc<BlockArchive<FileBackend>>,
+        listen_addr: SocketAddr,
     ) -> Self {
-        Self { raft, state, applied_state, block_archive: Some(block_archive) }
+        Self { raft, state, applied_state, block_archive: Some(block_archive), listen_addr }
     }
 }
 
@@ -878,6 +889,58 @@ impl AdminService for AdminServiceImpl {
             members,
             leader_id: current_leader.unwrap_or(0),
             term: metrics.vote.leader_id().term,
+        }))
+    }
+
+    /// Get node information for pre-bootstrap coordination.
+    ///
+    /// Returns the node's identity information including Snowflake ID, address,
+    /// cluster membership status, and current Raft term. This RPC is available
+    /// even before the cluster is formed, enabling nodes to discover each other's
+    /// IDs and determine who should bootstrap.
+    ///
+    /// # Security Considerations
+    ///
+    /// This RPC is intentionally unauthenticated to enable pre-cluster coordination
+    /// when nodes cannot yet share credentials. The following threat model applies:
+    ///
+    /// **Minimal Information Exposure**: Only returns data necessary for coordination:
+    /// - `node_id`: Snowflake ID (timestamp + random, not secret)
+    /// - `address`: Already known to caller (they connected to it)
+    /// - `is_cluster_member`: Cluster state observable via connection behavior
+    /// - `term`: Raft term (not sensitive)
+    ///
+    /// **Threat: Malicious Node ID**: An attacker could provide a very low Snowflake
+    /// ID to force leadership. Mitigations:
+    /// - Snowflake IDs use 42-bit timestamp + 22-bit random, making prediction difficult
+    /// - IDs are persisted on first startup, preventing replay
+    /// - Production clusters should use authenticated discovery (SRV records, etc.)
+    /// - Network-level controls (firewalls, VPNs) limit who can participate
+    ///
+    /// **Threat: Information Gathering**: Attacker discovers cluster topology.
+    /// Mitigations:
+    /// - This RPC returns only this node's info, not full cluster membership
+    /// - Use network-level access controls in production
+    ///
+    /// **Not Rate Limited**: The RPC is lightweight and coordination is time-bounded
+    /// by `bootstrap_timeout_secs`. The discovery polling interval provides natural
+    /// throttling for legitimate use.
+    async fn get_node_info(
+        &self,
+        _request: Request<GetNodeInfoRequest>,
+    ) -> Result<Response<GetNodeInfoResponse>, Status> {
+        let metrics = self.raft.metrics().borrow().clone();
+
+        // Node is a cluster member if it has a leader or is in membership
+        // (has at least one voter including itself)
+        let is_cluster_member = metrics.current_leader.is_some()
+            || metrics.membership_config.membership().voter_ids().count() > 0;
+
+        Ok(Response::new(GetNodeInfoResponse {
+            node_id: metrics.id,
+            address: self.listen_addr.to_string(),
+            is_cluster_member,
+            term: metrics.current_term,
         }))
     }
 

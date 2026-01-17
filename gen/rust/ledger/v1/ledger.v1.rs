@@ -1252,6 +1252,27 @@ pub struct GetClusterInfoResponse {
     #[prost(uint64, tag="3")]
     pub term: u64,
 }
+/// Request for node identity (empty - no parameters needed).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetNodeInfoRequest {
+}
+/// Node identity for bootstrap coordination.
+/// Available before cluster formation to support coordinated bootstrap.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetNodeInfoResponse {
+    /// Node's Snowflake ID (auto-generated, persisted).
+    #[prost(uint64, tag="1")]
+    pub node_id: u64,
+    /// Node's gRPC address (e.g., "192.168.1.10:50051").
+    #[prost(string, tag="2")]
+    pub address: ::prost::alloc::string::String,
+    /// True if node is already part of a cluster.
+    #[prost(bool, tag="3")]
+    pub is_cluster_member: bool,
+    /// Current Raft term (0 if not in cluster).
+    #[prost(uint64, tag="4")]
+    pub term: u64,
+}
 /// A member of the Raft cluster.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClusterMember {

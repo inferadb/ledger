@@ -8,14 +8,31 @@
 //! 1. Cached peers (from previous successful connections)
 //! 2. Static config (from peers configuration)
 //! 3. DNS SRV lookup (if srv_domain is configured)
+//!
+//! # Security
+//!
+//! The [`discover_node_info`] function currently uses plaintext HTTP for gRPC
+//! connections during bootstrap coordination. This is acceptable for:
+//! - Private networks with network-level isolation
+//! - Development and testing environments
+//!
+//! For production deployments requiring transport encryption:
+//! - Use network-level TLS termination (e.g., service mesh, load balancer)
+//! - Deploy nodes on private networks with firewall rules
+//! - Consider implementing server-side TLS configuration in a future release
+//!
+//! The `GetNodeInfo` RPC returns only non-sensitive coordination metadata,
+//! minimizing exposure risk even without transport encryption.
 
-use std::{net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path, time::Duration};
 
 use hickory_resolver::{
     TokioAsyncResolver,
     config::{ResolverConfig, ResolverOpts},
 };
+use inferadb_ledger_raft::proto::{GetNodeInfoRequest, admin_service_client::AdminServiceClient};
 use serde::{Deserialize, Serialize};
+use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 // Re-export DiscoveryConfig from config for convenience
@@ -30,6 +47,24 @@ pub struct DiscoveredPeer {
     pub priority: u16,
     /// SRV record weight (for load balancing among same priority).
     pub weight: u16,
+}
+
+/// A discovered node with identity information from GetNodeInfo RPC.
+///
+/// Used during bootstrap coordination to determine which node should
+/// bootstrap the cluster (lowest Snowflake ID wins).
+// Used by coordinator module in Task 5 (PRD.md)
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct DiscoveredNode {
+    /// Node's Snowflake ID (auto-generated, persisted).
+    pub node_id: u64,
+    /// Node's gRPC address.
+    pub addr: SocketAddr,
+    /// True if node is already part of a cluster.
+    pub is_cluster_member: bool,
+    /// Current Raft term (0 if not in cluster).
+    pub term: u64,
 }
 
 /// Cached peers file format.
@@ -101,6 +136,87 @@ pub async fn resolve_bootstrap_peers(discovery: &DiscoveryConfig) -> Vec<SocketA
     addresses.retain(|addr| seen.insert(*addr));
 
     addresses
+}
+
+/// Query a peer for its node identity information via GetNodeInfo RPC.
+///
+/// This function connects to a peer and retrieves its Snowflake ID, cluster
+/// membership status, and current Raft term. Used during bootstrap coordination
+/// to determine which node should bootstrap the cluster.
+///
+/// Returns `None` if the connection fails, the RPC times out, or the address
+/// is invalid, allowing callers to skip unreachable/invalid peers gracefully.
+///
+/// # Arguments
+///
+/// * `addr` - The peer's gRPC address
+/// * `timeout` - Maximum time to wait for connection and RPC completion
+///
+/// # Security
+///
+/// This function validates the peer address before attempting connection:
+/// - Rejects port 0 (unassigned/ephemeral)
+/// - Rejects unspecified addresses (0.0.0.0, ::)
+///
+/// Network-level controls (firewalls, VPNs) should further restrict which
+/// peers can be contacted in production environments.
+pub async fn discover_node_info(addr: SocketAddr, timeout: Duration) -> Option<DiscoveredNode> {
+    // Validate peer address before attempting connection
+    if addr.port() == 0 {
+        debug!(peer = %addr, "Rejecting peer with port 0");
+        return None;
+    }
+
+    if addr.ip().is_unspecified() {
+        debug!(peer = %addr, "Rejecting unspecified peer address");
+        return None;
+    }
+
+    debug!(peer = %addr, "Querying node info");
+
+    let endpoint = match Channel::from_shared(format!("http://{}", addr)) {
+        Ok(ep) => ep.connect_timeout(timeout),
+        Err(e) => {
+            debug!(peer = %addr, error = %e, "Invalid peer address");
+            return None;
+        },
+    };
+
+    let channel = match endpoint.connect().await {
+        Ok(ch) => ch,
+        Err(e) => {
+            debug!(peer = %addr, error = %e, "Failed to connect to peer");
+            return None;
+        },
+    };
+
+    let mut client = AdminServiceClient::new(channel);
+
+    match tokio::time::timeout(timeout, client.get_node_info(GetNodeInfoRequest {})).await {
+        Ok(Ok(response)) => {
+            let info = response.into_inner();
+            debug!(
+                peer = %addr,
+                node_id = info.node_id,
+                is_cluster_member = info.is_cluster_member,
+                "Got node info"
+            );
+            Some(DiscoveredNode {
+                node_id: info.node_id,
+                addr,
+                is_cluster_member: info.is_cluster_member,
+                term: info.term,
+            })
+        },
+        Ok(Err(e)) => {
+            debug!(peer = %addr, error = %e, "GetNodeInfo RPC failed");
+            None
+        },
+        Err(_) => {
+            debug!(peer = %addr, "GetNodeInfo RPC timed out");
+            None
+        },
+    }
 }
 
 /// Perform DNS SRV lookup for `_ledger._tcp.<domain>`.
@@ -274,5 +390,71 @@ mod tests {
         // With no discovery sources configured, should return empty
         let addresses = resolve_bootstrap_peers(&discovery).await;
         assert!(addresses.is_empty());
+    }
+
+    #[test]
+    fn test_discovered_node_struct() {
+        let node = DiscoveredNode {
+            node_id: 12345,
+            addr: "192.168.1.1:50051".parse().expect("valid addr"),
+            is_cluster_member: false,
+            term: 0,
+        };
+
+        assert_eq!(node.node_id, 12345);
+        assert_eq!(node.addr.port(), 50051);
+        assert!(!node.is_cluster_member);
+        assert_eq!(node.term, 0);
+    }
+
+    #[test]
+    fn test_discovered_node_cluster_member() {
+        let node = DiscoveredNode {
+            node_id: 67890,
+            addr: "10.0.0.1:8080".parse().expect("valid addr"),
+            is_cluster_member: true,
+            term: 42,
+        };
+
+        assert_eq!(node.node_id, 67890);
+        assert!(node.is_cluster_member);
+        assert_eq!(node.term, 42);
+    }
+
+    #[tokio::test]
+    async fn test_discover_node_info_unreachable_peer() {
+        // Try to connect to a non-existent address
+        let addr: SocketAddr = "127.0.0.1:59999".parse().expect("valid addr");
+        let result = discover_node_info(addr, Duration::from_millis(100)).await;
+
+        // Should return None for unreachable peer
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_discover_node_info_rejects_port_zero() {
+        // Port 0 should be rejected for security
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("valid addr");
+        let result = discover_node_info(addr, Duration::from_millis(100)).await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_discover_node_info_rejects_unspecified_ipv4() {
+        // 0.0.0.0 should be rejected
+        let addr: SocketAddr = "0.0.0.0:50051".parse().expect("valid addr");
+        let result = discover_node_info(addr, Duration::from_millis(100)).await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_discover_node_info_rejects_unspecified_ipv6() {
+        // [::] should be rejected
+        let addr: SocketAddr = "[::]:50051".parse().expect("valid addr");
+        let result = discover_node_info(addr, Duration::from_millis(100)).await;
+
+        assert!(result.is_none());
     }
 }

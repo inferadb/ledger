@@ -23,9 +23,12 @@ use serial_test::serial;
 async fn test_single_node_bootstrap() {
     let cluster = TestCluster::new(1).await;
 
+    // Get the actual node ID (Snowflake ID)
+    let expected_leader_id = cluster.nodes()[0].id;
+
     // Should elect itself as leader
     let leader_id = cluster.wait_for_leader().await;
-    assert_eq!(leader_id, 1, "single node should be leader");
+    assert_eq!(leader_id, expected_leader_id, "single node should be leader");
 
     // Verify leader state
     let leader = cluster.leader().expect("should have leader");
@@ -137,9 +140,17 @@ async fn test_write_idempotency() {
 async fn test_two_node_cluster_formation() {
     let cluster = TestCluster::new(2).await;
 
+    // Get the actual node IDs (Snowflake IDs)
+    let node_ids: Vec<u64> = cluster.nodes().iter().map(|n| n.id).collect();
+
     // Wait for leader election
     let leader_id = cluster.wait_for_leader().await;
-    assert!(leader_id >= 1 && leader_id <= 2, "leader should be one of the nodes");
+    assert!(
+        node_ids.contains(&leader_id),
+        "leader {} should be one of the nodes {:?}",
+        leader_id,
+        node_ids
+    );
 
     // Should have exactly one leader
     let leaders: Vec<_> = cluster.nodes().iter().filter(|n| n.is_leader()).collect();
@@ -151,14 +162,21 @@ async fn test_two_node_cluster_formation() {
 }
 
 /// Test three-node cluster formation and leader election.
-/// Note: This test requires proper cluster joining which is not yet implemented.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_cluster_formation() {
     let cluster = TestCluster::new(3).await;
 
+    // Get the actual node IDs (Snowflake IDs)
+    let node_ids: Vec<u64> = cluster.nodes().iter().map(|n| n.id).collect();
+
     // Wait for leader election
     let leader_id = cluster.wait_for_leader().await;
-    assert!(leader_id >= 1 && leader_id <= 3, "leader should be one of the nodes");
+    assert!(
+        node_ids.contains(&leader_id),
+        "leader {} should be one of the nodes {:?}",
+        leader_id,
+        node_ids
+    );
 
     // Should have exactly one leader
     let leaders: Vec<_> = cluster.nodes().iter().filter(|n| n.is_leader()).collect();

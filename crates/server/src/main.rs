@@ -14,7 +14,9 @@
 
 mod bootstrap;
 mod config;
+mod coordinator;
 mod discovery;
+mod node_id;
 mod shutdown;
 
 use std::{env, net::SocketAddr};

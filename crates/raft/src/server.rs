@@ -189,11 +189,13 @@ impl LedgerServer {
                 self.state.clone(),
                 self.applied_state.clone(),
                 archive.clone(),
+                self.addr,
             ),
             None => AdminServiceImpl::new(
                 self.raft.clone(),
                 self.state.clone(),
                 self.applied_state.clone(),
+                self.addr,
             ),
         };
         let health_service = HealthServiceImpl::new(

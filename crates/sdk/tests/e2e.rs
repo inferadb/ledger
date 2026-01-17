@@ -18,7 +18,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
     LedgerTypeConfig,
@@ -30,44 +30,12 @@ use inferadb_ledger_sdk::{
 };
 use inferadb_ledger_test_utils::TestDir;
 use openraft::Raft;
-use serde::Serialize;
 use serial_test::serial;
 use tokio::time::timeout;
 
 // ============================================================================
 // Test Cluster Infrastructure
 // ============================================================================
-
-/// Write a peer cache file for discovery.
-///
-/// This allows joining nodes to "discover" the leader without real DNS SRV.
-fn write_peer_cache(path: &Path, leader_addr: &SocketAddr) {
-    #[derive(Serialize)]
-    struct CachedPeers {
-        cached_at: u64,
-        peers: Vec<DiscoveredPeer>,
-    }
-
-    #[derive(Serialize)]
-    struct DiscoveredPeer {
-        addr: String,
-        priority: u16,
-        weight: u16,
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let cached = CachedPeers {
-        cached_at: now,
-        peers: vec![DiscoveredPeer { addr: leader_addr.to_string(), priority: 10, weight: 100 }],
-    };
-
-    let content = serde_json::to_string_pretty(&cached).expect("serialize peer cache");
-    std::fs::write(path, content).expect("write peer cache");
-}
 
 /// A test node in a cluster.
 struct TestNode {
@@ -120,24 +88,28 @@ impl TestCluster {
         let mut nodes = Vec::with_capacity(size);
 
         // Step 1: Start the bootstrap node as a SINGLE-NODE cluster
-        let node_id = 1u64;
         let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
         let temp_dir = TestDir::new();
 
-        // Bootstrap node: no discovery configured → no peers found → bootstraps
+        // Bootstrap node: no discovery configured → no peers found → bootstraps.
+        // Uses auto-generated Snowflake ID (node_id: None) for realistic testing.
         let config = inferadb_ledger_server::config::Config {
-            node_id,
+            node_id: None, // Auto-generate Snowflake ID
             listen_addr: addr,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
             batching: inferadb_ledger_server::config::BatchConfig::default(),
             rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
             discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
+            bootstrap: inferadb_ledger_server::config::BootstrapConfig::for_single_node(),
         };
 
         let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
             .await
             .expect("bootstrap node");
+
+        // Get the auto-generated Snowflake ID from Raft metrics
+        let node_id = bootstrapped.raft.metrics().borrow().id;
 
         let server = bootstrapped.server;
         let server_handle = tokio::spawn(async move {
@@ -177,32 +149,37 @@ impl TestCluster {
 
         // Step 2: Start remaining nodes and have them join dynamically
         for i in 1..size {
-            let node_id = (i + 1) as u64;
             let port = base_port + i as u16;
             let temp_dir = TestDir::new();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-            // Joining node: discovery finds the leader → doesn't bootstrap
-            let cache_path = temp_dir.path().join("peers.cache");
-            write_peer_cache(&cache_path, &leader_addr);
-
+            // Joining node: use skip_coordination mode for dynamic node addition.
+            // This bypasses the coordinated bootstrap system and uses the legacy
+            // behavior: no Raft cluster initialized, waiting to be added via
+            // AdminService's JoinCluster RPC which we call explicitly below.
+            // Uses auto-generated Snowflake ID (node_id: None) for realistic testing.
             let config = inferadb_ledger_server::config::Config {
-                node_id,
+                node_id: None, // Auto-generate Snowflake ID
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: temp_dir.path().to_path_buf(),
                 batching: inferadb_ledger_server::config::BatchConfig::default(),
                 rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
-                discovery: inferadb_ledger_server::config::DiscoveryConfig {
-                    srv_domain: None,
-                    cached_peers_path: Some(cache_path.to_string_lossy().to_string()),
-                    cache_ttl_secs: 3600,
+                discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
+                bootstrap: inferadb_ledger_server::config::BootstrapConfig {
+                    min_cluster_size: 1,
+                    allow_single_node: true,
+                    skip_coordination: true,
+                    ..Default::default()
                 },
             };
 
             let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
                 .await
                 .expect("bootstrap node");
+
+            // Get the auto-generated Snowflake ID from Raft metrics
+            let node_id = bootstrapped.raft.metrics().borrow().id;
 
             let server = bootstrapped.server;
             let server_handle = tokio::spawn(async move {

@@ -1,13 +1,43 @@
 # InferaDB Ledger Configuration
 #
 # Copy to inferadb-ledger.toml and adjust for your environment.
-# Environment variables override with INFERADB__LEDGER__ prefix (e.g., INFERADB__LEDGER__NODE_ID=1).
+# Environment variables override with INFERADB__LEDGER__ prefix
+# (e.g., INFERADB__LEDGER__BOOTSTRAP__MIN_CLUSTER_SIZE=3).
 
 # === Required ===
 
-node_id = 1                      # Unique numeric identifier for this node
 listen_addr = "0.0.0.0:50051"    # gRPC listen address
 data_dir = "/var/lib/ledger"     # Data directory for Raft logs and state
+
+# === Bootstrap Configuration ===
+#
+# Controls coordinated cluster formation. Multiple nodes discover each other,
+# exchange node info, and the node with the lowest Snowflake ID bootstraps
+# the cluster while others wait to join.
+
+[bootstrap]
+# Minimum nodes required before cluster formation begins.
+# Default: 3 (prevents accidental single-node production deployments)
+min_cluster_size = 3
+
+# Maximum time (seconds) to wait for min_cluster_size peers.
+# Returns error if timeout expires before enough peers discovered.
+# Default: 60
+bootstrap_timeout_secs = 60
+
+# Interval (seconds) between discovery polls during bootstrap.
+# Default: 2
+poll_interval_secs = 2
+
+# Required when min_cluster_size = 1 to prevent accidental single-node deployments.
+# Set to true for development or intentional single-node mode.
+# Default: false
+# allow_single_node = true
+
+# Skip coordination algorithm (for testing/legacy compatibility).
+# When true, node bootstraps alone if no peers found, or waits for JoinCluster RPC.
+# Default: false
+# skip_coordination = true
 
 # === Optional (defaults shown) ===
 

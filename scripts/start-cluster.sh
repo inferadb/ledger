@@ -2,6 +2,10 @@
 #
 # Start a local 3-node Ledger cluster for development.
 #
+# Uses coordinated bootstrap: all 3 nodes discover each other via peer cache,
+# exchange node info, and the node with the lowest Snowflake ID bootstraps
+# the cluster while others wait to join.
+#
 # Usage:
 #   ./scripts/start-cluster.sh         # Start cluster
 #   ./scripts/start-cluster.sh stop    # Stop cluster
@@ -16,7 +20,7 @@ DATA_ROOT="${LEDGER_DATA_ROOT:-/tmp/ledger-cluster}"
 BINARY="${PROJECT_ROOT}/target/release/ledger"
 
 # Node configuration (bash 3 compatible)
-NODE_IDS="1 2 3"
+NODE_COUNT=3
 
 get_port() {
     case "$1" in
@@ -40,52 +44,65 @@ build_if_needed() {
 
 create_peer_cache() {
     local cache_file=$1
-    local leader_addr=$2
+    shift
     local now
     now=$(date +%s)
+
+    # Build peers array from remaining arguments
+    local peers=""
+    local first=true
+    for addr in "$@"; do
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            peers="${peers},"
+        fi
+        peers="${peers}{\"addr\": \"${addr}\", \"priority\": 10, \"weight\": 100}"
+    done
 
     cat > "$cache_file" << EOF
 {
   "cached_at": ${now},
-  "peers": [{"addr": "${leader_addr}", "priority": 10, "weight": 100}]
+  "peers": [${peers}]
 }
 EOF
 }
 
 create_config() {
-    local node_id=$1
+    local node_num=$1
     local port
-    port=$(get_port "$node_id")
-    local config_dir="${DATA_ROOT}/node-${node_id}"
+    port=$(get_port "$node_num")
+    local config_dir="${DATA_ROOT}/node-${node_num}"
     local config_file="${config_dir}/inferadb-ledger.toml"
-    local leader_port
-    leader_port=$(get_port 1)
     local cache_file="${config_dir}/peers.cache"
 
     mkdir -p "$config_dir"
 
-    # Node 1: No discovery → no peers found → bootstraps new cluster
-    # Other nodes: Discovery finds node 1 → waits to join via AdminService RPC
-    if [[ "$node_id" == "1" ]]; then
-        cat > "$config_file" << EOF
-# Auto-generated config for node ${node_id}
-node_id = ${node_id}
+    # Build list of all other node addresses for peer cache
+    local peer_addrs=()
+    for i in $(seq 1 $NODE_COUNT); do
+        if [[ "$i" != "$node_num" ]]; then
+            peer_addrs+=("127.0.0.1:$(get_port "$i")")
+        fi
+    done
+
+    # Create peer cache with all other nodes
+    create_peer_cache "$cache_file" "${peer_addrs[@]}"
+
+    # All nodes use the same bootstrap config:
+    # - min_cluster_size=3: wait for all nodes to discover each other
+    # - Node IDs are auto-generated (Snowflake IDs)
+    # - Lowest ID node will bootstrap, others wait to join
+    cat > "$config_file" << EOF
+# Auto-generated config for node ${node_num}
+# Node ID is auto-generated (Snowflake ID) and persisted to data_dir/node_id
 listen_addr = "127.0.0.1:${port}"
 data_dir = "${config_dir}/data"
 
-[batching]
-max_batch_size = 100
-max_batch_delay_ms = 10
-EOF
-    else
-        # Create peer cache pointing to node 1
-        create_peer_cache "$cache_file" "127.0.0.1:${leader_port}"
-
-        cat > "$config_file" << EOF
-# Auto-generated config for node ${node_id}
-node_id = ${node_id}
-listen_addr = "127.0.0.1:${port}"
-data_dir = "${config_dir}/data"
+[bootstrap]
+min_cluster_size = 3
+bootstrap_timeout_secs = 30
+poll_interval_secs = 1
 
 [batching]
 max_batch_size = 100
@@ -94,41 +111,40 @@ max_batch_delay_ms = 10
 [discovery]
 cached_peers_path = "${cache_file}"
 EOF
-    fi
 
     echo "$config_file"
 }
 
 start_node() {
-    local node_id=$1
+    local node_num=$1
     local config_file
-    config_file=$(create_config "$node_id")
-    local log_file="${DATA_ROOT}/node-${node_id}/ledger.log"
-    local pid_file="${DATA_ROOT}/node-${node_id}/ledger.pid"
+    config_file=$(create_config "$node_num")
+    local log_file="${DATA_ROOT}/node-${node_num}/ledger.log"
+    local pid_file="${DATA_ROOT}/node-${node_num}/ledger.pid"
     local port
-    port=$(get_port "$node_id")
+    port=$(get_port "$node_num")
 
     if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-        log "Node $node_id already running (PID $(cat "$pid_file"))"
+        log "Node $node_num already running (PID $(cat "$pid_file"))"
         return 0
     fi
 
-    log "Starting node $node_id on port ${port}..."
+    log "Starting node $node_num on port ${port}..."
     RUST_LOG="${RUST_LOG:-info}" "$BINARY" --config "$config_file" > "$log_file" 2>&1 &
     local pid=$!
     echo "$pid" > "$pid_file"
-    log "Node $node_id started (PID $pid)"
+    log "Node $node_num started (PID $pid)"
 }
 
 stop_node() {
-    local node_id=$1
-    local pid_file="${DATA_ROOT}/node-${node_id}/ledger.pid"
+    local node_num=$1
+    local pid_file="${DATA_ROOT}/node-${node_num}/ledger.pid"
 
     if [[ -f "$pid_file" ]]; then
         local pid
         pid=$(cat "$pid_file")
         if kill -0 "$pid" 2>/dev/null; then
-            log "Stopping node $node_id (PID $pid)..."
+            log "Stopping node $node_num (PID $pid)..."
             kill "$pid" 2>/dev/null || true
             # Wait for graceful shutdown
             local i=0
@@ -152,28 +168,26 @@ start_cluster() {
     build_if_needed
     mkdir -p "$DATA_ROOT"
 
-    log "Starting 3-node cluster..."
+    log "Starting ${NODE_COUNT}-node cluster with coordinated bootstrap..."
     log "Data directory: $DATA_ROOT"
     echo
 
-    # Start nodes in order (node 1 first to establish cluster)
-    for node_id in $NODE_IDS; do
-        start_node "$node_id"
-        # Small delay to let first node initialize before others join
-        if [[ "$node_id" == "1" ]]; then
-            sleep 1
-        fi
+    # Start all nodes simultaneously - they will coordinate via GetNodeInfo RPC
+    # The node with the lowest Snowflake ID will bootstrap the cluster
+    for node_num in $(seq 1 $NODE_COUNT); do
+        start_node "$node_num"
     done
 
     echo
-    log "Cluster started!"
+    log "Cluster starting! Nodes are coordinating bootstrap..."
+    log "The node with the lowest Snowflake ID will become the initial leader."
     log "Logs: ${DATA_ROOT}/node-*/ledger.log"
     echo
     echo "Node endpoints:"
-    for node_id in $NODE_IDS; do
+    for node_num in $(seq 1 $NODE_COUNT); do
         local port
-        port=$(get_port "$node_id")
-        echo "  Node $node_id: 127.0.0.1:${port}"
+        port=$(get_port "$node_num")
+        echo "  Node $node_num: 127.0.0.1:${port}"
     done
     echo
     echo "Stop with: $0 stop"
@@ -181,8 +195,8 @@ start_cluster() {
 
 stop_cluster() {
     log "Stopping cluster..."
-    for node_id in $NODE_IDS; do
-        stop_node "$node_id"
+    for node_num in $(seq 1 $NODE_COUNT); do
+        stop_node "$node_num"
     done
     log "Cluster stopped"
 }
@@ -198,14 +212,14 @@ clean_cluster() {
 
 status_cluster() {
     echo "Cluster status:"
-    for node_id in $NODE_IDS; do
-        local pid_file="${DATA_ROOT}/node-${node_id}/ledger.pid"
+    for node_num in $(seq 1 $NODE_COUNT); do
+        local pid_file="${DATA_ROOT}/node-${node_num}/ledger.pid"
         local port
-        port=$(get_port "$node_id")
+        port=$(get_port "$node_num")
         if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-            echo "  Node $node_id: running (PID $(cat "$pid_file")) on port ${port}"
+            echo "  Node $node_num: running (PID $(cat "$pid_file")) on port ${port}"
         else
-            echo "  Node $node_id: stopped"
+            echo "  Node $node_num: stopped"
         fi
     done
 }

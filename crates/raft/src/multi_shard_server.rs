@@ -137,6 +137,7 @@ impl MultiShardLedgerServer {
             system_shard.state().clone(),
             system_shard.applied_state().clone(),
             system_shard.block_archive().clone(),
+            self.addr,
         );
 
         let health_service = HealthServiceImpl::new(

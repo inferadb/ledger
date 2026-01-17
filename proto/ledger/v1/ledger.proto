@@ -695,6 +695,11 @@ service AdminService {
   // Get current cluster membership information.
   rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
 
+  // Get node information for pre-bootstrap coordination.
+  // Available even before cluster is formed. Used by nodes to discover
+  // each other's Snowflake IDs and determine who should bootstrap.
+  rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
+
   // ==========================================================================
   // Maintenance Operations
   // ==========================================================================
@@ -985,6 +990,22 @@ message GetClusterInfoResponse {
   repeated ClusterMember members = 1;
   uint64 leader_id = 2;
   uint64 term = 3; // Current Raft term
+}
+
+// Request for node identity (empty - no parameters needed).
+message GetNodeInfoRequest {}
+
+// Node identity for bootstrap coordination.
+// Available before cluster formation to support coordinated bootstrap.
+message GetNodeInfoResponse {
+  // Node's Snowflake ID (auto-generated, persisted).
+  uint64 node_id = 1;
+  // Node's gRPC address (e.g., "192.168.1.10:50051").
+  string address = 2;
+  // True if node is already part of a cluster.
+  bool is_cluster_member = 3;
+  // Current Raft term (0 if not in cluster).
+  uint64 term = 4;
 }
 
 // A member of the Raft cluster.

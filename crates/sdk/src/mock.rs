@@ -1386,6 +1386,23 @@ impl AdminService for MockAdminService {
         }))
     }
 
+    async fn get_node_info(
+        &self,
+        _request: Request<proto::GetNodeInfoRequest>,
+    ) -> Result<Response<proto::GetNodeInfoResponse>, Status> {
+        self.state.maybe_delay().await;
+        if self.state.should_inject_unavailable() {
+            return Err(Status::unavailable("Injected error"));
+        }
+
+        Ok(Response::new(proto::GetNodeInfoResponse {
+            node_id: 1,
+            address: "127.0.0.1:50051".to_string(),
+            is_cluster_member: true,
+            term: 1,
+        }))
+    }
+
     async fn create_snapshot(
         &self,
         request: Request<proto::CreateSnapshotRequest>,

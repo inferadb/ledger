@@ -4,7 +4,12 @@
 //! - Bootstrap a new cluster with this node as the initial leader
 //! - Join an existing cluster by contacting the leader
 
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
@@ -17,7 +22,11 @@ use openraft::{BasicNode, Raft, storage::Adaptor};
 use tonic::transport::Channel;
 use tracing::info;
 
-use crate::{config::Config, discovery::resolve_bootstrap_peers};
+use crate::{
+    config::Config,
+    coordinator::{BootstrapDecision, coordinate_bootstrap},
+    discovery::resolve_bootstrap_peers,
+};
 
 /// Error type for bootstrap operations.
 #[derive(Debug)]
@@ -33,6 +42,14 @@ pub enum BootstrapError {
     /// Failed to join existing cluster.
     #[allow(dead_code)] // Reserved for join-cluster mode
     Join(String),
+    /// Failed to resolve or generate node ID.
+    NodeId(String),
+    /// Bootstrap coordination timed out waiting for peers.
+    #[allow(dead_code)] // Used by coordinator integration in Task 6 (PRD.md)
+    Timeout(String),
+    /// Configuration validation failed.
+    #[allow(dead_code)] // Used by coordinator integration in Task 6 (PRD.md)
+    Config(String),
 }
 
 impl std::fmt::Display for BootstrapError {
@@ -43,6 +60,9 @@ impl std::fmt::Display for BootstrapError {
             BootstrapError::Raft(msg) => write!(f, "raft error: {}", msg),
             BootstrapError::Initialize(msg) => write!(f, "initialization error: {}", msg),
             BootstrapError::Join(msg) => write!(f, "join error: {}", msg),
+            BootstrapError::NodeId(msg) => write!(f, "node id error: {}", msg),
+            BootstrapError::Timeout(msg) => write!(f, "bootstrap timeout: {}", msg),
+            BootstrapError::Config(msg) => write!(f, "configuration error: {}", msg),
         }
     }
 }
@@ -75,14 +95,25 @@ pub struct BootstrappedNode {
 
 /// Bootstrap a new cluster, join an existing one, or resume from saved state.
 ///
-/// Behavior is determined automatically:
+/// Behavior is determined automatically via coordinated bootstrap:
 ///
 /// - If the node has persisted Raft state, it resumes from that state.
-/// - If fresh node and discovery finds existing peers, this is a joining node that waits to be
-///   added via AdminService's JoinCluster RPC.
-/// - If fresh node and no peers discovered, initializes a new single-node cluster with this node as
-///   the sole member (and immediate leader).
+/// - If fresh node, coordinates with discovered peers using GetNodeInfo RPC:
+///   - If any peer is already a cluster member, waits to join existing cluster
+///   - If enough peers found, the node with lowest Snowflake ID bootstraps all members
+///   - If this node doesn't have lowest ID, waits to be added by the bootstrapping node
+/// - If `min_cluster_size=1` with `allow_single_node=true`, bootstraps immediately as single node
+///
+/// Legacy mode (`skip_coordination=true`):
+/// - If no peers discovered, bootstrap single-node cluster
+/// - If peers discovered, wait to be added via AdminService (no coordination)
 pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, BootstrapError> {
+    // Validate bootstrap configuration
+    config.bootstrap.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
+
+    // Resolve the effective node ID (manual or auto-generated Snowflake ID)
+    let node_id = config.effective_node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
+
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
 
@@ -106,7 +137,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
-        .with_shard_config(0, config.node_id.to_string()); // Default shard 0
+        .with_shard_config(0, node_id.to_string()); // Default shard 0
 
     // Determine bootstrap behavior before log_store is consumed by Adaptor
     let is_initialized = log_store.is_initialized();
@@ -129,7 +160,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     let (log_storage, state_machine) = Adaptor::new(log_store);
 
     let raft = Raft::<LedgerTypeConfig>::new(
-        config.node_id,
+        node_id,
         Arc::new(raft_config),
         network,
         log_storage,
@@ -143,20 +174,65 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // Determine whether to bootstrap based on existing state and discovery
     if is_initialized {
         tracing::info!("Existing Raft state found, resuming");
+    } else if config.bootstrap.skip_coordination {
+        // Legacy mode: bypass coordinator entirely.
+        // The node starts without initializing a Raft cluster and waits to be
+        // added via AdminService's JoinCluster RPC. This is used for dynamic
+        // node addition in tests and scenarios where nodes are added one-by-one
+        // to an existing cluster rather than coordinating startup together.
+        tracing::info!(
+            node_id,
+            "Skip coordination mode: waiting to be added via AdminService (no Raft initialization)"
+        );
+        // Note: We intentionally do NOT bootstrap or call discovery here.
+        // The calling code is responsible for adding this node to the cluster.
     } else {
-        // Fresh node - use discovery to determine if joining or bootstrapping
-        let discovered_peers = resolve_bootstrap_peers(&config.discovery).await;
+        // Fresh node - use coordinated bootstrap to determine action
+        let my_address = config.listen_addr.to_string();
 
-        if discovered_peers.is_empty() {
-            // No peers discovered - this is the first node, bootstrap new cluster
-            tracing::info!("No peers discovered, bootstrapping new single-node cluster");
-            bootstrap_cluster(&raft, config).await?;
-        } else {
-            // Peers discovered - this node will join via AdminService RPC
-            tracing::info!(
-                peer_count = discovered_peers.len(),
-                "Discovered existing peers, waiting to join cluster via AdminService"
-            );
+        let decision =
+            coordinate_bootstrap(node_id, &my_address, &config.bootstrap, &config.discovery)
+                .await
+                .map_err(|e| BootstrapError::Timeout(e.to_string()))?;
+
+        match decision {
+            BootstrapDecision::Bootstrap { initial_members } => {
+                if initial_members.len() == 1 {
+                    // Single-node bootstrap
+                    tracing::info!(node_id, "Bootstrapping new single-node cluster");
+                    bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
+                } else {
+                    // Multi-node coordinated bootstrap - this node has lowest ID
+                    tracing::info!(
+                        node_id,
+                        member_count = initial_members.len(),
+                        "Bootstrapping new multi-node cluster (lowest ID)"
+                    );
+                    bootstrap_cluster_multi(&raft, initial_members).await?;
+                }
+            },
+            BootstrapDecision::WaitForJoin { leader_addr } => {
+                // Another node has the lowest ID and will bootstrap
+                tracing::info!(
+                    node_id,
+                    leader = %leader_addr,
+                    "Waiting for cluster bootstrap by lowest-ID node"
+                );
+                let timeout = Duration::from_secs(config.bootstrap.bootstrap_timeout_secs);
+                let poll_interval = Duration::from_secs(config.bootstrap.poll_interval_secs);
+                wait_for_cluster_join(&raft, timeout, poll_interval).await?;
+            },
+            BootstrapDecision::JoinExisting { via_peer } => {
+                // Existing cluster found - wait to be added
+                tracing::info!(
+                    node_id,
+                    peer = %via_peer,
+                    "Found existing cluster, waiting to be added via AdminService"
+                );
+                let timeout = Duration::from_secs(config.bootstrap.bootstrap_timeout_secs);
+                let poll_interval = Duration::from_secs(config.bootstrap.poll_interval_secs);
+                wait_for_cluster_join(&raft, timeout, poll_interval).await?;
+            },
         }
     }
 
@@ -176,7 +252,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     let gc = TtlGarbageCollector::new(
         raft.clone(),
-        config.node_id,
+        node_id,
         state.clone(),
         applied_state_accessor.clone(),
     );
@@ -186,7 +262,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // Start block compactor for COMPACTED retention mode
     let compactor = BlockCompactor::new(
         raft.clone(),
-        config.node_id,
+        node_id,
         block_archive_for_compactor,
         applied_state_accessor.clone(),
     );
@@ -195,21 +271,16 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     // Start auto-recovery job for detecting and recovering diverged vaults
     // Per DESIGN.md §8.2: Circuit breaker with bounded retries
-    let recovery = AutoRecoveryJob::new(
-        raft.clone(),
-        config.node_id,
-        applied_state_accessor.clone(),
-        state.clone(),
-    )
-    .with_block_archive(block_archive_for_recovery)
-    .with_snapshot_manager(snapshot_manager);
+    let recovery =
+        AutoRecoveryJob::new(raft.clone(), node_id, applied_state_accessor.clone(), state.clone())
+            .with_block_archive(block_archive_for_recovery)
+            .with_snapshot_manager(snapshot_manager);
     let recovery_handle = recovery.start();
     tracing::info!("Started auto-recovery job with snapshot support");
 
     // Start learner refresh job for keeping learner state synchronized
     // Per DESIGN.md §9.3: Background polling of voters for fresh state
-    let learner_refresh =
-        LearnerRefreshJob::new(raft.clone(), config.node_id, applied_state_accessor);
+    let learner_refresh = LearnerRefreshJob::new(raft.clone(), node_id, applied_state_accessor);
     let learner_refresh_handle = learner_refresh.start();
     tracing::info!("Started learner refresh job");
 
@@ -229,18 +300,101 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 /// Additional nodes join dynamically via `join_cluster()` using discovery.
 async fn bootstrap_cluster(
     raft: &Raft<LedgerTypeConfig>,
-    config: &Config,
+    node_id: u64,
+    listen_addr: &SocketAddr,
 ) -> Result<(), BootstrapError> {
     let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
-    members.insert(config.node_id, BasicNode { addr: config.listen_addr.to_string() });
+    members.insert(node_id, BasicNode { addr: listen_addr.to_string() });
 
     raft.initialize(members)
         .await
         .map_err(|e| BootstrapError::Initialize(format!("failed to initialize: {}", e)))?;
 
-    tracing::info!(node_id = config.node_id, "Bootstrapped new single-node cluster");
+    tracing::info!(node_id = node_id, "Bootstrapped new single-node cluster");
 
     Ok(())
+}
+
+/// Bootstrap a new cluster with multiple initial members.
+///
+/// This is used during coordinated bootstrap when multiple nodes start simultaneously.
+/// The node with the lowest Snowflake ID calls this with all discovered members.
+///
+/// # Arguments
+///
+/// * `raft` - The Raft instance to initialize
+/// * `initial_members` - List of (node_id, address) pairs for all initial members
+async fn bootstrap_cluster_multi(
+    raft: &Raft<LedgerTypeConfig>,
+    initial_members: Vec<(u64, String)>,
+) -> Result<(), BootstrapError> {
+    let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
+    for (node_id, addr) in &initial_members {
+        members.insert(*node_id, BasicNode { addr: addr.clone() });
+    }
+
+    let member_ids: Vec<u64> = initial_members.iter().map(|(id, _)| *id).collect();
+    raft.initialize(members)
+        .await
+        .map_err(|e| BootstrapError::Initialize(format!("failed to initialize: {}", e)))?;
+
+    tracing::info!(members = ?member_ids, "Bootstrapped new multi-node cluster");
+
+    Ok(())
+}
+
+/// Wait for this node to be added to the cluster by another node.
+///
+/// This is used during coordinated bootstrap when this node is not the lowest-ID
+/// node. The lowest-ID node will bootstrap and then add other members via Raft.
+///
+/// # Arguments
+///
+/// * `raft` - The Raft instance to check for membership
+/// * `timeout` - Maximum time to wait before giving up
+/// * `poll_interval` - How often to check cluster membership status
+///
+/// # Returns
+///
+/// Returns `Ok(())` when the node becomes a cluster member, or `Err(Timeout)` if
+/// the timeout expires before joining.
+async fn wait_for_cluster_join(
+    raft: &Raft<LedgerTypeConfig>,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<(), BootstrapError> {
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(BootstrapError::Timeout(format!(
+                "timed out waiting to join cluster after {}s",
+                timeout.as_secs()
+            )));
+        }
+
+        let metrics = raft.metrics().borrow().clone();
+
+        // Check if we're now part of a cluster (have a leader or are in voter set)
+        let has_leader = metrics.current_leader.is_some();
+        let is_voter = metrics.membership_config.membership().voter_ids().count() > 0;
+
+        if has_leader || is_voter {
+            tracing::info!(
+                leader = ?metrics.current_leader,
+                term = metrics.current_term,
+                "Successfully joined cluster"
+            );
+            return Ok(());
+        }
+
+        tracing::debug!(
+            elapsed_secs = start.elapsed().as_secs(),
+            timeout_secs = timeout.as_secs(),
+            "Waiting to be added to cluster"
+        );
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 /// Join an existing cluster by contacting a peer.
@@ -252,6 +406,8 @@ async fn bootstrap_cluster(
 /// leader needs to be able to reach this node to replicate logs.
 #[allow(dead_code)] // Reserved for join-cluster mode in main.rs
 pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
+    let node_id = config.effective_node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
+
     let peer_addresses = resolve_bootstrap_peers(&config.discovery).await;
 
     if peer_addresses.is_empty() {
@@ -265,7 +421,7 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
     let my_address = config.listen_addr.to_string();
 
     for peer_addr in &peer_addresses {
-        if let Err(e) = try_join_via_peer(config.node_id, &my_address, *peer_addr).await {
+        if let Err(e) = try_join_via_peer(node_id, &my_address, *peer_addr).await {
             tracing::warn!(peer_addr = %peer_addr, error = %e, "Join attempt failed");
             continue;
         }
