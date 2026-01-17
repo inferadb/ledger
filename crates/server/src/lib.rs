@@ -6,4 +6,5 @@
 pub mod bootstrap;
 pub mod config;
 pub mod discovery;
+pub mod node_id;
 pub mod shutdown;

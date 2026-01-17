@@ -51,6 +51,9 @@ snafu.workspace = true
 # DNS SRV discovery
 hickory-resolver.workspace = true
 
+# Random number generation
+rand.workspace = true
+
 # Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -102,6 +102,91 @@ pub struct DiscoveryConfig {
     pub cache_ttl_secs: u64,
 }
 
+
+/// Bootstrap configuration for coordinated cluster formation.
+///
+/// Controls how nodes discover each other and coordinate to form a cluster.
+/// The `min_cluster_size` determines the minimum number of nodes required
+/// before bootstrapping can proceed. A default of 3 ensures production clusters
+/// have proper quorum.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BootstrapConfig {
+    /// Minimum cluster size before bootstrapping (default: 3).
+    ///
+    /// The node will wait until this many nodes are discovered before
+    /// proceeding with cluster formation. A value of 1 requires
+    /// `allow_single_node=true` to prevent accidental single-node deployments.
+    #[serde(default = "default_min_cluster_size")]
+    pub min_cluster_size: u32,
+
+    /// Timeout waiting for peers in seconds (default: 60).
+    ///
+    /// If the minimum cluster size is not reached within this timeout,
+    /// the node will fail to start with a timeout error.
+    #[serde(default = "default_bootstrap_timeout")]
+    pub bootstrap_timeout_secs: u64,
+
+    /// Discovery polling interval in seconds (default: 2).
+    ///
+    /// How frequently the node polls for new peers during the bootstrap
+    /// coordination phase.
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+
+    /// Allow single-node mode (required when min_cluster_size=1).
+    ///
+    /// Must be explicitly set to `true` to allow single-node deployments.
+    /// This prevents accidental misconfiguration in production.
+    #[serde(default)]
+    pub allow_single_node: bool,
+}
+
+fn default_min_cluster_size() -> u32 {
+    3
+}
+
+fn default_bootstrap_timeout() -> u64 {
+    60
+}
+
+fn default_poll_interval() -> u64 {
+    2
+}
+
+impl Default for BootstrapConfig {
+    fn default() -> Self {
+        Self {
+            min_cluster_size: default_min_cluster_size(),
+            bootstrap_timeout_secs: default_bootstrap_timeout(),
+            poll_interval_secs: default_poll_interval(),
+            allow_single_node: false,
+        }
+    }
+}
+
+impl BootstrapConfig {
+    /// Validate the bootstrap configuration.
+    ///
+    /// Returns an error if:
+    /// - `min_cluster_size` is 0 (must be at least 1)
+    /// - `min_cluster_size` is 1 without `allow_single_node=true`
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.min_cluster_size == 0 {
+            return Err(ConfigError::Validation(
+                "min_cluster_size must be at least 1".to_string(),
+            ));
+        }
+
+        if self.min_cluster_size == 1 && !self.allow_single_node {
+            return Err(ConfigError::Validation(
+                "min_cluster_size=1 requires allow_single_node=true".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self { srv_domain: None, cached_peers_path: None, cache_ttl_secs: default_cache_ttl() }
@@ -182,6 +267,8 @@ pub enum ConfigError {
     Load(String),
     /// Failed to parse configuration.
     Parse(String),
+    /// Configuration validation failed.
+    Validation(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -189,6 +276,7 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::Load(msg) => write!(f, "failed to load config: {}", msg),
             ConfigError::Parse(msg) => write!(f, "failed to parse config: {}", msg),
+            ConfigError::Validation(msg) => write!(f, "invalid config: {}", msg),
         }
     }
 }
@@ -196,6 +284,7 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -211,5 +300,65 @@ mod tests {
         let config = Config::for_test(1, 50051, PathBuf::from("/tmp/ledger-test"));
         assert_eq!(config.node_id, 1);
         assert_eq!(config.listen_addr.port(), 50051);
+    }
+
+
+    #[test]
+    fn test_bootstrap_config_defaults() {
+        let config = BootstrapConfig::default();
+        assert_eq!(config.min_cluster_size, 3);
+        assert_eq!(config.bootstrap_timeout_secs, 60);
+        assert_eq!(config.poll_interval_secs, 2);
+        assert!(!config.allow_single_node);
+    }
+
+    #[test]
+    fn test_bootstrap_config_validate_success() {
+        // min_cluster_size=3 doesn't require allow_single_node
+        let config = BootstrapConfig {
+            min_cluster_size: 3,
+            bootstrap_timeout_secs: 60,
+            poll_interval_secs: 2,
+            allow_single_node: false,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_bootstrap_config_single_node_requires_flag() {
+        // min_cluster_size=1 requires allow_single_node=true
+        let config = BootstrapConfig {
+            min_cluster_size: 1,
+            bootstrap_timeout_secs: 60,
+            poll_interval_secs: 2,
+            allow_single_node: false,
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+    }
+
+    #[test]
+    fn test_bootstrap_config_single_node_with_flag() {
+        // min_cluster_size=1 with allow_single_node=true is valid
+        let config = BootstrapConfig {
+            min_cluster_size: 1,
+            bootstrap_timeout_secs: 60,
+            poll_interval_secs: 2,
+            allow_single_node: true,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_bootstrap_config_zero_cluster_size_invalid() {
+        // min_cluster_size must be >= 1
+        let config = BootstrapConfig {
+            min_cluster_size: 0,
+            bootstrap_timeout_secs: 60,
+            poll_interval_secs: 2,
+            allow_single_node: true,
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
     }
 }

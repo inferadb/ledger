@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > Under active development. Not production-ready.
 
-[InferaDB](https://inferadb.com)'s persistence layer — a blockchain database for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently.
+[InferaDB](https://inferadb.com) Ledger is a distributed blockchain database optimized for authorization workfloads. It's optimized for low query latency, making it suitable for global applications. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently.
 
 ## Features
 
