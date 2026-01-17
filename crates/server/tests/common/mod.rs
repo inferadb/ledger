@@ -98,11 +98,7 @@ impl TestCluster {
             batching: inferadb_ledger_server::config::BatchConfig::default(),
             rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
             discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
-            bootstrap: inferadb_ledger_server::config::BootstrapConfig {
-                min_cluster_size: 1,
-                allow_single_node: true,
-                ..Default::default()
-            },
+            bootstrap: inferadb_ledger_server::config::BootstrapConfig::for_single_node(),
         };
 
         let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
@@ -155,10 +151,9 @@ impl TestCluster {
             let temp_dir = TestDir::new();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-            // Joining node: use skip_coordination mode for dynamic node addition.
-            // This bypasses the coordinated bootstrap system and uses the legacy
-            // behavior: no peers discovered → no Raft cluster initialized,
-            // waiting to be added via AdminService's JoinCluster RPC.
+            // Joining node: use join mode (min_cluster_size=0) for dynamic node addition.
+            // This bypasses bootstrap entirely - no Raft cluster initialized, waiting
+            // to be added via AdminService's JoinCluster RPC.
             // Uses auto-generated Snowflake ID (node_id: None) for realistic testing.
             let config = inferadb_ledger_server::config::Config {
                 node_id: None, // Auto-generate Snowflake ID
@@ -169,16 +164,14 @@ impl TestCluster {
                 rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
                 discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
                 bootstrap: inferadb_ledger_server::config::BootstrapConfig {
-                    min_cluster_size: 1,
-                    allow_single_node: true,
-                    skip_coordination: true,
+                    min_cluster_size: 0, // Join mode: wait to be added to existing cluster
                     ..Default::default()
                 },
             };
 
-            // Create the node - with skip_coordination=true and no discovery,
-            // it won't initialize its own Raft cluster. It just starts the gRPC
-            // server and waits to be added via AdminService's JoinCluster RPC.
+            // Create the node - with min_cluster_size=0, it won't initialize its own
+            // Raft cluster. It just starts the gRPC server and waits to be added via
+            // AdminService's JoinCluster RPC.
             let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
                 .await
                 .expect("bootstrap node");

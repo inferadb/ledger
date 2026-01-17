@@ -16,28 +16,23 @@ data_dir = "/var/lib/ledger"     # Data directory for Raft logs and state
 # the cluster while others wait to join.
 
 [bootstrap]
-# Minimum nodes required before cluster formation begins.
-# Default: 3 (prevents accidental single-node production deployments)
+# Controls cluster formation behavior:
+#   0 = Join mode: wait to be added to existing cluster via AdminService
+#   1 = Single-node: bootstrap immediately without coordination
+#   2+ = Coordinated: discover peers, lowest-ID node bootstraps
+# Default: 3 (ensures production clusters have proper quorum)
 min_cluster_size = 3
 
 # Maximum time (seconds) to wait for min_cluster_size peers.
 # Returns error if timeout expires before enough peers discovered.
+# Ignored when min_cluster_size <= 1.
 # Default: 60
 bootstrap_timeout_secs = 60
 
 # Interval (seconds) between discovery polls during bootstrap.
+# Ignored when min_cluster_size <= 1.
 # Default: 2
 poll_interval_secs = 2
-
-# Required when min_cluster_size = 1 to prevent accidental single-node deployments.
-# Set to true for development or intentional single-node mode.
-# Default: false
-# allow_single_node = true
-
-# Skip coordination algorithm (for testing/legacy compatibility).
-# When true, node bootstraps alone if no peers found, or waits for JoinCluster RPC.
-# Default: false
-# skip_coordination = true
 
 # === Optional (defaults shown) ===
 

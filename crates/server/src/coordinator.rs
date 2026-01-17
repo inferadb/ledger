@@ -374,8 +374,6 @@ mod tests {
             min_cluster_size: 3,
             bootstrap_timeout_secs: 1, // Very short timeout
             poll_interval_secs: 1,
-            allow_single_node: false,
-            ..Default::default()
         };
 
         let discovery_config = DiscoveryConfig {
@@ -400,14 +398,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_coordinate_bootstrap_single_node_immediate() {
-        // Single node with allow_single_node should succeed immediately
-        let bootstrap_config = BootstrapConfig {
-            min_cluster_size: 1,
-            bootstrap_timeout_secs: 1,
-            poll_interval_secs: 1,
-            allow_single_node: true,
-            ..Default::default()
-        };
+        // Single node mode should succeed immediately
+        let bootstrap_config = BootstrapConfig::for_single_node();
 
         let discovery_config =
             DiscoveryConfig { srv_domain: None, cached_peers_path: None, cache_ttl_secs: 3600 };

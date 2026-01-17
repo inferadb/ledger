@@ -118,17 +118,20 @@ pub struct DiscoveryConfig {
 /// Bootstrap configuration for coordinated cluster formation.
 ///
 /// Controls how nodes discover each other and coordinate to form a cluster.
-/// The `min_cluster_size` determines the minimum number of nodes required
-/// before bootstrapping can proceed. A default of 3 ensures production clusters
-/// have proper quorum.
+/// The `min_cluster_size` determines behavior:
+/// - `0`: Join mode. Node waits to be added to an existing cluster via AdminService.
+/// - `1`: Single-node mode. Node bootstraps immediately without coordination.
+/// - `2+`: Coordinated mode. Nodes discover peers and the lowest-ID node bootstraps.
+///
+/// Default is 3 to ensure production clusters have proper quorum.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)] // Fields used in Task 5/6 (coordinator integration)
 pub struct BootstrapConfig {
     /// Minimum cluster size before bootstrapping (default: 3).
     ///
-    /// The node will wait until this many nodes are discovered before
-    /// proceeding with cluster formation. A value of 1 requires
-    /// `allow_single_node=true` to prevent accidental single-node deployments.
+    /// - When `0`: Join mode. Waits to be added to existing cluster via AdminService.
+    /// - When `1`: Single-node deployment. Bootstraps immediately, no coordination.
+    /// - When `2+`: Waits for this many nodes before coordinated bootstrap.
     #[serde(default = "default_min_cluster_size")]
     pub min_cluster_size: u32,
 
@@ -136,31 +139,16 @@ pub struct BootstrapConfig {
     ///
     /// If the minimum cluster size is not reached within this timeout,
     /// the node will fail to start with a timeout error.
+    /// Ignored when `min_cluster_size=1`.
     #[serde(default = "default_bootstrap_timeout")]
     pub bootstrap_timeout_secs: u64,
 
     /// Discovery polling interval in seconds (default: 2).
     ///
     /// How frequently the node polls for new peers during the bootstrap
-    /// coordination phase.
+    /// coordination phase. Ignored when `min_cluster_size=1`.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
-
-    /// Allow single-node mode (required when min_cluster_size=1).
-    ///
-    /// Must be explicitly set to `true` to allow single-node deployments.
-    /// This prevents accidental misconfiguration in production.
-    #[serde(default)]
-    pub allow_single_node: bool,
-
-    /// Skip coordinated bootstrap and use legacy mode (default: false).
-    ///
-    /// When true, the node bypasses the coordinator and uses the legacy bootstrap
-    /// behavior: if no peers discovered, bootstrap single-node; if peers found,
-    /// wait to be added via AdminService. This is primarily for testing scenarios
-    /// that require dynamic node addition rather than coordinated startup.
-    #[serde(default)]
-    pub skip_coordination: bool,
 }
 
 fn default_min_cluster_size() -> u32 {
@@ -181,8 +169,6 @@ impl Default for BootstrapConfig {
             min_cluster_size: default_min_cluster_size(),
             bootstrap_timeout_secs: default_bootstrap_timeout(),
             poll_interval_secs: default_poll_interval(),
-            allow_single_node: false,
-            skip_coordination: false,
         }
     }
 }
@@ -194,26 +180,30 @@ impl BootstrapConfig {
     /// This is primarily for testing or development scenarios where
     /// a single-node cluster is acceptable.
     pub fn for_single_node() -> Self {
-        Self { min_cluster_size: 1, allow_single_node: true, ..Self::default() }
+        Self { min_cluster_size: 1, ..Self::default() }
     }
 
     /// Validate the bootstrap configuration.
     ///
-    /// Returns an error if:
-    /// - `min_cluster_size` is 0 (must be at least 1)
-    /// - `min_cluster_size` is 1 without `allow_single_node=true`
+    /// Always succeeds - all `min_cluster_size` values are valid:
+    /// - `0`: Join existing cluster (no bootstrap)
+    /// - `1`: Single-node deployment
+    /// - `2+`: Coordinated multi-node bootstrap
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.min_cluster_size == 0 {
-            return Err(ConfigError::Validation("min_cluster_size must be at least 1".to_string()));
-        }
-
-        if self.min_cluster_size == 1 && !self.allow_single_node {
-            return Err(ConfigError::Validation(
-                "min_cluster_size=1 requires allow_single_node=true".to_string(),
-            ));
-        }
-
         Ok(())
+    }
+
+    /// Returns true if this is a single-node deployment (no coordination needed).
+    pub fn is_single_node(&self) -> bool {
+        self.min_cluster_size == 1
+    }
+
+    /// Returns true if this node should wait to join an existing cluster.
+    ///
+    /// When `min_cluster_size=0`, the node starts without initializing a Raft
+    /// cluster and waits to be added via AdminService's JoinCluster RPC.
+    pub fn is_join_mode(&self) -> bool {
+        self.min_cluster_size == 0
     }
 }
 
@@ -277,9 +267,9 @@ impl Config {
 
     /// Create a configuration for testing.
     ///
-    /// Uses `allow_single_node=true` and `min_cluster_size=1` by default
-    /// for simple test scenarios. The `node_id` is set to `Some(node_id)`
-    /// to maintain backwards compatibility with existing tests.
+    /// Uses `min_cluster_size=1` (single-node mode) by default for simple
+    /// test scenarios. The `node_id` is explicitly set to allow tests to
+    /// use deterministic, predictable node IDs.
     #[allow(clippy::unwrap_used, clippy::disallowed_methods, dead_code)]
     pub fn for_test(node_id: u64, port: u16, data_dir: PathBuf) -> Self {
         Self {
@@ -290,11 +280,7 @@ impl Config {
             batching: BatchConfig::default(),
             rate_limit: RateLimitConfig::default(),
             discovery: DiscoveryConfig::default(),
-            bootstrap: BootstrapConfig {
-                min_cluster_size: 1,
-                allow_single_node: true,
-                ..BootstrapConfig::default()
-            },
+            bootstrap: BootstrapConfig::for_single_node(),
         }
     }
 
@@ -364,7 +350,7 @@ mod tests {
         assert_eq!(config.listen_addr.port(), 50051);
         // Verify bootstrap config for tests uses single-node mode
         assert_eq!(config.bootstrap.min_cluster_size, 1);
-        assert!(config.bootstrap.allow_single_node);
+        assert!(config.bootstrap.is_single_node());
     }
 
     #[test]
@@ -373,40 +359,27 @@ mod tests {
         assert_eq!(config.min_cluster_size, 3);
         assert_eq!(config.bootstrap_timeout_secs, 60);
         assert_eq!(config.poll_interval_secs, 2);
-        assert!(!config.allow_single_node);
+        assert!(!config.is_single_node());
     }
 
     #[test]
     fn test_bootstrap_config_validate_success() {
-        // min_cluster_size=3 doesn't require allow_single_node
-        let config =
-            BootstrapConfig { min_cluster_size: 3, allow_single_node: false, ..Default::default() };
+        let config = BootstrapConfig { min_cluster_size: 3, ..Default::default() };
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn test_bootstrap_config_single_node_requires_flag() {
-        // min_cluster_size=1 requires allow_single_node=true
-        let config =
-            BootstrapConfig { min_cluster_size: 1, allow_single_node: false, ..Default::default() };
-        let err = config.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::Validation(_)));
-    }
-
-    #[test]
-    fn test_bootstrap_config_single_node_with_flag() {
-        // min_cluster_size=1 with allow_single_node=true is valid
-        let config =
-            BootstrapConfig { min_cluster_size: 1, allow_single_node: true, ..Default::default() };
+    fn test_bootstrap_config_single_node_valid() {
+        let config = BootstrapConfig::for_single_node();
         assert!(config.validate().is_ok());
+        assert!(config.is_single_node());
     }
 
     #[test]
-    fn test_bootstrap_config_zero_cluster_size_invalid() {
-        // min_cluster_size must be >= 1
-        let config =
-            BootstrapConfig { min_cluster_size: 0, allow_single_node: true, ..Default::default() };
-        let err = config.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::Validation(_)));
+    fn test_bootstrap_config_join_mode() {
+        let config = BootstrapConfig { min_cluster_size: 0, ..Default::default() };
+        assert!(config.validate().is_ok());
+        assert!(config.is_join_mode());
+        assert!(!config.is_single_node());
     }
 }

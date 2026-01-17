@@ -1,7 +1,7 @@
 //! Integration tests for coordinated cluster bootstrap.
 //!
-//! Tests the Task 6 bootstrap coordination system including:
-//! - Single-node bootstrap with `allow_single_node=true`
+//! Tests the bootstrap coordination system including:
+//! - Single-node bootstrap with `min_cluster_size=1`
 //! - 3-node coordinated bootstrap (lowest ID wins)
 //! - Node restart preserves ID and rejoins cluster
 //! - Late joiner finds existing cluster via `is_cluster_member`
@@ -22,18 +22,18 @@ use inferadb_ledger_server::{
 use inferadb_ledger_test_utils::TestDir;
 use serial_test::serial;
 
-/// Test single-node bootstrap with `allow_single_node=true`.
+/// Test single-node bootstrap with `min_cluster_size=1`.
 ///
 /// Verifies that a single node can bootstrap immediately when configured
-/// with `min_cluster_size=1` and `allow_single_node=true`.
+/// with `min_cluster_size=1`.
 #[serial]
 #[tokio::test]
-async fn test_single_node_bootstrap_with_allow_single_node() {
+async fn test_single_node_bootstrap() {
     let temp_dir = TestDir::new();
     let port = 45000 + (rand::random::<u16>() % 1000);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-    // Create config with allow_single_node=true
+    // Create config with single-node mode
     let config = Config {
         node_id: None, // Use auto-generated Snowflake ID
         listen_addr: addr,
@@ -42,13 +42,7 @@ async fn test_single_node_bootstrap_with_allow_single_node() {
         batching: Default::default(),
         rate_limit: Default::default(),
         discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig {
-            min_cluster_size: 1,
-            allow_single_node: true,
-            bootstrap_timeout_secs: 5,
-            poll_interval_secs: 1,
-            skip_coordination: false,
-        },
+        bootstrap: BootstrapConfig::for_single_node(),
     };
 
     // Bootstrap should succeed
@@ -105,13 +99,7 @@ async fn test_node_restart_preserves_id() {
         batching: Default::default(),
         rate_limit: Default::default(),
         discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig {
-            min_cluster_size: 1,
-            allow_single_node: true,
-            bootstrap_timeout_secs: 5,
-            poll_interval_secs: 1,
-            skip_coordination: false,
-        },
+        bootstrap: BootstrapConfig::for_single_node(),
     };
 
     // First startup - bootstrap fresh node
@@ -154,13 +142,7 @@ async fn test_node_restart_preserves_id() {
             batching: Default::default(),
             rate_limit: Default::default(),
             discovery: DiscoveryConfig::default(),
-            bootstrap: BootstrapConfig {
-                min_cluster_size: 1,
-                allow_single_node: true,
-                bootstrap_timeout_secs: 5,
-                poll_interval_secs: 1,
-                skip_coordination: false,
-            },
+            bootstrap: BootstrapConfig { ..BootstrapConfig::for_single_node() },
         };
 
         let bootstrapped = bootstrap_node(&config2).await.expect("restart should succeed");
@@ -219,8 +201,8 @@ async fn test_snowflake_ids_are_time_ordered_across_nodes() {
 #[serial]
 #[tokio::test]
 async fn test_three_node_cluster_uses_coordinated_bootstrap() {
-    // TestCluster uses skip_coordination for joining nodes,
-    // so this test verifies that behavior works correctly
+    // TestCluster uses single-node mode for the first node and dynamic
+    // join for subsequent nodes via AdminService
     let cluster = TestCluster::new(3).await;
 
     // Wait for leader election
@@ -270,12 +252,7 @@ async fn test_late_joiner_finds_existing_cluster() {
         batching: Default::default(),
         rate_limit: Default::default(),
         discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig {
-            min_cluster_size: 1,
-            allow_single_node: true,
-            skip_coordination: false,
-            ..Default::default()
-        },
+        bootstrap: BootstrapConfig::for_single_node(),
     };
 
     let leader = bootstrap_node(&leader_config).await.expect("leader bootstrap");
@@ -329,54 +306,19 @@ async fn test_late_joiner_finds_existing_cluster() {
     leader_handle.abort();
 }
 
-/// Test bootstrap validation rejects min_cluster_size=1 without allow_single_node.
+/// Test join mode (min_cluster_size=0) starts without bootstrapping.
+///
+/// Verifies that a node with min_cluster_size=0 starts successfully but
+/// does not initialize a Raft cluster - it waits to be added via AdminService.
+#[serial]
 #[tokio::test]
-async fn test_bootstrap_validation_rejects_unsafe_single_node() {
-    let temp_dir = TestDir::new();
-    let port = 48000 + (rand::random::<u16>() % 1000);
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-
-    // Create config with min_cluster_size=1 but allow_single_node=false
-    let config = Config {
-        node_id: Some(1),
-        listen_addr: addr,
-        metrics_addr: None,
-        data_dir: temp_dir.path().to_path_buf(),
-        batching: Default::default(),
-        rate_limit: Default::default(),
-        discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig {
-            min_cluster_size: 1,
-            allow_single_node: false, // This should cause validation failure
-            ..Default::default()
-        },
-    };
-
-    // Bootstrap should fail due to validation
-    let result = bootstrap_node(&config).await;
-
-    // Use match to extract error since BootstrappedNode doesn't implement Debug
-    let err = match result {
-        Err(e) => e,
-        Ok(_) => panic!("should reject min_cluster_size=1 without allow_single_node"),
-    };
-    let err_str = err.to_string();
-    assert!(
-        err_str.contains("allow_single_node") || err_str.contains("configuration"),
-        "error should mention allow_single_node: {}",
-        err_str
-    );
-}
-
-/// Test bootstrap validation rejects min_cluster_size=0.
-#[tokio::test]
-async fn test_bootstrap_validation_rejects_zero_cluster_size() {
+async fn test_join_mode_does_not_bootstrap() {
     let temp_dir = TestDir::new();
     let port = 48500 + (rand::random::<u16>() % 1000);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
-        node_id: Some(1),
+        node_id: None,
         listen_addr: addr,
         metrics_addr: None,
         data_dir: temp_dir.path().to_path_buf(),
@@ -384,23 +326,31 @@ async fn test_bootstrap_validation_rejects_zero_cluster_size() {
         rate_limit: Default::default(),
         discovery: DiscoveryConfig::default(),
         bootstrap: BootstrapConfig {
-            min_cluster_size: 0, // Invalid
-            allow_single_node: true,
+            min_cluster_size: 0, // Join mode
             ..Default::default()
         },
     };
 
+    // Bootstrap should succeed (node starts but doesn't initialize cluster)
     let result = bootstrap_node(&config).await;
+    assert!(result.is_ok(), "join mode should start successfully: {:?}", result.err());
 
-    // Use match to extract error since BootstrappedNode doesn't implement Debug
-    let err = match result {
-        Err(e) => e,
-        Ok(_) => panic!("should reject min_cluster_size=0"),
-    };
-    let err_str = err.to_string();
-    assert!(
-        err_str.contains("at least 1") || err_str.contains("min_cluster_size"),
-        "error should mention min_cluster_size: {}",
-        err_str
-    );
+    let bootstrapped = result.unwrap();
+
+    // Start server
+    let server = bootstrapped.server;
+    let server_handle = tokio::spawn(async move {
+        let _ = server.serve().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify node is NOT a cluster member (hasn't bootstrapped)
+    let mut client = create_admin_client(addr).await.expect("connect to admin service");
+    let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
+    let info = response.into_inner();
+
+    assert!(!info.is_cluster_member, "join mode node should NOT be cluster member");
+
+    server_handle.abort();
 }

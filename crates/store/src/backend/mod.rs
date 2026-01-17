@@ -276,7 +276,7 @@ impl DatabaseHeader {
             return Err(Error::InvalidMagic);
         }
 
-        // Verify version (we support both v1 and v2 for migration)
+        // Reject unsupported future versions
         if version > FORMAT_VERSION {
             return Err(Error::UnsupportedVersion { version });
         }
@@ -320,23 +320,6 @@ impl DatabaseHeader {
     /// Get the page size in bytes.
     pub fn page_size(&self) -> usize {
         1 << self.page_size_power
-    }
-
-    // Legacy compatibility methods for migration from v1 headers
-
-    /// Get total_pages from the active slot (legacy compatibility).
-    pub fn total_pages(&self) -> u64 {
-        self.primary_slot().total_pages
-    }
-
-    /// Get table_directory_page from the active slot (legacy compatibility).
-    pub fn table_directory_page(&self) -> u64 {
-        self.primary_slot().table_directory_page
-    }
-
-    /// Get last_txn_id from the active slot (legacy compatibility).
-    pub fn last_txn_id(&self) -> u64 {
-        self.primary_slot().last_txn_id
     }
 }
 

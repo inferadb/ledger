@@ -94,11 +94,10 @@ cargo test
 # Create a config file from the example
 cp inferadb-ledger.example.toml inferadb-ledger.toml
 
-# For single-node development, enable allow_single_node in config or via env:
+# For single-node development, set min_cluster_size=1:
 INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
 INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
 INFERADB__LEDGER__BOOTSTRAP__MIN_CLUSTER_SIZE=1 \
-INFERADB__LEDGER__BOOTSTRAP__ALLOW_SINGLE_NODE=true \
 cargo run --release -p inferadb-ledger-server
 ```
 
@@ -120,8 +119,7 @@ listen_addr = "0.0.0.0:50051"         # gRPC listen address
 data_dir = "/var/lib/ledger"          # Raft logs and state
 
 [bootstrap]
-min_cluster_size = 3                  # Wait for N nodes before bootstrap
-allow_single_node = false             # Require explicit opt-in for single-node
+min_cluster_size = 3                  # 0=join, 1=single-node, 2+=coordinated
 ```
 
 **Coordinated Bootstrap**: Nodes automatically generate Snowflake IDs (persisted to `{data_dir}/node_id`) and coordinate cluster formation:

@@ -98,15 +98,12 @@ pub struct BootstrappedNode {
 /// Behavior is determined automatically via coordinated bootstrap:
 ///
 /// - If the node has persisted Raft state, it resumes from that state.
-/// - If fresh node, coordinates with discovered peers using GetNodeInfo RPC:
+/// - If `min_cluster_size=0`, waits to be added to existing cluster via AdminService.
+/// - If `min_cluster_size=1`, bootstraps immediately as a single-node cluster.
+/// - Otherwise, coordinates with discovered peers using GetNodeInfo RPC:
 ///   - If any peer is already a cluster member, waits to join existing cluster
 ///   - If enough peers found, the node with lowest Snowflake ID bootstraps all members
 ///   - If this node doesn't have lowest ID, waits to be added by the bootstrapping node
-/// - If `min_cluster_size=1` with `allow_single_node=true`, bootstraps immediately as single node
-///
-/// Legacy mode (`skip_coordination=true`):
-/// - If no peers discovered, bootstrap single-node cluster
-/// - If peers discovered, wait to be added via AdminService (no coordination)
 pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, BootstrapError> {
     // Validate bootstrap configuration
     config.bootstrap.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
@@ -171,21 +168,21 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     let raft = Arc::new(raft);
 
-    // Determine whether to bootstrap based on existing state and discovery
+    // Determine whether to bootstrap based on existing state and min_cluster_size
     if is_initialized {
         tracing::info!("Existing Raft state found, resuming");
-    } else if config.bootstrap.skip_coordination {
-        // Legacy mode: bypass coordinator entirely.
-        // The node starts without initializing a Raft cluster and waits to be
-        // added via AdminService's JoinCluster RPC. This is used for dynamic
-        // node addition in tests and scenarios where nodes are added one-by-one
-        // to an existing cluster rather than coordinating startup together.
+    } else if config.bootstrap.is_join_mode() {
+        // Join mode: wait to be added to existing cluster via AdminService
         tracing::info!(
             node_id,
-            "Skip coordination mode: waiting to be added via AdminService (no Raft initialization)"
+            "Join mode (min_cluster_size=0): waiting to be added via AdminService"
         );
         // Note: We intentionally do NOT bootstrap or call discovery here.
         // The calling code is responsible for adding this node to the cluster.
+    } else if config.bootstrap.is_single_node() {
+        // Single-node mode: bootstrap immediately without coordination
+        tracing::info!(node_id, "Bootstrapping single-node cluster (min_cluster_size=1)");
+        bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
     } else {
         // Fresh node - use coordinated bootstrap to determine action
         let my_address = config.listen_addr.to_string();
