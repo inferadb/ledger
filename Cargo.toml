@@ -25,7 +25,7 @@ tokio-stream = "0.1"
 tokio-util = "0.7"
 
 # gRPC
-tonic = { version = "0.14", features = ["gzip", "zstd", "tls-native-roots"] }
+tonic = { version = "0.14", features = ["gzip", "zstd", "tls-ring"] }
 tonic-build = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
@@ -75,7 +75,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Metrics and observability
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+# Disable push-gateway (default) to avoid hyper-rustls/aws-lc-sys dependency
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 
 # Configuration
 config = "0.14"
@@ -99,6 +100,7 @@ hickory-resolver = "0.24"
 
 # Object Storage (S3, GCS, Azure, local)
 object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+
 async-trait = "0.1"
 
 # Network simulation testing
