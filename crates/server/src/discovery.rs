@@ -77,7 +77,7 @@ struct CachedPeers {
 ///
 /// Tries in order:
 /// 1. Cached peers (if valid and not expired)
-/// 2. DNS SRV lookup (if configured)
+/// 2. DNS A record lookup (if configured)
 ///
 /// Returns addresses for cluster discovery.
 pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
@@ -285,7 +285,7 @@ fn save_cached_peers(path: &str, peers: &[DiscoveredPeer]) -> Result<(), Discove
 /// Discovery error types.
 #[derive(Debug)]
 pub enum DiscoveryError {
-    /// DNS SRV lookup failed.
+    /// DNS lookup failed.
     DnsLookup(String),
     /// Failed to read cache file.
     CacheRead(String),

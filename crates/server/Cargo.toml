@@ -48,7 +48,7 @@ parking_lot.workspace = true
 # Error handling
 snafu.workspace = true
 
-# DNS SRV discovery
+# DNS discovery
 hickory-resolver.workspace = true
 
 # Random number generation

@@ -914,7 +914,7 @@ impl AdminService for AdminServiceImpl {
     /// ID to force leadership. Mitigations:
     /// - Snowflake IDs use 42-bit timestamp + 22-bit random, making prediction difficult
     /// - IDs are persisted on first startup, preventing replay
-    /// - Production clusters should use authenticated discovery (SRV records, etc.)
+    /// - Production clusters should use authenticated discovery (DNS, etc.)
     /// - Network-level controls (firewalls, VPNs) limit who can participate
     ///
     /// **Threat: Information Gathering**: Attacker discovers cluster topology.

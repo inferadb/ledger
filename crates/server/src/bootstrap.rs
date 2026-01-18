@@ -395,7 +395,7 @@ async fn wait_for_cluster_join(
 
 /// Join an existing cluster by contacting a peer.
 ///
-/// Uses discovery (DNS SRV + cached peers) to find cluster entry points.
+/// Uses discovery (DNS A records + cached peers) to find cluster entry points.
 /// The node contacts discovered peers and requests to be added to the cluster.
 ///
 /// Note: This should be called after the gRPC server has started, since the
@@ -408,7 +408,7 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
 
     if peer_addresses.is_empty() {
         return Err(BootstrapError::Join(
-            "No peers available (checked cache and DNS SRV)".to_string(),
+            "No peers available (checked cache and DNS)".to_string(),
         ));
     }
 

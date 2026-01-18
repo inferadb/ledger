@@ -141,7 +141,7 @@ service SystemDiscoveryService {
 
 ```
 New Node Startup:
-  1. Resolve bootstrap peers (cached → config → DNS SRV)
+  1. Resolve bootstrap peers (cached → DNS A lookup)
   2. Connect to ANY reachable peer
   3. Call GetPeers() to discover more nodes
   4. Request _system Raft membership (AddNode)

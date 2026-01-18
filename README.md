@@ -136,8 +136,8 @@ Each node needs its own data directory and a peer cache file listing other nodes
 # Create peer cache with other nodes
 cat > /var/lib/ledger-1/peers.cache << 'EOF'
 {"cached_at": 0, "peers": [
-  {"addr": "192.168.1.102:50051", "priority": 10, "weight": 100},
-  {"addr": "192.168.1.103:50051", "priority": 10, "weight": 100}
+  {"addr": "192.168.1.102:50051"},
+  {"addr": "192.168.1.103:50051"}
 ]}
 EOF
 
@@ -153,8 +153,8 @@ INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-1/peers.cache \
 ```bash
 cat > /var/lib/ledger-2/peers.cache << 'EOF'
 {"cached_at": 0, "peers": [
-  {"addr": "192.168.1.101:50051", "priority": 10, "weight": 100},
-  {"addr": "192.168.1.103:50051", "priority": 10, "weight": 100}
+  {"addr": "192.168.1.101:50051"},
+  {"addr": "192.168.1.103:50051"}
 ]}
 EOF
 
@@ -170,8 +170,8 @@ INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-2/peers.cache \
 ```bash
 cat > /var/lib/ledger-3/peers.cache << 'EOF'
 {"cached_at": 0, "peers": [
-  {"addr": "192.168.1.101:50051", "priority": 10, "weight": 100},
-  {"addr": "192.168.1.102:50051", "priority": 10, "weight": 100}
+  {"addr": "192.168.1.101:50051"},
+  {"addr": "192.168.1.102:50051"}
 ]}
 EOF
 
@@ -262,7 +262,7 @@ Start the new node with `bootstrap_expect=0` (join mode) and a peer cache pointi
 ```bash
 cat > /var/lib/ledger-new/peers.cache << 'EOF'
 {"cached_at": 0, "peers": [
-  {"addr": "192.168.1.101:50051", "priority": 10, "weight": 100}
+  {"addr": "192.168.1.101:50051"}
 ]}
 EOF
 

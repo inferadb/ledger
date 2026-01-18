@@ -94,7 +94,7 @@ proptest = "1.4"
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
 
-# DNS resolver for SRV record discovery
+# DNS resolver for A record discovery
 hickory-resolver = "0.24"
 
 # Object Storage (S3, GCS, Azure, local)
