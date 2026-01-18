@@ -14,9 +14,10 @@
 # =============================================================================
 FROM rust:1.85-bookworm AS builder
 
-# Install protobuf compiler (required for gRPC code generation)
+# Install protobuf compiler and well-known types (required for gRPC code generation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
