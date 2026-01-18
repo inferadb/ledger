@@ -14,8 +14,8 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,ignore
-//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+//! ```no_run
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation};
 //!
 //! #[tokio::main]
 //! async fn main() -> inferadb_ledger_sdk::Result<()> {
@@ -27,10 +27,11 @@
 //!     let client = LedgerClient::new(config).await?;
 //!
 //!     // Read operations
-//!     let value = client.read(1, 0, "user:123").await?;
+//!     let value = client.read(1, None, "user:123").await?;
 //!
 //!     // Write operations with automatic idempotency
-//!     let result = client.write(1, 0, operations).await?;
+//!     let operations = vec![Operation::set_entity("user:123", b"data".to_vec())];
+//!     let result = client.write(1, None, operations).await?;
 //!
 //!     Ok(())
 //! }

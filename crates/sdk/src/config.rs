@@ -178,15 +178,17 @@ impl ClientConfigBuilder {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::{ClientConfig, TlsConfig};
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{ClientConfig, TlsConfig};
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = ClientConfig::builder()
     ///     .with_endpoint("https://secure.example.com:443")
     ///     .with_client_id("my-client")
     ///     .with_tls(TlsConfig::new()
     ///         .with_ca_cert_pem("/path/to/ca.pem"))
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_tls(mut self, tls: TlsConfig) -> Self {
@@ -406,9 +408,8 @@ pub struct DiscoveryConfig {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use inferadb_ledger_sdk::TlsConfig;
-///
+/// ```no_run
+/// # use inferadb_ledger_sdk::TlsConfig;
 /// // Simple TLS with CA certificate only (server verification)
 /// let tls = TlsConfig::new()
 ///     .with_ca_cert_pem("/path/to/ca.pem");

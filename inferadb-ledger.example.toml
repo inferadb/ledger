@@ -1,52 +1,65 @@
 # InferaDB Ledger Configuration
-#
 # Copy to inferadb-ledger.toml and adjust for your environment.
-# Environment variables override with INFERADB__LEDGER__ prefix
-# (e.g., INFERADB__LEDGER__BOOTSTRAP__BOOTSTRAP_EXPECT=3).
+# All settings can also be set via environment variables (INFERADB__LEDGER__<KEY>).
 
-# === Required ===
+# ─────────────────────────────────────────────────────────────────────────────
+# Server
+# ─────────────────────────────────────────────────────────────────────────────
 
-listen_addr = "0.0.0.0:50051"    # gRPC listen address
-data_dir = "/var/lib/ledger"     # Data directory for Raft logs and state
+# gRPC listen address
+listen_addr = "0.0.0.0:50051"
 
-# === Bootstrap Configuration ===
-#
-# Controls coordinated cluster formation. Multiple nodes discover each other,
-# exchange node info, and the node with the lowest Snowflake ID bootstraps
-# the cluster while others wait to join.
+# Data directory for Raft logs and state
+data_dir = "/var/lib/ledger"
 
-[bootstrap]
-# Expected number of nodes for bootstrap (Consul-style semantics):
-#   0 = Join mode: wait to be added to existing cluster via AdminService
-#   1 = Single-node: bootstrap immediately without coordination
-#   2+ = Coordinated: discover peers, lowest-ID node bootstraps
-# Default: 3 (ensures production clusters have proper quorum)
-bootstrap_expect = 3
+# ─────────────────────────────────────────────────────────────────────────────
+# Cluster Bootstrap
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Maximum time (seconds) to wait for expected peers.
-# Returns error if timeout expires before enough peers discovered.
-# Ignored when bootstrap_expect <= 1.
-# Default: 60
-bootstrap_timeout_secs = 60
+# Number of nodes expected for bootstrap (follows Consul semantics):
+#   0  = Join existing cluster via AdminService
+#   1  = Single-node mode, bootstrap immediately
+#   2+ = Wait for N peers, lowest-ID node bootstraps
+# bootstrap_expect = 3
 
-# Interval (seconds) between discovery polls during bootstrap.
-# Ignored when bootstrap_expect <= 1.
-# Default: 2
-poll_interval_secs = 2
+# Timeout (seconds) waiting for peers during coordinated bootstrap
+# bootstrap_timeout_secs = 60
 
-# === Optional (defaults shown) ===
+# Interval (seconds) between peer discovery polls
+# bootstrap_poll_secs = 2
 
-# metrics_addr = "0.0.0.0:9090"  # Prometheus endpoint (disabled if not set)
+# ─────────────────────────────────────────────────────────────────────────────
+# Discovery
+# ─────────────────────────────────────────────────────────────────────────────
 
-# [batching]
-# max_batch_size = 100           # Max transactions per batch
-# max_batch_delay_ms = 10        # Max wait time for batch to fill (ms)
+# DNS SRV record for peer discovery (_ledger._tcp.<domain>)
+# discovery_domain = "cluster.example.com"
 
-# [rate_limit]
-# max_concurrent = 100           # Max concurrent requests per connection
-# timeout_secs = 30              # Request timeout
+# Path to cache discovered peers (survives restarts)
+# discovery_cache_path = "/var/lib/ledger/peers.cache"
 
-# [discovery]
-# srv_domain = "cluster.example.com"  # DNS SRV for peer discovery (_ledger._tcp.<domain>)
-# cached_peers_path = "/var/lib/ledger/peers.cache"
-# cache_ttl_secs = 3600          # Cache TTL (1 hour)
+# Cache TTL in seconds
+# discovery_cache_ttl_secs = 3600
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Performance
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Max transactions per batch
+# batch_max_size = 100
+
+# Max wait (ms) for batch to fill before flushing
+# batch_max_delay_ms = 10
+
+# Max concurrent requests per connection
+# requests_max_concurrent = 100
+
+# Request timeout in seconds
+# requests_timeout_secs = 30
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Observability
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Prometheus metrics endpoint (disabled if unset)
+# metrics_addr = "0.0.0.0:9090"

@@ -90,6 +90,7 @@ impl PositionTracker for HeightTracker {
 ///
 /// ```ignore
 /// use inferadb_ledger_sdk::streaming::{ReconnectingStream, HeightTracker};
+/// use inferadb_ledger_sdk::RetryPolicy;
 ///
 /// let stream = ReconnectingStream::new(
 ///     initial_stream,

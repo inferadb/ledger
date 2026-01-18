@@ -106,7 +106,7 @@ pub struct BootstrappedNode {
 ///   - If this node doesn't have lowest ID, waits to be added by the bootstrapping node
 pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, BootstrapError> {
     // Validate bootstrap configuration
-    config.bootstrap.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
+    config.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
 
     // Resolve the effective node ID (manual or auto-generated Snowflake ID)
     let node_id = config.effective_node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
@@ -171,7 +171,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // Determine whether to bootstrap based on existing state and bootstrap_expect
     if is_initialized {
         tracing::info!("Existing Raft state found, resuming");
-    } else if config.bootstrap.is_join_mode() {
+    } else if config.is_join_mode() {
         // Join mode: wait to be added to existing cluster via AdminService
         tracing::info!(
             node_id,
@@ -179,7 +179,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         );
         // Note: We intentionally do NOT bootstrap or call discovery here.
         // The calling code is responsible for adding this node to the cluster.
-    } else if config.bootstrap.is_single_node() {
+    } else if config.is_single_node() {
         // Single-node mode: bootstrap immediately without coordination
         tracing::info!(node_id, "Bootstrapping single-node cluster (bootstrap_expect=1)");
         bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
@@ -187,10 +187,9 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         // Fresh node - use coordinated bootstrap to determine action
         let my_address = config.listen_addr.to_string();
 
-        let decision =
-            coordinate_bootstrap(node_id, &my_address, &config.bootstrap, &config.discovery)
-                .await
-                .map_err(|e| BootstrapError::Timeout(e.to_string()))?;
+        let decision = coordinate_bootstrap(node_id, &my_address, config)
+            .await
+            .map_err(|e| BootstrapError::Timeout(e.to_string()))?;
 
         match decision {
             BootstrapDecision::Bootstrap { initial_members } => {
@@ -215,8 +214,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
                     leader = %leader_addr,
                     "Waiting for cluster bootstrap by lowest-ID node"
                 );
-                let timeout = Duration::from_secs(config.bootstrap.bootstrap_timeout_secs);
-                let poll_interval = Duration::from_secs(config.bootstrap.poll_interval_secs);
+                let timeout = Duration::from_secs(config.bootstrap_timeout_secs);
+                let poll_interval = Duration::from_secs(config.bootstrap_poll_secs);
                 wait_for_cluster_join(&raft, timeout, poll_interval).await?;
             },
             BootstrapDecision::JoinExisting { via_peer } => {
@@ -226,8 +225,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
                     peer = %via_peer,
                     "Found existing cluster, waiting to be added via AdminService"
                 );
-                let timeout = Duration::from_secs(config.bootstrap.bootstrap_timeout_secs);
-                let poll_interval = Duration::from_secs(config.bootstrap.poll_interval_secs);
+                let timeout = Duration::from_secs(config.bootstrap_timeout_secs);
+                let poll_interval = Duration::from_secs(config.bootstrap_poll_secs);
                 wait_for_cluster_join(&raft, timeout, poll_interval).await?;
             },
         }
@@ -245,7 +244,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         Some(block_archive),
         config.listen_addr,
     )
-    .with_rate_limit(config.rate_limit.max_concurrent, config.rate_limit.timeout_secs);
+    .with_rate_limit(config.requests_max_concurrent, config.requests_timeout_secs);
 
     let gc = TtlGarbageCollector::new(
         raft.clone(),
@@ -405,7 +404,7 @@ async fn wait_for_cluster_join(
 pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
     let node_id = config.effective_node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
 
-    let peer_addresses = resolve_bootstrap_peers(&config.discovery).await;
+    let peer_addresses = resolve_bootstrap_peers(config).await;
 
     if peer_addresses.is_empty() {
         return Err(BootstrapError::Join(

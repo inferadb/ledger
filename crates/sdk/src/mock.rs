@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use inferadb_ledger_sdk::mock::MockLedgerServer;
 //! use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
 //!

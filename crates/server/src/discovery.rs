@@ -35,8 +35,7 @@ use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-// Re-export DiscoveryConfig from config for convenience
-pub use crate::config::DiscoveryConfig;
+use crate::config::Config;
 
 /// A discovered peer from DNS SRV lookup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,11 +82,11 @@ struct CachedPeers {
 /// 2. DNS SRV lookup (if configured)
 ///
 /// Returns addresses for cluster discovery.
-pub async fn resolve_bootstrap_peers(discovery: &DiscoveryConfig) -> Vec<SocketAddr> {
+pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
     let mut addresses = Vec::new();
 
-    if let Some(cached_path) = &discovery.cached_peers_path {
-        match load_cached_peers(cached_path, discovery.cache_ttl_secs) {
+    if let Some(cached_path) = &config.discovery_cache_path {
+        match load_cached_peers(cached_path, config.discovery_cache_ttl_secs) {
             Ok(cached) => {
                 debug!(count = cached.len(), "Loaded cached peers");
                 for peer in cached {
@@ -102,13 +101,13 @@ pub async fn resolve_bootstrap_peers(discovery: &DiscoveryConfig) -> Vec<SocketA
         }
     }
 
-    if let Some(domain) = &discovery.srv_domain {
+    if let Some(domain) = &config.discovery_domain {
         match dns_srv_lookup(domain).await {
             Ok(srv_peers) => {
                 info!(count = srv_peers.len(), domain = %domain, "Discovered peers via DNS SRV");
 
                 // Cache the discovered peers
-                if let Some(cached_path) = &discovery.cached_peers_path {
+                if let Some(cached_path) = &config.discovery_cache_path {
                     if let Err(e) = save_cached_peers(cached_path, &srv_peers) {
                         warn!(error = %e, "Failed to cache discovered peers");
                     }
@@ -331,6 +330,8 @@ impl std::error::Error for DiscoveryError {}
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
+    use std::path::PathBuf;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -376,19 +377,19 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_config_defaults() {
-        let config = DiscoveryConfig::default();
-        assert!(config.srv_domain.is_none());
-        assert!(config.cached_peers_path.is_none());
-        assert_eq!(config.cache_ttl_secs, 3600);
+    fn test_config_discovery_defaults() {
+        let config = Config::default();
+        assert!(config.discovery_domain.is_none());
+        assert!(config.discovery_cache_path.is_none());
+        assert_eq!(config.discovery_cache_ttl_secs, 3600);
     }
 
     #[tokio::test]
     async fn test_resolve_with_no_discovery_configured() {
-        let discovery = DiscoveryConfig::default();
+        let config = Config { data_dir: PathBuf::from("/tmp/test"), ..Config::default() };
 
         // With no discovery sources configured, should return empty
-        let addresses = resolve_bootstrap_peers(&discovery).await;
+        let addresses = resolve_bootstrap_peers(&config).await;
         assert!(addresses.is_empty());
     }
 

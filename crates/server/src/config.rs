@@ -1,6 +1,8 @@
 //! Server configuration.
 //!
 //! Provides configuration loading from files and environment variables.
+//! All configuration options are flat (no nested sections) for simpler
+//! environment variable mapping.
 
 use std::{net::SocketAddr, path::PathBuf};
 
@@ -9,6 +11,10 @@ use serde::Deserialize;
 use crate::node_id;
 
 /// Server configuration.
+///
+/// All fields are at the top level for simple environment variable mapping.
+/// Environment variables use the `INFERADB__LEDGER__` prefix with field names
+/// in SCREAMING_SNAKE_CASE (e.g., `INFERADB__LEDGER__BOOTSTRAP_EXPECT`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Unique node identifier (deprecated - use auto-generated Snowflake IDs).
@@ -17,121 +23,25 @@ pub struct Config {
     /// and letting the server auto-generate a unique Snowflake ID on first start.
     #[serde(default)]
     pub node_id: Option<u64>,
-    /// Address to listen on for gRPC.
+
+    /// Address to listen on for gRPC (e.g., "0.0.0.0:50051").
     pub listen_addr: SocketAddr,
+
     /// Address to expose Prometheus metrics (e.g., "0.0.0.0:9090").
     /// If not set, metrics endpoint is disabled.
     #[serde(default)]
     pub metrics_addr: Option<SocketAddr>,
+
     /// Data directory for Raft logs and snapshots.
     pub data_dir: PathBuf,
-    /// Batching configuration.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub batching: BatchConfig,
-    /// Rate limiting configuration.
-    #[serde(default)]
-    pub rate_limit: RateLimitConfig,
-    /// Peer discovery configuration (DNS SRV, caching).
-    ///
-    /// Used to determine cluster membership on startup:
-    /// - If discovery finds existing peers, this node joins the cluster
-    /// - If no peers are discovered, this node bootstraps a new cluster
-    #[serde(default)]
-    pub discovery: DiscoveryConfig,
-    /// Bootstrap coordination configuration.
-    ///
-    /// Controls how nodes discover each other and coordinate to form a cluster.
-    /// See [`BootstrapConfig`] for details on each setting.
-    #[serde(default)]
-    #[allow(dead_code)] // Used in Task 5/6 (coordinator integration)
-    pub bootstrap: BootstrapConfig,
-}
 
-/// Transaction batching configuration.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct BatchConfig {
-    /// Maximum number of transactions per batch.
-    #[serde(default = "default_max_batch_size")]
-    pub max_batch_size: usize,
-    /// Maximum time to wait for a batch to fill (milliseconds).
-    #[serde(default = "default_max_batch_delay_ms")]
-    pub max_batch_delay_ms: u64,
-}
-
-/// Rate limiting configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RateLimitConfig {
-    /// Maximum requests per second per connection.
-    /// Reserved for future use - not currently implemented due to tonic Clone requirements.
-    #[serde(default = "default_requests_per_second")]
-    #[allow(dead_code)]
-    pub requests_per_second: u64,
-    /// Maximum concurrent requests per connection.
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent: usize,
-    /// Request timeout in seconds.
-    #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: u64,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            requests_per_second: default_requests_per_second(),
-            max_concurrent: default_max_concurrent(),
-            timeout_secs: default_timeout_secs(),
-        }
-    }
-}
-
-fn default_requests_per_second() -> u64 {
-    1000 // 1000 requests per second by default
-}
-
-fn default_max_concurrent() -> usize {
-    100 // Max 100 concurrent requests per connection
-}
-
-fn default_timeout_secs() -> u64 {
-    30 // 30 second timeout
-}
-
-/// Peer discovery configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct DiscoveryConfig {
-    /// DNS SRV domain for bootstrap discovery.
-    /// When set, the server will query `_ledger._tcp.<domain>` to discover peers.
-    #[serde(default)]
-    pub srv_domain: Option<String>,
-
-    /// Path to cache discovered peers for faster subsequent startups.
-    #[serde(default)]
-    pub cached_peers_path: Option<String>,
-
-    /// TTL for cached peers in seconds (default: 3600 = 1 hour).
-    #[serde(default = "default_cache_ttl")]
-    pub cache_ttl_secs: u64,
-}
-
-/// Bootstrap configuration for coordinated cluster formation.
-///
-/// Controls how nodes discover each other and coordinate to form a cluster.
-/// The `bootstrap_expect` value determines behavior:
-/// - `0`: Join mode. Node waits to be added to an existing cluster via AdminService.
-/// - `1`: Single-node mode. Node bootstraps immediately without coordination.
-/// - `2+`: Coordinated mode. Nodes discover peers and the lowest-ID node bootstraps.
-///
-/// Default is 3 to ensure production clusters have proper quorum.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // Fields used in Task 5/6 (coordinator integration)
-pub struct BootstrapConfig {
+    // === Bootstrap ===
     /// Expected number of nodes for bootstrap (default: 3).
     ///
+    /// Controls how nodes discover each other and coordinate to form a cluster:
     /// - `0`: Join mode. Waits to be added to existing cluster via AdminService.
     /// - `1`: Single-node deployment. Bootstraps immediately, no coordination.
-    /// - `2+`: Waits for this many nodes before coordinated bootstrap.
+    /// - `2+`: Coordinated mode. Waits for this many nodes before bootstrap.
     #[serde(default = "default_bootstrap_expect")]
     pub bootstrap_expect: u32,
 
@@ -140,105 +50,104 @@ pub struct BootstrapConfig {
     /// If the expected node count is not reached within this timeout,
     /// the node will fail to start with a timeout error.
     /// Ignored when `bootstrap_expect <= 1`.
-    #[serde(default = "default_bootstrap_timeout")]
+    #[serde(default = "default_bootstrap_timeout_secs")]
     pub bootstrap_timeout_secs: u64,
 
     /// Discovery polling interval in seconds (default: 2).
     ///
     /// How frequently the node polls for new peers during the bootstrap
     /// coordination phase. Ignored when `bootstrap_expect <= 1`.
-    #[serde(default = "default_poll_interval")]
-    pub poll_interval_secs: u64,
+    #[serde(default = "default_bootstrap_poll_secs")]
+    pub bootstrap_poll_secs: u64,
+
+    // === Batching ===
+    /// Maximum number of transactions per batch (default: 100).
+    #[serde(default = "default_batch_max_size")]
+    #[allow(dead_code)] // Reserved for LedgerServer batching integration
+    pub batch_max_size: usize,
+
+    /// Maximum time to wait for a batch to fill in milliseconds (default: 10).
+    #[serde(default = "default_batch_max_delay_ms")]
+    #[allow(dead_code)] // Reserved for LedgerServer batching integration
+    pub batch_max_delay_ms: u64,
+
+    // === Request Limits ===
+    /// Maximum concurrent requests per connection (default: 100).
+    #[serde(default = "default_requests_max_concurrent")]
+    pub requests_max_concurrent: usize,
+
+    /// Request timeout in seconds (default: 30).
+    #[serde(default = "default_requests_timeout_secs")]
+    pub requests_timeout_secs: u64,
+
+    // === Discovery ===
+    /// DNS SRV domain for bootstrap discovery.
+    /// When set, the server will query `_ledger._tcp.<domain>` to discover peers.
+    #[serde(default)]
+    pub discovery_domain: Option<String>,
+
+    /// Path to cache discovered peers for faster subsequent startups.
+    #[serde(default)]
+    pub discovery_cache_path: Option<String>,
+
+    /// TTL for cached peers in seconds (default: 3600 = 1 hour).
+    #[serde(default = "default_discovery_cache_ttl_secs")]
+    pub discovery_cache_ttl_secs: u64,
 }
 
+// Default value functions for serde
 fn default_bootstrap_expect() -> u32 {
     3
 }
-
-fn default_bootstrap_timeout() -> u64 {
+fn default_bootstrap_timeout_secs() -> u64 {
     60
 }
-
-fn default_poll_interval() -> u64 {
+fn default_bootstrap_poll_secs() -> u64 {
     2
 }
-
-impl Default for BootstrapConfig {
-    fn default() -> Self {
-        Self {
-            bootstrap_expect: default_bootstrap_expect(),
-            bootstrap_timeout_secs: default_bootstrap_timeout(),
-            poll_interval_secs: default_poll_interval(),
-        }
-    }
+fn default_batch_max_size() -> usize {
+    100
 }
-
-#[allow(dead_code)] // Used in Task 5/6 (coordinator integration)
-impl BootstrapConfig {
-    /// Create a bootstrap configuration for single-node deployments.
-    ///
-    /// This is primarily for testing or development scenarios where
-    /// a single-node cluster is acceptable.
-    pub fn for_single_node() -> Self {
-        Self { bootstrap_expect: 1, ..Self::default() }
-    }
-
-    /// Validate the bootstrap configuration.
-    ///
-    /// Always succeeds - all `bootstrap_expect` values are valid:
-    /// - `0`: Join existing cluster (no bootstrap)
-    /// - `1`: Single-node deployment
-    /// - `2+`: Coordinated multi-node bootstrap
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        Ok(())
-    }
-
-    /// Returns true if this is a single-node deployment (no coordination needed).
-    pub fn is_single_node(&self) -> bool {
-        self.bootstrap_expect == 1
-    }
-
-    /// Returns true if this node should wait to join an existing cluster.
-    ///
-    /// When `bootstrap_expect=0`, the node starts without initializing a Raft
-    /// cluster and waits to be added via AdminService's JoinCluster RPC.
-    pub fn is_join_mode(&self) -> bool {
-        self.bootstrap_expect == 0
-    }
+fn default_batch_max_delay_ms() -> u64 {
+    10
 }
-
-impl Default for DiscoveryConfig {
-    fn default() -> Self {
-        Self { srv_domain: None, cached_peers_path: None, cache_ttl_secs: default_cache_ttl() }
-    }
+fn default_requests_max_concurrent() -> usize {
+    100
 }
-
-fn default_cache_ttl() -> u64 {
+fn default_requests_timeout_secs() -> u64 {
+    30
+}
+fn default_discovery_cache_ttl_secs() -> u64 {
     3600 // 1 hour
 }
 
-impl Default for BatchConfig {
+impl Default for Config {
+    #[allow(clippy::expect_used)] // Infallible: parsing a constant valid address
     fn default() -> Self {
         Self {
-            max_batch_size: default_max_batch_size(),
-            max_batch_delay_ms: default_max_batch_delay_ms(),
+            node_id: None,
+            listen_addr: "0.0.0.0:50051".parse().expect("valid default address"),
+            metrics_addr: None,
+            data_dir: PathBuf::from("/var/lib/ledger"),
+            bootstrap_expect: default_bootstrap_expect(),
+            bootstrap_timeout_secs: default_bootstrap_timeout_secs(),
+            bootstrap_poll_secs: default_bootstrap_poll_secs(),
+            batch_max_size: default_batch_max_size(),
+            batch_max_delay_ms: default_batch_max_delay_ms(),
+            requests_max_concurrent: default_requests_max_concurrent(),
+            requests_timeout_secs: default_requests_timeout_secs(),
+            discovery_domain: None,
+            discovery_cache_path: None,
+            discovery_cache_ttl_secs: default_discovery_cache_ttl_secs(),
         }
     }
-}
-
-fn default_max_batch_size() -> usize {
-    100
-}
-
-fn default_max_batch_delay_ms() -> u64 {
-    10
 }
 
 impl Config {
     /// Load configuration from a file.
     ///
     /// Supports TOML format. Environment variables can override config values
-    /// using the `LEDGER_` prefix (e.g., `LEDGER_NODE_ID=1`).
+    /// using the `INFERADB__LEDGER__` prefix (e.g., `INFERADB__LEDGER__BOOTSTRAP_EXPECT=3`).
     pub fn load(path: Option<&str>) -> Result<Self, ConfigError> {
         let builder = config::Config::builder();
 
@@ -253,7 +162,7 @@ impl Config {
         };
 
         // Add environment variables with INFERADB__LEDGER__ prefix.
-        // Use "__" separator for nesting (e.g., INFERADB__LEDGER__BATCHING__MAX_BATCH_SIZE).
+        // Use "__" separator for nesting (though config is now flat).
         // Single underscores in field names are preserved (e.g., INFERADB__LEDGER__NODE_ID →
         // node_id).
         let builder = builder.add_source(
@@ -277,11 +186,18 @@ impl Config {
             listen_addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             metrics_addr: None,
             data_dir,
-            batching: BatchConfig::default(),
-            rate_limit: RateLimitConfig::default(),
-            discovery: DiscoveryConfig::default(),
-            bootstrap: BootstrapConfig::for_single_node(),
+            bootstrap_expect: 1, // Single-node mode for tests
+            ..Self::default()
         }
+    }
+
+    /// Create a configuration for single-node deployments.
+    ///
+    /// Sets `bootstrap_expect=1` for immediate bootstrap without coordination.
+    /// Primarily for testing or development scenarios.
+    #[allow(dead_code)]
+    pub fn for_single_node() -> Self {
+        Self { bootstrap_expect: 1, ..Self::default() }
     }
 
     /// Get the effective node ID, logging a deprecation warning if manually configured.
@@ -305,6 +221,32 @@ impl Config {
                 ConfigError::Validation(format!("failed to load or generate node ID: {}", e))
             }),
         }
+    }
+
+    /// Validate the configuration.
+    ///
+    /// Always succeeds - all `bootstrap_expect` values are valid:
+    /// - `0`: Join existing cluster (no bootstrap)
+    /// - `1`: Single-node deployment
+    /// - `2+`: Coordinated multi-node bootstrap
+    #[allow(dead_code)]
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        Ok(())
+    }
+
+    /// Returns true if this is a single-node deployment (no coordination needed).
+    #[allow(dead_code)]
+    pub fn is_single_node(&self) -> bool {
+        self.bootstrap_expect == 1
+    }
+
+    /// Returns true if this node should wait to join an existing cluster.
+    ///
+    /// When `bootstrap_expect=0`, the node starts without initializing a Raft
+    /// cluster and waits to be added via AdminService's JoinCluster RPC.
+    #[allow(dead_code)]
+    pub fn is_join_mode(&self) -> bool {
+        self.bootstrap_expect == 0
     }
 }
 
@@ -337,10 +279,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_batch_config() {
-        let config = BatchConfig::default();
-        assert_eq!(config.max_batch_size, 100);
-        assert_eq!(config.max_batch_delay_ms, 10);
+    fn test_default_config() {
+        let config = Config::default();
+        assert_eq!(config.bootstrap_expect, 3);
+        assert_eq!(config.bootstrap_timeout_secs, 60);
+        assert_eq!(config.bootstrap_poll_secs, 2);
+        assert_eq!(config.batch_max_size, 100);
+        assert_eq!(config.batch_max_delay_ms, 10);
+        assert_eq!(config.requests_max_concurrent, 100);
+        assert_eq!(config.requests_timeout_secs, 30);
+        assert_eq!(config.discovery_cache_ttl_secs, 3600);
+        assert!(!config.is_single_node());
     }
 
     #[test]
@@ -348,36 +297,27 @@ mod tests {
         let config = Config::for_test(1, 50051, PathBuf::from("/tmp/ledger-test"));
         assert_eq!(config.node_id, Some(1));
         assert_eq!(config.listen_addr.port(), 50051);
-        // Verify bootstrap config for tests uses single-node mode
-        assert_eq!(config.bootstrap.bootstrap_expect, 1);
-        assert!(config.bootstrap.is_single_node());
-    }
-
-    #[test]
-    fn test_bootstrap_config_defaults() {
-        let config = BootstrapConfig::default();
-        assert_eq!(config.bootstrap_expect, 3);
-        assert_eq!(config.bootstrap_timeout_secs, 60);
-        assert_eq!(config.poll_interval_secs, 2);
-        assert!(!config.is_single_node());
-    }
-
-    #[test]
-    fn test_bootstrap_config_validate_success() {
-        let config = BootstrapConfig { bootstrap_expect: 3, ..Default::default() };
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_bootstrap_config_single_node_valid() {
-        let config = BootstrapConfig::for_single_node();
-        assert!(config.validate().is_ok());
+        assert_eq!(config.bootstrap_expect, 1);
         assert!(config.is_single_node());
     }
 
     #[test]
-    fn test_bootstrap_config_join_mode() {
-        let config = BootstrapConfig { bootstrap_expect: 0, ..Default::default() };
+    fn test_config_for_single_node() {
+        let config = Config::for_single_node();
+        assert_eq!(config.bootstrap_expect, 1);
+        assert!(config.is_single_node());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validate_success() {
+        let config = Config { bootstrap_expect: 3, ..Config::default() };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_join_mode() {
+        let config = Config { bootstrap_expect: 0, ..Config::default() };
         assert!(config.validate().is_ok());
         assert!(config.is_join_mode());
         assert!(!config.is_single_node());

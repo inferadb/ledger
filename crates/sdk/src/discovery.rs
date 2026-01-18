@@ -18,7 +18,14 @@
 //! # Example
 //!
 //! ```ignore
-//! use inferadb_ledger_sdk::{DiscoveryService, DiscoveryConfig, ConnectionPool};
+//! use inferadb_ledger_sdk::{DiscoveryConfig, ClientConfig};
+//! use inferadb_ledger_sdk::discovery::DiscoveryService;
+//! use inferadb_ledger_sdk::connection::ConnectionPool;
+//!
+//! let config = ClientConfig::builder()
+//!     .with_endpoint("http://localhost:50051")
+//!     .with_client_id("my-client")
+//!     .build()?;
 //!
 //! let pool = ConnectionPool::new(config);
 //! let discovery = DiscoveryService::new(pool.clone(), DiscoveryConfig::enabled());

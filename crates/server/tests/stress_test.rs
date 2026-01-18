@@ -349,18 +349,18 @@ impl StressMetrics {
         let (r_p50, r_p95, r_p99, r_max) = Self::compute_percentiles(&mut read_lats);
 
         println!("\n╔══════════════════════════════════════════════════════════════╗");
-        println!("║                    STRESS TEST RESULTS                       ║");
+        println!("║                      STRESS TEST RESULTS                     ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║ Duration: {:>10.2}s                                       ║", secs);
+        println!("║ Duration: {:>10.2}s                                        ║", secs);
         println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║                         WRITES                               ║");
+        println!("║                            WRITES                            ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!(
-            "║ Total:     {:>10}  │  Throughput: {:>10.0} ops/sec      ║",
+            "║ Total:     {:>10}  │  Throughput: {:>10.0} ops/sec     ║",
             writes, write_throughput
         );
         println!(
-            "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%              ║",
+            "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%            ║",
             write_errors,
             if writes > 0 { write_errors as f64 / writes as f64 * 100.0 } else { 0.0 }
         );
@@ -368,14 +368,14 @@ impl StressMetrics {
         println!("║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║", w_p50, w_p95, w_p99);
         println!("║   max: {:>8}                                              ║", w_max);
         println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║                          READS                               ║");
+        println!("║                             READS                            ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!(
-            "║ Total:     {:>10}  │  Throughput: {:>10.0} ops/sec      ║",
+            "║ Total:     {:>10}  │  Throughput: {:>10.0} ops/sec     ║",
             reads, read_throughput
         );
         println!(
-            "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%              ║",
+            "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%            ║",
             read_errors,
             if reads > 0 { read_errors as f64 / reads as f64 * 100.0 } else { 0.0 }
         );
@@ -383,7 +383,7 @@ impl StressMetrics {
         println!("║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║", r_p50, r_p95, r_p99);
         println!("║   max: {:>8}                                              ║", r_max);
         println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║                    DESIGN.md TARGETS                         ║");
+        println!("║                            TARGETS                           ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
 
         let write_p99_target = 50_000; // 50ms in µs

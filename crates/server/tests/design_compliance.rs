@@ -734,24 +734,6 @@ async fn test_diverged_vault_returns_unavailable() {
 // DESIGN.md §3.2.1: State Commitment and Bucket-Based Verification
 // =============================================================================
 
-/// DESIGN.md: State root must be consistent after node restart.
-///
-/// After a node restarts, its computed state root should match what was
-/// persisted, ensuring durability of the merkle tree state.
-///
-/// Implementation needs:
-/// - TestCluster.restart_node(node_id) capability
-/// - API to query current state root for a vault
-#[tokio::test]
-#[ignore = "requires node restart capability in TestCluster"]
-async fn test_state_root_consistency_after_restart() {
-    // This test would:
-    // 1. Create a cluster and write data
-    // 2. Record the state root
-    // 3. Restart a node
-    // 4. Verify the state root matches after restart
-}
-
 /// DESIGN.md Invariant 28: "Followers verify state roots match leader."
 ///
 /// When a follower applies log entries, it must verify that its computed
@@ -1014,56 +996,6 @@ async fn test_sequence_survives_leader_failover() {
     }
 }
 
-/// DESIGN.md: Log compaction preserves applied state.
-///
-/// After log compaction (snapshot creation), the log entries before the
-/// snapshot can be discarded, but the state must be preserved.
-///
-/// Implementation needs:
-/// - API to trigger snapshot creation
-/// - API to trigger log compaction
-/// - Configuration for snapshot frequency
-#[tokio::test]
-#[ignore = "requires snapshot/compaction trigger API"]
-async fn test_log_compaction_after_snapshot() {
-    // This test would:
-    // 1. Write enough data to trigger snapshot creation
-    // 2. Verify snapshot is created
-    // 3. Trigger log compaction
-    // 4. Verify state is still accessible
-}
-
-/// DESIGN.md: Followers can install snapshots from leader.
-///
-/// When a follower is too far behind (e.g., after being offline),
-/// the leader should send a snapshot instead of individual log entries.
-///
-/// Implementation needs:
-/// - Turmoil integration for network partitions (see network_simulation.rs)
-/// - Snapshot trigger API
-/// - API to verify InstallSnapshot RPC was received
-#[tokio::test]
-#[ignore = "requires turmoil integration with snapshot triggering"]
-async fn test_snapshot_install_from_leader() {
-    // This test would:
-    // 1. Create a 3-node cluster
-    // 2. Partition one node
-    // 3. Write enough data to trigger snapshot
-    // 4. Heal the partition
-    // 5. Verify the partitioned node installs snapshot
-}
-
-/// DESIGN.md: Writes during network partition are handled correctly.
-///
-/// During a network partition, writes to the majority partition should
-/// succeed, while writes to the minority partition should fail or timeout.
-///
-/// This functionality is tested in `network_simulation.rs` using turmoil:
-/// - `test_network_partition_blocks_communication` - verifies partitions block RPCs
-/// - `test_majority_partition_continues_operating` - verifies majority continues while minority
-///   fails
-#[tokio::test]
-#[ignore = "covered by turmoil tests in network_simulation.rs"]
-async fn test_network_partition_during_write() {
-    // See network_simulation.rs for turmoil-based partition tests
-}
+// NOTE: Additional tests for log compaction, snapshot installation, and network
+// partitions are implemented in network_simulation.rs using turmoil for realistic
+// network fault injection.

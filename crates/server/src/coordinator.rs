@@ -13,7 +13,7 @@ use std::{
 use tracing::{debug, info};
 
 use crate::{
-    config::{BootstrapConfig, DiscoveryConfig},
+    config::Config,
     discovery::{DiscoveredNode, discover_node_info, resolve_bootstrap_peers},
 };
 
@@ -76,7 +76,7 @@ impl std::error::Error for CoordinatorError {}
 ///
 /// This function implements the coordination algorithm:
 ///
-/// 1. Poll discovery every `poll_interval_secs` until `bootstrap_expect` nodes found
+/// 1. Poll discovery every `bootstrap_poll_secs` until `bootstrap_expect` nodes found
 /// 2. Query each discovered peer via `discover_node_info`
 /// 3. If any peer has `is_cluster_member=true`, return `JoinExisting`
 /// 4. If enough peers found and my ID is lowest, return `Bootstrap` with all members
@@ -87,8 +87,7 @@ impl std::error::Error for CoordinatorError {}
 ///
 /// * `my_node_id` - This node's Snowflake ID
 /// * `my_address` - This node's gRPC address
-/// * `bootstrap_config` - Bootstrap timing and size configuration
-/// * `discovery_config` - Peer discovery configuration
+/// * `config` - Server configuration with bootstrap and discovery settings
 ///
 /// # Returns
 ///
@@ -97,20 +96,19 @@ impl std::error::Error for CoordinatorError {}
 pub async fn coordinate_bootstrap(
     my_node_id: u64,
     my_address: &str,
-    bootstrap_config: &BootstrapConfig,
-    discovery_config: &DiscoveryConfig,
+    config: &Config,
 ) -> Result<BootstrapDecision, CoordinatorError> {
     let start = Instant::now();
-    let timeout = Duration::from_secs(bootstrap_config.bootstrap_timeout_secs);
-    let poll_interval = Duration::from_secs(bootstrap_config.poll_interval_secs);
+    let timeout = Duration::from_secs(config.bootstrap_timeout_secs);
+    let poll_interval = Duration::from_secs(config.bootstrap_poll_secs);
     let rpc_timeout = Duration::from_secs(5);
 
     info!(
         my_id = my_node_id,
         my_address = %my_address,
-        bootstrap_expect = bootstrap_config.bootstrap_expect,
-        timeout_secs = bootstrap_config.bootstrap_timeout_secs,
-        poll_interval_secs = bootstrap_config.poll_interval_secs,
+        bootstrap_expect = config.bootstrap_expect,
+        timeout_secs = config.bootstrap_timeout_secs,
+        poll_interval_secs = config.bootstrap_poll_secs,
         "Starting bootstrap coordination"
     );
 
@@ -121,18 +119,18 @@ pub async fn coordinate_bootstrap(
                 my_id = my_node_id,
                 my_address = %my_address,
                 elapsed_secs = start.elapsed().as_secs(),
-                bootstrap_expect = bootstrap_config.bootstrap_expect,
+                bootstrap_expect = config.bootstrap_expect,
                 decision = "timeout",
                 "Bootstrap coordination timed out waiting for peers"
             );
             return Err(CoordinatorError::Timeout(format!(
                 "did not discover {} peers within {}s",
-                bootstrap_config.bootstrap_expect, bootstrap_config.bootstrap_timeout_secs
+                config.bootstrap_expect, config.bootstrap_timeout_secs
             )));
         }
 
         // Resolve peer addresses from discovery
-        let peer_addrs = resolve_bootstrap_peers(discovery_config).await;
+        let peer_addrs = resolve_bootstrap_peers(config).await;
 
         // Query each peer for node info
         let discovered = query_peers(&peer_addrs, rpc_timeout).await;
@@ -154,15 +152,11 @@ pub async fn coordinate_bootstrap(
         // Count total nodes (discovered + self)
         let total_nodes = discovered.len() + 1;
 
-        if total_nodes >= bootstrap_config.bootstrap_expect as usize {
+        if total_nodes >= config.bootstrap_expect as usize {
             return Ok(make_bootstrap_decision(my_node_id, my_address, &discovered));
         }
 
-        debug!(
-            found = total_nodes,
-            required = bootstrap_config.bootstrap_expect,
-            "Waiting for peers"
-        );
+        debug!(found = total_nodes, required = config.bootstrap_expect, "Waiting for peers");
         tokio::time::sleep(poll_interval).await;
     }
 }
@@ -238,6 +232,8 @@ fn make_bootstrap_decision(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -370,21 +366,15 @@ mod tests {
     #[tokio::test]
     async fn test_coordinate_bootstrap_timeout() {
         // Use a very short timeout and no discoverable peers
-        let bootstrap_config = BootstrapConfig {
+        let config = Config {
             bootstrap_expect: 3,
             bootstrap_timeout_secs: 1, // Very short timeout
-            poll_interval_secs: 1,
+            bootstrap_poll_secs: 1,
+            data_dir: PathBuf::from("/tmp/test"),
+            ..Config::default()
         };
 
-        let discovery_config = DiscoveryConfig {
-            srv_domain: None,        // No DNS SRV
-            cached_peers_path: None, // No cached peers
-            cache_ttl_secs: 3600,
-        };
-
-        let result =
-            coordinate_bootstrap(100, "127.0.0.1:50051", &bootstrap_config, &discovery_config)
-                .await;
+        let result = coordinate_bootstrap(100, "127.0.0.1:50051", &config).await;
 
         // Should timeout since no peers are discoverable
         match result {
@@ -399,14 +389,13 @@ mod tests {
     #[tokio::test]
     async fn test_coordinate_bootstrap_single_node_immediate() {
         // Single node mode should succeed immediately
-        let bootstrap_config = BootstrapConfig::for_single_node();
+        let config = Config {
+            bootstrap_expect: 1,
+            data_dir: PathBuf::from("/tmp/test"),
+            ..Config::default()
+        };
 
-        let discovery_config =
-            DiscoveryConfig { srv_domain: None, cached_peers_path: None, cache_ttl_secs: 3600 };
-
-        let result =
-            coordinate_bootstrap(100, "127.0.0.1:50051", &bootstrap_config, &discovery_config)
-                .await;
+        let result = coordinate_bootstrap(100, "127.0.0.1:50051", &config).await;
 
         // Should immediately bootstrap as single node (1 node = bootstrap_expect)
         match result {

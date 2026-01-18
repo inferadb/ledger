@@ -95,10 +95,8 @@ impl TestCluster {
             listen_addr: addr,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
-            batching: inferadb_ledger_server::config::BatchConfig::default(),
-            rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
-            discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
-            bootstrap: inferadb_ledger_server::config::BootstrapConfig::for_single_node(),
+            bootstrap_expect: 1, // Single-node mode for immediate bootstrap
+            ..inferadb_ledger_server::config::Config::default()
         };
 
         let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
@@ -160,13 +158,8 @@ impl TestCluster {
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: temp_dir.path().to_path_buf(),
-                batching: inferadb_ledger_server::config::BatchConfig::default(),
-                rate_limit: inferadb_ledger_server::config::RateLimitConfig::default(),
-                discovery: inferadb_ledger_server::config::DiscoveryConfig::default(),
-                bootstrap: inferadb_ledger_server::config::BootstrapConfig {
-                    bootstrap_expect: 0, // Join mode: wait to be added to existing cluster
-                    ..Default::default()
-                },
+                bootstrap_expect: 0, // Join mode: wait to be added to existing cluster
+                ..inferadb_ledger_server::config::Config::default()
             };
 
             // Create the node - with bootstrap_expect=0, it won't initialize its own

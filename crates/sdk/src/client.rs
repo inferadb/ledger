@@ -67,15 +67,22 @@ pub struct WriteSuccess {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use inferadb_ledger_sdk::LedgerClient;
-/// use futures::StreamExt;
-///
-/// let stream = client.watch_blocks(namespace_id, vault_id, start_height).await?;
+/// ```no_run
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+/// # use futures::StreamExt;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = LedgerClient::new(ClientConfig::builder()
+/// #     .with_endpoint("http://localhost:50051")
+/// #     .with_client_id("example")
+/// #     .build()?).await?;
+/// # let (namespace_id, vault_id, start_height) = (1i64, 1i64, 1u64);
+/// let mut stream = client.watch_blocks(namespace_id, vault_id, start_height).await?;
 /// while let Some(announcement) = stream.next().await {
 ///     let block = announcement?;
 ///     println!("New block at height {}: {:?}", block.height, block.block_hash);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockAnnouncement {
@@ -851,15 +858,22 @@ impl ListResourcesOpts {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use inferadb_ledger_sdk::{LedgerClient, VerifyOpts};
-///
-/// let result = client.verified_read(ns_id, vault_id, "key", VerifyOpts::new()).await?;
+/// ```no_run
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, VerifyOpts};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = LedgerClient::new(ClientConfig::builder()
+/// #     .with_endpoint("http://localhost:50051")
+/// #     .with_client_id("example")
+/// #     .build()?).await?;
+/// # let (ns_id, vault_id) = (1i64, 1i64);
+/// let result = client.verified_read(ns_id, Some(vault_id), "key", VerifyOpts::new()).await?;
 /// if let Some(verified) = result {
 ///     // Verify the proof is valid
-///     assert!(verified.verify());
+///     assert!(verified.verify()?);
 ///     println!("Verified value: {:?}", verified.value);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedValue {
@@ -981,7 +995,8 @@ impl Operation {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::Operation;
     /// let op = Operation::set_entity("user:123", b"data".to_vec());
     /// ```
     pub fn set_entity(key: impl Into<String>, value: Vec<u8>) -> Self {
@@ -1121,9 +1136,9 @@ impl SetCondition {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
-///
+/// ```no_run
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = ClientConfig::builder()
 ///     .with_endpoint("http://localhost:50051")
 ///     .with_client_id("my-app-001")
@@ -1135,6 +1150,8 @@ impl SetCondition {
 ///
 /// // Graceful shutdown
 /// client.shutdown().await;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct LedgerClient {
@@ -1156,13 +1173,17 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = ClientConfig::builder()
     ///     .with_endpoint("http://localhost:50051")
     ///     .with_client_id("my-service")
     ///     .build()?;
     ///
     /// let client = LedgerClient::new(config).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn new(config: ClientConfig) -> Result<Self> {
         let client_id = config.client_id().to_string();
@@ -1185,8 +1206,12 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn connect(
         endpoint: impl Into<String>,
@@ -1261,14 +1286,20 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let (namespace_id, vault_id) = (1i64, 1i64);
+    /// # let operations = vec![];
     /// let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     ///
     /// // Perform operations...
-    /// client.write(namespace_id, vault_id, operations).await?;
+    /// client.write(namespace_id, Some(vault_id), operations).await?;
     ///
     /// // Graceful shutdown before application exit
     /// client.shutdown().await;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn shutdown(&self) {
         // Cancel all pending and future operations
@@ -1289,10 +1320,15 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// if client.is_shutdown() {
     ///     println!("Client has been shut down");
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[inline]
     #[must_use]
@@ -1319,16 +1355,18 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::{LedgerClient, DiscoveryConfig};
-    ///
-    /// let client = LedgerClient::connect("http://localhost:50051", "my-client");
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, DiscoveryConfig};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = LedgerClient::connect("http://localhost:50051", "my-client").await?;
     /// let discovery = client.create_discovery_service(DiscoveryConfig::enabled());
     ///
     /// // Start background endpoint refresh
     /// discovery.start_background_refresh();
     ///
     /// // The client will now use updated endpoints as peers are discovered
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn create_discovery_service(
@@ -1364,12 +1402,18 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (namespace_id, vault_id) = (1i64, 1i64);
     /// // Read a namespace-level entity
     /// let value = client.read(namespace_id, None, "user:123").await?;
     ///
     /// // Read a vault-level entity
     /// let value = client.read(namespace_id, Some(vault_id), "key").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn read(
         &self,
@@ -1402,9 +1446,15 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (namespace_id, vault_id) = (1i64, 1i64);
     /// // Read with strong consistency guarantee
     /// let value = client.read_consistent(namespace_id, Some(vault_id), "key").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn read_consistent(
         &self,
@@ -1437,7 +1487,11 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (namespace_id, vault_id) = (1i64, 1i64);
     /// let results = client.batch_read(
     ///     namespace_id,
     ///     Some(vault_id),
@@ -1450,6 +1504,8 @@ impl LedgerClient {
     ///         None => println!("{key}: not found"),
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn batch_read(
         &self,
@@ -1610,9 +1666,11 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::Operation;
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, Operation};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (namespace_id, vault_id) = (1i64, 1i64);
     /// let result = client.write(
     ///     namespace_id,
     ///     Some(vault_id),
@@ -1623,6 +1681,8 @@ impl LedgerClient {
     /// ).await?;
     ///
     /// println!("Committed at block {}", result.block_height);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn write(
         &self,
@@ -1820,9 +1880,11 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::Operation;
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, Operation};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (namespace_id, vault_id) = (1i64, 1i64);
     /// // Atomic transaction: create user AND grant permissions
     /// let result = client.batch_write(
     ///     namespace_id,
@@ -1839,6 +1901,8 @@ impl LedgerClient {
     /// ).await?;
     ///
     /// println!("Batch committed at block {}", result.block_height);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn batch_write(
         &self,
@@ -2001,10 +2065,10 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::LedgerClient;
-    /// use futures::StreamExt;
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # use futures::StreamExt;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = LedgerClient::connect("http://localhost:50051", "my-app").await?;
     ///
     /// // Start watching from height 1
@@ -2022,6 +2086,8 @@ impl LedgerClient {
     ///         }
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn watch_blocks(
         &self,
@@ -2124,9 +2190,14 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// let namespace_id = client.create_namespace("my-org").await?;
     /// println!("Created namespace with ID: {}", namespace_id);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn create_namespace(&self, name: impl Into<String>) -> Result<i64> {
         self.check_shutdown()?;
@@ -2170,9 +2241,15 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let namespace_id = 1i64;
     /// let info = client.get_namespace(namespace_id).await?;
     /// println!("Namespace: {} (status: {:?})", info.name, info.status);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn get_namespace(&self, namespace_id: i64) -> Result<NamespaceInfo> {
         self.check_shutdown()?;
@@ -2212,11 +2289,16 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// let namespaces = client.list_namespaces().await?;
     /// for ns in namespaces {
     ///     println!("Namespace: {} (ID: {})", ns.name, ns.namespace_id);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn list_namespaces(&self) -> Result<Vec<NamespaceInfo>> {
         self.check_shutdown()?;
@@ -2261,9 +2343,15 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let namespace_id = 1i64;
     /// let vault = client.create_vault(namespace_id).await?;
     /// println!("Created vault with ID: {}", vault.vault_id);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn create_vault(&self, namespace_id: i64) -> Result<VaultInfo> {
         self.check_shutdown()?;
@@ -2318,9 +2406,15 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (namespace_id, vault_id) = (1i64, 1i64);
     /// let info = client.get_vault(namespace_id, vault_id).await?;
     /// println!("Vault height: {}, status: {:?}", info.height, info.status);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn get_vault(&self, namespace_id: i64, vault_id: i64) -> Result<VaultInfo> {
         self.check_shutdown()?;
@@ -2358,11 +2452,16 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// let vaults = client.list_vaults().await?;
     /// for v in vaults {
     ///     println!("Vault {} in namespace {}", v.vault_id, v.namespace_id);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn list_vaults(&self) -> Result<Vec<VaultInfo>> {
         self.check_shutdown()?;
@@ -2403,12 +2502,17 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// if client.health_check().await? {
     ///     println!("Node is healthy");
     /// } else {
     ///     println!("Node is degraded but available");
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn health_check(&self) -> Result<bool> {
         self.check_shutdown()?;
@@ -2437,12 +2541,17 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// let health = client.health_check_detailed().await?;
     /// println!("Status: {:?}, Message: {}", health.status, health.message);
     /// if let Some(term) = health.details.get("current_term") {
     ///     println!("Current Raft term: {}", term);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn health_check_detailed(&self) -> Result<HealthCheckResult> {
         self.check_shutdown()?;
@@ -2483,12 +2592,17 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// let health = client.health_check_vault(1, 0).await?;
     /// println!("Vault status: {:?}", health.status);
     /// if let Some(height) = health.details.get("block_height") {
     ///     println!("Current height: {}", height);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn health_check_vault(
         &self,
@@ -2539,15 +2653,19 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::{LedgerClient, VerifyOpts};
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, VerifyOpts};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (ns_id, vault_id) = (1i64, 1i64);
     /// let result = client.verified_read(ns_id, Some(vault_id), "user:123", VerifyOpts::new()).await?;
     /// if let Some(verified) = result {
     ///     // Verify the proof before using the value
     ///     verified.verify()?;
     ///     println!("Value: {:?}", verified.value);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn verified_read(
         &self,
@@ -2603,9 +2721,11 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::{LedgerClient, ListEntitiesOpts};
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, ListEntitiesOpts};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let ns_id = 1i64;
     /// // List all users
     /// let result = client.list_entities(ns_id, ListEntitiesOpts::with_prefix("user:")).await?;
     /// for entity in result.items {
@@ -2619,6 +2739,8 @@ impl LedgerClient {
     ///         ListEntitiesOpts::with_prefix("user:").page_token(token)
     ///     ).await?;
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn list_entities(
         &self,
@@ -2672,9 +2794,11 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::{LedgerClient, ListRelationshipsOpts};
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, ListRelationshipsOpts};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (ns_id, vault_id) = (1i64, 1i64);
     /// // List all relationships for a document
     /// let result = client.list_relationships(
     ///     ns_id,
@@ -2685,6 +2809,8 @@ impl LedgerClient {
     /// for rel in result.items {
     ///     println!("{} -> {} -> {}", rel.resource, rel.relation, rel.subject);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn list_relationships(
         &self,
@@ -2742,9 +2868,11 @@ impl LedgerClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use inferadb_ledger_sdk::{LedgerClient, ListResourcesOpts};
-    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, ListResourcesOpts};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (ns_id, vault_id) = (1i64, 1i64);
     /// // List all document resources
     /// let result = client.list_resources(
     ///     ns_id,
@@ -2755,6 +2883,8 @@ impl LedgerClient {
     /// for resource_id in result.items {
     ///     println!("Resource: {}", resource_id);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn list_resources(
         &self,

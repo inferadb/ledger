@@ -23,11 +23,11 @@ Importantly, a diverged vault is **isolated** from other vaults in the same shar
      └──────────────────────────────────────────────────────────────┘
 ```
 
-| State | Description | Read Availability | Write Availability |
-|-------|-------------|-------------------|-------------------|
-| `Healthy` | Normal operation | Yes | Yes |
-| `Diverged` | State root mismatch detected | No (`UNAVAILABLE`) | Replicated but not applied |
-| `Recovering` | Auto-recovery in progress | No (`UNAVAILABLE`) | Replicated but not applied |
+| State        | Description                  | Read Availability  | Write Availability         |
+| ------------ | ---------------------------- | ------------------ | -------------------------- |
+| `Healthy`    | Normal operation             | Yes                | Yes                        |
+| `Diverged`   | State root mismatch detected | No (`UNAVAILABLE`) | Replicated but not applied |
+| `Recovering` | Auto-recovery in progress    | No (`UNAVAILABLE`) | Replicated but not applied |
 
 ## Divergence Detection
 
@@ -46,6 +46,7 @@ CRITICAL: state_root_divergence{vault_id=123, shard_id=1, height=45678}
 ```
 
 The follower:
+
 - Rolls back uncommitted state for this vault only
 - Marks vault as `Diverged`
 - Emits critical alert
@@ -56,11 +57,11 @@ The follower:
 
 Diverged vaults attempt automatic recovery with exponential backoff:
 
-| Attempt | Backoff | Action |
-|---------|---------|--------|
-| 1 | Immediate | Clear state, replay from snapshot + log |
-| 2 | 1 minute | Same as attempt 1 |
-| 3 | 5 minutes | Require manual intervention |
+| Attempt | Backoff   | Action                                  |
+| ------- | --------- | --------------------------------------- |
+| 1       | Immediate | Clear state, replay from snapshot + log |
+| 2       | 1 minute  | Same as attempt 1                       |
+| 3       | 5 minutes | Require manual intervention             |
 
 The recovery process:
 
@@ -73,6 +74,7 @@ The recovery process:
 7. On failure: schedule retry with backoff (or halt if attempt 3)
 
 After 3 failed attempts:
+
 ```
 CRITICAL: vault_recovery_exhausted{vault_id=123}
 ```
@@ -102,12 +104,12 @@ ledger-admin compare-state-roots --namespace 1 --vault 123 --height 45678
 
 ### Step 2: Identify Root Cause
 
-| Symptom | Likely Cause | Resolution |
-|---------|--------------|------------|
-| Single node diverged | Disk corruption | Rebuild from snapshot |
-| Multiple nodes diverged | Non-deterministic bug | Code fix required, then rebuild |
-| All nodes diverged | Corrupted leader state | Rollback cluster to known-good snapshot |
-| Divergence after upgrade | Version incompatibility | Rollback upgrade, coordinate releases |
+| Symptom                  | Likely Cause            | Resolution                              |
+| ------------------------ | ----------------------- | --------------------------------------- |
+| Single node diverged     | Disk corruption         | Rebuild from snapshot                   |
+| Multiple nodes diverged  | Non-deterministic bug   | Code fix required, then rebuild         |
+| All nodes diverged       | Corrupted leader state  | Rollback cluster to known-good snapshot |
+| Divergence after upgrade | Version incompatibility | Rollback upgrade, coordinate releases   |
 
 ### Step 3: Force Recovery
 
@@ -122,6 +124,7 @@ ledger-admin watch-recovery --namespace 1 --vault 123
 ```
 
 The `--force` flag:
+
 - Resets the recovery attempt counter
 - Clears vault state immediately
 - Begins replay from the latest snapshot
@@ -197,22 +200,24 @@ ledger-admin vault-status --namespace 1 --vault 123
 
 ### Key Metrics
 
-| Metric | Alert Threshold | Meaning |
-|--------|-----------------|---------|
-| `vault_health{state="diverged"}` | > 0 | Vault is diverged |
-| `vault_health{state="recovering"}` | > 0 for 10m | Recovery taking too long |
-| `vault_recovery_attempts_total` | > 3 | Automatic recovery exhausted |
-| `state_root_computation_duration_seconds` | p99 > 100ms | Performance issue |
+| Metric                                    | Alert Threshold | Meaning                      |
+| ----------------------------------------- | --------------- | ---------------------------- |
+| `vault_health{state="diverged"}`          | > 0             | Vault is diverged            |
+| `vault_health{state="recovering"}`        | > 0 for 10m     | Recovery taking too long     |
+| `vault_recovery_attempts_total`           | > 3             | Automatic recovery exhausted |
+| `state_root_computation_duration_seconds` | p99 > 100ms     | Performance issue            |
 
 ### Alert Responses
 
 **Alert: `VaultDiverged`**
+
 ```
 severity: critical
 action: Page on-call, begin investigation
 ```
 
 **Alert: `VaultRecoveryExhausted`**
+
 ```
 severity: critical
 action: Manual intervention required
@@ -232,6 +237,7 @@ Yes. Raft log entries for the diverged vault continue replicating but are not ap
 ### Q: How long does recovery take?
 
 Depends on:
+
 - Snapshot age (more log to replay = longer)
 - Vault size (larger state tree = longer)
 - Disk I/O performance
@@ -241,12 +247,14 @@ Typical recoveries complete in seconds to minutes. Very large vaults with old sn
 ### Q: Can I read historical data from a diverged vault?
 
 No. The vault is marked unavailable for all reads until recovery completes. If you need urgent access to historical data, consider:
+
 - Reading from a healthy replica
 - Using the block archive directly (requires tooling)
 
 ### Q: What if all replicas diverge?
 
 This indicates a serious bug or coordinated corruption. Steps:
+
 1. Stop all writes to the cluster
 2. Identify the most recent known-good state
 3. Rollback all nodes to that snapshot

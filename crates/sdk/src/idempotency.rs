@@ -255,10 +255,9 @@ struct PersistedState {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use inferadb_ledger_sdk::FileSequenceStorage;
-/// use std::path::PathBuf;
-///
+/// ```no_run
+/// # use inferadb_ledger_sdk::FileSequenceStorage;
+/// # use std::path::PathBuf;
 /// let storage = FileSequenceStorage::new("client-123", PathBuf::from("/var/lib/ledger"));
 /// ```
 #[derive(Debug)]
@@ -438,15 +437,17 @@ impl SequenceStorage for FileSequenceStorage {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use inferadb_ledger_sdk::{PersistentSequenceTracker, FileSequenceStorage};
-/// use std::path::PathBuf;
-///
+/// ```no_run
+/// # use inferadb_ledger_sdk::{PersistentSequenceTracker, FileSequenceStorage};
+/// # use std::path::PathBuf;
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let storage = FileSequenceStorage::new("my-client", PathBuf::from("/var/lib/ledger"));
 /// let tracker = PersistentSequenceTracker::new("my-client", storage)?;
 ///
 /// // Sequences persist automatically
 /// let seq = tracker.next_sequence(1, 0);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct PersistentSequenceTracker<S: SequenceStorage + 'static> {

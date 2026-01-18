@@ -15,9 +15,7 @@ use std::time::Duration;
 use common::{TestCluster, create_admin_client};
 use inferadb_ledger_raft::proto::GetNodeInfoRequest;
 use inferadb_ledger_server::{
-    bootstrap::bootstrap_node,
-    config::{BootstrapConfig, Config, DiscoveryConfig},
-    node_id::load_or_generate_node_id,
+    bootstrap::bootstrap_node, config::Config, node_id::load_or_generate_node_id,
 };
 use inferadb_ledger_test_utils::TestDir;
 use serial_test::serial;
@@ -39,10 +37,8 @@ async fn test_single_node_bootstrap() {
         listen_addr: addr,
         metrics_addr: None,
         data_dir: temp_dir.path().to_path_buf(),
-        batching: Default::default(),
-        rate_limit: Default::default(),
-        discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig::for_single_node(),
+        bootstrap_expect: 1, // Single-node mode
+        ..Config::default()
     };
 
     // Bootstrap should succeed
@@ -96,10 +92,8 @@ async fn test_node_restart_preserves_id() {
         listen_addr: addr,
         metrics_addr: None,
         data_dir: temp_dir.path().to_path_buf(),
-        batching: Default::default(),
-        rate_limit: Default::default(),
-        discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig::for_single_node(),
+        bootstrap_expect: 1, // Single-node mode
+        ..Config::default()
     };
 
     // First startup - bootstrap fresh node
@@ -139,10 +133,8 @@ async fn test_node_restart_preserves_id() {
             listen_addr: addr2,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
-            batching: Default::default(),
-            rate_limit: Default::default(),
-            discovery: DiscoveryConfig::default(),
-            bootstrap: BootstrapConfig { ..BootstrapConfig::for_single_node() },
+            bootstrap_expect: 1, // Single-node mode
+            ..Config::default()
         };
 
         let bootstrapped = bootstrap_node(&config2).await.expect("restart should succeed");
@@ -249,10 +241,8 @@ async fn test_late_joiner_finds_existing_cluster() {
         listen_addr: leader_addr,
         metrics_addr: None,
         data_dir: leader_dir.path().to_path_buf(),
-        batching: Default::default(),
-        rate_limit: Default::default(),
-        discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig::for_single_node(),
+        bootstrap_expect: 1, // Single-node mode
+        ..Config::default()
     };
 
     let leader = bootstrap_node(&leader_config).await.expect("leader bootstrap");
@@ -322,13 +312,8 @@ async fn test_join_mode_does_not_bootstrap() {
         listen_addr: addr,
         metrics_addr: None,
         data_dir: temp_dir.path().to_path_buf(),
-        batching: Default::default(),
-        rate_limit: Default::default(),
-        discovery: DiscoveryConfig::default(),
-        bootstrap: BootstrapConfig {
-            bootstrap_expect: 0, // Join mode
-            ..Default::default()
-        },
+        bootstrap_expect: 0, // Join mode
+        ..Config::default()
     };
 
     // Bootstrap should succeed (node starts but doesn't initialize cluster)

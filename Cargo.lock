@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "inferadb-ledger-raft"
-version = "0.1.0"
+version = "0.1.0-pre.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "inferadb-ledger-sdk"
-version = "0.1.0"
+version = "0.1.0-pre.1"
 dependencies = [
  "backon",
  "chrono",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "inferadb-ledger-server"
-version = "0.1.0"
+version = "0.1.0-pre.1"
 dependencies = [
  "async-stream",
  "config",
@@ -1652,7 +1652,7 @@ dependencies = [
 
 [[package]]
 name = "inferadb-ledger-state"
-version = "0.1.0"
+version = "0.1.0-pre.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "inferadb-ledger-store"
-version = "0.1.0"
+version = "0.1.0-pre.1"
 dependencies = [
  "arc-swap",
  "byteorder",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "inferadb-ledger-test-utils"
-version = "0.1.0"
+version = "0.1.0-pre.1"
 dependencies = [
  "chrono",
  "inferadb-ledger-types",
@@ -1707,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "inferadb-ledger-types"
-version = "0.1.0"
+version = "0.1.0-pre.1"
 dependencies = [
  "bytes",
  "chrono",

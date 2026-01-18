@@ -13,6 +13,9 @@
 //! # Example
 //!
 //! ```ignore
+//! use inferadb_ledger_sdk::ClientConfig;
+//! use inferadb_ledger_sdk::connection::ConnectionPool;
+//!
 //! let config = ClientConfig::builder()
 //!     .with_endpoint("http://localhost:50051")
 //!     .with_client_id("my-client")
