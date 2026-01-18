@@ -25,7 +25,9 @@ tokio-stream = "0.1"
 tokio-util = "0.7"
 
 # gRPC
-tonic = { version = "0.14", features = ["gzip", "zstd", "tls-ring"] }
+# tls-ring: use ring crypto instead of slow-to-compile aws-lc
+# tls-native-roots: load system CA certificates (needed by SDK)
+tonic = { version = "0.14", features = ["gzip", "zstd", "tls-ring", "tls-native-roots"] }
 tonic-build = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
