@@ -1,0 +1,40 @@
+# Headless Service for peer discovery (DNS A records)
+# Pods discover each other via: ledger.inferadb.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger
+  namespace: inferadb
+  labels:
+    app.kubernetes.io/name: inferadb-ledger
+    app.kubernetes.io/component: service
+spec:
+  clusterIP: None  # Headless - returns pod IPs directly
+  selector:
+    app.kubernetes.io/name: inferadb-ledger
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  publishNotReadyAddresses: true  # Include pods not yet ready (for bootstrap)
+---
+# Client Service for external access (load-balanced)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-client
+  namespace: inferadb
+  labels:
+    app.kubernetes.io/name: inferadb-ledger
+    app.kubernetes.io/component: client-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: inferadb-ledger
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc

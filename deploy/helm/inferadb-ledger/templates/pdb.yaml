@@ -1,0 +1,14 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "inferadb-ledger.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferadb-ledger.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "inferadb-ledger.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -32,8 +32,9 @@ data_dir = "/var/lib/ledger"
 # Discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-# DNS SRV record for peer discovery (_ledger._tcp.<domain>)
-# discovery_domain = "cluster.example.com"
+# DNS domain for peer discovery (A record lookup)
+# For Kubernetes: use headless service DNS (e.g., ledger.default.svc.cluster.local)
+# discovery_domain = "ledger.default.svc.cluster.local"
 
 # Path to cache discovered peers (survives restarts)
 # discovery_cache_path = "/var/lib/ledger/peers.cache"

@@ -78,28 +78,47 @@ Nodes discover initial peers through multiple mechanisms:
 ```
 1. Cached peers? ─── Found ──→ Connected to cluster
        │
-       └─ Empty ──→ 2. Config bootstrap list? ─── Found ──→ Connected
+       └─ Empty ──→ 2. DNS A record lookup? ─── Found ──→ Connected
                               │
-                              └─ Empty/Failed ──→ 3. DNS SRV lookup? ─── Found ──→ Connected
-                                                          │
-                                                          └─ Failed ──→ Bootstrap failed
+                              └─ Failed ──→ Bootstrap failed
 ```
 
-### DNS SRV Records
+### DNS A Records
 
-DNS SRV records enable dynamic bootstrap node management:
+DNS A records enable dynamic bootstrap node management. This is optimized for Kubernetes headless Services:
+
+**Kubernetes (recommended):**
+
+```yaml
+# Headless Service creates DNS A records for each pod
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger
+spec:
+  clusterIP: None  # headless
+  selector:
+    app: ledger
+  ports:
+    - port: 50051
+```
+
+Query `ledger.default.svc.cluster.local` returns A records for all pod IPs.
+
+**Non-Kubernetes environments:**
 
 ```
-_ledger._tcp.infra.example.com. 300 IN SRV 10 50 9000 node1.infra.example.com.
-_ledger._tcp.infra.example.com. 300 IN SRV 10 50 9000 node2.infra.example.com.
-_ledger._tcp.infra.example.com. 300 IN SRV 20 50 9000 node3.infra.example.com.
+# DNS A records (all nodes share the same name)
+ledger.cluster.example.com. 300 IN A 192.168.1.101
+ledger.cluster.example.com. 300 IN A 192.168.1.102
+ledger.cluster.example.com. 300 IN A 192.168.1.103
 ```
 
 **Benefits:**
 
 - Update bootstrap nodes via DNS without client reconfiguration
+- Native Kubernetes headless Service support
 - TTL-based caching reduces DNS load
-- Priority/weight fields enable load balancing
 - Works with split-horizon DNS for different environments
 
 ### Peer Exchange Protocol

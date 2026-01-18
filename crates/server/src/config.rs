@@ -81,8 +81,9 @@ pub struct Config {
     pub requests_timeout_secs: u64,
 
     // === Discovery ===
-    /// DNS SRV domain for bootstrap discovery.
-    /// When set, the server will query `_ledger._tcp.<domain>` to discover peers.
+    /// DNS domain for bootstrap discovery.
+    /// When set, the server queries this domain for A records to discover peers.
+    /// Optimized for Kubernetes headless Services (e.g., `ledger.default.svc.cluster.local`).
     #[serde(default)]
     pub discovery_domain: Option<String>,
 

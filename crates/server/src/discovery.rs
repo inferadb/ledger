@@ -1,13 +1,15 @@
-//! Peer discovery via DNS SRV records.
+//! Peer discovery via DNS.
 //!
-//! Per DESIGN.md §3.6: DNS SRV records enable dynamic bootstrap node management
-//! without client reconfiguration. Nodes query `_ledger._tcp.<domain>` to discover
-//! cluster entry points.
+//! Discovery enables nodes to find each other during cluster bootstrap.
+//! Nodes query DNS A records at the configured domain to discover peer IPs.
+//!
+//! This is optimized for Kubernetes headless Services, which create A records
+//! for each pod IP. Example: querying `ledger.default.svc.cluster.local` returns
+//! the IPs of all ledger pods.
 //!
 //! Discovery order:
 //! 1. Cached peers (from previous successful connections)
-//! 2. Static config (from peers configuration)
-//! 3. DNS SRV lookup (if srv_domain is configured)
+//! 2. DNS A record lookup (if discovery_domain is configured)
 //!
 //! # Security
 //!
@@ -37,15 +39,11 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 
-/// A discovered peer from DNS SRV lookup.
+/// A discovered peer from DNS lookup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredPeer {
-    /// Peer address (host:port).
+    /// Peer address (ip:port).
     pub addr: String,
-    /// SRV record priority (lower = preferred).
-    pub priority: u16,
-    /// SRV record weight (for load balancing among same priority).
-    pub weight: u16,
 }
 
 /// A discovered node with identity information from GetNodeInfo RPC.
@@ -102,30 +100,25 @@ pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
     }
 
     if let Some(domain) = &config.discovery_domain {
-        match dns_srv_lookup(domain).await {
-            Ok(srv_peers) => {
-                info!(count = srv_peers.len(), domain = %domain, "Discovered peers via DNS SRV");
+        match dns_lookup(domain, config.listen_addr.port()).await {
+            Ok(peers) => {
+                info!(count = peers.len(), domain = %domain, "Discovered peers via DNS");
 
                 // Cache the discovered peers
                 if let Some(cached_path) = &config.discovery_cache_path {
-                    if let Err(e) = save_cached_peers(cached_path, &srv_peers) {
+                    if let Err(e) = save_cached_peers(cached_path, &peers) {
                         warn!(error = %e, "Failed to cache discovered peers");
                     }
                 }
 
-                let mut sorted_peers = srv_peers;
-                sorted_peers.sort_by(|a, b| {
-                    a.priority.cmp(&b.priority).then_with(|| b.weight.cmp(&a.weight))
-                });
-
-                for peer in sorted_peers {
+                for peer in peers {
                     if let Ok(addr) = peer.addr.parse::<SocketAddr>() {
                         addresses.push(addr);
                     }
                 }
             },
             Err(e) => {
-                warn!(error = %e, domain = %domain, "DNS SRV lookup failed");
+                warn!(error = %e, domain = %domain, "DNS lookup failed");
             },
         }
     }
@@ -218,41 +211,32 @@ pub async fn discover_node_info(addr: SocketAddr, timeout: Duration) -> Option<D
     }
 }
 
-/// Perform DNS SRV lookup for `_ledger._tcp.<domain>`.
-async fn dns_srv_lookup(domain: &str) -> Result<Vec<DiscoveredPeer>, DiscoveryError> {
-    let srv_name = format!("_ledger._tcp.{}", domain);
-    debug!(name = %srv_name, "Performing DNS SRV lookup");
+/// Perform DNS A record lookup.
+///
+/// Queries the given domain for A/AAAA records and returns all discovered IPs
+/// with the specified port. This is optimized for Kubernetes headless Services,
+/// which return multiple A records (one per pod).
+///
+/// # Arguments
+///
+/// * `domain` - DNS name to query (e.g., `ledger.default.svc.cluster.local`)
+/// * `port` - Port to use for discovered peers (typically the gRPC listen port)
+async fn dns_lookup(domain: &str, port: u16) -> Result<Vec<DiscoveredPeer>, DiscoveryError> {
+    debug!(domain = %domain, port, "Performing DNS lookup");
 
     let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
 
-    let srv_records = resolver
-        .srv_lookup(&srv_name)
+    let ips = resolver
+        .lookup_ip(domain)
         .await
         .map_err(|e| DiscoveryError::DnsLookup(e.to_string()))?;
 
-    let mut peers = Vec::new();
+    let peers: Vec<DiscoveredPeer> = ips
+        .iter()
+        .map(|ip| DiscoveredPeer { addr: SocketAddr::new(ip, port).to_string() })
+        .collect();
 
-    for record in srv_records.iter() {
-        let target = record.target().to_string();
-        // Remove trailing dot from DNS name if present
-        let host = target.trim_end_matches('.');
-
-        match resolver.lookup_ip(host).await {
-            Ok(ips) => {
-                for ip in ips.iter() {
-                    peers.push(DiscoveredPeer {
-                        addr: SocketAddr::new(ip, record.port()).to_string(),
-                        priority: record.priority(),
-                        weight: record.weight(),
-                    });
-                }
-            },
-            Err(e) => {
-                warn!(target = %host, error = %e, "Failed to resolve SRV target");
-            },
-        }
-    }
-
+    debug!(count = peers.len(), domain = %domain, "DNS lookup returned IPs");
     Ok(peers)
 }
 
@@ -343,8 +327,8 @@ mod tests {
         let path_str = path.to_str().expect("path to string");
 
         let peers = vec![
-            DiscoveredPeer { addr: "192.168.1.1:50051".to_string(), priority: 10, weight: 100 },
-            DiscoveredPeer { addr: "192.168.1.2:50051".to_string(), priority: 20, weight: 50 },
+            DiscoveredPeer { addr: "192.168.1.1:50051".to_string() },
+            DiscoveredPeer { addr: "192.168.1.2:50051".to_string() },
         ];
 
         // Save
@@ -354,7 +338,7 @@ mod tests {
         let loaded = load_cached_peers(path_str, 3600).expect("load cache");
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].addr, "192.168.1.1:50051");
-        assert_eq!(loaded[0].priority, 10);
+        assert_eq!(loaded[1].addr, "192.168.1.2:50051");
     }
 
     #[test]

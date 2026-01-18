@@ -1,0 +1,17 @@
+# PodDisruptionBudget for InferaDB Ledger
+# Ensures Raft quorum is maintained during voluntary disruptions (upgrades, node drains).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ledger
+  namespace: inferadb
+  labels:
+    app.kubernetes.io/name: inferadb-ledger
+    app.kubernetes.io/component: pdb
+spec:
+  # For a 3-node cluster, allow at most 1 pod to be unavailable
+  # This maintains quorum (2/3 nodes) during rolling updates
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inferadb-ledger

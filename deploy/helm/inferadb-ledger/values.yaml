@@ -1,0 +1,138 @@
+# Default values for inferadb-ledger
+
+# Number of replicas (must be odd for Raft quorum: 1, 3, 5, 7)
+replicaCount: 3
+
+image:
+  repository: inferadb/ledger
+  tag: ""  # Defaults to Chart appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Ledger configuration
+config:
+  # gRPC listen address (usually leave as default)
+  listenAddr: "0.0.0.0:50051"
+
+  # Data directory (mounted from PVC)
+  dataDir: "/var/lib/ledger"
+
+  # Metrics endpoint (set to empty string to disable)
+  metricsAddr: "0.0.0.0:9090"
+
+  # Bootstrap configuration
+  bootstrap:
+    # Timeout waiting for peers (seconds)
+    timeoutSecs: 120
+    # Discovery polling interval (seconds)
+    pollSecs: 2
+
+  # Request handling
+  requests:
+    maxConcurrent: 100
+    timeoutSecs: 30
+
+  # Transaction batching
+  batch:
+    maxSize: 100
+    maxDelayMs: 10
+
+# Persistence configuration
+persistence:
+  enabled: true
+  # Storage class (leave empty for default)
+  storageClass: ""
+  # Access mode
+  accessMode: ReadWriteOnce
+  # Storage size
+  size: 10Gi
+  # Annotations for PVC
+  annotations: {}
+
+# Service configuration
+service:
+  # Client-facing service type
+  type: ClusterIP
+  # gRPC port
+  grpcPort: 50051
+  # Metrics port
+  metricsPort: 9090
+  # Annotations
+  annotations: {}
+
+# Resource limits
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Probes
+probes:
+  startup:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 24
+  liveness:
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 0
+    periodSeconds: 5
+    failureThreshold: 2
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  # For 3-node cluster, maxUnavailable=1 maintains quorum
+  maxUnavailable: 1
+
+# Service account
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity (anti-affinity is auto-configured for HA)
+affinity: {}
+
+# Additional pod annotations
+podAnnotations: {}
+
+# Additional pod labels
+podLabels: {}
+
+# Prometheus ServiceMonitor (requires Prometheus Operator)
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}

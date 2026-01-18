@@ -1,0 +1,24 @@
+apiVersion: v2
+name: inferadb-ledger
+description: Distributed blockchain database for cryptographically verifiable authorization
+type: application
+version: 0.1.0
+appVersion: "0.1.0-pre.1"
+
+home: https://inferadb.com
+sources:
+  - https://github.com/inferadb/ledger
+
+maintainers:
+  - name: InferaDB Contributors
+    url: https://github.com/inferadb
+
+keywords:
+  - database
+  - blockchain
+  - authorization
+  - raft
+  - distributed
+
+annotations:
+  artifacthub.io/license: MIT OR Apache-2.0

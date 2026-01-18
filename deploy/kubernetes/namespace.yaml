@@ -1,0 +1,8 @@
+# Namespace for InferaDB Ledger
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inferadb
+  labels:
+    app.kubernetes.io/name: inferadb-ledger
+    app.kubernetes.io/component: namespace

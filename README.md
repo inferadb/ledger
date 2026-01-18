@@ -189,21 +189,25 @@ Start all three nodes. They will:
 3. The node with lowest Snowflake ID bootstraps the cluster
 4. Other nodes join automatically
 
-#### DNS-Based Discovery (Production)
+#### DNS-Based Discovery (Production / Kubernetes)
 
-For production, use DNS SRV records instead of static peer caches:
-
-```bash
-# DNS SRV record format
-_ledger._tcp.cluster.example.com. 300 IN SRV 10 50 50051 node1.example.com.
-_ledger._tcp.cluster.example.com. 300 IN SRV 10 50 50051 node2.example.com.
-_ledger._tcp.cluster.example.com. 300 IN SRV 10 50 50051 node3.example.com.
-```
+For production, use DNS A records instead of static peer caches. This is optimized for Kubernetes headless Services:
 
 ```bash
-INFERADB__LEDGER__DISCOVERY_DOMAIN=cluster.example.com \
+# Set discovery_domain to a DNS name that returns A records for all peers
+# In Kubernetes, this is the headless service DNS name
+INFERADB__LEDGER__DISCOVERY_DOMAIN=ledger.default.svc.cluster.local \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
 ./target/release/ledger
+```
+
+For non-Kubernetes environments, configure DNS A records:
+
+```bash
+# DNS A records (all nodes share the same name, each with its own IP)
+ledger.cluster.example.com. 300 IN A 192.168.1.101
+ledger.cluster.example.com. 300 IN A 192.168.1.102
+ledger.cluster.example.com. 300 IN A 192.168.1.103
 ```
 
 ### Shutdown and Restart
@@ -423,6 +427,34 @@ bootstrap_expect = 3                  # 0=join, 1=single-node, 2+=coordinated
 This prevents split-brain scenarios where multiple nodes independently bootstrap separate clusters.
 
 Environment variables override config file values using the `INFERADB__LEDGER__` prefix (e.g., `INFERADB__LEDGER__BOOTSTRAP_EXPECT=3`).
+
+### Kubernetes Deployment
+
+For Kubernetes deployments, use the provided Helm chart or raw manifests.
+
+**Quick Start with Helm:**
+
+```bash
+helm install ledger ./deploy/helm/inferadb-ledger \
+  --namespace inferadb \
+  --create-namespace
+```
+
+**Quick Start with Kustomize:**
+
+```bash
+kubectl apply -k deploy/kubernetes/
+```
+
+The Kubernetes deployment uses:
+
+- **StatefulSet** for stable pod identities and persistent storage
+- **Headless Service** for DNS-based peer discovery
+- **PodDisruptionBudget** to maintain Raft quorum during rolling updates
+
+Pods discover each other via DNS A records from the headless service. Set `discovery_domain` to the service FQDN (e.g., `ledger.inferadb.svc.cluster.local`).
+
+See [`deploy/kubernetes/`](deploy/kubernetes/) for raw manifests and [`deploy/helm/`](deploy/helm/) for the Helm chart with configurable values.
 
 ## Crates
 

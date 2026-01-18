@@ -1,0 +1,45 @@
+# Headless Service for peer discovery
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inferadb-ledger.headlessServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferadb-ledger.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headless
+spec:
+  clusterIP: None
+  selector:
+    {{- include "inferadb-ledger.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+    {{- if .Values.config.metricsAddr }}
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+    {{- end }}
+  publishNotReadyAddresses: true
+---
+# Client Service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inferadb-ledger.fullname" . }}-client
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferadb-ledger.labels" . | nindent 4 }}
+    app.kubernetes.io/component: client
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "inferadb-ledger.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc

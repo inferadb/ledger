@@ -1,0 +1,108 @@
+# StatefulSet for InferaDB Ledger
+# Provides stable network identities and persistent storage for Raft consensus.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ledger
+  namespace: inferadb
+  labels:
+    app.kubernetes.io/name: inferadb-ledger
+    app.kubernetes.io/component: server
+spec:
+  serviceName: ledger  # Must match headless service name
+  replicas: 3
+  podManagementPolicy: Parallel  # Start all pods simultaneously for faster bootstrap
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inferadb-ledger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inferadb-ledger
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: ledger
+          image: inferadb/ledger:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: INFERADB__LEDGER__LISTEN_ADDR
+              value: "0.0.0.0:50051"
+            - name: INFERADB__LEDGER__DATA_DIR
+              value: "/var/lib/ledger"
+            - name: INFERADB__LEDGER__METRICS_ADDR
+              value: "0.0.0.0:9090"
+            # Discovery via headless service DNS
+            - name: INFERADB__LEDGER__DISCOVERY_DOMAIN
+              value: "ledger.inferadb.svc.cluster.local"
+            # Match replica count for coordinated bootstrap
+            - name: INFERADB__LEDGER__BOOTSTRAP_EXPECT
+              value: "3"
+            - name: INFERADB__LEDGER__BOOTSTRAP_TIMEOUT_SECS
+              value: "120"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ledger
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          # Startup probe: allow time for Raft bootstrap
+          startupProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 24  # 2 minutes total
+          # Liveness probe: detect hung processes
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          # Readiness probe: only route traffic to healthy nodes
+          readinessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: inferadb-ledger
+          app.kubernetes.io/component: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # Uncomment and set your storage class
+        # storageClassName: fast-ssd

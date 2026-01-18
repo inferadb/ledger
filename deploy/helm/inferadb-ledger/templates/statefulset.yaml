@@ -1,0 +1,148 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "inferadb-ledger.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferadb-ledger.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "inferadb-ledger.headlessServiceName" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "inferadb-ledger.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inferadb-ledger.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.config.metricsAddr }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.service.metricsPort }}"
+        prometheus.io/path: "/metrics"
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "inferadb-ledger.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if or .Values.affinity (gt (int .Values.replicaCount) 1) }}
+      affinity:
+        {{- if .Values.affinity }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- else }}
+        # Default: spread pods across nodes for HA
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "inferadb-ledger.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ledger
+          image: {{ include "inferadb-ledger.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            {{- if .Values.config.metricsAddr }}
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: INFERADB__LEDGER__LISTEN_ADDR
+              value: {{ .Values.config.listenAddr | quote }}
+            - name: INFERADB__LEDGER__DATA_DIR
+              value: {{ .Values.config.dataDir | quote }}
+            {{- if .Values.config.metricsAddr }}
+            - name: INFERADB__LEDGER__METRICS_ADDR
+              value: {{ .Values.config.metricsAddr | quote }}
+            {{- end }}
+            - name: INFERADB__LEDGER__DISCOVERY_DOMAIN
+              value: {{ include "inferadb-ledger.discoveryDomain" . | quote }}
+            - name: INFERADB__LEDGER__BOOTSTRAP_EXPECT
+              value: {{ .Values.replicaCount | quote }}
+            - name: INFERADB__LEDGER__BOOTSTRAP_TIMEOUT_SECS
+              value: {{ .Values.config.bootstrap.timeoutSecs | quote }}
+            - name: INFERADB__LEDGER__BOOTSTRAP_POLL_SECS
+              value: {{ .Values.config.bootstrap.pollSecs | quote }}
+            - name: INFERADB__LEDGER__REQUESTS_MAX_CONCURRENT
+              value: {{ .Values.config.requests.maxConcurrent | quote }}
+            - name: INFERADB__LEDGER__REQUESTS_TIMEOUT_SECS
+              value: {{ .Values.config.requests.timeoutSecs | quote }}
+            - name: INFERADB__LEDGER__BATCH_MAX_SIZE
+              value: {{ .Values.config.batch.maxSize | quote }}
+            - name: INFERADB__LEDGER__BATCH_MAX_DELAY_MS
+              value: {{ .Values.config.batch.maxDelayMs | quote }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.config.dataDir }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "inferadb-ledger.labels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

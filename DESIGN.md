@@ -2231,7 +2231,7 @@ flowchart TD
     start["Node starting up"]
     cached{"1. Cached peers?"}
     config{"2. Config bootstrap list?"}
-    dns{"3. DNS SRV lookup?"}
+    dns{"3. DNS A lookup?"}
     connected["Connected to cluster"]
     failed["Bootstrap failed"]
 
@@ -2244,26 +2244,29 @@ flowchart TD
     dns -->|Failed| failed
 ```
 
-#### DNS SRV Records
+#### DNS A Records
 
-DNS SRV records enable dynamic bootstrap node management:
+DNS A record lookups enable dynamic peer discovery, optimized for Kubernetes headless Services:
 
 ```
-; Zone file example
-_ledger._tcp.infra.example.com. 300 IN SRV 10 50 9000 node1.infra.example.com.
-_ledger._tcp.infra.example.com. 300 IN SRV 10 50 9000 node2.infra.example.com.
-_ledger._tcp.infra.example.com. 300 IN SRV 20 50 9000 node3.infra.example.com.
+; Zone file example (traditional DNS)
+ledger.infra.example.com. 300 IN A 192.168.1.101
+ledger.infra.example.com. 300 IN A 192.168.1.102
+ledger.infra.example.com. 300 IN A 192.168.1.103
+
+; Kubernetes headless Service (automatic)
+; ledger.inferadb.svc.cluster.local returns A records for all pods
 ```
 
 **Resolution:**
 
 ```rust
 struct BootstrapConfig {
-    /// DNS domain for SRV lookup (e.g., "infra.example.com")
-    srv_domain: Option<String>,
+    /// DNS domain for A record lookup (e.g., "ledger.inferadb.svc.cluster.local")
+    discovery_domain: Option<String>,
 
-    /// Static bootstrap nodes (fallback)
-    bootstrap_nodes: Vec<SocketAddr>,
+    /// Port to use with discovered IPs
+    listen_port: u16,
 
     /// Cached peers from previous session
     cached_peers_path: PathBuf,
@@ -2277,14 +2280,11 @@ async fn resolve_bootstrap_peers(config: &BootstrapConfig) -> Vec<SocketAddr> {
         peers.extend(cached);
     }
 
-    // 2. Static config (operator-provided)
-    peers.extend(&config.bootstrap_nodes);
-
-    // 3. DNS SRV lookup (dynamic, no config changes needed)
-    if let Some(domain) = &config.srv_domain {
-        if let Ok(records) = dns_srv_lookup(&format!("_ledger._tcp.{}", domain)).await {
-            for record in records {
-                peers.push(SocketAddr::new(record.target, record.port));
+    // 2. DNS A lookup (dynamic, K8s-native)
+    if let Some(domain) = &config.discovery_domain {
+        if let Ok(ips) = dns_lookup(domain).await {
+            for ip in ips {
+                peers.push(SocketAddr::new(ip, config.listen_port));
             }
         }
     }
@@ -2298,9 +2298,10 @@ async fn resolve_bootstrap_peers(config: &BootstrapConfig) -> Vec<SocketAddr> {
 
 **Benefits:**
 
+- Native Kubernetes integration via headless Services
+- Simpler DNS configuration (standard A records)
 - Update bootstrap nodes via DNS without client reconfiguration
 - TTL-based caching reduces DNS load
-- Priority/weight fields enable load balancing
 - Works with split-horizon DNS for different environments
 
 #### Peer Exchange Protocol
@@ -2346,7 +2347,7 @@ On _system state change:
 
 ```
 New Node Startup:
-  1. Resolve bootstrap peers (cached → config → DNS SRV)
+  1. Resolve bootstrap peers (cached → DNS A lookup)
   2. Connect to ANY reachable peer
   3. Call GetPeers() to discover more nodes
   4. Request _system Raft membership (AddNode)
