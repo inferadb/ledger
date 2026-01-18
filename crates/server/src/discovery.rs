@@ -226,10 +226,8 @@ async fn dns_lookup(domain: &str, port: u16) -> Result<Vec<DiscoveredPeer>, Disc
 
     let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
 
-    let ips = resolver
-        .lookup_ip(domain)
-        .await
-        .map_err(|e| DiscoveryError::DnsLookup(e.to_string()))?;
+    let ips =
+        resolver.lookup_ip(domain).await.map_err(|e| DiscoveryError::DnsLookup(e.to_string()))?;
 
     let peers: Vec<DiscoveredPeer> = ips
         .iter()

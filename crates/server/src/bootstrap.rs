@@ -407,9 +407,7 @@ pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
     let peer_addresses = resolve_bootstrap_peers(config).await;
 
     if peer_addresses.is_empty() {
-        return Err(BootstrapError::Join(
-            "No peers available (checked cache and DNS)".to_string(),
-        ));
+        return Err(BootstrapError::Join("No peers available (checked cache and DNS)".to_string()));
     }
 
     info!(peer_count = peer_addresses.len(), "Resolved bootstrap peers for cluster join");
