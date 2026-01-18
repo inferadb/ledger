@@ -107,11 +107,11 @@ cargo run --release -p inferadb-ledger-server
 
 Ledger uses coordinated bootstrap based on `bootstrap_expect`:
 
-| Value | Mode | Behavior |
-|-------|------|----------|
-| `0` | Join | Wait to be added to existing cluster via AdminService |
-| `1` | Single-node | Bootstrap immediately, no coordination |
-| `2+` | Coordinated | Wait for N peers, lowest-ID node bootstraps all |
+| Value | Mode        | Behavior                                              |
+| ----- | ----------- | ----------------------------------------------------- |
+| `0`   | Join        | Wait to be added to existing cluster via AdminService |
+| `1`   | Single-node | Bootstrap immediately, no coordination                |
+| `2+`  | Coordinated | Wait for N peers, lowest-ID node bootstraps all       |
 
 #### Single-Node Cluster
 
@@ -131,6 +131,7 @@ INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
 Each node needs its own data directory and a peer cache file listing other nodes.
 
 **Node 1** (`/var/lib/ledger-1`):
+
 ```bash
 # Create peer cache with other nodes
 cat > /var/lib/ledger-1/peers.cache << 'EOF'
@@ -148,6 +149,7 @@ INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-1/peers.cache \
 ```
 
 **Node 2** (`/var/lib/ledger-2`):
+
 ```bash
 cat > /var/lib/ledger-2/peers.cache << 'EOF'
 {"cached_at": 0, "peers": [
@@ -164,6 +166,7 @@ INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-2/peers.cache \
 ```
 
 **Node 3** (`/var/lib/ledger-3`):
+
 ```bash
 cat > /var/lib/ledger-3/peers.cache << 'EOF'
 {"cached_at": 0, "peers": [
@@ -180,6 +183,7 @@ INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-3/peers.cache \
 ```
 
 Start all three nodes. They will:
+
 1. Discover each other via peer cache
 2. Exchange node info via `GetNodeInfo` RPC
 3. The node with lowest Snowflake ID bootstraps the cluster
@@ -214,6 +218,7 @@ kill $(cat /var/lib/ledger/ledger.pid)
 ```
 
 The node will:
+
 1. Stop accepting new requests
 2. Complete in-flight operations
 3. Flush pending writes to disk
@@ -228,6 +233,7 @@ Simply start the node with the same `data_dir`. The persisted `node_id` file ens
 ```
 
 On restart:
+
 1. Node loads persisted `node_id` from `{data_dir}/node_id`
 2. Recovers Raft state from `raft.db`
 3. Replays log entries after last snapshot
@@ -238,6 +244,7 @@ On restart:
 Stop nodes in any order. Restart in any order—Raft leader election handles coordination.
 
 For a 3-node cluster, maintain quorum (2 nodes) during rolling restarts:
+
 1. Stop node 1, wait for it to be removed from Raft
 2. Restart node 1, wait for it to rejoin
 3. Repeat for nodes 2 and 3
@@ -263,6 +270,7 @@ INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-new/peers.cache \
 ```
 
 The node will:
+
 1. Start its gRPC server
 2. Connect to discovered peers
 3. Wait for AdminService `JoinCluster` RPC from the leader
@@ -292,6 +300,7 @@ The `data_dir` contains all persistent state:
 #### Backup Methods
 
 **Cold backup** (node stopped):
+
 ```bash
 # Stop the node
 kill $(cat /var/lib/ledger/ledger.pid)
@@ -314,6 +323,7 @@ cp "$LATEST" /backup/
 ```
 
 Snapshots include:
+
 - State data (zstd compressed)
 - Shard height
 - Vault state roots
@@ -321,10 +331,10 @@ Snapshots include:
 
 #### Backup Frequency
 
-| Data | Recommended Frequency |
-|------|----------------------|
-| Full `data_dir` | Daily (cold backup during maintenance window) |
-| Snapshots | Hourly (automatic, copy latest) |
+| Data                 | Recommended Frequency                              |
+| -------------------- | -------------------------------------------------- |
+| Full `data_dir`      | Daily (cold backup during maintenance window)      |
+| Snapshots            | Hourly (automatic, copy latest)                    |
 | Off-site replication | Real-time (run 3+ nodes across availability zones) |
 
 ### Restore
@@ -348,6 +358,7 @@ cp -r /backup/ledger-20240115-030000 /var/lib/ledger
 ```
 
 The node will:
+
 1. Load the restored `node_id`
 2. Detect it's behind the cluster
 3. Catch up via Raft log replication from peers
@@ -369,6 +380,7 @@ INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
 ```
 
 The node will:
+
 1. Generate a new `node_id`
 2. Load state from snapshot
 3. Join the cluster as a new member
