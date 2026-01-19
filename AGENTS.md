@@ -1,63 +1,68 @@
 # AGENTS.md
 
-This file provides guidance for working with code in this repository.
+InferaDB Ledger: blockchain database for cryptographically verifiable authorization. Rust 1.85 (2024 edition), gRPC API.
 
-## Project Overview
+## Critical Constraints
 
-InferaDB Ledger is a blockchain database for cryptographically verifiable authorization. It commits state changes cryptographically, replicates via Raft consensus, and enables client-side verification. Built in Rust 1.85 (2024 edition) with gRPC API.
+**These rules are non-negotiable:**
+
+- No `unsafe` code
+- No `.unwrap()` — use snafu `.context()`
+- No `panic!`, `todo!()`, `unimplemented!()`
+- No placeholder stubs — fully implement or don't write
+- No TODO/FIXME/HACK comments
+- No backwards compatibility shims or feature flags
+- Write tests before implementation, target 90%+ coverage
 
 ## Source of Truth
 
-- **DESIGN.md** — Authoritative specification for all implementations. Code must match the design doc.
-- **proto/** — gRPC service and message definitions. Keep in sync with DESIGN.md and implementation.
+1. **DESIGN.md** — authoritative spec. Code must match.
+2. **proto/** — gRPC definitions. Keep synced with DESIGN.md.
 
 ## Serena (MCP Server)
 
-Always activate and use Serena for codebase navigation and editing. Serena provides semantic tooling that understands code structure rather than treating files as raw text.
+Activate at session start: `mcp__plugin_serena_serena__activate_project`
 
-**Activation:** Run `mcp__plugin_serena_serena__activate_project` at session start if not already active.
+**Use semantic tools, not file operations:**
 
-**Prefer semantic tools over file operations:**
+| Task                 | Use                                            | Not                  |
+| -------------------- | ---------------------------------------------- | -------------------- |
+| Understand file      | `get_symbols_overview`                         | Reading entire file  |
+| Find function/struct | `find_symbol` with pattern                     | Grep/glob            |
+| Find usages          | `find_referencing_symbols`                     | Grep for text        |
+| Edit function        | `replace_symbol_body`                          | Raw text replacement |
+| Add code             | `insert_after_symbol` / `insert_before_symbol` | Line number editing  |
+| Search patterns      | `search_for_pattern` with `relative_path`      | Global grep          |
 
-| Task                   | Use Serena                                       | Avoid                     |
-| ---------------------- | ------------------------------------------------ | ------------------------- |
-| Understand a file      | `get_symbols_overview`                           | Reading entire file       |
-| Find a function/struct | `find_symbol` with name pattern                  | Grep/glob searching       |
-| Find usages            | `find_referencing_symbols`                       | Grep for text             |
-| Edit a function        | `replace_symbol_body`                            | Raw text replacement      |
-| Add new code           | `insert_after_symbol` / `insert_before_symbol`   | Editing with line numbers |
-| Search patterns        | `search_for_pattern` with `relative_path` filter | Global grep               |
+**Symbol paths:** `ClassName/method_name` format. Patterns: `Foo` (any), `Foo/bar` (nested), `/Foo/bar` (exact root path).
 
 **Workflow:**
 
-1. Use `get_symbols_overview` to understand file structure before diving in
-2. Use `find_symbol` with `depth=1` to see class methods without reading bodies
-3. Only request `include_body=True` when you need the implementation
-4. Use `find_referencing_symbols` before refactoring to find all callers
-5. Prefer `replace_symbol_body` for targeted edits over full-file rewrites
-
-**Name paths:** Symbols are identified by paths like `ClassName/method_name`. Use patterns like `Foo` (any symbol named Foo), `Foo/bar` (bar inside Foo), or `/Foo/bar` (exact path from file root).
+1. `get_symbols_overview` first
+2. `find_symbol` with `depth=1` to see methods without bodies
+3. `include_body=True` only when needed
+4. `find_referencing_symbols` before any refactor
 
 ## Commands
 
 ```bash
 # Build
-cargo build                                # All crates
-cargo build -p inferadb-ledger-types       # Single crate
+cargo build                                # all crates
+cargo build -p inferadb-ledger-types       # single crate
 
 # Test
-cargo test                                 # All tests
-cargo test -p inferadb-ledger-state        # Single crate
-cargo test test_name -- --nocapture # Single test with output
+cargo test                                 # all tests
+cargo test -p inferadb-ledger-state        # single crate
+cargo test test_name -- --nocapture        # single test with output
 
-# Lint & Format (nightly required for fmt)
+# Lint & Format
 cargo +nightly fmt
 cargo +1.85 clippy --all-targets -- -D warnings
 
-# Full check before commit
+# Pre-commit check
 cargo +nightly fmt --check && cargo +1.85 clippy --all-targets -- -D warnings && cargo test
 
-# Generate protobuf (from proto/ directory)
+# Protobuf generation
 cd proto && buf generate
 
 # Run server
@@ -67,84 +72,49 @@ cargo run -p inferadb-ledger-server --release -- --config config.toml
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      gRPC Services                          │
-│   ReadService │ WriteService │ AdminService │ HealthService │
-├─────────────────────────────────────────────────────────────┤
-│           inferadb-ledger-raft (consensus)                  │
-│   Raft via openraft │ Log storage │ Batching │ Idempotency  │
-├─────────────────────────────────────────────────────────────┤
-│           inferadb-ledger-state (domain)                    │
-│   Entity/Relationship stores │ State roots │ Indexes        │
-├─────────────────────────────────────────────────────────────┤
-│           inferadb-ledger-store (engine)                    │
-│   B+ tree │ Pages │ Transactions │ Backends                 │
-├─────────────────────────────────────────────────────────────┤
-│           inferadb-ledger-types (shared)                    │
-│   Hash primitives │ Merkle proofs │ Config │ Error types    │
-└─────────────────────────────────────────────────────────────┘
+gRPC Services: ReadService | WriteService | AdminService | HealthService
+       ↓
+inferadb-ledger-raft    — Raft consensus, log storage, batching, idempotency
+       ↓
+inferadb-ledger-state   — Entity/Relationship stores, state roots, indexes
+       ↓
+inferadb-ledger-store   — B+ tree engine, pages, transactions, backends
+       ↓
+inferadb-ledger-types   — Hash primitives, Merkle proofs, config, errors
 ```
 
 **Crates:**
 
-- `inferadb-ledger-types` — Core types, SHA-256/seahash, merkle tree, snafu errors
-- `inferadb-ledger-store` — B+ tree database engine, page management, transactions, memory/file backends
-- `inferadb-ledger-state` — Domain state management, entity/relationship CRUD, indexes, state root computation
-- `inferadb-ledger-raft` — openraft integration, log storage, gRPC services, transaction batching
-- `inferadb-ledger-server` — Main binary, bootstrap coordination, config loading, node ID generation
+- `types` — SHA-256/seahash, merkle tree, snafu errors
+- `store` — B+ tree engine, page management, memory/file backends
+- `state` — Domain state, entity/relationship CRUD, state root computation
+- `raft` — openraft integration, gRPC services, transaction batching
+- `server` — Binary, bootstrap, config, node ID generation
 
-**Key abstractions:**
+**Key types:**
 
-- `StorageEngine` (state/engine.rs) — inferadb-ledger-store wrapper with transaction helpers
-- `StateLayer` (state/state.rs) — Applies blocks, computes bucket-based state roots
-- `LedgerServer` (raft/server.rs) — gRPC server combining all services with Raft
+- `StorageEngine` (state/engine.rs) — store wrapper with transaction helpers
+- `StateLayer` (state/state.rs) — applies blocks, computes state roots
+- `LedgerServer` (raft/server.rs) — gRPC server combining services with Raft
 
 **Data model:**
 
-- Namespace → isolated storage unit per organization
-- Vault → relationship store within namespace, maintains its own blockchain
-- Entity → key-value data with TTL and versioning
+- Namespace → isolated storage per org
+- Vault → relationship store within namespace, owns its blockchain
+- Entity → key-value with TTL and versioning
 - Relationship → authorization tuple (resource, relation, subject)
-- Shard → multiple namespaces sharing a Raft group for efficiency
+- Shard → namespaces sharing a Raft group
 
-## Code Conventions
+## Error Handling
 
-**Lints (workspace-level):**
+Use `snafu` with backtraces. Propagate with `?`. No `.unwrap()`.
 
-- `unsafe_code = "deny"` — No unsafe
-- `unwrap_used = "deny"` — Use snafu `.context()` instead
-- `panic = "deny"` — No panics
-- `missing_docs = "warn"` — Document public items
+## Code Quality
 
-**Error handling:** Use `snafu` with backtraces. Propagate with `?` operator.
+**Linting:** `cargo +1.85 clippy --all-targets -- -D warnings`
 
-**Formatting:** Nightly toolchain required (`cargo +nightly fmt`).
+**Formatting:** `cargo +nightly fmt` (nightly required)
 
-## Implementation Standards
+**Doc comments:** Use ` ```no_run ` for code examples — prevents `cargo test` from executing examples while still validating syntax via `cargo doc`.
 
-- No `todo!()`, `unimplemented!()`, or placeholder stubs — fully implement or don't write
-- No backwards compatibility shims, feature flags, or deprecation patterns
-- No tech debt markers (TODO, FIXME, HACK)
-- TDD: write tests before implementation, target 90%+ coverage
-
-## Writing Style
-
-For documentation, comments, and markdown files:
-
-**Conciseness:**
-
-- "because" not "due to the fact that"
-- "to" not "in order to"
-- "now" not "at this point in time"
-- "if" not "in the event that"
-
-**No filler or weak modifiers:**
-
-- "can" not "has the ability to" / "is able to"
-- Remove: very, really, quite, extremely, basically, actually
-
-**Markdown:**
-
-- Headers: plain text, no bold, no numbering
-- Code blocks: always specify language
-- File naming: kebab-case
+**Markdown:** Be concise, no filler words, kebab-case filenames, specify language in code blocks. Prefer showing to telling.
