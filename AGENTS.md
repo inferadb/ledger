@@ -115,6 +115,8 @@ Use `snafu` with backtraces. Propagate with `?`. No `.unwrap()`.
 
 **Formatting:** `cargo +nightly fmt` (nightly required)
 
-**Doc comments:** Use ` ```no_run ` for code examples — prevents `cargo test` from executing examples while still validating syntax via `cargo doc`.
+**Doc comments:** Use ```` ```no_run ```` for code examples — `cargo test` skips execution; `cargo doc` validates syntax.
 
 **Markdown:** Be concise, no filler words, kebab-case filenames, specify language in code blocks. Prefer showing to telling.
+
+**Writing:** No filler (very, really, basically), no wordiness (in order to → to, due to the fact → because), active voice, specific language.
