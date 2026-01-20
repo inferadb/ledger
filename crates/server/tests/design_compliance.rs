@@ -919,10 +919,10 @@ async fn test_sequence_survives_leader_failover() {
                 if node.id == original_leader_id {
                     continue; // Skip the old leader
                 }
-                if let Some(leader) = node.current_leader() {
-                    if leader != original_leader_id {
-                        return leader;
-                    }
+                if let Some(leader) = node.current_leader()
+                    && leader != original_leader_id
+                {
+                    return leader;
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

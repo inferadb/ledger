@@ -8,6 +8,8 @@
 //! - System namespace types and cluster membership
 //! - Time-travel index for historical queries
 
+#![deny(unsafe_code)]
+
 mod block_archive;
 mod bucket;
 mod engine;

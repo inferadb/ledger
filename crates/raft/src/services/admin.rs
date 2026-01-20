@@ -532,19 +532,19 @@ impl AdminService for AdminServiceImpl {
                     };
 
                     // Verify chain continuity (previous_vault_hash)
-                    if let Some(expected_prev) = last_vault_hash {
-                        if entry.previous_vault_hash != expected_prev {
-                            issues.push(IntegrityIssue {
-                                block_height: height,
-                                issue_type: "chain_break".to_string(),
-                                description: format!(
-                                    "Previous hash mismatch at height {}: expected {:x?}, got {:x?}",
-                                    height,
-                                    &expected_prev[..8],
-                                    &entry.previous_vault_hash[..8]
-                                ),
-                            });
-                        }
+                    if let Some(expected_prev) = last_vault_hash
+                        && entry.previous_vault_hash != expected_prev
+                    {
+                        issues.push(IntegrityIssue {
+                            block_height: height,
+                            issue_type: "chain_break".to_string(),
+                            description: format!(
+                                "Previous hash mismatch at height {}: expected {:x?}, got {:x?}",
+                                height,
+                                &expected_prev[..8],
+                                &entry.previous_vault_hash[..8]
+                            ),
+                        });
                     }
 
                     // Apply transactions to temp state
@@ -589,21 +589,20 @@ impl AdminService for AdminServiceImpl {
 
                 // Compare final replayed state root against current state
                 let current_state = &*self.state;
-                if let Ok(current_root) = current_state.compute_state_root(*v_id) {
-                    if let Ok(replayed_root) = temp_state.compute_state_root(*v_id) {
-                        if current_root != replayed_root {
-                            issues.push(IntegrityIssue {
-                                block_height: *expected_height,
-                                issue_type: "final_state_mismatch".to_string(),
-                                description: format!(
-                                    "Final state root mismatch for vault {}: current {:x?}, replayed {:x?}",
-                                    v_id,
-                                    &current_root[..8],
-                                    &replayed_root[..8]
-                                ),
-                            });
-                        }
-                    }
+                if let Ok(current_root) = current_state.compute_state_root(*v_id)
+                    && let Ok(replayed_root) = temp_state.compute_state_root(*v_id)
+                    && current_root != replayed_root
+                {
+                    issues.push(IntegrityIssue {
+                        block_height: *expected_height,
+                        issue_type: "final_state_mismatch".to_string(),
+                        description: format!(
+                            "Final state root mismatch for vault {}: current {:x?}, replayed {:x?}",
+                            v_id,
+                            &current_root[..8],
+                            &replayed_root[..8]
+                        ),
+                    });
                 }
             }
         } else {
@@ -1091,15 +1090,15 @@ impl AdminService for AdminServiceImpl {
             };
 
             // Verify chain continuity
-            if let Some(expected_prev) = last_vault_hash {
-                if entry.previous_vault_hash != expected_prev {
-                    tracing::warn!(
-                        height,
-                        "Chain break detected during recovery: expected {:x?}, got {:x?}",
-                        &expected_prev[..8],
-                        &entry.previous_vault_hash[..8]
-                    );
-                }
+            if let Some(expected_prev) = last_vault_hash
+                && entry.previous_vault_hash != expected_prev
+            {
+                tracing::warn!(
+                    height,
+                    "Chain break detected during recovery: expected {:x?}, got {:x?}",
+                    &expected_prev[..8],
+                    &entry.previous_vault_hash[..8]
+                );
             }
 
             // Apply transactions

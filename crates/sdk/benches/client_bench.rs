@@ -322,7 +322,7 @@ fn bench_mixed_read_heavy(c: &mut Criterion) {
     c.bench_function("mixed_90read_10write", |b| {
         b.to_async(&rt).iter(|| {
             op_counter += 1;
-            let is_write = op_counter % 10 == 0;
+            let is_write = op_counter.is_multiple_of(10);
             let key_num = op_counter;
             let client = client.clone();
 

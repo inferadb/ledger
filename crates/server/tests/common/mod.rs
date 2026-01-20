@@ -325,10 +325,10 @@ impl TestCluster {
             let leaders: Vec<Option<u64>> = self.nodes.iter().map(|n| n.current_leader()).collect();
 
             // Check if all nodes report the same leader (and it's not None)
-            if let Some(first) = leaders.first().copied().flatten() {
-                if leaders.iter().all(|&l| l == Some(first)) {
-                    return Some(first);
-                }
+            if let Some(first) = leaders.first().copied().flatten()
+                && leaders.iter().all(|&l| l == Some(first))
+            {
+                return Some(first);
             }
 
             tokio::time::sleep(Duration::from_millis(50)).await;

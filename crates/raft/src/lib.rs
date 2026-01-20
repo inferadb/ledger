@@ -5,7 +5,9 @@
 //! - Combined RaftStorage implementation (log + state machine)
 //! - gRPC services (Read, Write, Admin, Health, Discovery)
 //! - Inter-node Raft network transport
-//!
+
+#![deny(unsafe_code)]
+
 //! ## Architecture Note
 //!
 //! OpenRaft 0.9 has sealed traits for `RaftLogStorage` and `RaftStateMachine` (v2 API).

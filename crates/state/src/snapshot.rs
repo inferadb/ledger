@@ -393,10 +393,10 @@ impl SnapshotManager {
 
         for entry in fs::read_dir(&self.snapshot_dir).context(IoSnafu)? {
             let entry = entry.context(IoSnafu)?;
-            if let Some(filename) = entry.file_name().to_str() {
-                if let Some(height) = parse_snapshot_filename(filename) {
-                    heights.push(height);
-                }
+            if let Some(filename) = entry.file_name().to_str()
+                && let Some(height) = parse_snapshot_filename(filename)
+            {
+                heights.push(height);
             }
         }
 

@@ -181,11 +181,11 @@ pub fn load_or_generate_node_id(data_dir: &Path) -> Result<u64, NodeIdError> {
         Ok(id)
     } else {
         // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .context(CreateDirSnafu { path: parent.display().to_string() })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)
+                .context(CreateDirSnafu { path: parent.display().to_string() })?;
         }
 
         let id = generate_snowflake_id()?;

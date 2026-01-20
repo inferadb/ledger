@@ -7,6 +7,8 @@
 //! - Merkle tree implementation
 //! - Error types using snafu
 
+#![deny(unsafe_code)]
+
 pub mod codec;
 pub mod config;
 pub mod error;

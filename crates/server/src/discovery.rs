@@ -105,10 +105,10 @@ pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
                 info!(count = peers.len(), domain = %domain, "Discovered peers via DNS");
 
                 // Cache the discovered peers
-                if let Some(cached_path) = &config.discovery_cache_path {
-                    if let Err(e) = save_cached_peers(cached_path, &peers) {
-                        warn!(error = %e, "Failed to cache discovered peers");
-                    }
+                if let Some(cached_path) = &config.discovery_cache_path
+                    && let Err(e) = save_cached_peers(cached_path, &peers)
+                {
+                    warn!(error = %e, "Failed to cache discovered peers");
                 }
 
                 for peer in peers {

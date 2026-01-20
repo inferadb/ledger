@@ -166,7 +166,7 @@ impl From<&InternalMerkleProof> for proto::MerkleProof {
         for hash in &internal.proof_hashes {
             // If current index is even (left child), sibling is on the right
             // If current index is odd (right child), sibling is on the left
-            let direction = if index % 2 == 0 {
+            let direction = if index.is_multiple_of(2) {
                 Direction::Right // sibling is right, so we do hash(current || sibling)
             } else {
                 Direction::Left // sibling is left, so we do hash(sibling || current)

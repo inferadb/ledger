@@ -343,49 +343,48 @@ impl ReadServiceImpl {
             // Find the vault's height in this snapshot
             if let Some(vault_meta) =
                 snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id)
+                && vault_meta.vault_height <= target_height
             {
-                if vault_meta.vault_height <= target_height {
-                    // This snapshot is usable - load its entities into temp_state
-                    if let Some(entities) = snapshot.state.vault_entities.get(&vault_id) {
-                        // Convert entities to SetEntity operations for replay
-                        let operations: Vec<inferadb_ledger_types::Operation> = entities
-                            .iter()
-                            .map(|entity| {
-                                // Entity.key is Vec<u8>, convert to String for Operation
-                                let key = String::from_utf8_lossy(&entity.key).into_owned();
-                                inferadb_ledger_types::Operation::SetEntity {
-                                    key,
-                                    value: entity.value.clone(),
-                                    condition: None, // No condition for snapshot restore
-                                    expires_at: if entity.expires_at == 0 {
-                                        None
-                                    } else {
-                                        Some(entity.expires_at)
-                                    },
-                                }
-                            })
-                            .collect();
-
-                        // Apply all entities at the snapshot height
-                        if !operations.is_empty() {
-                            if let Err(e) = temp_state.apply_operations(
-                                vault_id,
-                                &operations,
-                                vault_meta.vault_height,
-                            ) {
-                                debug!("Failed to restore entities from snapshot: {:?}", e);
-                                return (1, false);
+                // This snapshot is usable - load its entities into temp_state
+                if let Some(entities) = snapshot.state.vault_entities.get(&vault_id) {
+                    // Convert entities to SetEntity operations for replay
+                    let operations: Vec<inferadb_ledger_types::Operation> = entities
+                        .iter()
+                        .map(|entity| {
+                            // Entity.key is Vec<u8>, convert to String for Operation
+                            let key = String::from_utf8_lossy(&entity.key).into_owned();
+                            inferadb_ledger_types::Operation::SetEntity {
+                                key,
+                                value: entity.value.clone(),
+                                condition: None, // No condition for snapshot restore
+                                expires_at: if entity.expires_at == 0 {
+                                    None
+                                } else {
+                                    Some(entity.expires_at)
+                                },
                             }
-                        }
-                    }
+                        })
+                        .collect();
 
-                    debug!(
-                        shard_height,
-                        vault_height = vault_meta.vault_height,
-                        "Loaded snapshot for historical read"
-                    );
-                    return (vault_meta.vault_height + 1, true);
+                    // Apply all entities at the snapshot height
+                    if !operations.is_empty()
+                        && let Err(e) = temp_state.apply_operations(
+                            vault_id,
+                            &operations,
+                            vault_meta.vault_height,
+                        )
+                    {
+                        debug!("Failed to restore entities from snapshot: {:?}", e);
+                        return (1, false);
+                    }
                 }
+
+                debug!(
+                    shard_height,
+                    vault_height = vault_meta.vault_height,
+                    "Loaded snapshot for historical read"
+                );
+                return (vault_meta.vault_height + 1, true);
             }
         }
 

@@ -52,11 +52,11 @@ impl MultiShardWriteService {
 
     /// Check per-namespace rate limit.
     fn check_rate_limit(&self, namespace_id: i64) -> Result<(), Status> {
-        if let Some(limiter) = &self.rate_limiter {
-            if let Err(e) = limiter.check(namespace_id) {
-                warn!(namespace_id, "Rate limit exceeded");
-                return Err(Status::resource_exhausted(e.to_string()));
-            }
+        if let Some(limiter) = &self.rate_limiter
+            && let Err(e) = limiter.check(namespace_id)
+        {
+            warn!(namespace_id, "Rate limit exceeded");
+            return Err(Status::resource_exhausted(e.to_string()));
         }
         Ok(())
     }

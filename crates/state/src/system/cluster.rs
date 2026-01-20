@@ -195,10 +195,10 @@ impl ClusterMembership {
             .min_by_key(|(_, n)| n.joined_at)
             .map(|(id, _)| id.clone());
 
-        if let Some(ref node_id) = learner_to_promote {
-            if let Some(node) = self.nodes.get_mut(node_id) {
-                node.role = NodeRole::Voter;
-            }
+        if let Some(ref node_id) = learner_to_promote
+            && let Some(node) = self.nodes.get_mut(node_id)
+        {
+            node.role = NodeRole::Voter;
         }
 
         learner_to_promote
@@ -222,10 +222,10 @@ impl ClusterMembership {
             .max_by_key(|(_, n)| n.joined_at)
             .map(|(id, _)| id.clone());
 
-        if let Some(ref node_id) = voter_to_demote {
-            if let Some(node) = self.nodes.get_mut(node_id) {
-                node.role = NodeRole::Learner;
-            }
+        if let Some(ref node_id) = voter_to_demote
+            && let Some(node) = self.nodes.get_mut(node_id)
+        {
+            node.role = NodeRole::Learner;
         }
 
         voter_to_demote

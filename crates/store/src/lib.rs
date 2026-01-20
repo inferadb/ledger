@@ -7,7 +7,7 @@
 //! - **Single writer**: Leverages Raft's serialization (no MVCC needed)
 //! - **Append-optimized**: Raft log access patterns
 //! - **Checksummed pages**: Crash safety with XXHash verification
-//!
+
 //! ## Architecture
 //!
 //! ```text
@@ -55,6 +55,7 @@
 //! let entry = txn.get::<RaftLog>(42)?;
 //! ```
 
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 // All unwraps in this crate are infallible:

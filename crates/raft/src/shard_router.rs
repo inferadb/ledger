@@ -244,11 +244,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         // Check cache first
         {
             let cache = self.cache.read();
-            if let Some(entry) = cache.get(&namespace_id) {
-                if !entry.is_stale(self.config.cache_ttl) {
-                    debug!(namespace_id, shard_id = entry.shard_id, "Cache hit");
-                    return Ok(entry.clone());
-                }
+            if let Some(entry) = cache.get(&namespace_id)
+                && !entry.is_stale(self.config.cache_ttl)
+            {
+                debug!(namespace_id, shard_id = entry.shard_id, "Cache hit");
+                return Ok(entry.clone());
             }
         }
 
@@ -439,11 +439,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Call this when a response indicates the actual leader.
     pub fn update_leader_hint(&self, namespace_id: NamespaceId, leader_node: &str) {
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&namespace_id) {
-            if entry.leader_hint.as_deref() != Some(leader_node) {
-                entry.leader_hint = Some(leader_node.to_string());
-                debug!(namespace_id, leader_node, "Updated leader hint");
-            }
+        if let Some(entry) = cache.get_mut(&namespace_id)
+            && entry.leader_hint.as_deref() != Some(leader_node)
+        {
+            entry.leader_hint = Some(leader_node.to_string());
+            debug!(namespace_id, leader_node, "Updated leader hint");
         }
     }
 

@@ -86,7 +86,7 @@ impl MerkleProof {
         let mut index = self.leaf_index;
 
         for sibling in &self.proof_hashes {
-            let combined = if index % 2 == 0 {
+            let combined = if index.is_multiple_of(2) {
                 // Current is left, sibling is right
                 let mut buf = Vec::with_capacity(64);
                 buf.extend_from_slice(&current_hash);

@@ -378,16 +378,15 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         vault_id: i64,
     ) -> Result<(u64, inferadb_ledger_types::Hash), RecoveryError> {
         // Try to find a snapshot to start from
-        if let Some(snapshot_manager) = &self.snapshot_manager {
-            if let Ok(snapshots) = snapshot_manager.list_snapshots() {
-                for &shard_height in snapshots.iter().rev() {
-                    if let Ok(snapshot) = snapshot_manager.load(shard_height) {
-                        if let Some(vault_state) =
-                            snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id)
-                        {
-                            return Ok((vault_state.vault_height + 1, vault_state.state_root));
-                        }
-                    }
+        if let Some(snapshot_manager) = &self.snapshot_manager
+            && let Ok(snapshots) = snapshot_manager.list_snapshots()
+        {
+            for &shard_height in snapshots.iter().rev() {
+                if let Ok(snapshot) = snapshot_manager.load(shard_height)
+                    && let Some(vault_state) =
+                        snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id)
+                {
+                    return Ok((vault_state.vault_height + 1, vault_state.state_root));
                 }
             }
         }

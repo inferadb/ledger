@@ -111,10 +111,10 @@ fn extract_leader_addr_from_error(error_msg: &str) -> Option<SocketAddr> {
     if let Some(start) = error_msg.find("addr: \\\"") {
         let addr_start = start + "addr: \\\"".len();
         let remaining = &error_msg[addr_start..];
-        if let Some(end) = remaining.find("\\\"") {
-            if let Ok(addr) = remaining[..end].parse() {
-                return Some(addr);
-            }
+        if let Some(end) = remaining.find("\\\"")
+            && let Ok(addr) = remaining[..end].parse()
+        {
+            return Some(addr);
         }
     }
 
@@ -122,10 +122,10 @@ fn extract_leader_addr_from_error(error_msg: &str) -> Option<SocketAddr> {
     if let Some(start) = error_msg.find("addr: \"") {
         let addr_start = start + "addr: \"".len();
         let remaining = &error_msg[addr_start..];
-        if let Some(end) = remaining.find('"') {
-            if let Ok(addr) = remaining[..end].parse() {
-                return Some(addr);
-            }
+        if let Some(end) = remaining.find('"')
+            && let Ok(addr) = remaining[..end].parse()
+        {
+            return Some(addr);
         }
     }
 

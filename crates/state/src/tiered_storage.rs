@@ -633,18 +633,18 @@ impl TieredSnapshotManager {
             return self.hot.load(height);
         }
 
-        if let Some(ref warm) = self.warm {
-            if warm.exists(height)? {
-                self.locations.write().insert(height, StorageTier::Warm);
-                return warm.load(height);
-            }
+        if let Some(ref warm) = self.warm
+            && warm.exists(height)?
+        {
+            self.locations.write().insert(height, StorageTier::Warm);
+            return warm.load(height);
         }
 
-        if let Some(ref cold) = self.cold {
-            if cold.exists(height)? {
-                self.locations.write().insert(height, StorageTier::Cold);
-                return cold.load(height);
-            }
+        if let Some(ref cold) = self.cold
+            && cold.exists(height)?
+        {
+            self.locations.write().insert(height, StorageTier::Cold);
+            return cold.load(height);
         }
 
         Err(TieredStorageError::SnapshotNotFound { height })
@@ -756,16 +756,16 @@ impl TieredSnapshotManager {
             return Ok(Some(StorageTier::Hot));
         }
 
-        if let Some(ref warm) = self.warm {
-            if warm.exists(height)? {
-                return Ok(Some(StorageTier::Warm));
-            }
+        if let Some(ref warm) = self.warm
+            && warm.exists(height)?
+        {
+            return Ok(Some(StorageTier::Warm));
         }
 
-        if let Some(ref cold) = self.cold {
-            if cold.exists(height)? {
-                return Ok(Some(StorageTier::Cold));
-            }
+        if let Some(ref cold) = self.cold
+            && cold.exists(height)?
+        {
+            return Ok(Some(StorageTier::Cold));
         }
 
         Ok(None)

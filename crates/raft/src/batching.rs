@@ -150,10 +150,10 @@ impl BatchState {
         }
 
         // Flush if batch timeout elapsed
-        if let Some(first_at) = self.first_pending_at {
-            if first_at.elapsed() >= config.batch_timeout {
-                return true;
-            }
+        if let Some(first_at) = self.first_pending_at
+            && first_at.elapsed() >= config.batch_timeout
+        {
+            return true;
         }
 
         // Eager commit: flush if we have pending writes and the queue hasn't grown

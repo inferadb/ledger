@@ -270,10 +270,10 @@ impl TestCluster {
         timeout(timeout_duration, async {
             loop {
                 for node in &self.nodes {
-                    if let Some(leader_id) = node.current_leader() {
-                        if self.nodes.iter().any(|n| n.id == leader_id && n.is_leader()) {
-                            return leader_id;
-                        }
+                    if let Some(leader_id) = node.current_leader()
+                        && self.nodes.iter().any(|n| n.id == leader_id && n.is_leader())
+                    {
+                        return leader_id;
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;

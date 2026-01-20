@@ -608,10 +608,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 state.vault_heights.insert(key, new_height);
 
                 // Update last write timestamp from latest transaction (deterministic)
-                if let Some(last_tx) = transactions.last() {
-                    if let Some(vault_meta) = state.vaults.get_mut(&key) {
-                        vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
-                    }
+                if let Some(last_tx) = transactions.last()
+                    && let Some(vault_meta) = state.vaults.get_mut(&key)
+                {
+                    vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
                 }
 
                 // Persist client sequences for idempotency recovery.
@@ -1271,11 +1271,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             };
 
             // Store in block archive if configured
-            if let Some(archive) = &self.block_archive {
-                if let Err(e) = archive.append_block(&shard_block) {
-                    tracing::error!("Failed to store block: {}", e);
-                    // Continue - block storage failure is logged but doesn't fail the operation
-                }
+            if let Some(archive) = &self.block_archive
+                && let Err(e) = archive.append_block(&shard_block)
+            {
+                tracing::error!("Failed to store block: {}", e);
+                // Continue - block storage failure is logged but doesn't fail the operation
             }
 
             // Update previous vault hashes for each entry

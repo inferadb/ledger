@@ -7,6 +7,7 @@
 //! - [`test_batch_config`] - Default batch configuration for tests
 //! - [`test_rate_limit_config`] - Default rate limit configuration for tests
 
+#![deny(unsafe_code)]
 // Test utilities are allowed to use unwrap for simplicity
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 

@@ -3,6 +3,8 @@
 //! Provides the core server functionality including configuration,
 //! cluster bootstrap, and shutdown handling.
 
+#![deny(unsafe_code)]
+
 pub mod bootstrap;
 pub mod config;
 pub mod discovery;

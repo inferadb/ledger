@@ -315,10 +315,11 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
                 .range::<tables::TimeTravelIndex>(Some(&start), Some(&end))
                 .context(StorageSnafu)?
             {
-                if let Some((v_id, _, height)) = parse_index_key(&k) {
-                    if v_id == vault_id && height < cutoff_height {
-                        keys_to_delete.push(k);
-                    }
+                if let Some((v_id, _, height)) = parse_index_key(&k)
+                    && v_id == vault_id
+                    && height < cutoff_height
+                {
+                    keys_to_delete.push(k);
                 }
             }
         }
