@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.1.0-pre.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/inferadb/ledger"
 authors = ["InferaDB Contributors"]
@@ -37,7 +37,7 @@ tower = { version = "0.5", features = ["limit", "load-shed", "timeout"] }
 
 # Raft consensus
 openraft = { version = "0.9", features = ["serde", "tracing-log", "loosen-follower-log-revert"] }
-validit = "=0.2.4"  # Pin to 0.2.4 for Rust 1.85 MSRV (0.2.5 requires let chains)
+validit = "0.2"
 
 # Crypto
 sha2 = "0.10"

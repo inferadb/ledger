@@ -1,6 +1,6 @@
 # AGENTS.md
 
-InferaDB Ledger: blockchain database for cryptographically verifiable authorization. Rust 1.85 (2024 edition), gRPC API.
+InferaDB Ledger: blockchain database for cryptographically verifiable authorization. Rust 1.92 (2024 edition), gRPC API.
 
 ## Critical Constraints
 
@@ -57,10 +57,10 @@ cargo test test_name -- --nocapture        # single test with output
 
 # Lint & Format
 cargo +nightly fmt
-cargo +1.85 clippy --all-targets -- -D warnings
+cargo +1.92 clippy --all-targets -- -D warnings
 
 # Pre-commit check
-cargo +nightly fmt --check && cargo +1.85 clippy --all-targets -- -D warnings && cargo test
+cargo +nightly fmt --check && cargo +1.92 clippy --all-targets -- -D warnings && cargo test
 
 # Protobuf generation
 cd proto && buf generate
@@ -111,7 +111,7 @@ Use `snafu` with backtraces. Propagate with `?`. No `.unwrap()`.
 
 ## Code Quality
 
-**Linting:** `cargo +1.85 clippy --all-targets -- -D warnings`
+**Linting:** `cargo +1.92 clippy --all-targets -- -D warnings`
 
 **Formatting:** `cargo +nightly fmt` (nightly required)
 

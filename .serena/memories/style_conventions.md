@@ -1,7 +1,7 @@
 # Code Style & Conventions
 
 ## Rust Edition & Toolchain
-- Rust 2024 edition, version 1.85
+- Rust 2024 edition, version 1.92
 - Nightly toolchain required for formatting
 
 ## Formatting (rustfmt)

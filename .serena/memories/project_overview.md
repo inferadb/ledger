@@ -4,7 +4,7 @@
 Ledger is InferaDB's storage layer — a blockchain database for cryptographically verifiable auditing.
 
 ## Tech Stack
-- **Language**: Rust 1.85 (2024 edition)
+- **Language**: Rust 1.92 (2024 edition)
 - **Storage**: inferadb-ledger-store (custom embedded ACID B+ tree engine)
 - **Consensus**: openraft (Raft implementation)
 - **Networking**: gRPC via tonic/prost (HTTP/2 over TCP)

@@ -93,7 +93,7 @@ body:
         Please provide relevant environment details.
       placeholder: |
         - Ledger Version: [e.g., 0.1.0]
-        - Rust Version: [e.g., 1.85.0]
+        - Rust Version: [e.g., 1.92.0]
         - OS: [e.g., Ubuntu 22.04, macOS 14]
         - Deployment: [e.g., single node, 3-node cluster]
     validations:
