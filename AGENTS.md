@@ -109,6 +109,56 @@ inferadb-ledger-types   — Hash primitives, Merkle proofs, config, errors
 
 Use `snafu` with backtraces. Propagate with `?`. No `.unwrap()`.
 
+## Builder Pattern (bon)
+
+Use the `bon` crate for type-safe builders. Two patterns:
+
+**Simple structs** — `#[derive(bon::Builder)]`:
+
+```rust
+#[derive(bon::Builder)]
+struct Config {
+    #[builder(default = 100)]
+    max_connections: u32,
+    #[builder(into)]  // accepts &str, String, etc.
+    name: String,
+}
+
+let config = Config::builder()
+    .max_connections(50)
+    .name("test")
+    .build();
+```
+
+**Fallible constructors** — `#[bon]` on impl block:
+
+```rust
+#[bon]
+impl TlsConfig {
+    #[builder]
+    pub fn new(
+        #[builder(into)] ca_cert: Option<String>,
+        use_native_roots: bool,
+    ) -> Result<Self, ConfigError> {
+        // Validation logic here
+    }
+}
+```
+
+**Conventions:**
+
+- Use `#[builder(into)]` for `String` fields to accept `&str`
+- Match `#[builder(default)]` with `#[serde(default)]` for config structs
+- Use fallible builders (`#[bon]` impl block) when validation is needed
+- Prefer compile-time required field enforcement over runtime checks
+
+**Performance:**
+
+- bon is a proc-macro generating code at compile-time with zero runtime overhead
+- Full workspace clean build: ~74 seconds (20 structs with builders)
+- Estimated compile-time impact: ~2 seconds per 10 structs based on bon benchmarks
+- Builder construction optimizes to direct struct initialization in release builds
+
 ## Code Quality
 
 **Linting:** `cargo +1.92 clippy --all-targets -- -D warnings`

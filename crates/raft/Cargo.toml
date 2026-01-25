@@ -43,6 +43,9 @@ postcard.workspace = true
 # Error handling
 snafu.workspace = true
 
+# Builder pattern
+bon.workspace = true
+
 # Crypto
 sha2.workspace = true
 hmac.workspace = true

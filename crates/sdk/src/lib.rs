@@ -20,8 +20,8 @@
 //! #[tokio::main]
 //! async fn main() -> inferadb_ledger_sdk::Result<()> {
 //!     let config = ClientConfig::builder()
-//!         .with_endpoint("http://localhost:50051")
-//!         .with_client_id("my-app-001")
+//!         .endpoints(vec!["http://localhost:50051".into()])
+//!         .client_id("my-app-001")
 //!         .build()?;
 //!
 //!     let client = LedgerClient::new(config).await?;
@@ -79,8 +79,8 @@ pub use client::{
     Relationship, SetCondition, VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
 };
 pub use config::{
-    CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy,
-    RetryPolicyBuilder, TlsConfig,
+    CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, TlsConfig,
+    TlsConfigBuilder,
 };
 pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};

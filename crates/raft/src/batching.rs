@@ -28,13 +28,16 @@ use crate::{
 };
 
 /// Configuration for the batch writer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct BatchConfig {
     /// Maximum number of writes to batch together.
+    #[builder(default = 100)]
     pub max_batch_size: usize,
     /// Maximum time to wait before flushing a batch.
+    #[builder(default = Duration::from_millis(2))]
     pub batch_timeout: Duration,
     /// Interval for checking batch timeout.
+    #[builder(default = Duration::from_micros(500))]
     pub tick_interval: Duration,
     /// Commit immediately when queue drains to zero.
     ///
@@ -44,6 +47,7 @@ pub struct BatchConfig {
     ///
     /// Set to false for batch import workloads where throughput is more
     /// important than latency.
+    #[builder(default = true)]
     pub eager_commit: bool,
 }
 
@@ -591,5 +595,47 @@ mod tests {
         assert!(result.is_ok());
 
         writer_task.abort();
+    }
+
+    // =========================================================================
+    // Builder API tests (TDD for bon::Builder adoption)
+    // =========================================================================
+
+    #[test]
+    fn test_batch_config_builder_with_defaults() {
+        // builder().build() should produce the same result as Default::default()
+        let from_builder = BatchConfig::builder().build();
+        let from_default = BatchConfig::default();
+
+        assert_eq!(from_builder.max_batch_size, from_default.max_batch_size);
+        assert_eq!(from_builder.batch_timeout, from_default.batch_timeout);
+        assert_eq!(from_builder.tick_interval, from_default.tick_interval);
+        assert_eq!(from_builder.eager_commit, from_default.eager_commit);
+    }
+
+    #[test]
+    fn test_batch_config_builder_custom_values() {
+        let config = BatchConfig::builder()
+            .max_batch_size(500)
+            .batch_timeout(Duration::from_millis(50))
+            .tick_interval(Duration::from_millis(10))
+            .eager_commit(false)
+            .build();
+
+        assert_eq!(config.max_batch_size, 500);
+        assert_eq!(config.batch_timeout, Duration::from_millis(50));
+        assert_eq!(config.tick_interval, Duration::from_millis(10));
+        assert!(!config.eager_commit);
+    }
+
+    #[test]
+    fn test_batch_config_builder_partial_override() {
+        // Only override some fields, rest should use defaults
+        let config = BatchConfig::builder().max_batch_size(200).eager_commit(false).build();
+
+        assert_eq!(config.max_batch_size, 200);
+        assert_eq!(config.batch_timeout, Duration::from_millis(2)); // default
+        assert_eq!(config.tick_interval, Duration::from_micros(500)); // default
+        assert!(!config.eager_commit);
     }
 }

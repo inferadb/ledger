@@ -331,15 +331,15 @@ impl TestCluster {
 /// Create a LedgerClient connected to the given cluster node.
 async fn create_sdk_client(addr: SocketAddr, client_id: &str) -> LedgerClient {
     let config = ClientConfig::builder()
-        .with_endpoint(format!("http://{}", addr))
-        .with_client_id(client_id)
-        .with_timeout(Duration::from_secs(10))
-        .with_connect_timeout(Duration::from_secs(5))
-        .with_retry_policy(
+        .endpoints(vec![format!("http://{}", addr)])
+        .client_id(client_id)
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .retry_policy(
             RetryPolicy::builder()
-                .with_max_attempts(3)
-                .with_initial_backoff(Duration::from_millis(100))
-                .with_max_backoff(Duration::from_secs(2))
+                .max_attempts(3)
+                .initial_backoff(Duration::from_millis(100))
+                .max_backoff(Duration::from_secs(2))
                 .build(),
         )
         .build()

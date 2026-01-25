@@ -54,6 +54,9 @@ hickory-resolver.workspace = true
 # Random number generation
 rand.workspace = true
 
+# Builder pattern
+bon.workspace = true
+
 # Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true

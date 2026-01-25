@@ -13,6 +13,8 @@ keywords = ["database", "btree", "embedded", "storage", "ledger"]
 categories = ["database-implementations", "data-structures"]
 
 [dependencies]
+# Builder pattern
+bon = { workspace = true }
 # Hashing for checksums
 xxhash-rust = { workspace = true }
 

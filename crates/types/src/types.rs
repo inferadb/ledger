@@ -44,7 +44,7 @@ pub type ClientId = String;
 /// Per DESIGN.md lines 695-708, block headers are hashed with a fixed 148-byte encoding:
 /// height (8) + namespace_id (8) + vault_id (8) + previous_hash (32) + tx_merkle_root (32)
 /// + state_root (32) + timestamp_secs (8) + timestamp_nanos (4) + term (8) + committed_index (8)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct BlockHeader {
     /// Block height (0 for genesis).
     pub height: u64,
@@ -238,9 +238,45 @@ impl ShardBlock {
 // Transaction Structures
 // ============================================================================
 
+/// Error during transaction validation.
+#[derive(Debug, snafu::Snafu)]
+#[snafu(visibility(pub))]
+pub enum TransactionValidationError {
+    /// Actor identifier is empty.
+    #[snafu(display("Transaction actor cannot be empty"))]
+    EmptyActor,
+
+    /// Operations list is empty.
+    #[snafu(display("Transaction must contain at least one operation"))]
+    EmptyOperations,
+
+    /// Sequence number must be positive.
+    #[snafu(display("Transaction sequence must be positive (got 0)"))]
+    ZeroSequence,
+}
+
 /// Transaction containing one or more operations.
 ///
 /// Per DESIGN.md lines 196-202.
+///
+/// Use the builder pattern to construct transactions with validation:
+/// ```no_run
+/// # use inferadb_ledger_types::types::{Transaction, Operation};
+/// # use chrono::Utc;
+/// let tx = Transaction::builder()
+///     .id([1u8; 16])
+///     .client_id("client-123")
+///     .sequence(1)
+///     .actor("user:alice")
+///     .operations(vec![Operation::CreateRelationship {
+///         resource: "doc:1".into(),
+///         relation: "owner".into(),
+///         subject: "user:alice".into(),
+///     }])
+///     .timestamp(Utc::now())
+///     .build()
+///     .expect("valid transaction");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     /// Unique transaction identifier.
@@ -255,6 +291,33 @@ pub struct Transaction {
     pub operations: Vec<Operation>,
     /// Transaction submission timestamp.
     pub timestamp: DateTime<Utc>,
+}
+
+#[bon::bon]
+impl Transaction {
+    /// Creates a new transaction with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `actor` is empty
+    /// - `operations` is empty
+    /// - `sequence` is zero
+    #[builder]
+    pub fn new(
+        id: TxId,
+        #[builder(into)] client_id: ClientId,
+        sequence: u64,
+        #[builder(into)] actor: String,
+        operations: Vec<Operation>,
+        timestamp: DateTime<Utc>,
+    ) -> Result<Self, TransactionValidationError> {
+        snafu::ensure!(!actor.is_empty(), EmptyActorSnafu);
+        snafu::ensure!(!operations.is_empty(), EmptyOperationsSnafu);
+        snafu::ensure!(sequence > 0, ZeroSequenceSnafu);
+
+        Ok(Self { id, client_id, sequence, actor, operations, timestamp })
+    }
 }
 
 /// Operation types per DESIGN.md lines 204-214.
@@ -433,8 +496,10 @@ pub struct WriteResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::hash::ZERO_HASH;
 
     #[test]
     fn test_relationship_to_key() {
@@ -448,5 +513,188 @@ mod tests {
         assert_eq!(SetCondition::MustExist.type_byte(), 0x02);
         assert_eq!(SetCondition::VersionEquals(1).type_byte(), 0x03);
         assert_eq!(SetCondition::ValueEquals(vec![]).type_byte(), 0x04);
+    }
+
+    // ========================================================================
+    // BlockHeader Builder Tests (TDD)
+    // ========================================================================
+
+    #[test]
+    fn test_block_header_builder_all_fields() {
+        let timestamp = Utc::now();
+        let header = BlockHeader::builder()
+            .height(100)
+            .namespace_id(1)
+            .vault_id(2)
+            .previous_hash(ZERO_HASH)
+            .tx_merkle_root(ZERO_HASH)
+            .state_root(ZERO_HASH)
+            .timestamp(timestamp)
+            .term(5)
+            .committed_index(50)
+            .build();
+
+        assert_eq!(header.height, 100);
+        assert_eq!(header.namespace_id, 1);
+        assert_eq!(header.vault_id, 2);
+        assert_eq!(header.previous_hash, ZERO_HASH);
+        assert_eq!(header.tx_merkle_root, ZERO_HASH);
+        assert_eq!(header.state_root, ZERO_HASH);
+        assert_eq!(header.timestamp, timestamp);
+        assert_eq!(header.term, 5);
+        assert_eq!(header.committed_index, 50);
+    }
+
+    #[test]
+    fn test_block_header_builder_genesis_block() {
+        let header = BlockHeader::builder()
+            .height(0) // Genesis
+            .namespace_id(1)
+            .vault_id(1)
+            .previous_hash(ZERO_HASH) // ZERO_HASH for genesis
+            .tx_merkle_root(ZERO_HASH)
+            .state_root(ZERO_HASH)
+            .timestamp(Utc::now())
+            .term(1)
+            .committed_index(0)
+            .build();
+
+        assert_eq!(header.height, 0);
+        assert_eq!(header.previous_hash, ZERO_HASH);
+    }
+
+    // ========================================================================
+    // Transaction Builder Tests (TDD)
+    // ========================================================================
+
+    #[test]
+    fn test_transaction_builder_valid() {
+        let timestamp = Utc::now();
+        let tx = Transaction::builder()
+            .id([1u8; 16])
+            .client_id("client-123")
+            .sequence(1)
+            .actor("user:alice")
+            .operations(vec![Operation::CreateRelationship {
+                resource: "doc:1".into(),
+                relation: "owner".into(),
+                subject: "user:alice".into(),
+            }])
+            .timestamp(timestamp)
+            .build()
+            .expect("valid transaction should build");
+
+        assert_eq!(tx.id, [1u8; 16]);
+        assert_eq!(tx.client_id, "client-123");
+        assert_eq!(tx.sequence, 1);
+        assert_eq!(tx.actor, "user:alice");
+        assert_eq!(tx.operations.len(), 1);
+        assert_eq!(tx.timestamp, timestamp);
+    }
+
+    #[test]
+    fn test_transaction_builder_empty_actor_fails() {
+        let result = Transaction::builder()
+            .id([1u8; 16])
+            .client_id("client-123")
+            .sequence(1)
+            .actor("")
+            .operations(vec![Operation::CreateRelationship {
+                resource: "doc:1".into(),
+                relation: "owner".into(),
+                subject: "user:alice".into(),
+            }])
+            .timestamp(Utc::now())
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("actor"));
+    }
+
+    #[test]
+    fn test_transaction_builder_empty_operations_fails() {
+        let result = Transaction::builder()
+            .id([1u8; 16])
+            .client_id("client-123")
+            .sequence(1)
+            .actor("user:alice")
+            .operations(vec![])
+            .timestamp(Utc::now())
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("operation"));
+    }
+
+    #[test]
+    fn test_transaction_builder_zero_sequence_fails() {
+        let result = Transaction::builder()
+            .id([1u8; 16])
+            .client_id("client-123")
+            .sequence(0)
+            .actor("user:alice")
+            .operations(vec![Operation::CreateRelationship {
+                resource: "doc:1".into(),
+                relation: "owner".into(),
+                subject: "user:alice".into(),
+            }])
+            .timestamp(Utc::now())
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("sequence"));
+    }
+
+    #[test]
+    fn test_transaction_builder_with_into_for_strings() {
+        // Test that #[builder(into)] allows &str for String fields
+        let tx = Transaction::builder()
+            .id([2u8; 16])
+            .client_id("client-456") // &str should work
+            .sequence(1)
+            .actor("user:bob") // &str should work
+            .operations(vec![Operation::SetEntity {
+                key: "entity:1".into(),
+                value: vec![1, 2, 3],
+                condition: None,
+                expires_at: None,
+            }])
+            .timestamp(Utc::now())
+            .build()
+            .expect("valid transaction with &str");
+
+        assert_eq!(tx.client_id, "client-456");
+        assert_eq!(tx.actor, "user:bob");
+    }
+
+    #[test]
+    fn test_transaction_builder_multiple_operations() {
+        let tx = Transaction::builder()
+            .id([3u8; 16])
+            .client_id("client-789")
+            .sequence(5)
+            .actor("user:charlie")
+            .operations(vec![
+                Operation::SetEntity {
+                    key: "entity:1".into(),
+                    value: vec![1],
+                    condition: None,
+                    expires_at: None,
+                },
+                Operation::CreateRelationship {
+                    resource: "doc:1".into(),
+                    relation: "viewer".into(),
+                    subject: "user:charlie".into(),
+                },
+                Operation::DeleteEntity { key: "entity:old".into() },
+            ])
+            .timestamp(Utc::now())
+            .build()
+            .expect("valid transaction with multiple operations");
+
+        assert_eq!(tx.operations.len(), 3);
     }
 }

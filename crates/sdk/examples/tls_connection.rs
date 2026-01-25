@@ -29,7 +29,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Result, TlsConfig};
+use inferadb_ledger_sdk::{CertificateData, ClientConfig, LedgerClient, Result, TlsConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -68,13 +68,13 @@ async fn main() -> Result<()> {
     if use_native_roots && ca_cert.is_none() {
         println!("--- Example: Using native root certificates ---");
 
-        let tls = TlsConfig::with_native_roots();
+        let tls = TlsConfig::with_native_roots()?;
 
         let config = ClientConfig::builder()
-            .with_endpoint(endpoint)
-            .with_client_id("tls-native-roots-example")
-            .with_timeout(Duration::from_secs(10))
-            .with_tls(tls)
+            .endpoints(vec![endpoint.into()])
+            .client_id("tls-native-roots-example")
+            .timeout(Duration::from_secs(10))
+            .tls(tls)
             .build()?;
 
         println!("TLS configured with native roots");
@@ -93,25 +93,53 @@ async fn main() -> Result<()> {
     if let Some(ref ca_path) = ca_cert {
         println!("--- Example: TLS with custom CA certificate ---");
 
-        let mut tls = TlsConfig::new().with_ca_cert_pem(ca_path);
+        // Read the CA certificate from file
+        let ca_data = std::fs::read(ca_path).expect("failed to read CA certificate");
 
-        // Optionally add native roots as fallback
-        if use_native_roots {
-            tls = TlsConfig::with_native_roots().with_ca_cert_pem(ca_path);
-            println!("Using both custom CA and native roots");
-        }
+        // Build TLS config based on options provided
+        let tls = match (&client_cert, &client_key) {
+            // Mutual TLS with client certificate
+            (Some(cert_path), Some(key_path)) => {
+                println!("Configuring mutual TLS with client certificate");
+                let cert_data =
+                    std::fs::read(cert_path).expect("failed to read client certificate");
+                let key_data = std::fs::read(key_path).expect("failed to read client key");
 
-        // Add client certificate for mutual TLS if provided
-        if let (Some(cert_path), Some(key_path)) = (&client_cert, &client_key) {
-            println!("Configuring mutual TLS with client certificate");
-            tls = tls.with_client_cert_pem(cert_path, key_path);
-        }
+                if use_native_roots {
+                    println!("Using both custom CA and native roots");
+                    TlsConfig::builder()
+                        .ca_cert(CertificateData::Pem(ca_data))
+                        .client_cert(CertificateData::Pem(cert_data))
+                        .client_key(key_data)
+                        .use_native_roots(true)
+                        .build()?
+                } else {
+                    TlsConfig::builder()
+                        .ca_cert(CertificateData::Pem(ca_data))
+                        .client_cert(CertificateData::Pem(cert_data))
+                        .client_key(key_data)
+                        .build()?
+                }
+            },
+            // Simple TLS (server verification only)
+            _ => {
+                if use_native_roots {
+                    println!("Using both custom CA and native roots");
+                    TlsConfig::builder()
+                        .ca_cert(CertificateData::Pem(ca_data))
+                        .use_native_roots(true)
+                        .build()?
+                } else {
+                    TlsConfig::builder().ca_cert(CertificateData::Pem(ca_data)).build()?
+                }
+            },
+        };
 
         let config = ClientConfig::builder()
-            .with_endpoint(endpoint)
-            .with_client_id("tls-custom-ca-example")
-            .with_timeout(Duration::from_secs(10))
-            .with_tls(tls)
+            .endpoints(vec![endpoint.into()])
+            .client_id("tls-custom-ca-example")
+            .timeout(Duration::from_secs(10))
+            .tls(tls)
             .build()?;
 
         println!("TLS configuration created");
@@ -130,26 +158,35 @@ async fn main() -> Result<()> {
     println!("No TLS configuration provided. Here are the available options:\n");
 
     println!("1. Native root certificates (for public CAs):");
-    println!("   TlsConfig::with_native_roots()\n");
+    println!("   TlsConfig::with_native_roots()?;\n");
 
-    println!("2. Custom CA certificate (PEM format):");
-    println!("   TlsConfig::new().with_ca_cert_pem(\"/path/to/ca.pem\")\n");
+    println!("2. Custom CA certificate (from bytes):");
+    println!("   let ca_data = std::fs::read(\"/path/to/ca.pem\")?;");
+    println!("   TlsConfig::builder()");
+    println!("       .ca_cert(CertificateData::Pem(ca_data))");
+    println!("       .build()?;\n");
 
     println!("3. Custom CA certificate (DER format):");
-    println!("   TlsConfig::new().with_ca_cert_der(\"/path/to/ca.der\")\n");
+    println!("   let ca_data = std::fs::read(\"/path/to/ca.der\")?;");
+    println!("   TlsConfig::builder()");
+    println!("       .ca_cert(CertificateData::Der(ca_data))");
+    println!("       .build()?;\n");
 
-    println!("4. From bytes (useful for embedded certs):");
-    println!("   TlsConfig::new().with_ca_cert_pem_bytes(pem_bytes)\n");
+    println!("4. Mutual TLS (mTLS) with client certificate:");
+    println!("   let ca_data = std::fs::read(\"/path/to/ca.pem\")?;");
+    println!("   let cert_data = std::fs::read(\"/path/to/client.pem\")?;");
+    println!("   let key_data = std::fs::read(\"/path/to/client.key\")?;");
+    println!("   TlsConfig::builder()");
+    println!("       .ca_cert(CertificateData::Pem(ca_data))");
+    println!("       .client_cert(CertificateData::Pem(cert_data))");
+    println!("       .client_key(key_data)");
+    println!("       .build()?;\n");
 
-    println!("5. Mutual TLS (mTLS) with client certificate:");
-    println!("   TlsConfig::new()");
-    println!("       .with_ca_cert_pem(\"/path/to/ca.pem\")");
-    println!("       .with_client_cert_pem(\"/path/to/client.pem\", \"/path/to/client.key\")\n");
-
-    println!("6. Domain name override (when cert CN doesn't match hostname):");
-    println!("   TlsConfig::new()");
-    println!("       .with_ca_cert_pem(\"/path/to/ca.pem\")");
-    println!("       .with_domain_name(\"actual-domain.example.com\")\n");
+    println!("5. Domain name override (when cert CN doesn't match hostname):");
+    println!("   TlsConfig::builder()");
+    println!("       .ca_cert(CertificateData::Pem(ca_data))");
+    println!("       .domain_name(\"actual-domain.example.com\")");
+    println!("       .build()?;\n");
 
     println!("Usage:");
     println!("  cargo run --example tls_connection -- --native-roots --endpoint https://...");

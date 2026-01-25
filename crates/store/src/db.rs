@@ -49,13 +49,16 @@ use crate::{
 };
 
 /// Database configuration options.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct DatabaseConfig {
     /// Page size (must be power of 2, default 4096).
+    #[builder(default = DEFAULT_PAGE_SIZE)]
     pub page_size: usize,
     /// Maximum pages to cache in memory.
+    #[builder(default = 1024)]
     pub cache_size: usize,
     /// Whether to sync on every commit (default true for durability).
+    #[builder(default = true)]
     pub sync_on_commit: bool,
 }
 
@@ -1250,6 +1253,36 @@ impl<B: StorageBackend, T: Table> Iterator for TableIterator<'_, '_, B, T> {
 mod tests {
     use super::*;
     use crate::tables;
+
+    #[test]
+    fn test_database_config_builder() {
+        let config =
+            DatabaseConfig::builder().page_size(8192).cache_size(512).sync_on_commit(false).build();
+
+        assert_eq!(config.page_size, 8192);
+        assert_eq!(config.cache_size, 512);
+        assert!(!config.sync_on_commit);
+    }
+
+    #[test]
+    fn test_database_config_builder_defaults() {
+        let from_builder = DatabaseConfig::builder().build();
+        let from_default = DatabaseConfig::default();
+
+        assert_eq!(from_builder.page_size, from_default.page_size);
+        assert_eq!(from_builder.cache_size, from_default.cache_size);
+        assert_eq!(from_builder.sync_on_commit, from_default.sync_on_commit);
+    }
+
+    #[test]
+    fn test_database_config_builder_partial() {
+        // Override only one field, others use defaults
+        let config = DatabaseConfig::builder().page_size(16384).build();
+
+        assert_eq!(config.page_size, 16384);
+        assert_eq!(config.cache_size, 1024); // default
+        assert!(config.sync_on_commit); // default
+    }
 
     #[test]
     fn test_database_create() {

@@ -13,6 +13,9 @@ keywords = ["ledger", "blockchain", "cryptography", "merkle", "authorization"]
 categories = ["cryptography", "data-structures"]
 
 [dependencies]
+# Builder pattern
+bon.workspace = true
+
 # Crypto
 sha2.workspace = true
 seahash.workspace = true
@@ -35,6 +38,7 @@ tracing.workspace = true
 humantime.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

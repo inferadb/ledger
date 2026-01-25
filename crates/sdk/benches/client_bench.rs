@@ -43,13 +43,13 @@ fn create_runtime() -> Runtime {
 /// Create a client connected to the mock server.
 async fn create_client_for_mock(endpoint: &str) -> LedgerClient {
     let config = ClientConfig::builder()
-        .with_endpoint(endpoint)
-        .with_client_id("bench-client")
-        .with_timeout(Duration::from_secs(5))
-        .with_connect_timeout(Duration::from_secs(2))
-        .with_retry_policy(
+        .endpoints(vec![endpoint.into()])
+        .client_id("bench-client")
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(2))
+        .retry_policy(
             RetryPolicy::builder()
-                .with_max_attempts(1) // No retry for benchmarks
+                .max_attempts(1) // No retry for benchmarks
                 .build(),
         )
         .build()

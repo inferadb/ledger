@@ -31,10 +31,10 @@ async fn main() -> Result<()> {
     // 1. Create a client with configuration
     // -------------------------------------------------------------------------
     let config = ClientConfig::builder()
-        .with_endpoint(endpoint)
-        .with_client_id("basic-usage-example")
-        .with_timeout(std::time::Duration::from_secs(10))
-        .with_compression(true)
+        .endpoints(vec![endpoint.into()])
+        .client_id("basic-usage-example")
+        .timeout(std::time::Duration::from_secs(10))
+        .compression(true)
         .build()?;
 
     let client = LedgerClient::new(config).await?;

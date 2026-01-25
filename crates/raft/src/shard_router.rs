@@ -162,15 +162,19 @@ pub struct ShardConnection {
 // ============================================================================
 
 /// Configuration for the shard router.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct RouterConfig {
     /// Time-to-live for cache entries.
+    #[builder(default = Duration::from_secs(60))]
     pub cache_ttl: Duration,
     /// Connection timeout for shard connections.
+    #[builder(default = Duration::from_secs(5))]
     pub connect_timeout: Duration,
     /// Maximum retry attempts for connection.
+    #[builder(default = 3)]
     pub max_retries: u32,
     /// Base port for shard gRPC services.
+    #[builder(default = 50051)]
     pub grpc_port: u16,
 }
 
@@ -521,6 +525,39 @@ mod tests {
         assert_eq!(config.cache_ttl, Duration::from_secs(60));
         assert_eq!(config.connect_timeout, Duration::from_secs(5));
         assert_eq!(config.max_retries, 3);
+    }
+
+    #[test]
+    fn test_router_config_builder_with_defaults() {
+        let config = RouterConfig::builder().build();
+        assert_eq!(config.cache_ttl, Duration::from_secs(60));
+        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.grpc_port, 50051);
+    }
+
+    #[test]
+    fn test_router_config_builder_with_custom_values() {
+        let config = RouterConfig::builder()
+            .cache_ttl(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
+            .max_retries(5)
+            .grpc_port(9090)
+            .build();
+        assert_eq!(config.cache_ttl, Duration::from_secs(120));
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.grpc_port, 9090);
+    }
+
+    #[test]
+    fn test_router_config_builder_matches_default() {
+        let from_builder = RouterConfig::builder().build();
+        let from_default = RouterConfig::default();
+        assert_eq!(from_builder.cache_ttl, from_default.cache_ttl);
+        assert_eq!(from_builder.connect_timeout, from_default.connect_timeout);
+        assert_eq!(from_builder.max_retries, from_default.max_retries);
+        assert_eq!(from_builder.grpc_port, from_default.grpc_port);
     }
 
     #[test]

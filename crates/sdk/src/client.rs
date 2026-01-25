@@ -72,8 +72,8 @@ pub struct WriteSuccess {
 /// # use futures::StreamExt;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = LedgerClient::new(ClientConfig::builder()
-/// #     .with_endpoint("http://localhost:50051")
-/// #     .with_client_id("example")
+/// #     .endpoints(vec!["http://localhost:50051".into()])
+/// #     .client_id("example")
 /// #     .build()?).await?;
 /// # let (namespace_id, vault_id, start_height) = (1i64, 1i64, 1u64);
 /// let mut stream = client.watch_blocks(namespace_id, vault_id, start_height).await?;
@@ -661,19 +661,24 @@ impl Relationship {
 /// Options for listing entities.
 ///
 /// Builder pattern for configuring entity list queries with optional filters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, bon::Builder)]
 pub struct ListEntitiesOpts {
     /// Filter entities by key prefix (e.g., "user:", "session:").
+    #[builder(into, default)]
     pub key_prefix: String,
     /// Read at a specific block height (None = current).
     pub at_height: Option<u64>,
     /// Include entities past their expiration time.
+    #[builder(default)]
     pub include_expired: bool,
     /// Maximum number of results per page (0 = server default).
+    #[builder(default)]
     pub limit: u32,
     /// Pagination token from previous response.
+    #[builder(into)]
     pub page_token: Option<String>,
     /// Read consistency level.
+    #[builder(default)]
     pub consistency: ReadConsistency,
 }
 
@@ -724,21 +729,27 @@ impl ListEntitiesOpts {
 ///
 /// Builder pattern for configuring relationship list queries with optional filters.
 /// All filter fields are optional; omitting a filter matches all values for that field.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, bon::Builder)]
 pub struct ListRelationshipsOpts {
     /// Filter by resource (exact match).
+    #[builder(into)]
     pub resource: Option<String>,
     /// Filter by relation (exact match).
+    #[builder(into)]
     pub relation: Option<String>,
     /// Filter by subject (exact match).
+    #[builder(into)]
     pub subject: Option<String>,
     /// Read at a specific block height (None = current).
     pub at_height: Option<u64>,
     /// Maximum number of results per page (0 = server default).
+    #[builder(default)]
     pub limit: u32,
     /// Pagination token from previous response.
+    #[builder(into)]
     pub page_token: Option<String>,
     /// Read consistency level.
+    #[builder(default)]
     pub consistency: ReadConsistency,
 }
 
@@ -800,17 +811,21 @@ impl ListRelationshipsOpts {
 /// Options for listing resources.
 ///
 /// Builder pattern for configuring resource list queries.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, bon::Builder)]
 pub struct ListResourcesOpts {
     /// Resource type prefix (e.g., "document" matches "document:*").
+    #[builder(into, default)]
     pub resource_type: String,
     /// Read at a specific block height (None = current).
     pub at_height: Option<u64>,
     /// Maximum number of results per page (0 = server default).
+    #[builder(default)]
     pub limit: u32,
     /// Pagination token from previous response.
+    #[builder(into)]
     pub page_token: Option<String>,
     /// Read consistency level.
+    #[builder(default)]
     pub consistency: ReadConsistency,
 }
 
@@ -862,8 +877,8 @@ impl ListResourcesOpts {
 /// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, VerifyOpts};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = LedgerClient::new(ClientConfig::builder()
-/// #     .with_endpoint("http://localhost:50051")
-/// #     .with_client_id("example")
+/// #     .endpoints(vec!["http://localhost:50051".into()])
+/// #     .client_id("example")
 /// #     .build()?).await?;
 /// # let (ns_id, vault_id) = (1i64, 1i64);
 /// let result = client.verified_read(ns_id, Some(vault_id), "key", VerifyOpts::new()).await?;
@@ -1140,8 +1155,8 @@ impl SetCondition {
 /// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = ClientConfig::builder()
-///     .with_endpoint("http://localhost:50051")
-///     .with_client_id("my-app-001")
+///     .endpoints(vec!["http://localhost:50051".into()])
+///     .client_id("my-app-001")
 ///     .build()?;
 ///
 /// let client = LedgerClient::new(config).await?;
@@ -1177,8 +1192,8 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = ClientConfig::builder()
-    ///     .with_endpoint("http://localhost:50051")
-    ///     .with_client_id("my-service")
+    ///     .endpoints(vec!["http://localhost:50051".into()])
+    ///     .client_id("my-service")
     ///     .build()?;
     ///
     /// let client = LedgerClient::new(config).await?;
@@ -1217,8 +1232,10 @@ impl LedgerClient {
         endpoint: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Result<Self> {
-        let config =
-            ClientConfig::builder().with_endpoint(endpoint).with_client_id(client_id).build()?;
+        let config = ClientConfig::builder()
+            .endpoints(vec![endpoint.into()])
+            .client_id(client_id)
+            .build()?;
 
         Self::new(config).await
     }
@@ -2970,8 +2987,8 @@ mod tests {
     #[tokio::test]
     async fn test_new_with_valid_config() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
             .build()
             .expect("valid config");
 
@@ -3001,10 +3018,10 @@ mod tests {
     #[tokio::test]
     async fn test_config_accessor_returns_full_config() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("accessor-test")
-            .with_timeout(Duration::from_secs(30))
-            .with_compression(true)
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("accessor-test")
+            .timeout(Duration::from_secs(30))
+            .compression(true)
             .build()
             .expect("valid config");
 
@@ -3030,9 +3047,9 @@ mod tests {
     #[tokio::test]
     async fn test_pool_accessor_returns_pool() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("pool-test")
-            .with_compression(true)
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("pool-test")
+            .compression(true)
             .build()
             .expect("valid config");
 
@@ -3046,8 +3063,8 @@ mod tests {
         use crate::config::DiscoveryConfig;
 
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("discovery-test")
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("discovery-test")
             .build()
             .expect("valid config");
 
@@ -3060,14 +3077,14 @@ mod tests {
     #[tokio::test]
     async fn test_new_preserves_retry_policy() {
         let retry_policy = RetryPolicy::builder()
-            .with_max_attempts(5)
-            .with_initial_backoff(Duration::from_millis(100))
+            .max_attempts(5)
+            .initial_backoff(Duration::from_millis(100))
             .build();
 
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("retry-test")
-            .with_retry_policy(retry_policy)
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("retry-test")
+            .retry_policy(retry_policy)
             .build()
             .expect("valid config");
 
@@ -3108,15 +3125,15 @@ mod tests {
     async fn test_read_returns_error_on_connection_failure() {
         // Configure minimal retry to make test fast
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59999")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3129,15 +3146,15 @@ mod tests {
     #[tokio::test]
     async fn test_read_consistent_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59998")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59998".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3150,15 +3167,15 @@ mod tests {
     #[tokio::test]
     async fn test_batch_read_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59997")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59997".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3171,15 +3188,15 @@ mod tests {
     #[tokio::test]
     async fn test_batch_read_consistent_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59996")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59996".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3193,15 +3210,15 @@ mod tests {
     async fn test_read_with_none_vault_id() {
         // Test that read works with None vault_id (namespace-level reads)
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59995")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59995".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3412,15 +3429,15 @@ mod tests {
     #[tokio::test]
     async fn test_write_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59994")
-            .with_client_id("write-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59994".into()])
+            .client_id("write-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3485,15 +3502,15 @@ mod tests {
     #[tokio::test]
     async fn test_write_with_multiple_operations() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59990")
-            .with_client_id("multi-op-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59990".into()])
+            .client_id("multi-op-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3520,15 +3537,15 @@ mod tests {
     #[tokio::test]
     async fn test_batch_write_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59989")
-            .with_client_id("batch-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59989".into()])
+            .client_id("batch-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3619,15 +3636,15 @@ mod tests {
     #[tokio::test]
     async fn test_batch_write_with_multiple_operation_groups() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59984")
-            .with_client_id("batch-groups-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59984".into()])
+            .client_id("batch-groups-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3762,15 +3779,15 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59982")
-            .with_client_id("watch-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59982".into()])
+            .client_id("watch-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3784,15 +3801,15 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_different_vaults() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59981")
-            .with_client_id("multi-vault-watch")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59981".into()])
+            .client_id("multi-vault-watch")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -3809,15 +3826,15 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_start_height_parameter() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59980")
-            .with_client_id("height-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59980".into()])
+            .client_id("height-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4037,15 +4054,15 @@ mod tests {
     #[tokio::test]
     async fn test_create_namespace_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59970")
-            .with_client_id("admin-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59970".into()])
+            .client_id("admin-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4058,15 +4075,15 @@ mod tests {
     #[tokio::test]
     async fn test_get_namespace_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59971")
-            .with_client_id("admin-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59971".into()])
+            .client_id("admin-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4079,15 +4096,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_namespaces_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59972")
-            .with_client_id("admin-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59972".into()])
+            .client_id("admin-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4100,15 +4117,15 @@ mod tests {
     #[tokio::test]
     async fn test_create_vault_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59973")
-            .with_client_id("admin-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59973".into()])
+            .client_id("admin-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4121,15 +4138,15 @@ mod tests {
     #[tokio::test]
     async fn test_get_vault_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59974")
-            .with_client_id("admin-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59974".into()])
+            .client_id("admin-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4142,15 +4159,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_vaults_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59975")
-            .with_client_id("admin-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59975".into()])
+            .client_id("admin-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4266,15 +4283,15 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59976")
-            .with_client_id("health-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59976".into()])
+            .client_id("health-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4287,15 +4304,15 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_detailed_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59977")
-            .with_client_id("health-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59977".into()])
+            .client_id("health-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4308,15 +4325,15 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_vault_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59978")
-            .with_client_id("health-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59978".into()])
+            .client_id("health-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -4817,15 +4834,15 @@ mod tests {
     #[tokio::test]
     async fn test_verified_read_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59999")
-            .with_client_id("verified-read-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .client_id("verified-read-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5066,6 +5083,138 @@ mod tests {
         assert_eq!(opts.consistency, ReadConsistency::Eventual);
     }
 
+    #[test]
+    fn test_list_entities_opts_bon_builder() {
+        let opts = ListEntitiesOpts::builder()
+            .key_prefix("user:")
+            .at_height(100)
+            .include_expired(true)
+            .limit(50)
+            .page_token("abc123")
+            .consistency(ReadConsistency::Linearizable)
+            .build();
+
+        assert_eq!(opts.key_prefix, "user:");
+        assert_eq!(opts.at_height, Some(100));
+        assert!(opts.include_expired);
+        assert_eq!(opts.limit, 50);
+        assert_eq!(opts.page_token, Some("abc123".to_string()));
+        assert_eq!(opts.consistency, ReadConsistency::Linearizable);
+    }
+
+    #[test]
+    fn test_list_entities_opts_bon_builder_defaults() {
+        let opts = ListEntitiesOpts::builder().build();
+
+        assert_eq!(opts.key_prefix, "");
+        assert_eq!(opts.at_height, None);
+        assert!(!opts.include_expired);
+        assert_eq!(opts.limit, 0);
+        assert_eq!(opts.page_token, None);
+        assert_eq!(opts.consistency, ReadConsistency::Eventual);
+    }
+
+    #[test]
+    fn test_list_entities_opts_bon_builder_matches_default() {
+        let from_builder = ListEntitiesOpts::builder().build();
+        let from_default = ListEntitiesOpts::default();
+
+        assert_eq!(from_builder.key_prefix, from_default.key_prefix);
+        assert_eq!(from_builder.at_height, from_default.at_height);
+        assert_eq!(from_builder.include_expired, from_default.include_expired);
+        assert_eq!(from_builder.limit, from_default.limit);
+        assert_eq!(from_builder.page_token, from_default.page_token);
+        assert_eq!(from_builder.consistency, from_default.consistency);
+    }
+
+    #[test]
+    fn test_list_relationships_opts_bon_builder() {
+        let opts = ListRelationshipsOpts::builder()
+            .resource("document:1")
+            .relation("viewer")
+            .subject("user:alice")
+            .at_height(50)
+            .limit(100)
+            .page_token("xyz")
+            .consistency(ReadConsistency::Linearizable)
+            .build();
+
+        assert_eq!(opts.resource, Some("document:1".to_string()));
+        assert_eq!(opts.relation, Some("viewer".to_string()));
+        assert_eq!(opts.subject, Some("user:alice".to_string()));
+        assert_eq!(opts.at_height, Some(50));
+        assert_eq!(opts.limit, 100);
+        assert_eq!(opts.page_token, Some("xyz".to_string()));
+        assert_eq!(opts.consistency, ReadConsistency::Linearizable);
+    }
+
+    #[test]
+    fn test_list_relationships_opts_bon_builder_defaults() {
+        let opts = ListRelationshipsOpts::builder().build();
+
+        assert_eq!(opts.resource, None);
+        assert_eq!(opts.relation, None);
+        assert_eq!(opts.subject, None);
+        assert_eq!(opts.at_height, None);
+        assert_eq!(opts.limit, 0);
+        assert_eq!(opts.page_token, None);
+        assert_eq!(opts.consistency, ReadConsistency::Eventual);
+    }
+
+    #[test]
+    fn test_list_relationships_opts_bon_builder_matches_default() {
+        let from_builder = ListRelationshipsOpts::builder().build();
+        let from_default = ListRelationshipsOpts::default();
+
+        assert_eq!(from_builder.resource, from_default.resource);
+        assert_eq!(from_builder.relation, from_default.relation);
+        assert_eq!(from_builder.subject, from_default.subject);
+        assert_eq!(from_builder.at_height, from_default.at_height);
+        assert_eq!(from_builder.limit, from_default.limit);
+        assert_eq!(from_builder.page_token, from_default.page_token);
+        assert_eq!(from_builder.consistency, from_default.consistency);
+    }
+
+    #[test]
+    fn test_list_resources_opts_bon_builder() {
+        let opts = ListResourcesOpts::builder()
+            .resource_type("document")
+            .at_height(200)
+            .limit(25)
+            .page_token("next")
+            .consistency(ReadConsistency::Linearizable)
+            .build();
+
+        assert_eq!(opts.resource_type, "document");
+        assert_eq!(opts.at_height, Some(200));
+        assert_eq!(opts.limit, 25);
+        assert_eq!(opts.page_token, Some("next".to_string()));
+        assert_eq!(opts.consistency, ReadConsistency::Linearizable);
+    }
+
+    #[test]
+    fn test_list_resources_opts_bon_builder_defaults() {
+        let opts = ListResourcesOpts::builder().build();
+
+        assert_eq!(opts.resource_type, "");
+        assert_eq!(opts.at_height, None);
+        assert_eq!(opts.limit, 0);
+        assert_eq!(opts.page_token, None);
+        assert_eq!(opts.consistency, ReadConsistency::Eventual);
+    }
+
+    #[test]
+    fn test_list_resources_opts_bon_builder_matches_default() {
+        let from_builder = ListResourcesOpts::builder().build();
+        let from_default = ListResourcesOpts::default();
+
+        assert_eq!(from_builder.resource_type, from_default.resource_type);
+        assert_eq!(from_builder.at_height, from_default.at_height);
+        assert_eq!(from_builder.limit, from_default.limit);
+        assert_eq!(from_builder.page_token, from_default.page_token);
+        assert_eq!(from_builder.consistency, from_default.consistency);
+    }
+
     // =========================================================================
     // Query Operations Integration Tests
     // =========================================================================
@@ -5073,15 +5222,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_entities_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59999")
-            .with_client_id("list-entities-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .client_id("list-entities-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5094,15 +5243,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_relationships_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59999")
-            .with_client_id("list-rels-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .client_id("list-rels-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5115,15 +5264,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_resources_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59999")
-            .with_client_id("list-resources-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .client_id("list-resources-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5136,15 +5285,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_entities_with_different_options() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59999")
-            .with_client_id("list-entities-opts-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .client_id("list-entities-opts-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5165,15 +5314,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_relationships_with_filters() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:59999")
-            .with_client_id("list-rels-filter-test")
-            .with_retry_policy(
+            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .client_id("list-rels-filter-test")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5247,15 +5396,15 @@ mod tests {
     #[tokio::test]
     async fn test_read_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5272,15 +5421,15 @@ mod tests {
     #[tokio::test]
     async fn test_write_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5296,15 +5445,15 @@ mod tests {
     #[tokio::test]
     async fn test_batch_write_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5321,15 +5470,15 @@ mod tests {
     #[tokio::test]
     async fn test_batch_read_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5345,15 +5494,15 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5368,15 +5517,15 @@ mod tests {
     #[tokio::test]
     async fn test_admin_operations_return_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5399,15 +5548,15 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5429,15 +5578,15 @@ mod tests {
     #[tokio::test]
     async fn test_verified_read_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 
@@ -5454,15 +5603,15 @@ mod tests {
     #[tokio::test]
     async fn test_query_operations_return_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_retry_policy(
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .retry_policy(
                 RetryPolicy::builder()
-                    .with_max_attempts(1)
-                    .with_initial_backoff(Duration::from_millis(1))
+                    .max_attempts(1)
+                    .initial_backoff(Duration::from_millis(1))
                     .build(),
             )
-            .with_connect_timeout(Duration::from_millis(100))
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
 

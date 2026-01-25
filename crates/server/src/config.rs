@@ -6,16 +6,42 @@
 
 use std::{net::SocketAddr, path::PathBuf};
 
+use bon::Builder;
 use serde::Deserialize;
 
 use crate::node_id;
+
+/// Default listen address for the gRPC server.
+#[allow(clippy::expect_used)] // Infallible: parsing a constant valid address
+fn default_listen_addr() -> SocketAddr {
+    "0.0.0.0:50051".parse().expect("valid default address")
+}
+
+/// Default data directory path.
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/ledger")
+}
 
 /// Server configuration.
 ///
 /// All fields are at the top level for simple environment variable mapping.
 /// Environment variables use the `INFERADB__LEDGER__` prefix with field names
 /// in SCREAMING_SNAKE_CASE (e.g., `INFERADB__LEDGER__BOOTSTRAP_EXPECT`).
-#[derive(Debug, Clone, Deserialize)]
+///
+/// # Builder Example
+///
+/// ```no_run
+/// use std::path::PathBuf;
+/// use inferadb_ledger_server::config::Config;
+///
+/// let config = Config::builder()
+///     .listen_addr("0.0.0.0:9000".parse().unwrap())
+///     .data_dir(PathBuf::from("/data/ledger"))
+///     .bootstrap_expect(3)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Deserialize, Builder)]
+#[builder(derive(Debug))]
 pub struct Config {
     /// Unique node identifier (deprecated - use auto-generated Snowflake IDs).
     ///
@@ -25,6 +51,7 @@ pub struct Config {
     pub node_id: Option<u64>,
 
     /// Address to listen on for gRPC (e.g., "0.0.0.0:50051").
+    #[builder(default = default_listen_addr())]
     pub listen_addr: SocketAddr,
 
     /// Address to expose Prometheus metrics (e.g., "0.0.0.0:9090").
@@ -33,6 +60,7 @@ pub struct Config {
     pub metrics_addr: Option<SocketAddr>,
 
     /// Data directory for Raft logs and snapshots.
+    #[builder(default = default_data_dir())]
     pub data_dir: PathBuf,
 
     // === Bootstrap ===
@@ -43,6 +71,7 @@ pub struct Config {
     /// - `1`: Single-node deployment. Bootstraps immediately, no coordination.
     /// - `2+`: Coordinated mode. Waits for this many nodes before bootstrap.
     #[serde(default = "default_bootstrap_expect")]
+    #[builder(default = default_bootstrap_expect())]
     pub bootstrap_expect: u32,
 
     /// Timeout waiting for peers in seconds (default: 60).
@@ -51,6 +80,7 @@ pub struct Config {
     /// the node will fail to start with a timeout error.
     /// Ignored when `bootstrap_expect <= 1`.
     #[serde(default = "default_bootstrap_timeout_secs")]
+    #[builder(default = default_bootstrap_timeout_secs())]
     pub bootstrap_timeout_secs: u64,
 
     /// Discovery polling interval in seconds (default: 2).
@@ -58,26 +88,31 @@ pub struct Config {
     /// How frequently the node polls for new peers during the bootstrap
     /// coordination phase. Ignored when `bootstrap_expect <= 1`.
     #[serde(default = "default_bootstrap_poll_secs")]
+    #[builder(default = default_bootstrap_poll_secs())]
     pub bootstrap_poll_secs: u64,
 
     // === Batching ===
     /// Maximum number of transactions per batch (default: 100).
     #[serde(default = "default_batch_max_size")]
+    #[builder(default = default_batch_max_size())]
     #[allow(dead_code)] // Reserved for LedgerServer batching integration
     pub batch_max_size: usize,
 
     /// Maximum time to wait for a batch to fill in milliseconds (default: 10).
     #[serde(default = "default_batch_max_delay_ms")]
+    #[builder(default = default_batch_max_delay_ms())]
     #[allow(dead_code)] // Reserved for LedgerServer batching integration
     pub batch_max_delay_ms: u64,
 
     // === Request Limits ===
     /// Maximum concurrent requests per connection (default: 100).
     #[serde(default = "default_requests_max_concurrent")]
+    #[builder(default = default_requests_max_concurrent())]
     pub requests_max_concurrent: usize,
 
     /// Request timeout in seconds (default: 30).
     #[serde(default = "default_requests_timeout_secs")]
+    #[builder(default = default_requests_timeout_secs())]
     pub requests_timeout_secs: u64,
 
     // === Discovery ===
@@ -93,6 +128,7 @@ pub struct Config {
 
     /// TTL for cached peers in seconds (default: 3600 = 1 hour).
     #[serde(default = "default_discovery_cache_ttl_secs")]
+    #[builder(default = default_discovery_cache_ttl_secs())]
     pub discovery_cache_ttl_secs: u64,
 }
 
@@ -123,13 +159,12 @@ fn default_discovery_cache_ttl_secs() -> u64 {
 }
 
 impl Default for Config {
-    #[allow(clippy::expect_used)] // Infallible: parsing a constant valid address
     fn default() -> Self {
         Self {
             node_id: None,
-            listen_addr: "0.0.0.0:50051".parse().expect("valid default address"),
+            listen_addr: default_listen_addr(),
             metrics_addr: None,
-            data_dir: PathBuf::from("/var/lib/ledger"),
+            data_dir: default_data_dir(),
             bootstrap_expect: default_bootstrap_expect(),
             bootstrap_timeout_secs: default_bootstrap_timeout_secs(),
             bootstrap_poll_secs: default_bootstrap_poll_secs(),
@@ -322,5 +357,84 @@ mod tests {
         assert!(config.validate().is_ok());
         assert!(config.is_join_mode());
         assert!(!config.is_single_node());
+    }
+
+    // === Builder API Tests (TDD) ===
+
+    #[test]
+    fn test_config_builder_with_defaults() {
+        // Builder with all defaults should match Default::default()
+        let from_builder = Config::builder().build();
+        let from_default = Config::default();
+
+        assert_eq!(from_builder.node_id, from_default.node_id);
+        assert_eq!(from_builder.listen_addr, from_default.listen_addr);
+        assert_eq!(from_builder.metrics_addr, from_default.metrics_addr);
+        assert_eq!(from_builder.data_dir, from_default.data_dir);
+        assert_eq!(from_builder.bootstrap_expect, from_default.bootstrap_expect);
+        assert_eq!(from_builder.bootstrap_timeout_secs, from_default.bootstrap_timeout_secs);
+        assert_eq!(from_builder.bootstrap_poll_secs, from_default.bootstrap_poll_secs);
+        assert_eq!(from_builder.batch_max_size, from_default.batch_max_size);
+        assert_eq!(from_builder.batch_max_delay_ms, from_default.batch_max_delay_ms);
+        assert_eq!(from_builder.requests_max_concurrent, from_default.requests_max_concurrent);
+        assert_eq!(from_builder.requests_timeout_secs, from_default.requests_timeout_secs);
+        assert_eq!(from_builder.discovery_domain, from_default.discovery_domain);
+        assert_eq!(from_builder.discovery_cache_path, from_default.discovery_cache_path);
+        assert_eq!(from_builder.discovery_cache_ttl_secs, from_default.discovery_cache_ttl_secs);
+    }
+
+    #[test]
+    fn test_config_builder_with_custom_values() {
+        let config = Config::builder()
+            .node_id(42)
+            .listen_addr("127.0.0.1:9999".parse().unwrap())
+            .metrics_addr("127.0.0.1:9090".parse().unwrap())
+            .data_dir(PathBuf::from("/custom/data"))
+            .bootstrap_expect(5)
+            .bootstrap_timeout_secs(120)
+            .bootstrap_poll_secs(5)
+            .batch_max_size(500)
+            .batch_max_delay_ms(50)
+            .requests_max_concurrent(200)
+            .requests_timeout_secs(60)
+            .discovery_domain("ledger.example.com".to_string())
+            .discovery_cache_path("/tmp/cache".to_string())
+            .discovery_cache_ttl_secs(7200)
+            .build();
+
+        assert_eq!(config.node_id, Some(42));
+        assert_eq!(config.listen_addr.port(), 9999);
+        assert!(config.metrics_addr.is_some());
+        assert_eq!(config.data_dir, PathBuf::from("/custom/data"));
+        assert_eq!(config.bootstrap_expect, 5);
+        assert_eq!(config.bootstrap_timeout_secs, 120);
+        assert_eq!(config.bootstrap_poll_secs, 5);
+        assert_eq!(config.batch_max_size, 500);
+        assert_eq!(config.batch_max_delay_ms, 50);
+        assert_eq!(config.requests_max_concurrent, 200);
+        assert_eq!(config.requests_timeout_secs, 60);
+        assert_eq!(config.discovery_domain, Some("ledger.example.com".to_string()));
+        assert_eq!(config.discovery_cache_path, Some("/tmp/cache".to_string()));
+        assert_eq!(config.discovery_cache_ttl_secs, 7200);
+    }
+
+    #[test]
+    fn test_config_builder_single_node_mode() {
+        // Builder can create single-node configs easily
+        let config = Config::builder().bootstrap_expect(1).build();
+
+        assert!(config.is_single_node());
+        assert!(!config.is_join_mode());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_builder_join_mode() {
+        // Builder can create join-mode configs
+        let config = Config::builder().bootstrap_expect(0).build();
+
+        assert!(config.is_join_mode());
+        assert!(!config.is_single_node());
+        assert!(config.validate().is_ok());
     }
 }

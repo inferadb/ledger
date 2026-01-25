@@ -24,11 +24,13 @@ pub const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(60 * 60);
 pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Configuration for peer tracking behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct PeerTrackerConfig {
     /// Duration after which a peer is considered stale if not seen.
+    #[builder(default = DEFAULT_STALENESS_THRESHOLD)]
     pub staleness_threshold: Duration,
     /// How often to run maintenance (pruning).
+    #[builder(default = DEFAULT_MAINTENANCE_INTERVAL)]
     pub maintenance_interval: Duration,
 }
 
@@ -291,6 +293,31 @@ mod tests {
         let config = PeerTrackerConfig::default();
         assert_eq!(config.staleness_threshold, Duration::from_secs(60 * 60));
         assert_eq!(config.maintenance_interval, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn test_peer_tracker_config_builder_with_defaults() {
+        let config = PeerTrackerConfig::builder().build();
+        assert_eq!(config.staleness_threshold, Duration::from_secs(60 * 60));
+        assert_eq!(config.maintenance_interval, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn test_peer_tracker_config_builder_with_custom_values() {
+        let config = PeerTrackerConfig::builder()
+            .staleness_threshold(Duration::from_secs(120))
+            .maintenance_interval(Duration::from_secs(30))
+            .build();
+        assert_eq!(config.staleness_threshold, Duration::from_secs(120));
+        assert_eq!(config.maintenance_interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_peer_tracker_config_builder_matches_default() {
+        let from_builder = PeerTrackerConfig::builder().build();
+        let from_default = PeerTrackerConfig::default();
+        assert_eq!(from_builder.staleness_threshold, from_default.staleness_threshold);
+        assert_eq!(from_builder.maintenance_interval, from_default.maintenance_interval);
     }
 
     #[test]

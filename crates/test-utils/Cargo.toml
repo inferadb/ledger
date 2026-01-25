@@ -9,6 +9,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Builder pattern
+bon.workspace = true
+
 # File system
 tempfile.workspace = true
 

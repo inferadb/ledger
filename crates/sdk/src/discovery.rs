@@ -23,8 +23,8 @@
 //! use inferadb_ledger_sdk::connection::ConnectionPool;
 //!
 //! let config = ClientConfig::builder()
-//!     .with_endpoint("http://localhost:50051")
-//!     .with_client_id("my-client")
+//!     .endpoints(vec!["http://localhost:50051".into()])
+//!     .client_id("my-client")
 //!     .build()?;
 //!
 //! let pool = ConnectionPool::new(config);
@@ -389,9 +389,9 @@ mod tests {
 
     fn test_config() -> ClientConfig {
         ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_connect_timeout(Duration::from_millis(100))
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid test config")
     }

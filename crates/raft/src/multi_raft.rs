@@ -108,17 +108,20 @@ type ShardStorage =
 // ============================================================================
 
 /// Configuration for the Multi-Raft Manager.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct MultiRaftConfig {
     /// Base data directory (shards stored in subdirectories).
     pub data_dir: PathBuf,
     /// This node's ID.
     pub node_id: LedgerNodeId,
     /// Raft heartbeat interval in milliseconds.
+    #[builder(default = 150)]
     pub heartbeat_interval_ms: u64,
     /// Minimum election timeout in milliseconds.
+    #[builder(default = 300)]
     pub election_timeout_min_ms: u64,
     /// Maximum election timeout in milliseconds.
+    #[builder(default = 600)]
     pub election_timeout_max_ms: u64,
 }
 
@@ -145,15 +148,18 @@ impl MultiRaftConfig {
 }
 
 /// Configuration for a single shard.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct ShardConfig {
     /// Shard identifier.
     pub shard_id: ShardId,
     /// Initial cluster members (node_id -> address).
+    #[builder(default)]
     pub initial_members: Vec<(LedgerNodeId, String)>,
     /// Whether to bootstrap this shard as a new cluster.
+    #[builder(default = true)]
     pub bootstrap: bool,
     /// Whether to start background jobs (GC, compactor).
+    #[builder(default = true)]
     pub enable_background_jobs: bool,
 }
 
@@ -725,6 +731,75 @@ mod tests {
         assert_eq!(config.shard_id, 1);
         assert!(config.bootstrap);
         assert_eq!(config.initial_members.len(), 2);
+    }
+
+    #[test]
+    fn test_multi_raft_config_builder() {
+        let temp = TestDir::new();
+        let config =
+            MultiRaftConfig::builder().data_dir(temp.path().to_path_buf()).node_id(42).build();
+        assert_eq!(config.node_id, 42);
+        assert_eq!(config.heartbeat_interval_ms, 150);
+        assert_eq!(config.election_timeout_min_ms, 300);
+        assert_eq!(config.election_timeout_max_ms, 600);
+    }
+
+    #[test]
+    fn test_multi_raft_config_builder_custom_timeouts() {
+        let temp = TestDir::new();
+        let config = MultiRaftConfig::builder()
+            .data_dir(temp.path().to_path_buf())
+            .node_id(1)
+            .heartbeat_interval_ms(200)
+            .election_timeout_min_ms(500)
+            .election_timeout_max_ms(1000)
+            .build();
+        assert_eq!(config.heartbeat_interval_ms, 200);
+        assert_eq!(config.election_timeout_min_ms, 500);
+        assert_eq!(config.election_timeout_max_ms, 1000);
+    }
+
+    #[test]
+    fn test_multi_raft_config_builder_matches_new() {
+        let temp = TestDir::new();
+        let from_builder =
+            MultiRaftConfig::builder().data_dir(temp.path().to_path_buf()).node_id(1).build();
+        let from_new = MultiRaftConfig::new(temp.path().to_path_buf(), 1);
+        assert_eq!(from_builder.node_id, from_new.node_id);
+        assert_eq!(from_builder.heartbeat_interval_ms, from_new.heartbeat_interval_ms);
+        assert_eq!(from_builder.election_timeout_min_ms, from_new.election_timeout_min_ms);
+        assert_eq!(from_builder.election_timeout_max_ms, from_new.election_timeout_max_ms);
+    }
+
+    #[test]
+    fn test_shard_config_builder() {
+        let config = ShardConfig::builder().shard_id(5).build();
+        assert_eq!(config.shard_id, 5);
+        assert!(config.initial_members.is_empty());
+        assert!(config.bootstrap);
+        assert!(config.enable_background_jobs);
+    }
+
+    #[test]
+    fn test_shard_config_builder_with_all_fields() {
+        let members = vec![(1, "127.0.0.1:50051".to_string())];
+        let config = ShardConfig::builder()
+            .shard_id(3)
+            .initial_members(members.clone())
+            .bootstrap(false)
+            .enable_background_jobs(false)
+            .build();
+        assert_eq!(config.shard_id, 3);
+        assert_eq!(config.initial_members, members);
+        assert!(!config.bootstrap);
+        assert!(!config.enable_background_jobs);
+    }
+
+    #[test]
+    fn test_shard_config_without_background_jobs_method() {
+        let config =
+            ShardConfig::system(1, "127.0.0.1:50051".to_string()).without_background_jobs();
+        assert!(!config.enable_background_jobs);
     }
 
     #[test]

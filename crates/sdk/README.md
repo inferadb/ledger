@@ -27,8 +27,8 @@ use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation};
 #[tokio::main]
 async fn main() -> inferadb_ledger_sdk::Result<()> {
     let config = ClientConfig::builder()
-        .with_endpoint("http://localhost:50051")
-        .with_client_id("my-app")
+        .endpoints(vec!["http://localhost:50051".into()])
+        .client_id("my-app")
         .build()?;
 
     let client = LedgerClient::new(config).await?;

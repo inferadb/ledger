@@ -26,8 +26,8 @@
 //!
 //!     // Create client connected to mock server
 //!     let config = ClientConfig::builder()
-//!         .with_endpoint(server.endpoint())
-//!         .with_client_id("test-client")
+//!         .endpoints(vec![server.endpoint().to_string()])
+//!         .client_id("test-client")
 //!         .build()
 //!         .unwrap();
 //!     let client = LedgerClient::new(config).await.unwrap();
@@ -1799,10 +1799,10 @@ mod tests {
         /// Helper to create a client connected to a mock server.
         async fn create_client_for_mock(server: &MockLedgerServer) -> LedgerClient {
             let config = ClientConfig::builder()
-                .with_endpoint(server.endpoint())
-                .with_client_id("test-client")
-                .with_timeout(Duration::from_secs(5))
-                .with_connect_timeout(Duration::from_secs(2))
+                .endpoints(vec![server.endpoint().to_string()])
+                .client_id("test-client")
+                .timeout(Duration::from_secs(5))
+                .connect_timeout(Duration::from_secs(2))
                 .build()
                 .expect("valid config");
 
@@ -1816,18 +1816,18 @@ mod tests {
             max_attempts: u32,
         ) -> LedgerClient {
             let retry_policy = RetryPolicy::builder()
-                .with_max_attempts(max_attempts)
-                .with_initial_backoff(Duration::from_millis(10))
-                .with_max_backoff(Duration::from_millis(100))
-                .with_multiplier(2.0)
+                .max_attempts(max_attempts)
+                .initial_backoff(Duration::from_millis(10))
+                .max_backoff(Duration::from_millis(100))
+                .multiplier(2.0)
                 .build();
 
             let config = ClientConfig::builder()
-                .with_endpoint(server.endpoint())
-                .with_client_id(client_id)
-                .with_timeout(Duration::from_secs(5))
-                .with_connect_timeout(Duration::from_secs(2))
-                .with_retry_policy(retry_policy)
+                .endpoints(vec![server.endpoint().to_string()])
+                .client_id(client_id)
+                .timeout(Duration::from_secs(5))
+                .connect_timeout(Duration::from_secs(2))
+                .retry_policy(retry_policy)
                 .build()
                 .expect("valid config");
 

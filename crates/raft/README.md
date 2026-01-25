@@ -27,6 +27,13 @@ This crate provides the distributed consensus layer:
 ```rust
 use inferadb_ledger_raft::{LedgerServer, BatchConfig};
 use inferadb_ledger_state::StateLayer;
+use std::time::Duration;
+
+// Configure batching with builder pattern
+let batch_config = BatchConfig::builder()
+    .max_batch_size(100)
+    .max_batch_delay(Duration::from_millis(5))
+    .build();
 
 let state = StateLayer::new(engine);
 let server = LedgerServer::new(state, raft_config).await?;

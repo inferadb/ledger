@@ -41,15 +41,19 @@ const BASE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
 
 /// Auto-recovery configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct AutoRecoveryConfig {
     /// Interval between scanning for diverged vaults.
+    #[builder(default = RECOVERY_SCAN_INTERVAL)]
     pub scan_interval: Duration,
     /// Base delay for exponential backoff.
+    #[builder(default = BASE_RETRY_DELAY)]
     pub base_retry_delay: Duration,
     /// Maximum delay between retries.
+    #[builder(default = MAX_RETRY_DELAY)]
     pub max_retry_delay: Duration,
     /// Whether auto-recovery is enabled.
+    #[builder(default = true)]
     pub enabled: bool,
 }
 
@@ -566,6 +570,39 @@ mod tests {
         assert_eq!(config.base_retry_delay, Duration::from_secs(5));
         assert_eq!(config.max_retry_delay, Duration::from_secs(300));
         assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_auto_recovery_config_builder_with_defaults() {
+        let config = AutoRecoveryConfig::builder().build();
+        assert_eq!(config.scan_interval, Duration::from_secs(30));
+        assert_eq!(config.base_retry_delay, Duration::from_secs(5));
+        assert_eq!(config.max_retry_delay, Duration::from_secs(300));
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_auto_recovery_config_builder_with_custom_values() {
+        let config = AutoRecoveryConfig::builder()
+            .scan_interval(Duration::from_secs(60))
+            .base_retry_delay(Duration::from_secs(10))
+            .max_retry_delay(Duration::from_secs(600))
+            .enabled(false)
+            .build();
+        assert_eq!(config.scan_interval, Duration::from_secs(60));
+        assert_eq!(config.base_retry_delay, Duration::from_secs(10));
+        assert_eq!(config.max_retry_delay, Duration::from_secs(600));
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_auto_recovery_config_builder_matches_default() {
+        let from_builder = AutoRecoveryConfig::builder().build();
+        let from_default = AutoRecoveryConfig::default();
+        assert_eq!(from_builder.scan_interval, from_default.scan_interval);
+        assert_eq!(from_builder.base_retry_delay, from_default.base_retry_delay);
+        assert_eq!(from_builder.max_retry_delay, from_default.max_retry_delay);
+        assert_eq!(from_builder.enabled, from_default.enabled);
     }
 
     #[test]

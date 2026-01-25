@@ -26,11 +26,13 @@ pub fn test_batch_config() -> BatchConfig {
 ///
 /// This is a simple struct for test utilities since the production
 /// `RateLimitConfig` is in the server crate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
 pub struct TestRateLimitConfig {
     /// Maximum concurrent requests.
+    #[builder(default = 100)]
     pub max_concurrent: usize,
     /// Request timeout in seconds.
+    #[builder(default = 30)]
     pub timeout_secs: u64,
 }
 
@@ -41,5 +43,5 @@ pub struct TestRateLimitConfig {
 /// - `timeout_secs`: 30 (generous timeout)
 #[must_use]
 pub fn test_rate_limit_config() -> TestRateLimitConfig {
-    TestRateLimitConfig { max_concurrent: 100, timeout_secs: 30 }
+    TestRateLimitConfig::builder().build()
 }

@@ -36,6 +36,9 @@ snafu = { workspace = true }
 # Concurrency
 parking_lot = { workspace = true }
 
+# Builder pattern
+bon = { workspace = true }
+
 # Utilities
 tracing = { workspace = true }
 futures = { workspace = true }

@@ -31,8 +31,14 @@ Storage Backend (File / InMemory)
 ```rust
 use inferadb_ledger_store::{Database, DatabaseConfig};
 
-// Open database
+// Open database with default config
 let db = Database::open("ledger.db", DatabaseConfig::default())?;
+
+// Or customize with builder pattern
+let config = DatabaseConfig::builder()
+    .page_cache_size(1024)
+    .build();
+let db = Database::open("ledger.db", config)?;
 
 // Write transaction
 let mut txn = db.write_txn()?;

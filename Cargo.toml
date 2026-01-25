@@ -68,6 +68,9 @@ arc-swap = "1.7"
 lru = "0.16"
 moka = { version = "0.12", features = ["sync"] }
 
+# Builder pattern
+bon = "3.8"
+
 # Utilities
 bytes = "1.9"
 chrono = { version = "0.4", features = ["serde"] }

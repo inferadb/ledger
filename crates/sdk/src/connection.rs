@@ -17,8 +17,8 @@
 //! use inferadb_ledger_sdk::connection::ConnectionPool;
 //!
 //! let config = ClientConfig::builder()
-//!     .with_endpoint("http://localhost:50051")
-//!     .with_client_id("my-client")
+//!     .endpoints(vec!["http://localhost:50051".into()])
+//!     .client_id("my-client")
 //!     .build()?;
 //!
 //! let pool = ConnectionPool::new(config);
@@ -278,27 +278,27 @@ mod tests {
 
     fn test_config() -> ClientConfig {
         ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
             .build()
             .expect("valid test config")
     }
 
     fn test_config_with_compression() -> ClientConfig {
         ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_compression(true)
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .compression(true)
             .build()
             .expect("valid test config with compression")
     }
 
     fn test_config_with_custom_timeouts() -> ClientConfig {
         ClientConfig::builder()
-            .with_endpoint("http://localhost:50051")
-            .with_client_id("test-client")
-            .with_timeout(Duration::from_secs(30))
-            .with_connect_timeout(Duration::from_secs(10))
+            .endpoints(vec!["http://localhost:50051".into()])
+            .client_id("test-client")
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("valid test config with custom timeouts")
     }
@@ -358,9 +358,9 @@ mod tests {
     #[tokio::test]
     async fn get_channel_fails_with_unreachable_endpoint() {
         let config = ClientConfig::builder()
-            .with_endpoint("http://127.0.0.1:1") // Port 1 is unlikely to have a service
-            .with_client_id("test-client")
-            .with_connect_timeout(Duration::from_millis(100)) // Short timeout
+            .endpoints(vec!["http://127.0.0.1:1".into()]) // Port 1 is unlikely to have a service
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(100)) // Short timeout
             .build()
             .expect("valid config");
 

@@ -30,8 +30,8 @@ async fn main() -> Result<()> {
     // 1. Create the client
     // -------------------------------------------------------------------------
     let config = ClientConfig::builder()
-        .with_endpoint(endpoint)
-        .with_client_id("batch-operations-example")
+        .endpoints(vec![endpoint.into()])
+        .client_id("batch-operations-example")
         .build()?;
 
     let client = LedgerClient::new(config).await?;

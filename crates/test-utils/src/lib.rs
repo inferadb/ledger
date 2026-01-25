@@ -133,4 +133,32 @@ mod tests {
         assert!(config.max_concurrent > 0, "max concurrent should be positive");
         assert!(config.timeout_secs > 0, "timeout should be positive");
     }
+
+    #[test]
+    fn test_rate_limit_config_builder_with_defaults() {
+        // When: Building with all defaults
+        let config = TestRateLimitConfig::builder().build();
+        // Then: Should use sensible test defaults (permissive values)
+        assert!(config.max_concurrent > 0, "max_concurrent should have a positive default");
+        assert!(config.timeout_secs > 0, "timeout_secs should have a positive default");
+    }
+
+    #[test]
+    fn test_rate_limit_config_builder_with_custom_values() {
+        // When: Building with custom values
+        let config = TestRateLimitConfig::builder().max_concurrent(50).timeout_secs(15).build();
+        // Then: Should use the custom values
+        assert_eq!(config.max_concurrent, 50);
+        assert_eq!(config.timeout_secs, 15);
+    }
+
+    #[test]
+    fn test_rate_limit_config_builder_matches_factory_function() {
+        // When: Using builder with defaults vs factory function
+        let from_builder = TestRateLimitConfig::builder().build();
+        let from_factory = test_rate_limit_config();
+        // Then: Both should produce the same configuration
+        assert_eq!(from_builder.max_concurrent, from_factory.max_concurrent);
+        assert_eq!(from_builder.timeout_secs, from_factory.timeout_secs);
+    }
 }

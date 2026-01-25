@@ -31,6 +31,31 @@ let combined = sha256_concat(&hash, b"world");
 // Type-safe identifiers
 let ns: NamespaceId = 1;
 let vault: VaultId = 0;
+
+// Build domain types with type-safe builders
+use inferadb_ledger_types::{BlockHeader, Transaction};
+use chrono::Utc;
+
+let header = BlockHeader::builder()
+    .height(100)
+    .namespace_id(ns)
+    .vault_id(vault)
+    .timestamp(Utc::now())
+    .prev_hash(Hash::zero())
+    .state_root(hash)
+    .tx_root(hash)
+    .tx_count(1)
+    .proposer("node-1")
+    .signature(vec![])
+    .build();
+
+let tx = Transaction::builder()
+    .id("tx-1")
+    .actor("user:alice")
+    .operations(vec![Operation::set_entity("key", b"value".to_vec())])
+    .seq(1)
+    .timestamp(Utc::now())
+    .build()?;  // Fallible: validates actor and operations
 ```
 
 ## License
