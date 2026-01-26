@@ -30,6 +30,8 @@ const COMPACTION_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 ///
 /// Runs as a background task, periodically checking vault retention policies
 /// and compacting old blocks to remove transaction bodies.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct BlockCompactor<B: StorageBackend + 'static> {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -40,27 +42,11 @@ pub struct BlockCompactor<B: StorageBackend + 'static> {
     /// Accessor for applied state (vault registry and metadata).
     applied_state: AppliedStateAccessor,
     /// Compaction interval.
+    #[builder(default = COMPACTION_INTERVAL)]
     interval: Duration,
 }
 
 impl<B: StorageBackend + 'static> BlockCompactor<B> {
-    /// Create a new block compactor.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
-        block_archive: Arc<BlockArchive<B>>,
-        applied_state: AppliedStateAccessor,
-    ) -> Self {
-        Self { raft, node_id, block_archive, applied_state, interval: COMPACTION_INTERVAL }
-    }
-
-    /// Create with custom interval (for testing).
-    #[cfg(test)]
-    pub fn with_interval(mut self, interval: Duration) -> Self {
-        self.interval = interval;
-        self
-    }
-
     /// Check if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();

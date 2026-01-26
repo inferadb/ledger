@@ -37,6 +37,8 @@ const GC_ACTOR: &str = "system:gc";
 ///
 /// Runs as a background task, periodically scanning for and removing
 /// expired entities through Raft consensus.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -47,36 +49,14 @@ pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
     /// Accessor for applied state (vault registry).
     applied_state: AppliedStateAccessor,
     /// GC interval.
+    #[builder(default = GC_INTERVAL)]
     interval: Duration,
     /// Maximum entities per cycle.
+    #[builder(default = MAX_BATCH_SIZE)]
     max_batch_size: usize,
 }
 
 impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
-    /// Create a new garbage collector.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
-        state: Arc<StateLayer<B>>,
-        applied_state: AppliedStateAccessor,
-    ) -> Self {
-        Self {
-            raft,
-            node_id,
-            state,
-            applied_state,
-            interval: GC_INTERVAL,
-            max_batch_size: MAX_BATCH_SIZE,
-        }
-    }
-
-    /// Create with custom interval (for testing).
-    #[cfg(test)]
-    pub fn with_interval(mut self, interval: Duration) -> Self {
-        self.interval = interval;
-        self
-    }
-
     /// Check if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();

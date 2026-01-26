@@ -49,6 +49,8 @@ const SYSTEM_NAMESPACE_ID: i64 = 0;
 ///
 /// Runs as a background task, periodically scanning for and removing
 /// membership records that reference deleted users.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -59,27 +61,11 @@ pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,
     /// Cleanup interval.
+    #[builder(default = CLEANUP_INTERVAL)]
     interval: Duration,
 }
 
 impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
-    /// Create a new orphan cleanup job.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
-        state: Arc<StateLayer<B>>,
-        applied_state: AppliedStateAccessor,
-    ) -> Self {
-        Self { raft, node_id, state, applied_state, interval: CLEANUP_INTERVAL }
-    }
-
-    /// Create with custom interval (for testing).
-    #[cfg(test)]
-    pub fn with_interval(mut self, interval: Duration) -> Self {
-        self.interval = interval;
-        self
-    }
-
     /// Check if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();

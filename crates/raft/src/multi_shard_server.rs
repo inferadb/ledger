@@ -146,11 +146,11 @@ impl MultiShardLedgerServer {
             system_shard.applied_state().clone(),
         );
 
-        let discovery_service = DiscoveryServiceImpl::new(
-            system_shard.raft().clone(),
-            system_shard.state().clone(),
-            system_shard.applied_state().clone(),
-        );
+        let discovery_service = DiscoveryServiceImpl::builder()
+            .raft(system_shard.raft().clone())
+            .state(system_shard.state().clone())
+            .applied_state(system_shard.applied_state().clone())
+            .build();
 
         // Multi-shard Raft service routes inter-node RPCs to the correct shard
         let raft_service = MultiShardRaftService::new(self.manager.clone());

@@ -95,6 +95,8 @@ impl CachedSystemState {
 ///
 /// This runs as a background task on learner nodes, periodically fetching
 /// fresh state from voters to keep the local cache up to date.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct LearnerRefreshJob {
     /// The Raft instance for membership info.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -105,33 +107,14 @@ pub struct LearnerRefreshJob {
     #[allow(dead_code)]
     applied_state: AppliedStateAccessor,
     /// Cache of system state from voters.
+    #[builder(default = Arc::new(RwLock::new(CachedSystemState::default())))]
     cached_state: Arc<RwLock<CachedSystemState>>,
     /// Configuration.
+    #[builder(default)]
     config: LearnerRefreshConfig,
 }
 
 impl LearnerRefreshJob {
-    /// Create a new learner refresh job.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
-        applied_state: AppliedStateAccessor,
-    ) -> Self {
-        Self {
-            raft,
-            node_id,
-            applied_state,
-            cached_state: Arc::new(RwLock::new(CachedSystemState::default())),
-            config: LearnerRefreshConfig::default(),
-        }
-    }
-
-    /// Set custom configuration.
-    pub fn with_config(mut self, config: LearnerRefreshConfig) -> Self {
-        self.config = config;
-        self
-    }
-
     /// Get a reference to the cached state.
     pub fn cached_state(&self) -> Arc<RwLock<CachedSystemState>> {
         self.cached_state.clone()

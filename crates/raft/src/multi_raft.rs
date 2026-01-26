@@ -508,28 +508,33 @@ impl MultiRaftManager {
         info!(shard_id, "Starting background jobs for shard");
 
         // TTL Garbage Collector
-        let gc = TtlGarbageCollector::new(
-            raft.clone(),
-            self.config.node_id,
-            state.clone(),
-            applied_state.clone(),
-        );
+        let gc = TtlGarbageCollector::builder()
+            .raft(raft.clone())
+            .node_id(self.config.node_id)
+            .state(state.clone())
+            .applied_state(applied_state.clone())
+            .build();
         let gc_handle = gc.start();
         info!(shard_id, "Started TTL garbage collector");
 
         // Block Compactor
-        let compactor = BlockCompactor::new(
-            raft.clone(),
-            self.config.node_id,
-            block_archive.clone(),
-            applied_state.clone(),
-        );
+        let compactor = BlockCompactor::builder()
+            .raft(raft.clone())
+            .node_id(self.config.node_id)
+            .block_archive(block_archive.clone())
+            .applied_state(applied_state.clone())
+            .build();
         let compactor_handle = compactor.start();
         info!(shard_id, "Started block compactor");
 
         // Auto Recovery Job
-        let recovery = AutoRecoveryJob::new(raft, self.config.node_id, applied_state, state)
-            .with_block_archive(block_archive);
+        let recovery = AutoRecoveryJob::builder()
+            .raft(raft)
+            .node_id(self.config.node_id)
+            .applied_state(applied_state)
+            .state(state)
+            .block_archive(Some(block_archive))
+            .build();
         let recovery_handle = recovery.start();
         info!(shard_id, "Started auto recovery job");
 

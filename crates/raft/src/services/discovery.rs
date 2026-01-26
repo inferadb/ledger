@@ -164,6 +164,8 @@ fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
 const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Discovery service implementation.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct DiscoveryServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -173,49 +175,20 @@ pub struct DiscoveryServiceImpl {
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,
     /// Tracks when peers were last seen.
+    #[builder(default = RwLock::new(PeerTracker::new()))]
     peer_tracker: RwLock<PeerTracker>,
     /// This node's ID for voter/learner checks (optional for backward compatibility).
+    #[builder(default)]
     node_id: Option<crate::types::LedgerNodeId>,
     /// Timestamp of last state update (for learner staleness checks).
+    #[builder(default = RwLock::new(std::time::Instant::now()))]
     last_state_update: RwLock<std::time::Instant>,
     /// Learner cache TTL (stale after this duration).
+    #[builder(default = DEFAULT_LEARNER_CACHE_TTL)]
     learner_cache_ttl: std::time::Duration,
 }
 
 impl DiscoveryServiceImpl {
-    /// Create a new discovery service (without node_id, staleness checks disabled).
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-    ) -> Self {
-        Self {
-            raft,
-            state,
-            applied_state,
-            peer_tracker: RwLock::new(PeerTracker::new()),
-            node_id: None,
-            last_state_update: RwLock::new(std::time::Instant::now()),
-            learner_cache_ttl: DEFAULT_LEARNER_CACHE_TTL,
-        }
-    }
-
-    /// Add node_id for learner staleness checks.
-    ///
-    /// When set, the service can detect when a learner's cache is stale
-    /// and return appropriate errors with leader hints for client retry.
-    pub fn with_node_id(mut self, node_id: crate::types::LedgerNodeId) -> Self {
-        self.node_id = Some(node_id);
-        self
-    }
-
-    /// Create with custom learner cache TTL (for testing).
-    #[cfg(test)]
-    pub fn with_cache_ttl(mut self, ttl: std::time::Duration) -> Self {
-        self.learner_cache_ttl = ttl;
-        self
-    }
-
     /// Update the last state update timestamp.
     ///
     /// Should be called after applying Raft entries.

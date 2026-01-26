@@ -246,37 +246,45 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     )
     .with_rate_limit(config.requests_max_concurrent, config.requests_timeout_secs);
 
-    let gc = TtlGarbageCollector::new(
-        raft.clone(),
-        node_id,
-        state.clone(),
-        applied_state_accessor.clone(),
-    );
+    let gc = TtlGarbageCollector::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .state(state.clone())
+        .applied_state(applied_state_accessor.clone())
+        .build();
     let gc_handle = gc.start();
     tracing::info!("Started TTL garbage collector");
 
     // Start block compactor for COMPACTED retention mode
-    let compactor = BlockCompactor::new(
-        raft.clone(),
-        node_id,
-        block_archive_for_compactor,
-        applied_state_accessor.clone(),
-    );
+    let compactor = BlockCompactor::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .block_archive(block_archive_for_compactor)
+        .applied_state(applied_state_accessor.clone())
+        .build();
     let compactor_handle = compactor.start();
     tracing::info!("Started block compactor");
 
     // Start auto-recovery job for detecting and recovering diverged vaults
     // Per DESIGN.md §8.2: Circuit breaker with bounded retries
-    let recovery =
-        AutoRecoveryJob::new(raft.clone(), node_id, applied_state_accessor.clone(), state.clone())
-            .with_block_archive(block_archive_for_recovery)
-            .with_snapshot_manager(snapshot_manager);
+    let recovery = AutoRecoveryJob::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .applied_state(applied_state_accessor.clone())
+        .state(state.clone())
+        .block_archive(Some(block_archive_for_recovery))
+        .snapshot_manager(Some(snapshot_manager))
+        .build();
     let recovery_handle = recovery.start();
     tracing::info!("Started auto-recovery job with snapshot support");
 
     // Start learner refresh job for keeping learner state synchronized
     // Per DESIGN.md §9.3: Background polling of voters for fresh state
-    let learner_refresh = LearnerRefreshJob::new(raft.clone(), node_id, applied_state_accessor);
+    let learner_refresh = LearnerRefreshJob::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .applied_state(applied_state_accessor)
+        .build();
     let learner_refresh_handle = learner_refresh.start();
     tracing::info!("Started learner refresh job");
 

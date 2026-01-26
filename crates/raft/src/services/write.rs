@@ -32,46 +32,38 @@ use crate::{
 };
 
 /// Write service implementation.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct WriteServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Block archive for proof generation (optional).
+    #[builder(default)]
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Per-namespace rate limiter.
+    #[builder(default)]
     rate_limiter: Option<Arc<NamespaceRateLimiter>>,
     /// Accessor for applied state (client sequences for gap detection).
+    #[builder(default)]
     applied_state: Option<AppliedStateAccessor>,
     /// Handle for submitting writes to the batch writer.
     ///
     /// Per DESIGN.md §6.3: Writes are coalesced into batches and submitted
     /// as single Raft proposals for improved throughput.
+    #[builder(default)]
     batch_handle: Option<BatchWriterHandle>,
     /// Mutex to serialize Raft proposals (fallback when batching disabled).
     ///
     /// Used for BatchWriteRequest which bypasses the batch writer, or
     /// when batch_handle is None.
+    #[builder(default = Arc::new(Mutex::new(())))]
     proposal_mutex: Arc<Mutex<()>>,
 }
 
 #[allow(clippy::result_large_err)]
 impl WriteServiceImpl {
-    /// Create a new write service (without batching).
-    ///
-    /// For high-throughput scenarios, use `new_with_batching` instead.
-    pub fn new(raft: Arc<Raft<LedgerTypeConfig>>, idempotency: Arc<IdempotencyCache>) -> Self {
-        Self {
-            raft,
-            idempotency,
-            block_archive: None,
-            rate_limiter: None,
-            applied_state: None,
-            batch_handle: None,
-            proposal_mutex: Arc::new(Mutex::new(())),
-        }
-    }
-
     /// Create a write service with batching enabled.
     ///
     /// Per DESIGN.md §6.3: Batching coalesces multiple writes into single
@@ -136,23 +128,6 @@ impl WriteServiceImpl {
         (service, run_future)
     }
 
-    /// Create a write service with block archive access for proof generation.
-    pub fn with_block_archive(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        idempotency: Arc<IdempotencyCache>,
-        block_archive: Arc<BlockArchive<FileBackend>>,
-    ) -> Self {
-        Self {
-            raft,
-            idempotency,
-            block_archive: Some(block_archive),
-            rate_limiter: None,
-            applied_state: None,
-            batch_handle: None,
-            proposal_mutex: Arc::new(Mutex::new(())),
-        }
-    }
-
     /// Create a write service with block archive and batching enabled.
     pub fn with_block_archive_and_batching(
         raft: Arc<Raft<LedgerTypeConfig>>,
@@ -165,13 +140,15 @@ impl WriteServiceImpl {
         (service, run_future)
     }
 
-    /// Create a write service with per-namespace rate limiting.
+    /// Add per-namespace rate limiting to an existing service.
+    #[must_use]
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<NamespaceRateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
         self
     }
 
-    /// Set the applied state accessor for sequence gap detection.
+    /// Add applied state accessor for sequence gap detection.
+    #[must_use]
     pub fn with_applied_state(mut self, applied_state: AppliedStateAccessor) -> Self {
         self.applied_state = Some(applied_state);
         self

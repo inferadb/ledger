@@ -85,6 +85,8 @@ pub enum RecoveryResult {
 ///
 /// Runs as a background task, periodically scanning for vaults that need
 /// recovery and triggering the recovery process through Raft consensus.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     /// The Raft instance for proposing health updates.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -93,53 +95,20 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     /// Accessor for applied state (vault health).
     applied_state: AppliedStateAccessor,
     /// Block archive for replaying transactions.
+    #[builder(default)]
     block_archive: Option<Arc<BlockArchive<B>>>,
     /// Snapshot manager for finding recovery starting points.
+    #[builder(default)]
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// State layer for applying recovered state (internally thread-safe via inferadb-ledger-store
     /// MVCC).
     state: Arc<StateLayer<B>>,
     /// Configuration.
+    #[builder(default)]
     config: AutoRecoveryConfig,
 }
 
 impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
-    /// Create a new auto-recovery job.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
-        applied_state: AppliedStateAccessor,
-        state: Arc<StateLayer<B>>,
-    ) -> Self {
-        Self {
-            raft,
-            node_id,
-            applied_state,
-            block_archive: None,
-            snapshot_manager: None,
-            state,
-            config: AutoRecoveryConfig::default(),
-        }
-    }
-
-    /// Add block archive for recovery.
-    pub fn with_block_archive(mut self, archive: Arc<BlockArchive<B>>) -> Self {
-        self.block_archive = Some(archive);
-        self
-    }
-
-    /// Add snapshot manager for recovery optimization.
-    pub fn with_snapshot_manager(mut self, manager: Arc<SnapshotManager>) -> Self {
-        self.snapshot_manager = Some(manager);
-        self
-    }
-
-    /// Set custom configuration.
-    pub fn with_config(mut self, config: AutoRecoveryConfig) -> Self {
-        self.config = config;
-        self
-    }
-
     /// Check if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();

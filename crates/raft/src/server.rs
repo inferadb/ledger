@@ -146,13 +146,13 @@ impl LedgerServer {
             .into_inner();
 
         // Create service implementations
-        let read_service = ReadServiceImpl::with_idempotency(
-            self.state.clone(),
-            self.applied_state.clone(),
-            self.block_archive.clone(),
-            self.block_announcements.clone(),
-            self.idempotency.clone(),
-        );
+        let read_service = ReadServiceImpl::builder()
+            .state(self.state.clone())
+            .applied_state(self.applied_state.clone())
+            .block_archive(self.block_archive.clone())
+            .block_announcements(self.block_announcements.clone())
+            .idempotency(Some(self.idempotency.clone()))
+            .build();
         // Create write service with batching enabled for high throughput.
         // Per DESIGN.md §6.3: Server-level batching coalesces individual Write RPCs
         // into single Raft proposals. This improves throughput when clients can't
@@ -203,11 +203,11 @@ impl LedgerServer {
             self.state.clone(),
             self.applied_state.clone(),
         );
-        let discovery_service = DiscoveryServiceImpl::new(
-            self.raft.clone(),
-            self.state.clone(),
-            self.applied_state.clone(),
-        );
+        let discovery_service = DiscoveryServiceImpl::builder()
+            .raft(self.raft.clone())
+            .state(self.state.clone())
+            .applied_state(self.applied_state.clone())
+            .build();
 
         // RaftService handles inter-node Raft RPCs (Vote, AppendEntries, InstallSnapshot)
         let raft_service = RaftServiceImpl::new(self.raft.clone());

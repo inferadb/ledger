@@ -7,7 +7,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! let maintenance = PeerMaintenance::new(discovery_service);
+//! let maintenance = PeerMaintenance::builder().discovery(discovery_service).build();
 //! let handle = maintenance.start();
 //! // ... later ...
 //! handle.abort(); // to stop maintenance
@@ -26,27 +26,17 @@ pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Background maintenance task for peer tracking.
 ///
 /// Periodically prunes stale peers from the discovery service's tracker.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct PeerMaintenance {
     /// The discovery service to maintain.
     discovery: Arc<DiscoveryServiceImpl>,
     /// Interval between maintenance cycles.
+    #[builder(default = DEFAULT_MAINTENANCE_INTERVAL)]
     interval: Duration,
 }
 
 impl PeerMaintenance {
-    /// Create a new peer maintenance task.
-    pub fn new(discovery: Arc<DiscoveryServiceImpl>) -> Self {
-        let interval = discovery.maintenance_interval();
-        Self { discovery, interval }
-    }
-
-    /// Create with a custom interval (for testing).
-    #[cfg(test)]
-    pub fn with_interval(mut self, interval: Duration) -> Self {
-        self.interval = interval;
-        self
-    }
-
     /// Run a single maintenance cycle.
     fn run_cycle(&self) {
         let pruned = self.discovery.prune_stale_peers();

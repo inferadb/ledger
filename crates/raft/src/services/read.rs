@@ -42,141 +42,36 @@ use crate::{
 };
 
 /// Read service implementation.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct ReadServiceImpl {
     /// The state layer for reading data.
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Block archive for retrieving stored blocks.
+    #[builder(default)]
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Snapshot manager for historical reads optimization.
+    #[builder(default)]
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// Block announcement broadcast channel.
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Idempotency cache for client state tracking.
+    #[builder(default)]
     idempotency: Option<Arc<IdempotencyCache>>,
     /// Raft instance for consistency checks (linearizable reads).
+    #[builder(default)]
     raft: Option<Arc<Raft<LedgerTypeConfig>>>,
     /// This node's ID for leadership checks.
+    #[builder(default)]
     node_id: Option<LedgerNodeId>,
     /// Page token codec for secure pagination (HMAC-protected).
+    #[builder(default = PageTokenCodec::with_random_key())]
     page_token_codec: PageTokenCodec,
 }
 
 impl ReadServiceImpl {
-    /// Create a new read service.
-    pub fn new(
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        block_announcements: broadcast::Sender<BlockAnnouncement>,
-    ) -> Self {
-        Self {
-            state,
-            applied_state,
-            block_archive: None,
-            snapshot_manager: None,
-            block_announcements,
-            idempotency: None,
-            raft: None,
-            node_id: None,
-            page_token_codec: PageTokenCodec::with_random_key(),
-        }
-    }
-
-    /// Create a read service with block archive access.
-    pub fn with_block_archive(
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        block_archive: Arc<BlockArchive<FileBackend>>,
-        block_announcements: broadcast::Sender<BlockAnnouncement>,
-    ) -> Self {
-        Self {
-            state,
-            applied_state,
-            block_archive: Some(block_archive),
-            snapshot_manager: None,
-            block_announcements,
-            idempotency: None,
-            raft: None,
-            node_id: None,
-            page_token_codec: PageTokenCodec::with_random_key(),
-        }
-    }
-
-    /// Create a read service with block archive and snapshot manager.
-    pub fn with_snapshots(
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        block_archive: Arc<BlockArchive<FileBackend>>,
-        snapshot_manager: Arc<SnapshotManager>,
-        block_announcements: broadcast::Sender<BlockAnnouncement>,
-    ) -> Self {
-        Self {
-            state,
-            applied_state,
-            block_archive: Some(block_archive),
-            snapshot_manager: Some(snapshot_manager),
-            block_announcements,
-            idempotency: None,
-            raft: None,
-            node_id: None,
-            page_token_codec: PageTokenCodec::with_random_key(),
-        }
-    }
-
-    /// Create a read service with full configuration.
-    pub fn with_idempotency(
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        block_archive: Option<Arc<BlockArchive<FileBackend>>>,
-        block_announcements: broadcast::Sender<BlockAnnouncement>,
-        idempotency: Arc<IdempotencyCache>,
-    ) -> Self {
-        Self {
-            state,
-            applied_state,
-            block_archive,
-            snapshot_manager: None,
-            block_announcements,
-            idempotency: Some(idempotency),
-            raft: None,
-            node_id: None,
-            page_token_codec: PageTokenCodec::with_random_key(),
-        }
-    }
-
-    /// Create a read service with full configuration including snapshots.
-    pub fn with_full_config(
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        block_archive: Option<Arc<BlockArchive<FileBackend>>>,
-        snapshot_manager: Option<Arc<SnapshotManager>>,
-        block_announcements: broadcast::Sender<BlockAnnouncement>,
-        idempotency: Option<Arc<IdempotencyCache>>,
-    ) -> Self {
-        Self {
-            state,
-            applied_state,
-            block_archive,
-            snapshot_manager,
-            block_announcements,
-            idempotency,
-            raft: None,
-            node_id: None,
-            page_token_codec: PageTokenCodec::with_random_key(),
-        }
-    }
-
-    /// Add Raft instance for linearizable read support.
-    ///
-    /// When set, the service can enforce linearizable reads by checking
-    /// that this node is the current leader before serving read requests.
-    pub fn with_raft(mut self, raft: Arc<Raft<LedgerTypeConfig>>, node_id: LedgerNodeId) -> Self {
-        self.raft = Some(raft);
-        self.node_id = Some(node_id);
-        self
-    }
-
     /// Check if this node is the current Raft leader.
     ///
     /// Returns false if Raft is not configured.
