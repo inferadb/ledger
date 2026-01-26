@@ -59,6 +59,9 @@ cargo test test_name -- --nocapture        # single test with output
 cargo +nightly fmt
 cargo +1.92 clippy --all-targets -- -D warnings
 
+# Unused dependencies
+cargo +nightly udeps --workspace
+
 # Pre-commit check
 cargo +nightly fmt --check && cargo +1.92 clippy --all-targets -- -D warnings && cargo test
 
@@ -107,7 +110,44 @@ inferadb-ledger-types   — Hash primitives, Merkle proofs, config, errors
 
 ## Error Handling
 
-Use `snafu` with backtraces. Propagate with `?`. No `.unwrap()`.
+Use `snafu` with implicit location tracking. Never use `thiserror` or `anyhow`.
+
+**Why snafu over alternatives:**
+
+- `thiserror` — No context selectors, requires manual error construction
+- `anyhow` — No structured types, unsuitable for libraries
+- `snafu` — Context selectors + implicit locations + structured types
+
+**Pattern for error types with source fields:**
+
+```rust
+#[derive(Debug, Snafu)]
+pub enum MyError {
+    #[snafu(display("Storage error: {source}"))]
+    Storage {
+        source: SomeOtherError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+}
+```
+
+**Propagate with context selectors:**
+
+```rust
+// Good: captures location automatically
+some_operation().context(StorageSnafu)?;
+
+// Bad: loses location information
+some_operation().map_err(|e| MyError::Storage { source: e, location: ??? })?;
+```
+
+**Conventions:**
+
+- Add `#[snafu(implicit)] location: snafu::Location` to all variants with `source` fields
+- Use `.context(XxxSnafu)?` for propagation, never manual error construction
+- Leaf variants (no source) don't need location fields
+- API-facing errors use `message: String` for gRPC serialization
 
 ## Builder Pattern (bon)
 

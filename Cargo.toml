@@ -45,7 +45,6 @@ seahash = "4.1"
 hmac = "0.12"
 rs_merkle = "1.4"
 subtle = "2.6"
-zeroize = { version = "1.8", features = ["derive"] }
 base64 = "0.22"
 
 # Compression
@@ -64,7 +63,6 @@ parking_lot = "0.12"
 arc-swap = "1.7"
 
 # Caching
-lru = "0.16"
 moka = { version = "0.12", features = ["sync"] }
 
 # Builder pattern
@@ -125,7 +123,6 @@ inferadb-ledger-test-utils = { version = "0.1.0-pre.1", path = "crates/test-util
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
 byteorder = "1.5"
-memmap2 = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -135,7 +132,8 @@ missing_docs = "warn"
 unwrap_used = "deny"
 expect_used = "warn"
 panic = "deny"
-todo = "warn"
+todo = "deny"
+unimplemented = "deny"
 
 [profile.release]
 lto = "thin"

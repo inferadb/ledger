@@ -24,9 +24,6 @@ snafu = { workspace = true }
 # Serialization for key/value encoding
 byteorder = { workspace = true }
 
-# Memory-mapped files
-memmap2 = { workspace = true }
-
 # Parking lot for faster locks
 parking_lot = { workspace = true }
 

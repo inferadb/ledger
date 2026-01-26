@@ -143,10 +143,10 @@ impl<B: StorageBackend> StateLayer<B> {
                         Some(SetCondition::MustNotExist) => !is_update,
                         Some(SetCondition::MustExist) => is_update,
                         Some(SetCondition::VersionEquals(v)) => {
-                            entity_data.as_ref().map(|e| e.version == *v).unwrap_or(false)
+                            entity_data.as_ref().is_some_and(|e| e.version == *v)
                         },
                         Some(SetCondition::ValueEquals(expected)) => {
-                            entity_data.as_ref().map(|e| e.value == *expected).unwrap_or(false)
+                            entity_data.as_ref().is_some_and(|e| e.value == *expected)
                         },
                     };
 

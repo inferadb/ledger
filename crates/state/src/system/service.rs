@@ -84,15 +84,14 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     pub fn next_sequence(&self, key: &str, start_value: i64) -> Result<i64> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         // Read current value
-        let current = match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
-            Ok(Some(entity)) => {
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+        let current = match entity_opt {
+            Some(entity) => {
                 let value_str = String::from_utf8_lossy(&entity.value);
                 value_str.parse::<i64>().unwrap_or(start_value)
             },
-            Ok(None) => start_value,
-            Err(e) => {
-                return Err(SystemError::State { source: Box::new(e) });
-            },
+            None => start_value,
         };
 
         // Increment and save
@@ -142,13 +141,14 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     pub fn get_node(&self, node_id: &NodeId) -> Result<Option<NodeInfo>> {
         let key = SystemKeys::node_key(node_id);
 
-        match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
-            Ok(Some(entity)) => {
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+        match entity_opt {
+            Some(entity) => {
                 let node: NodeInfo = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(node))
             },
-            Ok(None) => Ok(None),
-            Err(e) => Err(SystemError::State { source: Box::new(e) }),
+            None => Ok(None),
         }
     }
 
@@ -211,13 +211,14 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     pub fn get_namespace(&self, namespace_id: NamespaceId) -> Result<Option<NamespaceRegistry>> {
         let key = SystemKeys::namespace_key(namespace_id);
 
-        match self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
-            Ok(Some(entity)) => {
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+        match entity_opt {
+            Some(entity) => {
                 let registry: NamespaceRegistry = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(registry))
             },
-            Ok(None) => Ok(None),
-            Err(e) => Err(SystemError::State { source: Box::new(e) }),
+            None => Ok(None),
         }
     }
 
@@ -226,15 +227,14 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         let index_key = SystemKeys::namespace_name_index_key(name);
 
         // First, look up the namespace ID from the index
-        let namespace_id = match self.state.get_entity(SYSTEM_VAULT_ID, index_key.as_bytes()) {
-            Ok(Some(entity)) => {
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, index_key.as_bytes()).context(StateSnafu)?;
+        let namespace_id = match entity_opt {
+            Some(entity) => {
                 let id_str = String::from_utf8_lossy(&entity.value);
                 id_str.parse::<NamespaceId>().ok()
             },
-            Ok(None) => None,
-            Err(e) => {
-                return Err(SystemError::State { source: Box::new(e) });
-            },
+            None => None,
         };
 
         match namespace_id {

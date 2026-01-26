@@ -21,7 +21,6 @@ sha2.workspace = true
 seahash.workspace = true
 rs_merkle.workspace = true
 subtle.workspace = true
-zeroize.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -31,10 +30,7 @@ postcard.workspace = true
 snafu.workspace = true
 
 # Utilities
-bytes.workspace = true
 chrono.workspace = true
-uuid.workspace = true
-tracing.workspace = true
 humantime.workspace = true
 
 [dev-dependencies]
