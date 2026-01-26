@@ -38,6 +38,8 @@ use crate::{
 /// The main Ledger gRPC server.
 ///
 /// Combines all services with the Raft consensus layer and state storage.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct LedgerServer {
     /// The Raft consensus instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -46,82 +48,32 @@ pub struct LedgerServer {
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Idempotency cache for duplicate detection.
+    #[builder(default = Arc::new(IdempotencyCache::new()))]
     idempotency: Arc<IdempotencyCache>,
     /// Block archive for historical block retrieval.
+    #[builder(default)]
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Block announcement broadcast channel.
+    #[builder(default = broadcast::channel(1000).0)]
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Server address.
     addr: SocketAddr,
     /// Rate limit: requests per second (reserved for future use).
     #[allow(dead_code)]
+    #[builder(default = 1000)]
     requests_per_second: u64,
     /// Max concurrent requests per connection.
+    #[builder(default = 100)]
     max_concurrent: usize,
     /// Request timeout in seconds.
+    #[builder(default = 30)]
     timeout_secs: u64,
     /// Per-namespace rate limiter (optional).
+    #[builder(default)]
     namespace_rate_limiter: Option<Arc<NamespaceRateLimiter>>,
 }
 
 impl LedgerServer {
-    /// Create a new Ledger server.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        addr: SocketAddr,
-    ) -> Self {
-        Self::with_block_archive(raft, state, applied_state, None, addr)
-    }
-
-    /// Create a new Ledger server with block archive for GetBlock/GetBlockRange.
-    pub fn with_block_archive(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        block_archive: Option<Arc<BlockArchive<FileBackend>>>,
-        addr: SocketAddr,
-    ) -> Self {
-        // Create broadcast channel for block announcements (capacity 1000)
-        let (block_announcements, _) = broadcast::channel(1000);
-
-        Self {
-            raft,
-            state,
-            applied_state,
-            idempotency: Arc::new(IdempotencyCache::new()),
-            block_archive,
-            block_announcements,
-            addr,
-            // Default rate limiting values
-            requests_per_second: 1000,
-            max_concurrent: 100,
-            timeout_secs: 30,
-            namespace_rate_limiter: None,
-        }
-    }
-
-    /// Configure request limits for this server.
-    ///
-    /// - `max_concurrent`: Max concurrent requests per connection
-    /// - `timeout_secs`: Request timeout in seconds
-    pub fn with_rate_limit(mut self, max_concurrent: usize, timeout_secs: u64) -> Self {
-        self.max_concurrent = max_concurrent;
-        self.timeout_secs = timeout_secs;
-        self
-    }
-
-    /// Configure per-namespace rate limiting.
-    ///
-    /// Per DESIGN.md §3.7: Mitigates noisy neighbor problems by limiting
-    /// requests per namespace. Each namespace gets an independent rate limit.
-    pub fn with_namespace_rate_limit(mut self, requests_per_second: u64) -> Self {
-        self.namespace_rate_limiter =
-            Some(Arc::new(NamespaceRateLimiter::with_limit(requests_per_second)));
-        self
-    }
-
     /// Start the gRPC server.
     ///
     /// This method blocks until the server is shut down.
@@ -183,21 +135,13 @@ impl LedgerServer {
             Some(limiter) => write_service.with_rate_limiter(limiter.clone()),
             None => write_service,
         };
-        let admin_service = match &self.block_archive {
-            Some(archive) => AdminServiceImpl::with_block_archive(
-                self.raft.clone(),
-                self.state.clone(),
-                self.applied_state.clone(),
-                archive.clone(),
-                self.addr,
-            ),
-            None => AdminServiceImpl::new(
-                self.raft.clone(),
-                self.state.clone(),
-                self.applied_state.clone(),
-                self.addr,
-            ),
-        };
+        let admin_service = AdminServiceImpl::builder()
+            .raft(self.raft.clone())
+            .state(self.state.clone())
+            .applied_state(self.applied_state.clone())
+            .block_archive(self.block_archive.clone())
+            .listen_addr(self.addr)
+            .build();
         let health_service = HealthServiceImpl::new(
             self.raft.clone(),
             self.state.clone(),

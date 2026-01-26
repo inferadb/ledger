@@ -576,8 +576,12 @@ impl MultiShardTestCluster {
             }
 
             // Create and start the multi-shard gRPC server
-            let server =
-                MultiShardLedgerServer::new(manager.clone(), addr).with_rate_limit(1000, 30); // High concurrency for tests
+            let server = MultiShardLedgerServer::builder()
+                .manager(manager.clone())
+                .addr(addr)
+                .max_concurrent(1000)
+                .timeout_secs(30)
+                .build();
 
             let server_handle = tokio::spawn(async move {
                 if let Err(e) = server.serve().await {

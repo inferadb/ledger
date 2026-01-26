@@ -43,56 +43,28 @@ use crate::{
 ///
 /// Combines multi-shard read/write services with the MultiRaftManager
 /// for routing requests to the correct shard.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct MultiShardLedgerServer {
     /// The multi-raft manager containing all shards.
     manager: Arc<MultiRaftManager>,
     /// Idempotency cache for duplicate detection.
+    #[builder(default = Arc::new(IdempotencyCache::new()))]
     idempotency: Arc<IdempotencyCache>,
     /// Server address.
     addr: SocketAddr,
     /// Max concurrent requests per connection.
+    #[builder(default = 100)]
     max_concurrent: usize,
     /// Request timeout in seconds.
+    #[builder(default = 30)]
     timeout_secs: u64,
     /// Per-namespace rate limiter (optional).
+    #[builder(default)]
     namespace_rate_limiter: Option<Arc<NamespaceRateLimiter>>,
 }
 
 impl MultiShardLedgerServer {
-    /// Create a new multi-shard Ledger server.
-    ///
-    /// The MultiRaftManager must have at least the system shard (shard 0) started.
-    pub fn new(manager: Arc<MultiRaftManager>, addr: SocketAddr) -> Self {
-        Self {
-            manager,
-            idempotency: Arc::new(IdempotencyCache::new()),
-            addr,
-            max_concurrent: 100,
-            timeout_secs: 30,
-            namespace_rate_limiter: None,
-        }
-    }
-
-    /// Configure request limits for this server.
-    pub fn with_rate_limit(mut self, max_concurrent: usize, timeout_secs: u64) -> Self {
-        self.max_concurrent = max_concurrent;
-        self.timeout_secs = timeout_secs;
-        self
-    }
-
-    /// Configure per-namespace rate limiting.
-    pub fn with_namespace_rate_limit(mut self, requests_per_second: u64) -> Self {
-        self.namespace_rate_limiter =
-            Some(Arc::new(NamespaceRateLimiter::with_limit(requests_per_second)));
-        self
-    }
-
-    /// Use a custom idempotency cache.
-    pub fn with_idempotency_cache(mut self, idempotency: Arc<IdempotencyCache>) -> Self {
-        self.idempotency = idempotency;
-        self
-    }
-
     /// Start the gRPC server.
     ///
     /// This method blocks until the server is shut down.
@@ -117,13 +89,11 @@ impl MultiShardLedgerServer {
         // Create multi-shard services
         let read_service = MultiShardReadService::new(resolver.clone());
 
-        let write_service = {
-            let base = MultiShardWriteService::new(resolver.clone(), self.idempotency.clone());
-            match &self.namespace_rate_limiter {
-                Some(limiter) => base.with_rate_limiter(limiter.clone()),
-                None => base,
-            }
-        };
+        let write_service = MultiShardWriteService::builder()
+            .resolver(resolver.clone())
+            .idempotency(self.idempotency.clone())
+            .rate_limiter(self.namespace_rate_limiter.clone())
+            .build();
 
         // Admin, Health, and Discovery services use the system shard
         // These handle global operations like namespace management
@@ -132,13 +102,13 @@ impl MultiShardLedgerServer {
                 as Box<dyn std::error::Error>
         })?;
 
-        let admin_service = AdminServiceImpl::with_block_archive(
-            system_shard.raft().clone(),
-            system_shard.state().clone(),
-            system_shard.applied_state().clone(),
-            system_shard.block_archive().clone(),
-            self.addr,
-        );
+        let admin_service = AdminServiceImpl::builder()
+            .raft(system_shard.raft().clone())
+            .state(system_shard.state().clone())
+            .applied_state(system_shard.applied_state().clone())
+            .block_archive(Some(system_shard.block_archive().clone()))
+            .listen_addr(self.addr)
+            .build();
 
         let health_service = HealthServiceImpl::new(
             system_shard.raft().clone(),

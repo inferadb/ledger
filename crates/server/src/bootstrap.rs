@@ -237,14 +237,15 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     let snapshot_dir = config.data_dir.join("snapshots");
     let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir, 5));
 
-    let server = LedgerServer::with_block_archive(
-        raft.clone(),
-        state.clone(),
-        applied_state_accessor.clone(),
-        Some(block_archive),
-        config.listen_addr,
-    )
-    .with_rate_limit(config.requests_max_concurrent, config.requests_timeout_secs);
+    let server = LedgerServer::builder()
+        .raft(raft.clone())
+        .state(state.clone())
+        .applied_state(applied_state_accessor.clone())
+        .block_archive(Some(block_archive))
+        .addr(config.listen_addr)
+        .max_concurrent(config.requests_max_concurrent)
+        .timeout_secs(config.requests_timeout_secs)
+        .build();
 
     let gc = TtlGarbageCollector::builder()
         .raft(raft.clone())

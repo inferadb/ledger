@@ -28,28 +28,20 @@ use crate::{
 /// Multi-shard write service implementation.
 ///
 /// Routes write requests to the correct shard based on namespace_id.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct MultiShardWriteService {
     /// Shard resolver for routing requests.
     resolver: Arc<dyn ShardResolver>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Per-namespace rate limiter (optional).
+    #[builder(default)]
     rate_limiter: Option<Arc<NamespaceRateLimiter>>,
 }
 
 #[allow(clippy::result_large_err)]
 impl MultiShardWriteService {
-    /// Create a new multi-shard write service.
-    pub fn new(resolver: Arc<dyn ShardResolver>, idempotency: Arc<IdempotencyCache>) -> Self {
-        Self { resolver, idempotency, rate_limiter: None }
-    }
-
-    /// Add per-namespace rate limiting.
-    pub fn with_rate_limiter(mut self, rate_limiter: Arc<NamespaceRateLimiter>) -> Self {
-        self.rate_limiter = Some(rate_limiter);
-        self
-    }
-
     /// Check per-namespace rate limit.
     fn check_rate_limit(&self, namespace_id: i64) -> Result<(), Status> {
         if let Some(limiter) = &self.rate_limiter

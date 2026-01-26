@@ -33,6 +33,8 @@ use crate::{
 };
 
 /// Admin service implementation.
+#[derive(bon::Builder)]
+#[builder(on(_, required))]
 pub struct AdminServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -41,39 +43,10 @@ pub struct AdminServiceImpl {
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Block archive for integrity verification.
+    #[builder(default)]
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// The node's listen address (for GetNodeInfo RPC).
     listen_addr: SocketAddr,
-}
-
-impl AdminServiceImpl {
-    /// Create a new admin service.
-    ///
-    /// # Arguments
-    ///
-    /// * `raft` - The Raft instance for consensus operations
-    /// * `state` - The state layer for data access
-    /// * `applied_state` - Accessor for applied state (vault heights, health)
-    /// * `listen_addr` - The node's gRPC listen address (returned by GetNodeInfo)
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        listen_addr: SocketAddr,
-    ) -> Self {
-        Self { raft, state, applied_state, block_archive: None, listen_addr }
-    }
-
-    /// Create with block archive for integrity verification.
-    pub fn with_block_archive(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-        block_archive: Arc<BlockArchive<FileBackend>>,
-        listen_addr: SocketAddr,
-    ) -> Self {
-        Self { raft, state, applied_state, block_archive: Some(block_archive), listen_addr }
-    }
 }
 
 #[tonic::async_trait]
