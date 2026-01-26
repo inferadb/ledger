@@ -104,7 +104,7 @@ pub struct LearnerRefreshJob {
     node_id: LedgerNodeId,
     /// Applied state accessor for updating local state.
     /// Reserved for future use when we want to apply state updates locally.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained for state access in refresh operations
     applied_state: AppliedStateAccessor,
     /// Cache of system state from voters.
     #[builder(default = Arc::new(RwLock::new(CachedSystemState::default())))]
@@ -138,20 +138,6 @@ impl LearnerRefreshJob {
             .voter_ids()
             .filter_map(|id| membership.get_node(&id).map(|node| (id, node.addr.clone())))
             .collect()
-    }
-
-    /// Pick a random voter from the membership.
-    /// Useful for single-shot refresh attempts (try_refresh handles fallback).
-    #[allow(dead_code)]
-    fn pick_random_voter(&self) -> Option<(LedgerNodeId, String)> {
-        let voters = self.get_voter_addresses();
-        if voters.is_empty() {
-            return None;
-        }
-
-        use rand::Rng;
-        let idx = rand::thread_rng().gen_range(0..voters.len());
-        Some(voters[idx].clone())
     }
 
     /// Refresh state from a voter.

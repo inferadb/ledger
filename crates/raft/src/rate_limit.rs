@@ -103,7 +103,7 @@ impl NamespaceRateLimiter {
     /// Get the current request count for a namespace.
     ///
     /// Useful for metrics and debugging.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // public API: utility for rate limit inspection
     pub fn current_count(&self, namespace_id: NamespaceId) -> u64 {
         let counters = self.counters.lock();
         counters.get(&namespace_id).map(|c| c.count).unwrap_or(0)

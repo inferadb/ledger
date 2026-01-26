@@ -8,11 +8,12 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use bon::Builder;
 use serde::Deserialize;
+use snafu::Snafu;
 
 use crate::node_id;
 
 /// Default listen address for the gRPC server.
-#[allow(clippy::expect_used)] // Infallible: parsing a constant valid address
+#[expect(clippy::expect_used, reason = "infallible: parsing constant valid address")]
 fn default_listen_addr() -> SocketAddr {
     "0.0.0.0:50051".parse().expect("valid default address")
 }
@@ -43,13 +44,6 @@ fn default_data_dir() -> PathBuf {
 #[derive(Debug, Clone, Deserialize, Builder)]
 #[builder(derive(Debug))]
 pub struct Config {
-    /// Unique node identifier (deprecated - use auto-generated Snowflake IDs).
-    ///
-    /// When set, a deprecation warning is logged. Prefer removing this field
-    /// and letting the server auto-generate a unique Snowflake ID on first start.
-    #[serde(default)]
-    pub node_id: Option<u64>,
-
     /// Address to listen on for gRPC (e.g., "0.0.0.0:50051").
     #[builder(default = default_listen_addr())]
     pub listen_addr: SocketAddr,
@@ -93,15 +87,19 @@ pub struct Config {
 
     // === Batching ===
     /// Maximum number of transactions per batch (default: 100).
+    ///
+    /// Reserved for LedgerServer batching integration.
     #[serde(default = "default_batch_max_size")]
     #[builder(default = default_batch_max_size())]
-    #[allow(dead_code)] // Reserved for LedgerServer batching integration
+    #[allow(dead_code)] // reserved for LedgerServer batching integration
     pub batch_max_size: usize,
 
     /// Maximum time to wait for a batch to fill in milliseconds (default: 10).
+    ///
+    /// Reserved for LedgerServer batching integration.
     #[serde(default = "default_batch_max_delay_ms")]
     #[builder(default = default_batch_max_delay_ms())]
-    #[allow(dead_code)] // Reserved for LedgerServer batching integration
+    #[allow(dead_code)] // reserved for LedgerServer batching integration
     pub batch_max_delay_ms: u64,
 
     // === Request Limits ===
@@ -161,7 +159,6 @@ fn default_discovery_cache_ttl_secs() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            node_id: None,
             listen_addr: default_listen_addr(),
             metrics_addr: None,
             data_dir: default_data_dir(),
@@ -205,20 +202,22 @@ impl Config {
             config::Environment::with_prefix("INFERADB__LEDGER").separator("__").try_parsing(true),
         );
 
-        let config = builder.build().map_err(|e| ConfigError::Load(e.to_string()))?;
+        let config = builder.build().map_err(|e| ConfigError::Load { message: e.to_string() })?;
 
-        config.try_deserialize().map_err(|e| ConfigError::Parse(e.to_string()))
+        config.try_deserialize().map_err(|e| ConfigError::Parse { message: e.to_string() })
     }
 
     /// Create a configuration for testing.
     ///
     /// Uses `bootstrap_expect=1` (single-node mode) by default for simple
-    /// test scenarios. The `node_id` is explicitly set to allow tests to
-    /// use deterministic, predictable node IDs.
-    #[allow(clippy::unwrap_used, clippy::disallowed_methods, dead_code)]
+    /// test scenarios. Writes the given node_id to the data directory for
+    /// deterministic, predictable node IDs in tests.
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, dead_code)]
     pub fn for_test(node_id: u64, port: u16, data_dir: PathBuf) -> Self {
+        // Write the node_id file for deterministic test behavior
+        node_id::write_node_id(&data_dir, node_id).expect("failed to write test node_id");
+
         Self {
-            node_id: Some(node_id),
             listen_addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             metrics_addr: None,
             data_dir,
@@ -231,32 +230,20 @@ impl Config {
     ///
     /// Sets `bootstrap_expect=1` for immediate bootstrap without coordination.
     /// Primarily for testing or development scenarios.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // convenience constructor for single-node deployments
     pub fn for_single_node() -> Self {
         Self { bootstrap_expect: 1, ..Self::default() }
     }
 
-    /// Get the effective node ID, logging a deprecation warning if manually configured.
+    /// Get the node ID for this server.
     ///
-    /// This method resolves the node ID to use:
-    /// - If `node_id` is explicitly set in config, use it (with deprecation warning)
-    /// - If not set, auto-generate a Snowflake ID and persist to `{data_dir}/node_id`
-    ///
-    /// The generated ID is persisted to disk and reused on subsequent startups to
-    /// maintain cluster identity across restarts.
-    pub fn effective_node_id(&self) -> Result<u64, ConfigError> {
-        match self.node_id {
-            Some(id) => {
-                tracing::warn!(
-                    node_id = id,
-                    "node_id in config is deprecated; remove it to use auto-generated Snowflake IDs"
-                );
-                Ok(id)
-            },
-            None => node_id::load_or_generate_node_id(&self.data_dir).map_err(|e| {
-                ConfigError::Validation(format!("failed to load or generate node ID: {}", e))
-            }),
-        }
+    /// Loads an existing node ID from `{data_dir}/node_id`, or generates a new
+    /// Snowflake ID and persists it. The ID is reused across restarts to maintain
+    /// cluster identity.
+    pub fn node_id(&self) -> Result<u64, ConfigError> {
+        node_id::load_or_generate_node_id(&self.data_dir).map_err(|e| ConfigError::Validation {
+            message: format!("failed to load or generate node ID: {}", e),
+        })
     }
 
     /// Validate the configuration.
@@ -265,13 +252,13 @@ impl Config {
     /// - `0`: Join existing cluster (no bootstrap)
     /// - `1`: Single-node deployment
     /// - `2+`: Coordinated multi-node bootstrap
-    #[allow(dead_code)]
+    #[allow(dead_code)] // validation hook for future constraints
     pub fn validate(&self) -> Result<(), ConfigError> {
         Ok(())
     }
 
     /// Returns true if this is a single-node deployment (no coordination needed).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // query method for bootstrap mode
     pub fn is_single_node(&self) -> bool {
         self.bootstrap_expect == 1
     }
@@ -280,34 +267,36 @@ impl Config {
     ///
     /// When `bootstrap_expect=0`, the node starts without initializing a Raft
     /// cluster and waits to be added via AdminService's JoinCluster RPC.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // query method for join-cluster mode
     pub fn is_join_mode(&self) -> bool {
         self.bootstrap_expect == 0
     }
 }
 
 /// Configuration error.
-#[derive(Debug)]
+#[derive(Debug, Snafu)]
 pub enum ConfigError {
     /// Failed to load configuration.
-    Load(String),
+    #[snafu(display("failed to load config: {message}"))]
+    Load {
+        /// Error description.
+        message: String,
+    },
+
     /// Failed to parse configuration.
-    Parse(String),
+    #[snafu(display("failed to parse config: {message}"))]
+    Parse {
+        /// Error description.
+        message: String,
+    },
+
     /// Configuration validation failed.
-    Validation(String),
+    #[snafu(display("invalid config: {message}"))]
+    Validation {
+        /// Error description.
+        message: String,
+    },
 }
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::Load(msg) => write!(f, "failed to load config: {}", msg),
-            ConfigError::Parse(msg) => write!(f, "failed to parse config: {}", msg),
-            ConfigError::Validation(msg) => write!(f, "invalid config: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
@@ -330,11 +319,15 @@ mod tests {
 
     #[test]
     fn test_config_for_test() {
-        let config = Config::for_test(1, 50051, PathBuf::from("/tmp/ledger-test"));
-        assert_eq!(config.node_id, Some(1));
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let config = Config::for_test(1, 50051, temp_dir.path().to_path_buf());
         assert_eq!(config.listen_addr.port(), 50051);
         assert_eq!(config.bootstrap_expect, 1);
         assert!(config.is_single_node());
+
+        // Verify node_id was written to file
+        let node_id = config.node_id().expect("load node_id");
+        assert_eq!(node_id, 1);
     }
 
     #[test]
@@ -367,7 +360,6 @@ mod tests {
         let from_builder = Config::builder().build();
         let from_default = Config::default();
 
-        assert_eq!(from_builder.node_id, from_default.node_id);
         assert_eq!(from_builder.listen_addr, from_default.listen_addr);
         assert_eq!(from_builder.metrics_addr, from_default.metrics_addr);
         assert_eq!(from_builder.data_dir, from_default.data_dir);
@@ -386,7 +378,6 @@ mod tests {
     #[test]
     fn test_config_builder_with_custom_values() {
         let config = Config::builder()
-            .node_id(42)
             .listen_addr("127.0.0.1:9999".parse().unwrap())
             .metrics_addr("127.0.0.1:9090".parse().unwrap())
             .data_dir(PathBuf::from("/custom/data"))
@@ -402,7 +393,6 @@ mod tests {
             .discovery_cache_ttl_secs(7200)
             .build();
 
-        assert_eq!(config.node_id, Some(42));
         assert_eq!(config.listen_addr.port(), 9999);
         assert!(config.metrics_addr.is_some());
         assert_eq!(config.data_dir, PathBuf::from("/custom/data"));

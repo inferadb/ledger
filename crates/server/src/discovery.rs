@@ -51,7 +51,6 @@ pub struct DiscoveredPeer {
 /// Used during bootstrap coordination to determine which node should
 /// bootstrap the cluster (lowest Snowflake ID wins).
 // Used by coordinator module in Task 5 (PRD.md)
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiscoveredNode {
     /// Node's Snowflake ID (auto-generated, persisted).

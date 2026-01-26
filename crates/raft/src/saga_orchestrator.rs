@@ -62,7 +62,7 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     state: Arc<StateLayer<B>>,
     /// Accessor for applied state.
     /// Reserved for future saga state queries.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained for state access in saga operations
     applied_state: AppliedStateAccessor,
     /// Poll interval.
     #[builder(default = SAGA_POLL_INTERVAL)]

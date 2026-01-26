@@ -110,7 +110,7 @@ impl Default for VaultCommitment {
 /// Use this when scanning a bucket to compute its root hash.
 pub struct BucketRootBuilder {
     hasher: BucketHasher,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // public API: stored for bucket identification
     bucket_id: u8,
 }
 
@@ -121,7 +121,7 @@ impl BucketRootBuilder {
     }
 
     /// Get the bucket ID this builder is for.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // public API: accessor for bucket identification
     pub fn bucket_id(&self) -> u8 {
         self.bucket_id
     }

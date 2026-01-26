@@ -136,7 +136,7 @@ impl BatchState {
         self.pending.len()
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // utility for batch queue inspection
     fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }

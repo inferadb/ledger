@@ -55,7 +55,7 @@ use crate::{
 
 // Metadata keys for RaftState table
 const KEY_VOTE: &str = "vote";
-#[allow(dead_code)] // Reserved for future use with save_committed/read_committed
+#[allow(dead_code)] // reserved for save_committed/read_committed
 const KEY_COMMITTED: &str = "committed";
 const KEY_LAST_PURGED: &str = "last_purged";
 const KEY_APPLIED_STATE: &str = "applied_state";
@@ -849,7 +849,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Compute a simple block hash (used in tests).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reserved for block hash computation in state machine
     fn compute_block_hash(
         &self,
         namespace_id: NamespaceId,
@@ -1471,7 +1471,7 @@ mod tests {
     use super::*;
 
     /// Helper to create log IDs for tests.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn make_log_id(term: u64, index: u64) -> LogId<LedgerNodeId> {
         LogId::new(CommittedLeaderId::new(term, 0), index)
     }

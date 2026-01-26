@@ -62,7 +62,7 @@ impl std::error::Error for LockError {
 /// which is automatically released even if the process crashes.
 pub struct DataDirLock {
     /// The lock file handle (kept open to maintain the lock).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to keep file handle open for lock
     file: File,
     /// Path to the lock file.
     path: PathBuf,

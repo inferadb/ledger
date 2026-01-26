@@ -39,16 +39,14 @@ pub enum BootstrapError {
     Raft(String),
     /// Failed to initialize cluster.
     Initialize(String),
-    /// Failed to join existing cluster.
-    #[allow(dead_code)] // Reserved for join-cluster mode
+    /// Failed to join existing cluster (reserved for join-cluster mode).
+    #[allow(dead_code)] // reserved for join-cluster mode
     Join(String),
     /// Failed to resolve or generate node ID.
     NodeId(String),
     /// Bootstrap coordination timed out waiting for peers.
-    #[allow(dead_code)] // Used by coordinator integration in Task 6 (PRD.md)
     Timeout(String),
     /// Configuration validation failed.
-    #[allow(dead_code)] // Used by coordinator integration in Task 6 (PRD.md)
     Config(String),
 }
 
@@ -70,26 +68,30 @@ impl std::fmt::Display for BootstrapError {
 impl std::error::Error for BootstrapError {}
 
 /// Bootstrapped node components.
+///
+/// Some fields are not directly accessed but are retained for ownership semantics:
+/// - `raft` and `state`: Maintain Arc reference counts for shared state
+/// - Handle fields: Keep background tasks alive and allow graceful shutdown
 pub struct BootstrappedNode {
     /// The Raft instance.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to maintain Arc reference count for shared Raft state
     pub raft: Arc<Raft<LedgerTypeConfig>>,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to maintain Arc reference count for shared state layer
     pub state: Arc<StateLayer<FileBackend>>,
     /// The configured Ledger server.
     pub server: LedgerServer,
     /// TTL garbage collector background task handle.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to keep background task alive
     pub gc_handle: tokio::task::JoinHandle<()>,
     /// Block compactor background task handle.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to keep background task alive
     pub compactor_handle: tokio::task::JoinHandle<()>,
     /// Auto-recovery background task handle.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to keep background task alive
     pub recovery_handle: tokio::task::JoinHandle<()>,
     /// Learner refresh background task handle (only active on learner nodes).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to keep background task alive
     pub learner_refresh_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -109,7 +111,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     config.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
 
     // Resolve the effective node ID (manual or auto-generated Snowflake ID)
-    let node_id = config.effective_node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
+    let node_id = config.node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
 
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
@@ -409,9 +411,9 @@ async fn wait_for_cluster_join(
 ///
 /// Note: This should be called after the gRPC server has started, since the
 /// leader needs to be able to reach this node to replicate logs.
-#[allow(dead_code)] // Reserved for join-cluster mode in main.rs
+#[allow(dead_code)] // reserved for join-cluster mode
 pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
-    let node_id = config.effective_node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
+    let node_id = config.node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
 
     let peer_addresses = resolve_bootstrap_peers(config).await;
 

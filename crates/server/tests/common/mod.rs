@@ -89,9 +89,8 @@ impl TestCluster {
         let temp_dir = TestDir::new();
 
         // Bootstrap node: no discovery configured → no peers found → bootstraps.
-        // Uses auto-generated Snowflake ID (node_id: None) for realistic testing.
+        // Uses auto-generated Snowflake ID for realistic testing.
         let config = inferadb_ledger_server::config::Config {
-            node_id: None, // Auto-generate Snowflake ID
             listen_addr: addr,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
@@ -152,9 +151,8 @@ impl TestCluster {
             // Joining node: use join mode (bootstrap_expect=0) for dynamic node addition.
             // This bypasses bootstrap entirely - no Raft cluster initialized, waiting
             // to be added via AdminService's JoinCluster RPC.
-            // Uses auto-generated Snowflake ID (node_id: None) for realistic testing.
+            // Uses auto-generated Snowflake ID for realistic testing.
             let config = inferadb_ledger_server::config::Config {
-                node_id: None, // Auto-generate Snowflake ID
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: temp_dir.path().to_path_buf(),

@@ -33,7 +33,6 @@ async fn test_single_node_bootstrap() {
 
     // Create config with single-node mode
     let config = Config {
-        node_id: None, // Use auto-generated Snowflake ID
         listen_addr: addr,
         metrics_addr: None,
         data_dir: temp_dir.path().to_path_buf(),
@@ -88,7 +87,6 @@ async fn test_node_restart_preserves_id() {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
-        node_id: None,
         listen_addr: addr,
         metrics_addr: None,
         data_dir: temp_dir.path().to_path_buf(),
@@ -129,7 +127,6 @@ async fn test_node_restart_preserves_id() {
         let addr2: std::net::SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
 
         let config2 = Config {
-            node_id: None,
             listen_addr: addr2,
             metrics_addr: None,
             data_dir: temp_dir.path().to_path_buf(),
@@ -236,8 +233,10 @@ async fn test_late_joiner_finds_existing_cluster() {
     let leader_port = 47000 + (rand::random::<u16>() % 1000);
     let leader_addr: std::net::SocketAddr = format!("127.0.0.1:{}", leader_port).parse().unwrap();
 
+    // Pre-write node_id for deterministic test behavior
+    inferadb_ledger_server::node_id::write_node_id(leader_dir.path(), 1).expect("write node_id");
+
     let leader_config = Config {
-        node_id: Some(1), // Use fixed ID for deterministic test
         listen_addr: leader_addr,
         metrics_addr: None,
         data_dir: leader_dir.path().to_path_buf(),
@@ -308,7 +307,6 @@ async fn test_join_mode_does_not_bootstrap() {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
-        node_id: None,
         listen_addr: addr,
         metrics_addr: None,
         data_dir: temp_dir.path().to_path_buf(),

@@ -90,15 +90,18 @@ pub struct CompactionStats {
 }
 
 /// Index entry for a block within a segment.
+///
+/// Fields are prefixed with `_` because segment file reading is not yet implemented;
+/// the current implementation stores blocks in the database and only uses segment files
+/// for writing. The index is preserved for future optimization of segment file reads.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 struct BlockIndex {
     /// Shard height of this block.
-    shard_height: u64,
+    _shard_height: u64,
     /// Offset in segment file.
-    offset: u64,
+    _offset: u64,
     /// Length of serialized block (including 4-byte length prefix).
-    length: u32,
+    _length: u32,
 }
 
 /// Segment writer for active segment.
@@ -119,7 +122,7 @@ pub struct BlockArchive<B: StorageBackend> {
     /// Directory for segment files (optional, for large deployments).
     blocks_dir: Option<PathBuf>,
     /// Cached segment indexes.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reserved for segment-based block retrieval
     segment_indexes: RwLock<HashMap<u64, Vec<BlockIndex>>>,
     /// Current segment writer (for file-based storage).
     current_segment: RwLock<Option<SegmentWriter>>,
@@ -208,9 +211,9 @@ impl<B: StorageBackend> BlockArchive<B> {
 
         // Update index
         writer.index.push(BlockIndex {
-            shard_height: block.shard_height,
-            offset,
-            length: (encoded.len() + 4) as u32,
+            _shard_height: block.shard_height,
+            _offset: offset,
+            _length: (encoded.len() + 4) as u32,
         });
 
         Ok(())

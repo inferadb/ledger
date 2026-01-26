@@ -13,10 +13,18 @@ use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 #[derive(Debug, Snafu)]
 pub enum EntityError {
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: inferadb_ledger_store::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("Codec error: {source}"))]
-    Codec { source: CodecError },
+    Codec {
+        source: CodecError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// Result type for entity operations.
@@ -344,12 +352,16 @@ mod tests {
     fn test_entity_error_display() {
         use std::error::Error;
 
-        // Create a codec error and verify it converts properly
-        let codec_err = inferadb_ledger_types::CodecError::Decode {
-            source: postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).expect_err("should fail"),
-        };
+        use snafu::ResultExt;
 
-        let entity_err = EntityError::Codec { source: codec_err };
+        // Create a codec error via context selector and verify it converts properly
+        fn create_entity_error() -> std::result::Result<(), EntityError> {
+            let malformed: &[u8] = &[0xFF, 0xFF, 0xFF];
+            let _: u64 = inferadb_ledger_types::decode(malformed).context(CodecSnafu)?;
+            Ok(())
+        }
+
+        let entity_err = create_entity_error().unwrap_err();
         let display = format!("{entity_err}");
 
         // Should have format "Codec error: Decoding failed: <postcard error>"
@@ -380,14 +392,5 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(matches!(err, EntityError::Codec { .. }), "Should be EntityError::Codec variant");
-    }
-
-    // Test that Storage variant also works correctly
-    #[test]
-    fn test_entity_error_storage_display() {
-        // We can't easily create an inferadb_ledger_store::Error, but we can verify the
-        // pattern compiles and the Display format is correct by checking the derive
-        let _: fn(inferadb_ledger_store::Error) -> EntityError =
-            |source| EntityError::Storage { source };
     }
 }

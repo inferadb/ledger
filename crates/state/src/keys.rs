@@ -37,7 +37,7 @@ pub fn encode_storage_key(vault_id: VaultId, local_key: &[u8]) -> Vec<u8> {
 /// Encode a key with explicit bucket_id (for range scans).
 ///
 /// This is used for scanning all keys in a specific bucket.
-#[allow(dead_code)]
+#[allow(dead_code)] // public API: reserved for bucket-based key encoding
 pub fn encode_key_with_bucket(vault_id: VaultId, bucket_id: u8, local_key: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(9 + local_key.len());
     key.extend_from_slice(&vault_id.to_be_bytes());
@@ -77,7 +77,7 @@ pub fn decode_storage_key(key: &[u8]) -> Option<StorageKey> {
 /// Encode a relationship key.
 ///
 /// Format: rel:{resource}#{relation}@{subject}
-#[allow(dead_code)]
+#[allow(dead_code)] // public API: reserved for relationship key encoding
 pub fn encode_relationship_key(resource: &str, relation: &str, subject: &str) -> Vec<u8> {
     format!("rel:{}#{}@{}", resource, relation, subject).into_bytes()
 }
@@ -94,12 +94,6 @@ pub fn encode_obj_index_key(resource: &str, relation: &str) -> Vec<u8> {
 /// Format: subj_idx:{subject}
 pub fn encode_subj_index_key(subject: &str) -> Vec<u8> {
     format!("subj_idx:{}", subject).into_bytes()
-}
-
-/// Encode an entity key (generic).
-#[allow(dead_code)]
-pub fn encode_entity_key(key: &str) -> Vec<u8> {
-    key.as_bytes().to_vec()
 }
 
 #[cfg(test)]

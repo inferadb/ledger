@@ -4,7 +4,7 @@
 //! using postcard serialization, with consistent error handling via snafu.
 
 use serde::{Serialize, de::DeserializeOwned};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
 /// Error type for codec operations.
 #[derive(Debug, Snafu)]
@@ -14,6 +14,9 @@ pub enum CodecError {
     Encode {
         /// The underlying postcard error.
         source: postcard::Error,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// Decoding failed.
@@ -21,6 +24,9 @@ pub enum CodecError {
     Decode {
         /// The underlying postcard error.
         source: postcard::Error,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 }
 
@@ -30,7 +36,7 @@ pub enum CodecError {
 ///
 /// Returns `CodecError::Encode` if serialization fails.
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
-    postcard::to_allocvec(value).map_err(|source| CodecError::Encode { source })
+    postcard::to_allocvec(value).context(EncodeSnafu)
 }
 
 /// Decodes bytes to a value using postcard deserialization.
@@ -39,13 +45,14 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
 ///
 /// Returns `CodecError::Decode` if deserialization fails.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
-    postcard::from_bytes(bytes).map_err(|source| CodecError::Decode { source })
+    postcard::from_bytes(bytes).context(DecodeSnafu)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use serde::Deserialize;
+    use snafu::ResultExt;
 
     use super::*;
 
@@ -273,17 +280,17 @@ mod tests {
     // Test that both error variants exist and are distinct
     #[test]
     fn test_codec_error_variants() {
-        // Decode error
-        let decode_err = CodecError::Decode {
-            source: postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).expect_err("should fail"),
-        };
+        // Decode error - use context selector to properly construct with location
+        let decode_result: Result<u64, CodecError> =
+            postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).context(super::DecodeSnafu);
+        let decode_err = decode_result.expect_err("should fail");
 
         // Verify we can match on the variant
         assert!(matches!(decode_err, CodecError::Decode { .. }));
 
-        // The Encode variant exists (verified at compile time by this pattern)
+        // The Encode variant exists (verified at compile time by matching)
         // Creating an actual encode error is difficult since postcard rarely fails encoding,
-        // but we can verify the variant exists through a type check
-        let _: fn(postcard::Error) -> CodecError = |source| CodecError::Encode { source };
+        // but the variant is tested implicitly via the encode() function
+        assert!(!matches!(decode_err, CodecError::Encode { .. }));
     }
 }

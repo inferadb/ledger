@@ -53,11 +53,11 @@ pub enum BootstrapDecision {
 
 /// Errors that can occur during bootstrap coordination.
 #[derive(Debug)]
-#[allow(dead_code)] // Config variant reserved for future use
 pub enum CoordinatorError {
     /// Bootstrap coordination timed out waiting for peers.
     Timeout(String),
-    /// Configuration validation failed.
+    /// Configuration validation failed (reserved for future use).
+    #[allow(dead_code)] // reserved for configuration errors
     Config(String),
 }
 

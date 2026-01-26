@@ -14,17 +14,23 @@ use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_ke
 
 /// Index manager error types.
 #[derive(Debug, Snafu)]
-#[allow(dead_code)]
 pub enum IndexError {
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: inferadb_ledger_store::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("Codec error: {source}"))]
-    Codec { source: inferadb_ledger_types::CodecError },
+    Codec {
+        source: inferadb_ledger_types::CodecError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// Result type for index operations.
-#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, IndexError>;
 
 /// Index entry for object index: list of subjects.
@@ -184,13 +190,13 @@ impl IndexManager {
         let local_key = encode_obj_index_key(resource, relation);
         let storage_key = encode_storage_key(vault_id, &local_key);
 
-        match txn.get::<tables::ObjIndex>(&storage_key) {
-            Ok(Some(data)) => {
-                let set: SubjectSet = decode(&data).context(CodecSnafu)?;
+        let data = txn.get::<tables::ObjIndex>(&storage_key).context(StorageSnafu)?;
+        match data {
+            Some(bytes) => {
+                let set: SubjectSet = decode(&bytes).context(CodecSnafu)?;
                 Ok(set.subjects)
             },
-            Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(IndexError::Storage { source: e }),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -203,13 +209,13 @@ impl IndexManager {
         let local_key = encode_subj_index_key(subject);
         let storage_key = encode_storage_key(vault_id, &local_key);
 
-        match txn.get::<tables::SubjIndex>(&storage_key) {
-            Ok(Some(data)) => {
-                let set: ResourceRelationSet = decode(&data).context(CodecSnafu)?;
+        let data = txn.get::<tables::SubjIndex>(&storage_key).context(StorageSnafu)?;
+        match data {
+            Some(bytes) => {
+                let set: ResourceRelationSet = decode(&bytes).context(CodecSnafu)?;
                 Ok(set.pairs)
             },
-            Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(IndexError::Storage { source: e }),
+            None => Ok(Vec::new()),
         }
     }
 }

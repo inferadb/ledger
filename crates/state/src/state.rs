@@ -30,6 +30,9 @@ pub enum StateError {
     Inkwell {
         /// The underlying inferadb-ledger-store storage error.
         source: inferadb_ledger_store::Error,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// Index operation failed.
@@ -37,6 +40,9 @@ pub enum StateError {
     Index {
         /// The underlying index error.
         source: IndexError,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// Codec error during serialization/deserialization.
@@ -44,6 +50,9 @@ pub enum StateError {
     Codec {
         /// The underlying codec error.
         source: inferadb_ledger_types::CodecError,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// Conditional write precondition failed.
@@ -62,12 +71,6 @@ pub enum StateError {
         /// The condition that failed (for specific error code mapping).
         failed_condition: Option<SetCondition>,
     },
-}
-
-impl From<IndexError> for StateError {
-    fn from(source: IndexError) -> Self {
-        StateError::Index { source }
-    }
 }
 
 /// Result type for state operations.
@@ -227,10 +230,12 @@ impl<B: StorageBackend> StateLayer<B> {
                         // Update indexes
                         IndexManager::add_to_obj_index(
                             &mut txn, vault_id, resource, relation, subject,
-                        )?;
+                        )
+                        .context(IndexSnafu)?;
                         IndexManager::add_to_subj_index(
                             &mut txn, vault_id, resource, relation, subject,
-                        )?;
+                        )
+                        .context(IndexSnafu)?;
 
                         dirty_keys.push(local_key.to_vec());
                         WriteStatus::Created
@@ -250,10 +255,12 @@ impl<B: StorageBackend> StateLayer<B> {
                         // Update indexes
                         IndexManager::remove_from_obj_index(
                             &mut txn, vault_id, resource, relation, subject,
-                        )?;
+                        )
+                        .context(IndexSnafu)?;
                         IndexManager::remove_from_subj_index(
                             &mut txn, vault_id, resource, relation, subject,
-                        )?;
+                        )
+                        .context(IndexSnafu)?;
 
                         dirty_keys.push(local_key.to_vec());
                         WriteStatus::Deleted
@@ -497,7 +504,7 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
     ) -> Result<Vec<String>> {
         let txn = self.db.read().context(InkwellSnafu)?;
-        Ok(IndexManager::get_subjects(&txn, vault_id, resource, relation)?)
+        IndexManager::get_subjects(&txn, vault_id, resource, relation).context(IndexSnafu)
     }
 
     /// List resource-relation pairs for a given subject.
@@ -507,7 +514,7 @@ impl<B: StorageBackend> StateLayer<B> {
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
         let txn = self.db.read().context(InkwellSnafu)?;
-        Ok(IndexManager::get_resources(&txn, vault_id, subject)?)
+        IndexManager::get_resources(&txn, vault_id, subject).context(IndexSnafu)
     }
 
     /// List all entities in a vault with optional prefix filter.
@@ -1211,11 +1218,11 @@ mod tests {
     fn test_state_error_display() {
         use std::error::Error;
 
-        // Test Codec variant display
-        let codec_err = inferadb_ledger_types::CodecError::Decode {
-            source: postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).expect_err("should fail"),
-        };
-        let state_err = StateError::Codec { source: codec_err };
+        // Test Codec variant display via context selector
+        let malformed: &[u8] = &[0xFF, 0xFF, 0xFF];
+        let result: std::result::Result<u64, StateError> =
+            inferadb_ledger_types::decode(malformed).context(CodecSnafu);
+        let state_err = result.expect_err("should fail");
         let display = format!("{state_err}");
 
         assert!(display.starts_with("Codec error:"), "Expected 'Codec error:', got: {display}");
@@ -1248,14 +1255,17 @@ mod tests {
     fn test_state_error_chain_from_index() {
         use crate::indexes::IndexError;
 
-        // IndexError with Codec source
-        let codec_err = inferadb_ledger_types::CodecError::Decode {
-            source: postcard::from_bytes::<u64>(&[0xFF]).expect_err("should fail"),
-        };
-        let index_err = IndexError::Codec { source: codec_err };
+        // IndexError with Codec source via context
+        let malformed: &[u8] = &[0xFF];
+        let codec_result: std::result::Result<u64, inferadb_ledger_types::CodecError> =
+            inferadb_ledger_types::decode(malformed);
+        let codec_err = codec_result.expect_err("should fail");
+        let index_err =
+            IndexError::Codec { source: codec_err, location: snafu::Location::default() };
 
-        // Convert IndexError -> StateError
-        let state_err = StateError::Index { source: index_err };
+        // Convert IndexError -> StateError via context selector
+        let state_err =
+            StateError::Index { source: index_err, location: snafu::Location::default() };
 
         let display = format!("{state_err}");
         assert!(

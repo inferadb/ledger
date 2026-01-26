@@ -170,7 +170,7 @@ pub struct DiscoveryServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // retained to maintain Arc reference count
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (namespace registry).
     applied_state: AppliedStateAccessor,

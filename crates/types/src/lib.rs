@@ -22,4 +22,29 @@ pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,
     compute_tx_merkle_root, sha256, sha256_concat, tx_hash, vault_entry_hash,
 };
-pub use types::*;
+pub use types::{
+    // Structs
+    BlockHeader,
+    ChainCommitment,
+    // Type aliases
+    ClientId,
+    Entity,
+    NamespaceId,
+    NodeId,
+    // Enums
+    Operation,
+    Relationship,
+    SetCondition,
+    ShardBlock,
+    ShardId,
+    Transaction,
+    TransactionValidationError,
+    TxId,
+    UserId,
+    VaultBlock,
+    VaultEntry,
+    VaultHealth,
+    VaultId,
+    WriteResult,
+    WriteStatus,
+};

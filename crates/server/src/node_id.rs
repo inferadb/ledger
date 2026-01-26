@@ -142,14 +142,14 @@ pub fn generate_snowflake_id() -> Result<u64, NodeIdError> {
 ///
 /// Returns milliseconds since the custom epoch (2024-01-01 00:00:00 UTC).
 #[must_use]
-#[allow(dead_code)] // Used in unit tests
+#[cfg(test)]
 pub fn extract_timestamp(id: u64) -> u64 {
     id >> RANDOM_BITS
 }
 
 /// Extract the random portion from a Snowflake ID.
 #[must_use]
-#[allow(dead_code)] // Used in unit tests
+#[cfg(test)]
 pub fn extract_random(id: u64) -> u64 {
     id & RANDOM_MASK
 }
@@ -193,6 +193,35 @@ pub fn load_or_generate_node_id(data_dir: &Path) -> Result<u64, NodeIdError> {
         tracing::info!(node_id = id, path = %path.display(), "generated new node ID");
         Ok(id)
     }
+}
+
+/// Write a specific node ID to the data directory.
+///
+/// This is primarily useful for tests that need deterministic node IDs.
+/// Creates parent directories if they don't exist.
+///
+/// # Arguments
+///
+/// * `data_dir` - Path to the node's data directory
+/// * `node_id` - The specific node ID to write
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be written.
+pub fn write_node_id(data_dir: &Path, node_id: u64) -> Result<(), NodeIdError> {
+    let path = data_dir.join("node_id");
+    let path_str = path.display().to_string();
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .context(CreateDirSnafu { path: parent.display().to_string() })?;
+    }
+
+    std::fs::write(&path, node_id.to_string()).context(WriteSnafu { path: &path_str })?;
+    Ok(())
 }
 
 #[cfg(test)]

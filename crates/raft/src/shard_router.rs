@@ -118,7 +118,7 @@ struct CacheEntry {
     /// Hint for current leader (may be stale).
     leader_hint: Option<String>,
     /// Configuration version for invalidation (reserved for future use).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // metadata for cache invalidation
     config_version: u64,
     /// When this entry was cached.
     cached_at: Instant,

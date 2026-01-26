@@ -790,7 +790,6 @@ pub struct WriteTransaction<'db, B: StorageBackend> {
     /// Page cache for read operations within this transaction.
     page_cache: RefCell<HashMap<PageId, Page>>,
     /// Guard to ensure only one write transaction at a time.
-    #[allow(dead_code)]
     _write_guard: std::sync::MutexGuard<'db, ()>,
 }
 

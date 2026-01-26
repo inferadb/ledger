@@ -58,7 +58,6 @@ async fn main() -> Result<(), ServerError> {
     let config = Config::load(config_path.as_deref()).map_err(ServerError::Config)?;
 
     tracing::info!(
-        node_id = config.node_id,
         listen_addr = %config.listen_addr,
         data_dir = %config.data_dir.display(),
         "Starting InferaDB Ledger"

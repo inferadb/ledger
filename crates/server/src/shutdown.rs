@@ -57,7 +57,7 @@ impl ShutdownCoordinator {
     }
 
     /// Subscribe to shutdown notifications.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // utility for components to receive shutdown notifications
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
         self.notify.subscribe()
     }
@@ -68,7 +68,7 @@ impl ShutdownCoordinator {
     }
 
     /// Wait for shutdown signal and trigger coordinator.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // utility for graceful shutdown coordination
     pub async fn wait_for_signal(&self) {
         shutdown_signal().await;
         self.shutdown();
