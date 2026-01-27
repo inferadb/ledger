@@ -63,7 +63,7 @@ RUN cargo build --release --package inferadb-ledger-server
 FROM gcr.io/distroless/cc-debian12:nonroot
 
 # Copy the binary
-COPY --from=builder /build/target/release/ledger /usr/local/bin/ledger
+COPY --from=builder /build/target/release/inferadb-ledger /usr/local/bin/inferadb-ledger
 
 # Default data directory (should be mounted as a volume)
 VOLUME /var/lib/ledger
@@ -82,4 +82,4 @@ ENV INFERADB__LEDGER__METRICS_ADDR=0.0.0.0:9090
 # Run as non-root user (distroless nonroot UID=65532)
 USER nonroot:nonroot
 
-ENTRYPOINT ["/usr/local/bin/ledger"]
+ENTRYPOINT ["/usr/local/bin/inferadb-ledger"]
