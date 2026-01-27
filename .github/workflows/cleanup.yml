@@ -1,0 +1,71 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+
+name: Cleanup
+
+on:
+  schedule:
+    # Weekly on Sunday at 3am UTC (after nightly builds at 2am)
+    - cron: "0 3 * * 0"
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write # Required for deleting releases
+
+jobs:
+  cleanup:
+    name: Cleanup Old Pre-releases
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Delete old canary releases (>30 days)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get all canary pre-releases older than 30 days
+          cutoff_date=$(date -d "30 days ago" +%Y-%m-%dT%H:%M:%SZ)
+
+          echo "Deleting canary releases older than $cutoff_date..."
+
+          gh release list --limit 100 --json tagName,isPrerelease,createdAt \
+            | jq -r --arg cutoff "$cutoff_date" '
+                .[]
+                | select(.isPrerelease == true)
+                | select(.tagName | test("-canary\\."))
+                | select(.createdAt < $cutoff)
+                | .tagName
+              ' \
+            | while read -r tag; do
+                echo "Deleting canary release: $tag"
+                gh release delete "$tag" --yes --cleanup-tag || true
+              done
+
+      - name: Delete old nightly releases (keep last 7)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Keeping only the 7 most recent nightly releases..."
+
+          # Get all nightly pre-releases, sorted by creation date (newest first)
+          gh release list --limit 100 --json tagName,isPrerelease,createdAt \
+            | jq -r '
+                [.[]
+                | select(.isPrerelease == true)
+                | select(.tagName | test("-nightly\\."))]
+                | sort_by(.createdAt)
+                | reverse
+                | .[7:]
+                | .[].tagName
+              ' \
+            | while read -r tag; do
+                echo "Deleting old nightly release: $tag"
+                gh release delete "$tag" --yes --cleanup-tag || true
+              done

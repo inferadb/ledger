@@ -20,6 +20,10 @@ This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.
 4. Update documentation for API or behavior changes
 5. Submit with a clear description
 
+**PR title must follow Conventional Commits format** (validated by CI):
+- `feat: add user authentication`
+- `fix(api): handle empty requests`
+
 ## Development Setup
 
 ```bash

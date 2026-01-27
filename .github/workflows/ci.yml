@@ -19,6 +19,7 @@ concurrency:
 # Default to read-only permissions
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,6 +27,45 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Validate conventional commit messages
+  commits:
+    name: Commit Messages
+    runs-on: ubuntu-latest
+    # Only run on pull requests - push to main is already validated
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017 # v5.5.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+          requireScope: false
+          subjectPattern: ^[a-z].*$
+          subjectPatternError: |
+            The subject "{subject}" must start with a lowercase letter.
+            Example: "feat: add user authentication" or "fix(api): handle empty requests"
+
   # Check code formatting
   fmt:
     name: Formatting
@@ -312,7 +352,7 @@ jobs:
   # Overall status check
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, udeps, msrv, test, coverage, docs]
+    needs: [commits, fmt, clippy, udeps, msrv, test, coverage, docs]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -331,6 +371,17 @@ jobs:
           DOCS_RESULT: ${{ needs.docs.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
         run: |
+          # Commits check is only required on PRs
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "${{ needs.commits.result }}" != "success" ]]; then
+              echo "Commit message validation failed"
+              echo "PR title must follow Conventional Commits format:"
+              echo "  <type>(<scope>): <description>"
+              echo "  Examples: 'feat: add new feature' or 'fix(api): handle edge case'"
+              exit 1
+            fi
+          fi
+
           results="$FMT_RESULT $CLIPPY_RESULT $UDEPS_RESULT $MSRV_RESULT $TEST_RESULT $DOCS_RESULT"
 
           for result in $results; do
