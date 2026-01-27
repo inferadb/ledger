@@ -1,6 +1,6 @@
-# Operations Guide
+# Deployment Guide
 
-This guide covers cluster operations for InferaDB Ledger: deployment, scaling, backup, and recovery.
+This guide covers cluster deployment, scaling, backup, and recovery for InferaDB Ledger.
 
 ## Cluster Setup
 
@@ -284,7 +284,7 @@ INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
 
 ## Configuration
 
-See [`inferadb-ledger.example.toml`](inferadb-ledger.example.toml) for all options. Key settings:
+See [`inferadb-ledger.example.toml`](../../inferadb-ledger.example.toml) for all options. Key settings:
 
 ```toml
 listen_addr = "0.0.0.0:50051"         # gRPC listen address
@@ -329,4 +329,4 @@ The Kubernetes deployment uses:
 
 Pods discover each other via DNS A records from the headless service. Set `discovery_domain` to the service FQDN (e.g., `ledger.inferadb.svc.cluster.local`).
 
-See [`deploy/kubernetes/`](deploy/kubernetes/) for raw manifests and [`deploy/helm/`](deploy/helm/) for the Helm chart.
+See [`deploy/kubernetes/`](../../deploy/kubernetes/) for raw manifests and [`deploy/helm/`](../../deploy/helm/) for the Helm chart.

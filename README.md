@@ -79,7 +79,7 @@ cargo run --release -p inferadb-ledger-server
 # ./target/release/inferadb-ledger
 ```
 
-For multi-node clusters, backup/restore, and Kubernetes deployment, see [OPERATIONS.md](OPERATIONS.md).
+For multi-node clusters, backup/restore, and Kubernetes deployment, see [docs/operations/](docs/operations/).
 
 ## Crates
 

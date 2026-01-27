@@ -4,9 +4,10 @@ This directory contains operational documentation for running InferaDB Ledger in
 
 ## Contents
 
-| Document                           | Description                              |
-| ---------------------------------- | ---------------------------------------- |
-| [vault-repair.md](vault-repair.md) | Diagnosing and repairing diverged vaults |
+| Document                           | Description                                    |
+| ---------------------------------- | ---------------------------------------------- |
+| [deployment.md](deployment.md)     | Cluster setup, scaling, backup, and Kubernetes |
+| [vault-repair.md](vault-repair.md) | Diagnosing and repairing diverged vaults       |
 
 ## Quick Reference
 
