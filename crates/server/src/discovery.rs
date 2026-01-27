@@ -29,8 +29,9 @@
 use std::{net::SocketAddr, path::Path, time::Duration};
 
 use hickory_resolver::{
-    TokioAsyncResolver,
+    Resolver,
     config::{ResolverConfig, ResolverOpts},
+    name_server::TokioConnectionProvider,
 };
 use inferadb_ledger_raft::proto::{GetNodeInfoRequest, admin_service_client::AdminServiceClient};
 use serde::{Deserialize, Serialize};
@@ -223,7 +224,12 @@ pub async fn discover_node_info(addr: SocketAddr, timeout: Duration) -> Option<D
 async fn dns_lookup(domain: &str, port: u16) -> Result<Vec<DiscoveredPeer>, DiscoveryError> {
     debug!(domain = %domain, port, "Performing DNS lookup");
 
-    let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+    let resolver = Resolver::builder_with_config(
+        ResolverConfig::default(),
+        TokioConnectionProvider::default(),
+    )
+    .with_options(ResolverOpts::default())
+    .build();
 
     let ips =
         resolver.lookup_ip(domain).await.map_err(|e| DiscoveryError::DnsLookup(e.to_string()))?;

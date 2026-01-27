@@ -78,10 +78,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Metrics and observability
 metrics = "0.24"
 # Disable push-gateway (default) to avoid hyper-rustls/aws-lc-sys dependency
-metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 # Configuration
-config = "0.14"
+config = "0.15"
 toml = "0.8"
 humantime = "2.1"
 
@@ -98,7 +98,7 @@ proptest = "1.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 # DNS resolver for A record discovery
-hickory-resolver = "0.24"
+hickory-resolver = "0.25"
 
 # Object Storage (S3, GCS, Azure, local)
 object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
