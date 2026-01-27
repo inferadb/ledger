@@ -14,15 +14,15 @@
     { "type": "perf", "section": "Performance" },
     { "type": "revert", "section": "Reverts" },
     { "type": "docs", "section": "Documentation", "hidden": true },
-    { "type": "style", "section": "Styles", "hidden": true },
-    { "type": "chore", "section": "Miscellaneous", "hidden": true },
-    { "type": "refactor", "section": "Code Refactoring", "hidden": true },
+    { "type": "style", "section": "Improvements", "hidden": true },
+    { "type": "chore", "section": "Improvements", "hidden": true },
+    { "type": "refactor", "section": "Improvements", "hidden": true },
     { "type": "test", "section": "Tests", "hidden": true },
-    { "type": "build", "section": "Build System", "hidden": true },
-    { "type": "ci", "section": "CI", "hidden": true },
-    { "type": "dx", "section": "Developer Experience", "hidden": false },
-    { "type": "ai", "section": "AI", "hidden": false },
-    { "type": "imp", "section": "Improvements", "hidden": false }
+    { "type": "build", "section": "Improvements", "hidden": true },
+    { "type": "ci", "section": "Improvements", "hidden": true },
+    { "type": "dx", "section": "Improvements" },
+    { "type": "ai", "section": "Improvements" },
+    { "type": "imp", "section": "Improvements" }
   ],
   "packages": {
     ".": {
