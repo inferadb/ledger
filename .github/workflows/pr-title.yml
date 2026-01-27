@@ -10,8 +10,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  normalize-bot-titles:
-    name: Normalize Bot PR Titles
+  normalize:
+    name: Normalize
     runs-on: ubuntu-latest
     # Only run for bot PRs with non-conventional titles
     if: >

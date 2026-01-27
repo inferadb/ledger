@@ -17,8 +17,8 @@ permissions:
 
 jobs:
   # Detect if security-relevant files changed
-  detect-changes:
-    name: Detect Changes
+  changes:
+    name: Changes
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -44,12 +44,12 @@ jobs:
               - '**/Cargo.toml'
               - '.github/workflows/security.yml'
 
-  dependency-review:
-    name: Dependency Review
-    needs: [detect-changes]
+  dependencies:
+    name: Dependencies
+    needs: [changes]
     runs-on: ubuntu-latest
     # Only run if Cargo files changed AND not triggered by dependabot
-    if: needs.detect-changes.outputs.cargo == 'true' && github.actor != 'dependabot[bot]'
+    if: needs.changes.outputs.cargo == 'true' && github.actor != 'dependabot[bot]'
     permissions:
       contents: read
       pull-requests: write
@@ -70,9 +70,9 @@ jobs:
 
   # Security scan summary - aggregates all security job results
   # This job ALWAYS runs to satisfy required status checks
-  security-summary:
-    name: Security Summary
-    needs: [detect-changes, dependency-review]
+  status:
+    name: Status
+    needs: [changes, dependencies]
     runs-on: ubuntu-latest
     if: always()
     permissions:
@@ -85,8 +85,8 @@ jobs:
 
       - name: Check security scan results
         env:
-          CARGO_CHANGES: ${{ needs.detect-changes.outputs.cargo }}
-          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+          CARGO_CHANGES: ${{ needs.changes.outputs.cargo }}
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependencies.result }}
         run: |
           echo "## Security Scan Results"
           echo ""
