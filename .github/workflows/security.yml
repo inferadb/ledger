@@ -71,7 +71,7 @@ jobs:
   # Security scan summary - aggregates all security job results
   # This job ALWAYS runs to satisfy required status checks
   status:
-    name: Status
+    name: Security Summary
     needs: [changes, dependencies]
     runs-on: ubuntu-latest
     if: always()
