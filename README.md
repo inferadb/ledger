@@ -74,24 +74,11 @@ cp inferadb-ledger.example.toml inferadb-ledger.toml
 INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
 INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
+
 cargo run --release -p inferadb-ledger-server
-# Or run the binary directly:
-# ./target/release/inferadb-ledger
 ```
 
 For multi-node clusters, backup/restore, and Kubernetes deployment, see [docs/operations/](docs/operations/).
-
-## Crates
-
-| Crate                        | Description                                    |
-| ---------------------------- | ---------------------------------------------- |
-| `inferadb-ledger-types`      | Core types, hashing, and protobuf definitions  |
-| `inferadb-ledger-store`      | Embedded B+ tree database engine               |
-| `inferadb-ledger-state`      | Domain state management, indexes, snapshots    |
-| `inferadb-ledger-raft`       | Raft consensus, log storage, network transport |
-| `inferadb-ledger-server`     | gRPC server, request routing, client handling  |
-| `inferadb-ledger-sdk`        | Rust SDK for client applications               |
-| `inferadb-ledger-test-utils` | Shared test utilities                          |
 
 ## Design
 
