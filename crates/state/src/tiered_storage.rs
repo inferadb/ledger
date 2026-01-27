@@ -15,7 +15,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
 use futures::TryStreamExt;
-use object_store::{ObjectStore, PutPayload, path::Path as ObjectPath};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path as ObjectPath};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 use url::Url;
