@@ -101,7 +101,7 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 hickory-resolver = "0.24"
 
 # Object Storage (S3, GCS, Azure, local)
-object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
 
 async-trait = "0.1"
 
