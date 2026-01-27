@@ -163,8 +163,11 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
           echo "CARGO_INCREMENTAL=0" >> $GITHUB_ENV
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
+          # Only use mold for native Linux builds, not cross-compilation
+          if [[ "${{ runner.os }}" == "Linux" && "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
             echo "RUSTFLAGS=-C codegen-units=16 -C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
+          elif [[ "${{ runner.os }}" == "Linux" ]]; then
+            echo "RUSTFLAGS=-C codegen-units=16" >> $GITHUB_ENV
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             echo "RUSTFLAGS=-C codegen-units=16" >> $GITHUB_ENV
             echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
