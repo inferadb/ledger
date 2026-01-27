@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "rust",
+  "release-type": "simple",
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "include-component-in-tag": false,
@@ -26,13 +26,46 @@
       "package-name": "inferadb-ledger",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "crates/types/Cargo.toml",
-        "crates/store/Cargo.toml",
-        "crates/state/Cargo.toml",
-        "crates/raft/Cargo.toml",
-        "crates/server/Cargo.toml",
-        "crates/sdk/Cargo.toml",
-        "crates/test-utils/Cargo.toml"
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-types.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-store.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-state.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-raft.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-server.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-sdk.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-test-utils.version"
+        }
       ]
     }
   }
