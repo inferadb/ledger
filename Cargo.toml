@@ -78,7 +78,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Metrics and observability
 metrics = "0.24"
 # Disable push-gateway (default) to avoid hyper-rustls/aws-lc-sys dependency
-metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 # Configuration
 config = "0.14"
