@@ -75,6 +75,8 @@ INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
 INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
 cargo run --release -p inferadb-ledger-server
+# Or run the binary directly:
+# ./target/release/inferadb-ledger
 ```
 
 For multi-node clusters, backup/restore, and Kubernetes deployment, see [OPERATIONS.md](OPERATIONS.md).

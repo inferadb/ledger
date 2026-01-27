@@ -20,7 +20,7 @@ mkdir -p /var/lib/ledger
 INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
 INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 ```
 
 ### Multi-Node Cluster (3 nodes)
@@ -41,7 +41,7 @@ INFERADB__LEDGER__LISTEN_ADDR=192.168.1.101:50051 \
 INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-1 \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
 INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-1/peers.cache \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 ```
 
 **Node 2** (`/var/lib/ledger-2`):
@@ -58,7 +58,7 @@ INFERADB__LEDGER__LISTEN_ADDR=192.168.1.102:50051 \
 INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-2 \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
 INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-2/peers.cache \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 ```
 
 **Node 3** (`/var/lib/ledger-3`):
@@ -75,7 +75,7 @@ INFERADB__LEDGER__LISTEN_ADDR=192.168.1.103:50051 \
 INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-3 \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
 INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-3/peers.cache \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 ```
 
 Start all three nodes. They will:
@@ -92,7 +92,7 @@ For production, use DNS A records instead of static peer caches:
 ```bash
 INFERADB__LEDGER__DISCOVERY_DOMAIN=ledger.default.svc.cluster.local \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 ```
 
 For non-Kubernetes environments, configure DNS A records:
@@ -127,7 +127,7 @@ The node will:
 Start the node with the same `data_dir`. The persisted `node_id` file ensures it rejoins with its original identity:
 
 ```bash
-./target/release/inferadb-ledger-server --config /etc/ledger/inferadb-ledger.toml
+./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
 ```
 
 On restart:
@@ -164,7 +164,7 @@ INFERADB__LEDGER__LISTEN_ADDR=192.168.1.104:50051 \
 INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-new \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
 INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-new/peers.cache \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 ```
 
 The node will:
@@ -202,7 +202,7 @@ The `data_dir` contains all persistent state:
 ```bash
 kill $(cat /var/lib/ledger/ledger.pid)
 cp -r /var/lib/ledger /backup/ledger-$(date +%Y%m%d-%H%M%S)
-./target/release/inferadb-ledger-server --config /etc/ledger/inferadb-ledger.toml
+./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
 ```
 
 **Snapshot-based backup** (node running):
@@ -237,7 +237,7 @@ Snapshots include:
 kill $(cat /var/lib/ledger/ledger.pid) 2>/dev/null || true
 rm -rf /var/lib/ledger
 cp -r /backup/ledger-20240115-030000 /var/lib/ledger
-./target/release/inferadb-ledger-server --config /etc/ledger/inferadb-ledger.toml
+./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
 ```
 
 The node will:
@@ -255,7 +255,7 @@ mkdir -p /var/lib/ledger/snapshots
 cp /backup/000010000.snap /var/lib/ledger/snapshots/
 
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
-./target/release/inferadb-ledger-server --config /etc/ledger/inferadb-ledger.toml
+./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
 ```
 
 The node will:
@@ -275,11 +275,11 @@ cp -r /backup/ledger-node1 /var/lib/ledger
 
 # Start first node with bootstrap_expect=1 to force bootstrap
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 
 # Start remaining nodes with bootstrap_expect=0
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
-./target/release/inferadb-ledger-server
+./target/release/inferadb-ledger
 ```
 
 ## Configuration

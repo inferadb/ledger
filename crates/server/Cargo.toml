@@ -13,7 +13,7 @@ name = "inferadb_ledger_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ledger"
+name = "inferadb-ledger"
 path = "src/main.rs"
 
 [dependencies]
