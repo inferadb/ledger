@@ -45,31 +45,29 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 
 ## Commands
 
+Use `just` for common tasks (see `Justfile` for all commands):
+
 ```bash
-# Build
-cargo build                                # all crates
-cargo build -p inferadb-ledger-types       # single crate
+just              # list available commands
+just check        # pre-commit: fmt + clippy + test
+just check-quick  # fast pre-commit: fmt + clippy only
+just test-fast    # quick tests (~15s)
+just test         # standard tests (~30s)
+just test-full    # all tests including slow (~5min)
+just fmt          # format code
+just clippy       # run linter
+just proto        # generate protobuf code
+just run          # run server (dev mode)
+```
 
-# Test
-cargo test                                 # all tests
-cargo test -p inferadb-ledger-state        # single crate
-cargo test test_name -- --nocapture        # single test with output
+Or use cargo directly:
 
-# Lint & Format
-cargo +nightly fmt
+```bash
+cargo +1.92 build -p <crate>               # build specific crate
+cargo +1.92 test -p <crate>                # test specific crate
+cargo +1.92 test <name> -- --nocapture     # run single test with output
+cargo +nightly fmt                         # format (nightly required)
 cargo +1.92 clippy --all-targets -- -D warnings
-
-# Unused dependencies
-cargo +nightly udeps --workspace
-
-# Pre-commit check
-cargo +nightly fmt --check && cargo +1.92 clippy --all-targets -- -D warnings && cargo test
-
-# Protobuf generation
-cd proto && buf generate
-
-# Run server
-cargo run -p inferadb-ledger-server --release -- --config config.toml
 ```
 
 ## Architecture
