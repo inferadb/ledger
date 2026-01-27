@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+
+name: PR Title
+
+on:
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  normalize-bot-titles:
+    name: Normalize Bot PR Titles
+    runs-on: ubuntu-latest
+    # Only run for bot PRs with non-conventional titles
+    if: >
+      github.event.pull_request.user.type == 'Bot' &&
+      !startsWith(github.event.pull_request.title, 'feat') &&
+      !startsWith(github.event.pull_request.title, 'fix') &&
+      !startsWith(github.event.pull_request.title, 'docs') &&
+      !startsWith(github.event.pull_request.title, 'style') &&
+      !startsWith(github.event.pull_request.title, 'refactor') &&
+      !startsWith(github.event.pull_request.title, 'perf') &&
+      !startsWith(github.event.pull_request.title, 'test') &&
+      !startsWith(github.event.pull_request.title, 'build') &&
+      !startsWith(github.event.pull_request.title, 'ci') &&
+      !startsWith(github.event.pull_request.title, 'chore') &&
+      !startsWith(github.event.pull_request.title, 'revert')
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Normalize PR title
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const title = context.payload.pull_request.title;
+            const author = context.payload.pull_request.user.login;
+            let newTitle = title;
+
+            // StepSecurity bot: [StepSecurity] Apply security best practices
+            if (author === 'stepsecurity-app[bot]' || author === 'step-security-bot[bot]') {
+              // Extract the action description
+              const match = title.match(/^\[StepSecurity\]\s*(.+)$/i);
+              if (match) {
+                const description = match[1].toLowerCase();
+                newTitle = `ci(security): ${description}`;
+              }
+            }
+            // Dependabot: Bump foo from 1.0 to 2.0
+            else if (author === 'dependabot[bot]') {
+              if (title.toLowerCase().startsWith('bump ')) {
+                newTitle = `build(deps): ${title.toLowerCase()}`;
+              }
+            }
+            // Renovate: Update dependency foo to v2.0
+            else if (author === 'renovate[bot]') {
+              if (title.toLowerCase().startsWith('update ')) {
+                newTitle = `build(deps): ${title.toLowerCase()}`;
+              }
+            }
+            // Generic fallback for other bots
+            else if (!title.match(/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?:/)) {
+              newTitle = `chore: ${title.toLowerCase()}`;
+            }
+
+            // Update the PR title if changed
+            if (newTitle !== title) {
+              console.log(`Updating PR title from "${title}" to "${newTitle}"`);
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                title: newTitle
+              });
+            } else {
+              console.log(`PR title "${title}" already follows conventional commits`);
+            }
