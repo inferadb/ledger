@@ -40,7 +40,7 @@ jobs:
 
   # Trigger stable release workflow when release-please creates a release
   release:
-    name: Trigger Release
+    name: Release
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     uses: ./.github/workflows/release.yml

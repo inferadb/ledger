@@ -29,7 +29,7 @@ env:
 jobs:
   # Validate conventional commit messages
   commits:
-    name: Commit Messages
+    name: Commits
     runs-on: ubuntu-latest
     # Only run on pull requests - push to main is already validated
     if: github.event_name == 'pull_request'
@@ -68,7 +68,7 @@ jobs:
 
   # Check code formatting
   fmt:
-    name: Formatting
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -126,7 +126,7 @@ jobs:
 
   # Check for unused dependencies
   udeps:
-    name: Unused Dependencies
+    name: Dependencies
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-C codegen-units=16 -C link-arg=-fuse-ld=mold"
@@ -258,7 +258,7 @@ jobs:
 
   # Code coverage (nightly only to reduce CI costs)
   coverage:
-    name: Code Coverage
+    name: Coverage
     needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
@@ -314,7 +314,7 @@ jobs:
 
   # Build documentation
   docs:
-    name: Documentation
+    name: Docs
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-C codegen-units=16 -C link-arg=-fuse-ld=mold"
@@ -351,7 +351,7 @@ jobs:
 
   # Overall status check
   ci-success:
-    name: CI Success
+    name: Status
     needs: [commits, fmt, clippy, udeps, msrv, test, coverage, docs]
     runs-on: ubuntu-latest
     if: always()
