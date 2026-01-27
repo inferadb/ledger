@@ -118,7 +118,7 @@ inferadb-ledger-state = { version = "0.1.0-nightly.20260127", path = "crates/sta
 inferadb-ledger-raft = { version = "0.1.0-nightly.20260127", path = "crates/raft" }
 inferadb-ledger-server = { version = "0.1.0-nightly.20260127", path = "crates/server" }
 inferadb-ledger-sdk = { version = "0.1.0-nightly.20260127", path = "crates/sdk" }
-inferadb-ledger-test-utils = { version = "0.1.0-nightly.20260127", path = "crates/test-utils" }
+inferadb-ledger-test-utils = { path = "crates/test-utils" }
 
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
