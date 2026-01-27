@@ -53,6 +53,13 @@ mod types;
 pub mod proto {
     #![allow(clippy::all)]
     #![allow(missing_docs)]
+
+    // Use pre-generated code when proto files aren't available (crates.io)
+    #[cfg(use_pregenerated_proto)]
+    include!("generated/ledger.v1.rs");
+
+    // Use build-time generated code in development
+    #[cfg(not(use_pregenerated_proto))]
     tonic::include_proto!("ledger.v1");
 }
 
