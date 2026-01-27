@@ -98,7 +98,7 @@ proptest = "1.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 # DNS resolver for A record discovery
-hickory-resolver = "0.24"
+hickory-resolver = "0.25"
 
 # Object Storage (S3, GCS, Azure, local)
 object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
