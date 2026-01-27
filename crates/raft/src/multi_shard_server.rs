@@ -86,8 +86,9 @@ impl MultiShardLedgerServer {
         let resolver: Arc<dyn crate::services::ShardResolver> =
             Arc::new(MultiShardResolver::new(self.manager.clone()));
 
-        // Create multi-shard services
-        let read_service = MultiShardReadService::new(resolver.clone());
+        // Create multi-shard services with forwarding support
+        let read_service =
+            MultiShardReadService::with_manager(resolver.clone(), self.manager.clone());
 
         let write_service = MultiShardWriteService::builder()
             .resolver(resolver.clone())

@@ -31,11 +31,13 @@ use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{NamespaceId, ShardId};
 use openraft::Raft;
+use tokio::sync::broadcast;
 use tonic::Status;
 
 use crate::{
     log_storage::AppliedStateAccessor,
     multi_raft::MultiRaftManager,
+    proto::BlockAnnouncement,
     shard_router::{RoutingInfo, ShardRouter},
     types::LedgerTypeConfig,
 };
@@ -52,6 +54,10 @@ pub struct ShardContext {
     pub block_archive: Arc<BlockArchive<FileBackend>>,
     /// Applied state accessor for this shard.
     pub applied_state: AppliedStateAccessor,
+    /// Block announcements broadcast channel for real-time notifications.
+    /// Optional for backward compatibility with single-shard setups that
+    /// manage the channel externally.
+    pub block_announcements: Option<broadcast::Sender<BlockAnnouncement>>,
 }
 
 /// Information for forwarding a request to a remote shard.
@@ -88,6 +94,7 @@ impl std::fmt::Debug for ShardContext {
             .field("state", &"<StateLayer>")
             .field("block_archive", &"<BlockArchive>")
             .field("applied_state", &"<AppliedState>")
+            .field("block_announcements", &self.block_announcements.is_some())
             .finish()
     }
 }
@@ -168,11 +175,14 @@ impl SingleShardResolver {
 impl ShardResolver for SingleShardResolver {
     fn resolve(&self, _namespace_id: NamespaceId) -> Result<ShardContext, Status> {
         // Single shard handles all namespaces
+        // Note: block_announcements is None because single-shard setups manage
+        // the channel externally in LedgerServer
         Ok(ShardContext {
             raft: self.raft.clone(),
             state: self.state.clone(),
             block_archive: self.block_archive.clone(),
             applied_state: self.applied_state.clone(),
+            block_announcements: None,
         })
     }
 
@@ -182,6 +192,7 @@ impl ShardResolver for SingleShardResolver {
             state: self.state.clone(),
             block_archive: self.block_archive.clone(),
             applied_state: self.applied_state.clone(),
+            block_announcements: None,
         })
     }
 }
@@ -235,6 +246,7 @@ impl ShardResolver for MultiShardResolver {
             state: shard.state().clone(),
             block_archive: shard.block_archive().clone(),
             applied_state: shard.applied_state().clone(),
+            block_announcements: Some(shard.block_announcements().clone()),
         })
     }
 
@@ -251,6 +263,7 @@ impl ShardResolver for MultiShardResolver {
                 state: shard.state().clone(),
                 block_archive: shard.block_archive().clone(),
                 applied_state: shard.applied_state().clone(),
+                block_announcements: Some(shard.block_announcements().clone()),
             }));
         }
 
@@ -288,6 +301,7 @@ impl ShardResolver for MultiShardResolver {
             state: shard.state().clone(),
             block_archive: shard.block_archive().clone(),
             applied_state: shard.applied_state().clone(),
+            block_announcements: Some(shard.block_announcements().clone()),
         })
     }
 

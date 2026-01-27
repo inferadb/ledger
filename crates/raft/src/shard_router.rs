@@ -301,7 +301,10 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     }
 
     /// Get or create a connection to a shard.
-    async fn get_connection(
+    ///
+    /// Returns an existing cached connection if available, otherwise creates a new one.
+    /// The connection will be cached for future use.
+    pub async fn get_connection(
         &self,
         shard_id: ShardId,
         member_nodes: &[String],

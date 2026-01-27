@@ -54,13 +54,14 @@ use inferadb_ledger_types::{NamespaceId, ShardId};
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use parking_lot::RwLock;
 use snafu::Snafu;
-use tokio::task::JoinHandle;
+use tokio::{sync::broadcast, task::JoinHandle};
 use tracing::{debug, info, warn};
 
 use crate::{
     auto_recovery::AutoRecoveryJob,
     block_compaction::BlockCompactor,
     log_storage::{AppliedStateAccessor, RaftLogStore},
+    proto::BlockAnnouncement,
     raft_network::GrpcRaftNetworkFactory,
     shard_router::ShardRouter,
     ttl_gc::TtlGarbageCollector,
@@ -236,6 +237,8 @@ pub struct ShardGroup {
     block_archive: Arc<BlockArchive<FileBackend>>,
     /// Accessor for applied state.
     applied_state: AppliedStateAccessor,
+    /// Block announcement broadcast channel for real-time block notifications.
+    block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Background job handles (wrapped in Mutex for mutable access through Arc).
     background_jobs: parking_lot::Mutex<ShardBackgroundJobs>,
 }
@@ -264,6 +267,11 @@ impl ShardGroup {
     /// Get the applied state accessor.
     pub fn applied_state(&self) -> &AppliedStateAccessor {
         &self.applied_state
+    }
+
+    /// Get the block announcements broadcast channel.
+    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
+        &self.block_announcements
     }
 
     /// Check if this node is the leader for this shard.
@@ -475,6 +483,10 @@ impl MultiRaftManager {
             ShardBackgroundJobs::none()
         };
 
+        // Create block announcements broadcast channel for real-time notifications.
+        // Buffer size of 1024 allows for burst handling during high commit rates.
+        let (block_announcements, _) = broadcast::channel(1024);
+
         // Create shard group
         let shard_group = Arc::new(ShardGroup {
             shard_id,
@@ -482,6 +494,7 @@ impl MultiRaftManager {
             state,
             block_archive,
             applied_state,
+            block_announcements,
             background_jobs: parking_lot::Mutex::new(background_jobs),
         });
 
