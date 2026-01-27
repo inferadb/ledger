@@ -116,7 +116,7 @@ inferadb-ledger-types = { version = "0.1.0-nightly.20260127", path = "crates/typ
 inferadb-ledger-store = { version = "0.1.0-nightly.20260127", path = "crates/store" }
 inferadb-ledger-state = { version = "0.1.0-nightly.20260127", path = "crates/state" }
 inferadb-ledger-raft = { version = "0.1.0-nightly.20260127", path = "crates/raft" }
-inferadb-ledger-server = { version = "0.1.0-nightly.20260127", path = "crates/server" }
+inferadb-ledger-server = { path = "crates/server" }
 inferadb-ledger-sdk = { version = "0.1.0-nightly.20260127", path = "crates/sdk" }
 inferadb-ledger-test-utils = { path = "crates/test-utils" }
 
