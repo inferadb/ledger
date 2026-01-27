@@ -60,6 +60,10 @@ jobs:
             build
             ci
             chore
+            revert
+            dx
+            ai
+            imp
           requireScope: false
           subjectPattern: ^[a-z].*$
           subjectPatternError: |

@@ -26,7 +26,10 @@ jobs:
       !startsWith(github.event.pull_request.title, 'build') &&
       !startsWith(github.event.pull_request.title, 'ci') &&
       !startsWith(github.event.pull_request.title, 'chore') &&
-      !startsWith(github.event.pull_request.title, 'revert')
+      !startsWith(github.event.pull_request.title, 'revert') &&
+      !startsWith(github.event.pull_request.title, 'dx') &&
+      !startsWith(github.event.pull_request.title, 'ai') &&
+      !startsWith(github.event.pull_request.title, 'imp')
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
