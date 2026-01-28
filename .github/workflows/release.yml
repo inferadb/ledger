@@ -116,7 +116,7 @@ jobs:
 
   # Build release binaries for multiple platforms
   build-binaries:
-    name: Build (${{ matrix.target }})
+    name: Build (${{ matrix.name }})
     needs: prepare
     runs-on: ${{ matrix.os }}
     permissions:
@@ -127,21 +127,25 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            name: Linux AMD64
             target: x86_64-unknown-linux-gnu
             artifact_name: inferadb-ledger
             asset_name: inferadb-ledger-linux-x86_64
 
           - os: ubuntu-24.04-arm
+            name: Linux ARM64
             target: aarch64-unknown-linux-gnu
             artifact_name: inferadb-ledger
             asset_name: inferadb-ledger-linux-aarch64
 
           - os: macos-15-intel
+            name: macOS Intel
             target: x86_64-apple-darwin
             artifact_name: inferadb-ledger
             asset_name: inferadb-ledger-macos-x86_64
 
           - os: macos-latest
+            name: macOS Apple Silicon
             target: aarch64-apple-darwin
             artifact_name: inferadb-ledger
             asset_name: inferadb-ledger-macos-aarch64
@@ -277,16 +281,18 @@ jobs:
 
   # Build and push Docker images to both Docker Hub and GitHub Container Registry
   build-docker:
-    name: Docker (${{ matrix.platform }})
+    name: Docker (${{ matrix.name }})
     needs: prepare
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
+            name: Linux AMD64
             runner: ubuntu-latest
             suffix: amd64
           - platform: linux/arm64
+            name: Linux ARM64
             runner: ubuntu-24.04-arm
             suffix: arm64
     runs-on: ${{ matrix.runner }}

@@ -207,13 +207,21 @@ jobs:
 
   # Run tests on multiple platforms
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.name }})
     needs: [fmt, clippy]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        include:
+          - runner: ubuntu-latest
+            name: Linux AMD64
+          - runner: ubuntu-24.04-arm
+            name: Linux ARM64
+          - runner: macos-15-intel
+            name: macOS Intel
+          - runner: macos-latest
+            name: macOS Apple Silicon
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
@@ -250,7 +258,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
         with:
-          shared-key: test-${{ matrix.os }}
+          shared-key: test-${{ matrix.runner }}
 
       - name: Run unit tests
         env:
