@@ -30,8 +30,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # GitHub Container Registry
+  GHCR_REGISTRY: ghcr.io
+  GHCR_IMAGE: ${{ github.repository }}
+  # Docker Hub
+  DOCKERHUB_IMAGE: inferadb/inferadb-ledger
 
 jobs:
   # Determine version from trigger source
@@ -89,6 +92,27 @@ jobs:
           name: Release ${{ needs.prepare.outputs.tag_name }}
           draft: false
           prerelease: false
+
+  # Update rolling latest tag
+  update-latest-tag:
+    name: Update Latest Tag
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Update latest tag
+        run: |
+          git tag -f latest
+          git push -f origin latest
 
   # Build release binaries for multiple platforms
   build-binaries:
@@ -282,18 +306,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: step-security/setup-buildx-action@8c8aef2d414c0b66518fee2b7084e0986f82d7ac # v3.11.1
 
-      # Login to Docker Hub
-      - name: Login to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      # Login to GitHub Container Registry
-      - name: Login to GitHub Container Registry
-        uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
-        with:
-          registry: ghcr.io
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -303,7 +319,7 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=release-${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=release-${{ matrix.suffix }}
 
@@ -345,72 +361,42 @@ jobs:
       - name: Set up Docker Buildx
         uses: step-security/setup-buildx-action@8c8aef2d414c0b66518fee2b7084e0986f82d7ac # v3.11.1
 
-      # Login to Docker Hub
-      - name: Login to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      # Login to GitHub Container Registry
-      - name: Login to GitHub Container Registry
-        uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
-        with:
-          registry: ghcr.io
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for GHCR
-        id: meta-ghcr
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+      - name: Log in to Docker Hub
+        uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest
-            type=raw,value=${{ needs.prepare.outputs.tag_name }}
-            type=raw,value=v${{ needs.prepare.outputs.version }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata for Docker Hub
-        id: meta-hub
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: inferadb/ledger
-          tags: |
-            type=raw,value=latest
-            type=raw,value=${{ needs.prepare.outputs.tag_name }}
-            type=raw,value=v${{ needs.prepare.outputs.version }}
-
-      - name: Create GHCR manifest list and push
+      - name: Create and push manifest to ghcr.io
         working-directory: /tmp/digests
-        env:
-          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta-ghcr.outputs.json }}
-          REGISTRY: ghcr.io
-          IMAGE_NAME: ${{ github.repository }}
         run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
-
-      - name: Create Docker Hub manifest list and push
-        working-directory: /tmp/digests
-        env:
-          VERSION: ${{ needs.prepare.outputs.tag_name }}
-          REGISTRY: ghcr.io
-          IMAGE_NAME: ${{ github.repository }}
-        run: |
-          # Re-tag and push to Docker Hub
           docker buildx imagetools create \
-            -t inferadb/ledger:latest \
-            -t "inferadb/ledger:${VERSION}" \
-            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+            -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:latest \
+            -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:${{ needs.prepare.outputs.tag_name }} \
+            -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:v${{ needs.prepare.outputs.version }} \
+            $(printf '${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}@sha256:%s ' *)
+
+      - name: Copy manifest to Docker Hub
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.DOCKERHUB_IMAGE }}:latest \
+            -t ${{ env.DOCKERHUB_IMAGE }}:${{ needs.prepare.outputs.tag_name }} \
+            -t ${{ env.DOCKERHUB_IMAGE }}:v${{ needs.prepare.outputs.version }} \
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:latest
 
       - name: Inspect images
-        env:
-          IMAGE_NAME: ${{ github.repository }}
         run: |
-          echo "=== GHCR Image ==="
-          docker buildx imagetools inspect "ghcr.io/${IMAGE_NAME}:latest"
-          echo "=== Docker Hub Image ==="
-          docker buildx imagetools inspect inferadb/ledger:latest
+          echo "=== ghcr.io ==="
+          docker buildx imagetools inspect ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:latest
+          echo "=== Docker Hub ==="
+          docker buildx imagetools inspect ${{ env.DOCKERHUB_IMAGE }}:latest
 
   # Generate SBOM for Docker image
   sbom-docker:
@@ -429,19 +415,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Login to GitHub Container Registry
+      - name: Log in to GitHub Container Registry
         uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          registry: ghcr.io
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate SBOM
         uses: anchore/sbom-action@62ad5284b8ced813296287a0b63906cb364b73ee # v0.22.0
-        env:
-          IMAGE_NAME: ${{ github.repository }}
         with:
-          image: ghcr.io/${{ env.IMAGE_NAME }}:latest
+          image: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:latest
           artifact-name: docker-sbom.spdx.json
           output-file: docker-sbom.spdx.json
 

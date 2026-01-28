@@ -19,8 +19,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # GitHub Container Registry
+  GHCR_REGISTRY: ghcr.io
+  GHCR_IMAGE: ${{ github.repository }}
+  # Docker Hub
+  DOCKERHUB_IMAGE: inferadb/inferadb-ledger
 
 jobs:
   # Check if there are changes since the last nightly
@@ -29,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
+      libraries_changed: ${{ steps.libraries.outputs.changed }}
+      server_changed: ${{ steps.server.outputs.changed }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
@@ -72,6 +77,75 @@ jobs:
           else
             echo "No commits since last nightly, skipping"
             echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for library changes since last nightly
+        id: libraries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the last nightly release
+          LAST_NIGHTLY=$(gh release list --limit 50 | grep -E 'nightly\.' | head -1 | awk '{print $1}' || echo "")
+
+          if [ -z "$LAST_NIGHTLY" ]; then
+            echo "No previous nightly, assuming library changes"
+            echo "changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          LAST_SHA=$(git rev-list -n 1 "$LAST_NIGHTLY" 2>/dev/null || echo "")
+
+          if [ -z "$LAST_SHA" ]; then
+            echo "Could not find commit, assuming library changes"
+            echo "changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if library files changed since last nightly
+          LIBRARY_CHANGES=$(git diff --name-only "$LAST_SHA"..HEAD -- \
+            crates/types crates/store crates/state crates/raft crates/sdk \
+            proto Cargo.toml Cargo.lock | wc -l)
+
+          if [ "$LIBRARY_CHANGES" -gt 0 ]; then
+            echo "Found $LIBRARY_CHANGES library file changes"
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No library changes, only server/CI changes"
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for server changes since last nightly
+        id: server
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the last nightly release
+          LAST_NIGHTLY=$(gh release list --limit 50 | grep -E 'nightly\.' | head -1 | awk '{print $1}' || echo "")
+
+          if [ -z "$LAST_NIGHTLY" ]; then
+            echo "No previous nightly, assuming server changes"
+            echo "changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          LAST_SHA=$(git rev-list -n 1 "$LAST_NIGHTLY" 2>/dev/null || echo "")
+
+          if [ -z "$LAST_SHA" ]; then
+            echo "Could not find commit, assuming server changes"
+            echo "changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if server files changed since last nightly
+          SERVER_CHANGES=$(git diff --name-only "$LAST_SHA"..HEAD -- \
+            crates/server Dockerfile | wc -l)
+
+          if [ "$SERVER_CHANGES" -gt 0 ]; then
+            echo "Found $SERVER_CHANGES server file changes"
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No server changes"
+            echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
   # Compute nightly version from release-please manifest
@@ -144,7 +218,9 @@ jobs:
 
             Install with Docker:
             ```bash
-            docker pull ghcr.io/${{ env.IMAGE_NAME }}:nightly
+            docker pull ${{ env.DOCKERHUB_IMAGE }}:nightly
+            # or
+            docker pull ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:nightly
             ```
 
       - name: Update nightly tag
@@ -152,10 +228,11 @@ jobs:
           git tag -f nightly
           git push -f origin nightly
 
-  # Build release binaries for multiple platforms
+  # Build release binaries for multiple platforms (only if server changed)
   build-binaries:
     name: Build (${{ matrix.target }})
-    needs: [version, create-release]
+    needs: [check-changes, version, create-release]
+    if: needs.check-changes.outputs.server_changed == 'true'
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -258,10 +335,11 @@ jobs:
           gh release upload "v${{ needs.version.outputs.version }}" \
             "sbom-${{ matrix.target }}.spdx.json"
 
-  # Build and push Docker images
+  # Build and push Docker images (only if server changed)
   build-docker:
     name: Docker (${{ matrix.platform }})
-    needs: [version, create-release]
+    needs: [check-changes, version, create-release]
+    if: needs.check-changes.outputs.server_changed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -291,7 +369,7 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -299,7 +377,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
           tags: |
             type=raw,value=nightly
             type=raw,value=nightly-${{ needs.version.outputs.date }}
@@ -311,7 +389,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=nightly-${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=nightly-${{ matrix.suffix }}
 
@@ -329,11 +407,12 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Merge platform-specific images into multi-arch manifest
+  # Merge platform-specific images into multi-arch manifest (only if server changed)
   merge-docker:
     name: Docker Manifest
     runs-on: ubuntu-latest
-    needs: [version, build-docker]
+    needs: [check-changes, version, build-docker]
+    if: needs.check-changes.outputs.server_changed == 'true'
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
@@ -353,34 +432,44 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+      - name: Log in to Docker Hub
+        uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=nightly
-            type=raw,value=nightly-${{ needs.version.outputs.date }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Create manifest list and push
+      - name: Create and push manifest to ghcr.io
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+          docker buildx imagetools create \
+            -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:nightly \
+            -t ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:nightly-${{ needs.version.outputs.date }} \
+            $(printf '${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}@sha256:%s ' *)
 
-      - name: Inspect image
+      - name: Copy manifest to Docker Hub
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly
+          docker buildx imagetools create \
+            -t ${{ env.DOCKERHUB_IMAGE }}:nightly \
+            -t ${{ env.DOCKERHUB_IMAGE }}:nightly-${{ needs.version.outputs.date }} \
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:nightly
 
-  # Generate SBOM for Docker image
+      - name: Inspect images
+        run: |
+          echo "=== ghcr.io ==="
+          docker buildx imagetools inspect ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:nightly
+          echo "=== Docker Hub ==="
+          docker buildx imagetools inspect ${{ env.DOCKERHUB_IMAGE }}:nightly
+
+  # Generate SBOM for Docker image (only if server changed)
   sbom-docker:
     name: Docker SBOM
     runs-on: ubuntu-latest
-    needs: [version, merge-docker]
+    needs: [check-changes, version, merge-docker]
+    if: needs.check-changes.outputs.server_changed == 'true'
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
@@ -393,14 +482,14 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate SBOM
         uses: anchore/sbom-action@62ad5284b8ced813296287a0b63906cb364b73ee # v0.22.0
         with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly
+          image: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:nightly
           artifact-name: docker-sbom.spdx.json
           output-file: docker-sbom.spdx.json
 
@@ -410,6 +499,57 @@ jobs:
         run: |
           gh release upload "v${{ needs.version.outputs.version }}" \
             docker-sbom.spdx.json --clobber || true
+
+  # Publish crates to crates.io with nightly version (only if libraries changed)
+  publish-crates:
+    name: Crates
+    needs: [check-changes, version, create-release]
+    if: needs.check-changes.outputs.libraries_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@881ba7bf39a41cda34ac9e123fb41b44ed08232f # stable
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Update crate versions
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Update workspace version
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+
+      - name: Cache Rust dependencies
+        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.3
+        id: auth
+
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-raft inferadb-ledger-sdk; do
+            echo "Publishing ${crate}..."
+            cargo publish -p "${crate}" --token "$CARGO_REGISTRY_TOKEN" --allow-dirty || echo "${crate} may already be published"
+            echo "Waiting for crates.io to index..."
+            sleep 45
+          done
 
   # Cleanup old nightly releases (keep last 7)
   cleanup:
