@@ -1956,17 +1956,22 @@ struct SystemState {
     version: u64,
 }
 
+enum UserStatus {
+    Active,      // User can authenticate
+    PendingOrg,  // Pending organization creation (saga in progress)
+    Suspended,   // User cannot authenticate
+    Deleting,    // Deletion cascade in progress
+    Deleted,     // Tombstone for audit
+}
+
 struct User {
     id: UserId,
     name: String,
-    password_hash: Option<String>,  // Argon2id (optional for passkey-only users)
+    primary_email_id: EmailId,      // References UserEmail.id
+    status: UserStatus,             // Lifecycle state
     // Namespace access derived from membership records (member:{id} in each org namespace)
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-    tos_accepted_at: Option<DateTime<Utc>>,
-    deleted_at: Option<DateTime<Utc>>,
-    disabled: bool,
-    primary_email_id: EmailId,      // References UserEmail.id (single source of truth)
 }
 
 /// User email address (separate entity, not embedded in User)
@@ -1974,9 +1979,10 @@ struct UserEmail {
     id: EmailId,                    // Sequential ID from Ledger leader
     user_id: UserId,
     email: String,                  // Normalized to lowercase
-    // Primary email is referenced by User.primary_email_id, not a flag here
-    verified_at: Option<DateTime<Utc>>,
+    verified: bool,                 // Whether email has been verified
+    primary: bool,                  // Whether this is the user's primary email
     created_at: DateTime<Utc>,
+    verified_at: Option<DateTime<Utc>>,
 }
 
 /// Email verification token (stored with TTL)
@@ -1989,20 +1995,36 @@ struct EmailVerificationToken {
     used_at: Option<DateTime<Utc>>,
 }
 
+enum NamespaceStatus {
+    Active,     // Accepting requests
+    Migrating,  // Being migrated to another shard
+    Suspended,  // Billing or policy suspension
+    Deleting,   // Deletion in progress
+    Deleted,    // Tombstone
+}
+
 struct NamespaceRegistry {
     namespace_id: NamespaceId,
+    name: String,                // Human-readable name
     shard_id: ShardId,           // Which shard hosts this namespace
     member_nodes: Vec<NodeId>,   // Nodes in the shard
-    leader_hint: Option<NodeId>, // May be stale
-    config_version: u64,
+    status: NamespaceStatus,     // Lifecycle state
+    config_version: u64,         // For cache invalidation
+    created_at: DateTime<Utc>,
+}
+
+enum NodeRole {
+    Voter,   // Participates in Raft elections (max 5 per cluster)
+    Learner, // Replicates data but doesn't vote (for scaling)
 }
 
 struct NodeInfo {
     node_id: NodeId,
     addresses: Vec<SocketAddr>,  // WireGuard IPs
     grpc_port: u16,
-    capabilities: Capabilities,
+    role: NodeRole,              // Voter or Learner
     last_heartbeat: DateTime<Utc>,
+    joined_at: DateTime<Utc>,    // For voter election ordering
 }
 ```
 

@@ -92,13 +92,13 @@ Note: SetEntity encodes condition before expires_at.
 
 **Condition types** for SetEntity:
 
-| Condition     | Type Byte | Data                  |
-| ------------- | --------- | --------------------- |
-| (no condition)| `0x00`    | (none)                |
-| MustNotExist  | `0x01`    | (none)                |
-| MustExist     | `0x02`    | (none)                |
-| VersionEquals | `0x03`    | u64 BE version        |
-| ValueEquals   | `0x04`    | u32 LE length + bytes |
+| Condition      | Type Byte | Data                  |
+| -------------- | --------- | --------------------- |
+| (no condition) | `0x00`    | (none)                |
+| MustNotExist   | `0x01`    | (none)                |
+| MustExist      | `0x02`    | (none)                |
+| VersionEquals  | `0x03`    | u64 BE version        |
+| ValueEquals    | `0x04`    | u32 LE length + bytes |
 
 Note: `0x00` represents `Option<SetCondition>::None`, not a SetCondition variant.
 
@@ -175,17 +175,18 @@ state_root = SHA-256(bucket_root[0] || bucket_root[1] || ... || bucket_root[255]
 
 ```protobuf
 enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
   DIRECTION_LEFT = 1;   // Sibling is on the LEFT
   DIRECTION_RIGHT = 2;  // Sibling is on the RIGHT
 }
 
 message MerkleProof {
-  bytes leaf_hash = 1;
-  repeated MerkleNode siblings = 2;
+  Hash leaf_hash = 1;
+  repeated MerkleSibling siblings = 2;
 }
 
-message MerkleNode {
-  bytes hash = 1;
+message MerkleSibling {
+  Hash hash = 1;
   Direction direction = 2;
 }
 ```

@@ -155,19 +155,19 @@ _meta:seq:email_verify → next TokenId
 
 ### In Organization Namespace
 
-| Entity Type        | Key Pattern                        | Example                               |
-| ------------------ | ---------------------------------- | ------------------------------------- |
-| Org metadata       | `_meta`                            | `_meta`                               |
-| Member             | `member:{id}`                      | `member:100`                          |
-| Member index       | `_idx:member:user:{user_id}`       | `_idx:member:user:1`                  |
-| Team               | `team:{id}`                        | `team:200`                            |
-| Team members index | `_idx:team_members:{team_id}`      | `_idx:team_members:200`               |
-| Client             | `client:{id}`                      | `client:400`                          |
-| Session            | `session:{token}`                  | `session:abc123`                      |
-| Vault metadata     | `vault:{vault_id}:_meta`           | `vault:1:_meta`                       |
-| User grant         | `vault:{vault_id}:grant:user:{id}` | `vault:1:grant:user:500`              |
-| Team grant         | `vault:{vault_id}:grant:team:{id}` | `vault:1:grant:team:501`              |
-| Relationship       | `vault:{vault_id}:rel:{tuple}`     | `vault:1:rel:doc:1#viewer@user:alice` |
+| Entity Type        | Key Pattern                           | Example                       |
+| ------------------ | ------------------------------------- | ----------------------------- |
+| Org metadata       | `_meta`                               | `_meta`                       |
+| Member             | `member:{id}`                         | `member:100`                  |
+| Member index       | `_idx:member:user:{user_id}`          | `_idx:member:user:1`          |
+| Team               | `team:{id}`                           | `team:200`                    |
+| Team members index | `_idx:team_members:{team_id}`         | `_idx:team_members:200`       |
+| Client             | `client:{id}`                         | `client:400`                  |
+| Session            | `session:{token}`                     | `session:abc123`              |
+| Vault metadata     | `vault:{vault_id}:_meta`              | `vault:1:_meta`               |
+| User grant         | `vault:{vault_id}:grant:user:{id}`    | `vault:1:grant:user:500`      |
+| Team grant         | `vault:{vault_id}:grant:team:{id}`    | `vault:1:grant:team:501`      |
+| Relationship       | `rel:{resource}#{relation}@{subject}` | `rel:doc:1#viewer@user:alice` |
 
 ### Index Patterns
 

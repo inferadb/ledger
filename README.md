@@ -37,25 +37,27 @@
 | CLI         | Purpose                                                                                                | Default           |
 | ----------- | ------------------------------------------------------------------------------------------------------ | ----------------- |
 | `--listen`  | Bind address for gRPC API                                                                              | `127.0.0.1:50051` |
-| `--data`    | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)              | _(ephemeral)_       |
+| `--data`    | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)              | _(ephemeral)_     |
 | `--single`  | Development or single-server deployment ([details](docs/operations/deployment.md#single-node-cluster)) |                   |
 | `--join`    | Add this server to an existing cluster ([details](docs/operations/deployment.md#adding-a-node))        |                   |
 | `--cluster` | Start a new N-node cluster ([details](docs/operations/deployment.md#multi-node-cluster-3-nodes))       | `3`               |
-| `--peers`   | How to [find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or file path    | _(disabled)_        |
+| `--peers`   | How to [find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or file path    | _(disabled)_      |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 
 ## Quick Start
 
-- Development or single-server deployment:
-  ```bash
-  inferadb-ledger --data /var/lib/ledger --single
-  ```
+**Development or single-server deployment:**
 
-- Production cluster (run on each of 3 nodes)
-  ```bash
-  inferadb-ledger --data /var/lib/ledger --cluster 3 --peers ledger.example.com
-  ```
+```bash
+inferadb-ledger --data /var/lib/ledger --single
+```
+
+**Production cluster (run on each of 3 nodes):**
+
+```bash
+inferadb-ledger --data /var/lib/ledger --cluster 3 --peers ledger.example.com
+```
 
 For clusters, `--peers` tells each node how to find the others. The format is auto-detected:
 

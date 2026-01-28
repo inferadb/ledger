@@ -30,14 +30,14 @@ enum Operation {
 
 All operations are idempotent, resolved by Raft total ordering:
 
-| Operation            | Pre-state  | Post-state | Behavior           |
-| -------------------- | ---------- | ---------- | ------------------ |
-| `CreateRelationship` | not exists | created    | Transaction succeeds |
+| Operation            | Pre-state  | Post-state | Behavior                     |
+| -------------------- | ---------- | ---------- | ---------------------------- |
+| `CreateRelationship` | not exists | created    | Transaction succeeds         |
 | `CreateRelationship` | exists     | no change  | Transaction succeeds (no-op) |
-| `DeleteRelationship` | exists     | deleted    | Transaction succeeds |
+| `DeleteRelationship` | exists     | deleted    | Transaction succeeds         |
 | `DeleteRelationship` | not exists | no change  | Transaction succeeds (no-op) |
-| `SetEntity`          | any        | value set  | Transaction succeeds |
-| `DeleteEntity`       | exists     | deleted    | Transaction succeeds |
+| `SetEntity`          | any        | value set  | Transaction succeeds         |
+| `DeleteEntity`       | exists     | deleted    | Transaction succeeds         |
 | `DeleteEntity`       | not exists | no change  | Transaction succeeds (no-op) |
 
 Note: `WriteResponse` is transaction-level (success or error), not per-operation. All operations in a transaction either succeed together or fail together.
@@ -88,22 +88,35 @@ message SetCondition {
 ```rust
 ledger.batch_write(BatchWriteRequest {
     namespace_id,
-    client_id: "my-client".into(),
+    vault_id: None,  // Entities are namespace-level
+    client_id: ClientId { id: "my-client".into() },
     sequence: 1,
     operations: vec![
-        Operation::SetEntity {
-            key: format!("_idx:user:email:{}", email),
-            value: user_id.as_bytes().to_vec(),
-            condition: Some(SetCondition { not_exists: true, ..Default::default() }),
-            expires_at: None,
-        },
-        Operation::SetEntity {
-            key: format!("user:{}", user_id),
-            value: serialize(&user),
-            condition: None,
-            expires_at: None,
+        // Each BatchWriteOperation groups operations that succeed/fail together
+        BatchWriteOperation {
+            operations: vec![
+                Operation {
+                    op: Some(Op::SetEntity(SetEntity {
+                        key: format!("_idx:user:email:{}", email),
+                        value: user_id.as_bytes().to_vec(),
+                        condition: Some(SetCondition {
+                            condition: Some(Condition::NotExists(true)),
+                        }),
+                        expires_at: None,
+                    })),
+                },
+                Operation {
+                    op: Some(Op::SetEntity(SetEntity {
+                        key: format!("user:{}", user_id),
+                        value: serialize(&user),
+                        condition: None,
+                        expires_at: None,
+                    })),
+                },
+            ],
         },
     ],
+    include_tx_proofs: false,
 }).await?;
 ```
 
@@ -263,8 +276,9 @@ Subscribe to new blocks via gRPC streaming:
 
 ```rust
 // Get current tip, then subscribe from tip+1
-let tip = client.get_tip(GetTipRequest { vault_id }).await?;
+let tip = client.get_tip(GetTipRequest { namespace_id, vault_id }).await?;
 let stream = client.watch_blocks(WatchBlocksRequest {
+    namespace_id,
     vault_id,
     start_height: tip.height + 1,
 }).await?;
@@ -308,10 +322,10 @@ message WriteError {
 }
 ```
 
-| Error Type      | Codes                                                                                                   | Purpose                   |
-| --------------- | ------------------------------------------------------------------------------------------------------- | ------------------------- |
+| Error Type      | Codes                                                                                                    | Purpose                   |
+| --------------- | -------------------------------------------------------------------------------------------------------- | ------------------------- |
 | `WriteError`    | `KEY_EXISTS`, `KEY_NOT_FOUND`, `VERSION_MISMATCH`, `VALUE_MISMATCH`, `ALREADY_COMMITTED`, `SEQUENCE_GAP` | CAS failures, idempotency |
-| `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                                    | Historical read failures  |
+| `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                                     | Historical read failures  |
 
 **Smart retry pattern**:
 

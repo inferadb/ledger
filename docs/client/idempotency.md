@@ -26,20 +26,20 @@ The leader maintains sequence state per client:
 
 ### Validation Rules
 
-| Condition                       | Response                               | Rationale                |
-| ------------------------------- | -------------------------------------- | ------------------------ |
-| `seq <= last_committed_seq`     | Cached response or `ALREADY_COMMITTED` | Duplicate/retry          |
-| `seq == last_committed_seq + 1` | Process transaction                    | Expected next            |
-| `seq > last_committed_seq + 1`  | Reject with `SEQUENCE_GAP`             | Client bug or lost state |
+| Condition                       | Response                            | Rationale                |
+| ------------------------------- | ----------------------------------- | ------------------------ |
+| `seq <= last_committed_seq`     | Cached `WriteSuccess` (if in cache) | Duplicate/retry          |
+| `seq == last_committed_seq + 1` | Process transaction                 | Expected next            |
+| `seq > last_committed_seq + 1`  | Reject with `SEQUENCE_GAP`          | Client bug or lost state |
 
 ### Duplicate Handling
 
 When `seq <= last_committed_seq`:
 
 1. If response is in cache (≤5 min old, ≤10,000 entries) → return cached `WriteSuccess`
-2. If cache is evicted → return `SEQUENCE_GAP` error
+2. If cache is evicted → request proceeds to Raft (state machine handles idempotency)
 
-**Cache limitation**: After cache eviction, the server cannot distinguish "already committed" from "actual gap". Clients should complete retries within the cache window (5 minutes) for best UX.
+**Cache limitation**: After cache eviction, the server relies on the Raft state machine to handle duplicate operations idempotently. Clients should complete retries within the cache window (5 minutes) for best UX and guaranteed cached response.
 
 The server durably stores only the sequence number, not transaction metadata.
 
@@ -62,7 +62,7 @@ Client should call `GetClientState` to recover, then resume from `last_committed
 | `SEQUENCE_GAP` error | Call `GetClientState`, resume sequence  | Reject until correct sequence    |
 | Success              | Increment sequence for next write       | N/A                              |
 
-**Exactly-once semantics**: Retrying within the cache window (5 minutes) returns the cached result. After cache eviction, retries return `SEQUENCE_GAP`—use `GetClientState` to recover.
+**Exactly-once semantics**: Retrying within the cache window (5 minutes) returns the cached result. After cache eviction, the state machine ensures idempotent operation handling.
 
 ## Client Requirements
 

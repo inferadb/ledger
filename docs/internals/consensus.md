@@ -157,10 +157,17 @@ Multiple vaults share a Raft group (shard). A `state_root` divergence in one vau
 ### Vault Health States
 
 ```rust
+// crates/types/src/types.rs - public API type
 enum VaultHealth {
     Healthy,
     Diverged { expected: Hash, computed: Hash, at_height: u64 },
-    Recovering { started_at: DateTime<Utc>, attempt: u8 },
+}
+
+// crates/raft/src/log_storage.rs - internal runtime type
+enum VaultHealthStatus {
+    Healthy,
+    Diverged { expected: Hash, computed: Hash, at_height: u64 },
+    Recovering { started_at: i64, attempt: u8 },  // Unix timestamp
 }
 ```
 
@@ -177,15 +184,17 @@ When a follower computes a different `state_root` than the block header:
 
 ### Automatic Recovery
 
-Diverged vaults recover automatically with bounded retries:
+Diverged vaults recover automatically with exponential backoff:
 
 | Attempt | Backoff    | Action on Failure           |
 | ------- | ---------- | --------------------------- |
-| 1       | Immediate  | Retry                       |
-| 2       | 30 seconds | Retry                       |
-| 3       | 5 minutes  | Require manual intervention |
+| 1       | 5 seconds  | Retry                       |
+| 2       | 10 seconds | Retry                       |
+| 3       | 20 seconds | Require manual intervention |
 
-After 3 failed attempts, the vault emits `vault_recovery_exhausted{vault_id}` and requires operator intervention.
+Backoff formula: `base_delay × 2^(attempt-1)` with base=5s, max=300s.
+
+After 3 failed attempts, the vault emits `ledger_determinism_bug_total` metric and requires operator intervention.
 
 **Recovery process**:
 
