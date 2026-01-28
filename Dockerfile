@@ -75,9 +75,9 @@ EXPOSE 50051
 EXPOSE 9090
 
 # Environment defaults optimized for Kubernetes
-ENV INFERADB__LEDGER__LISTEN_ADDR=0.0.0.0:50051
-ENV INFERADB__LEDGER__DATA_DIR=/var/lib/ledger
-ENV INFERADB__LEDGER__METRICS_ADDR=0.0.0.0:9090
+ENV INFERADB__LEDGER__LISTEN=0.0.0.0:50051
+ENV INFERADB__LEDGER__DATA=/var/lib/ledger
+ENV INFERADB__LEDGER__METRICS=0.0.0.0:9090
 
 # Run as non-root user (distroless nonroot UID=65532)
 USER nonroot:nonroot

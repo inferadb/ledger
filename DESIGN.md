@@ -2192,7 +2192,7 @@ struct SystemConfig {
     learner_cache_ttl: Duration,  // Default: 5s
 
     /// Interval for learner to poll voter for freshness check
-    learner_refresh_interval: Duration,  // Default: 1s
+    learner_refresh_interval: Duration,  // Default: 5s
 }
 
 impl Node {
@@ -2297,38 +2297,26 @@ impl Client {
 
 ### Block Announcements
 
-Raft replication propagates blocks to followers. Clients subscribe via gRPC streaming:
+Clients subscribe to block updates via `WatchBlocks` gRPC streaming:
 
 ```rust
 // WatchBlocks is part of ReadService (see ledger.proto)
 // Returns lightweight announcements; clients fetch full blocks via GetBlock if needed
-
-impl VaultReplica {
-    async fn on_block_committed(&self, block: &Block) {
-        // Raft followers already have the block via AppendEntries
-        // Notify local gRPC subscribers
-        self.block_subscribers.broadcast(BlockAnnouncement {
-            vault_id: block.vault_id.clone(),
-            height: block.height,
-            hash: block.hash(),
-            state_root: block.state_root,
-        }).await;
-    }
-}
 ```
+
+**Current implementation**: `WatchBlocks` supports historical block replay only. When a client subscribes with `start_height`, all committed blocks from that height forward are streamed until the current tip. Real-time push notifications for newly committed blocks are not yet implemented.
 
 **Subscription pattern:**
 
 ```rust
-// Get current tip, then subscribe from tip+1
-let tip = client.get_tip(GetTipRequest { vault_id }).await?;
+// Replay all blocks from height 1 to current tip
 let stream = client.watch_blocks(WatchBlocksRequest {
     vault_id,
-    start_height: tip.height + 1,
+    start_height: 1,
 }).await?;
 
-// Server replays any blocks committed between GetTip and WatchBlocks,
-// then streams new blocks as they commit. No blocks are missed.
+// For incremental sync: track last processed height, replay from there
+// Note: Stream ends at current tip; re-subscribe to catch new blocks
 ```
 
 `start_height` must be >= 1 (no magic values). For full replay from genesis, use `start_height = 1`.
@@ -2339,7 +2327,7 @@ Fully decentralized:
 
 - **No privileged nodes**: Any node can serve discovery queries, bootstrap new nodes, or become `_system` leader
 - **Bootstrap nodes are entry points, not authorities**: After joining, nodes discover all peers
-- **Dynamic peer list**: Nodes cache peers from `_system` state, surviving bootstrap node failures
+- **Dynamic peer list**: Nodes cache peers from `_system` state in memory (disk persistence not yet implemented)
 - **Symmetric roles**: All nodes participate equally in `_system` consensus
 
 ### Bootstrap Discovery
@@ -2349,20 +2337,19 @@ Nodes discover initial peers through multiple mechanisms:
 ```mermaid
 flowchart TD
     start["Node starting up"]
-    cached{"1. Cached peers?"}
-    config{"2. Config bootstrap list?"}
-    dns{"3. DNS A lookup?"}
+    config{"1. Config bootstrap list?"}
+    dns{"2. DNS A lookup?"}
     connected["Connected to cluster"]
     failed["Bootstrap failed"]
 
-    start --> cached
-    cached -->|Found| connected
-    cached -->|Empty| config
+    start --> config
     config -->|Found| connected
     config -->|Empty/Failed| dns
     dns -->|Found| connected
     dns -->|Failed| failed
 ```
+
+> **Note**: Peer cache persistence is planned but not yet implemented. Currently, nodes must use config bootstrap addresses or DNS discovery on every startup.
 
 #### DNS A Records
 
@@ -3377,6 +3364,8 @@ Control data uses convention-based key prefixes within each namespace:
 | User grant     | `vault:{vault_id}:grant:user:{id}` | `vault:1:grant:user:500`              |
 | Team grant     | `vault:{vault_id}:grant:team:{id}` | `vault:1:grant:team:501`              |
 | Relationship   | `vault:{vault_id}:rel:{tuple}`     | `vault:1:rel:doc:1#viewer@user:alice` |
+
+> **Implementation status**: Organization namespace control entities (member, team, client, session, vault grants) are designed but not yet implemented. Currently, only the core entity/relationship storage and `_system` namespace patterns are operational. Vault metadata (`vault:{id}:_meta`) and relationships (`vault:{id}:rel:...`) work, but access control enforcement via grants requires additional implementation.
 
 **Index maintenance**: Entities and their indexes must be created/deleted atomically in the same transaction. This prevents orphaned indexes (index pointing to non-existent entity) and orphaned entities (entity without required indexes).
 
