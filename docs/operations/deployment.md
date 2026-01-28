@@ -127,7 +127,8 @@ The node will:
 Start the node with the same `data_dir`. The persisted `node_id` file ensures it rejoins with its original identity:
 
 ```bash
-./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
+INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
+./target/release/inferadb-ledger
 ```
 
 On restart:
@@ -202,7 +203,8 @@ The `data_dir` contains all persistent state:
 ```bash
 kill $(cat /var/lib/ledger/ledger.pid)
 cp -r /var/lib/ledger /backup/ledger-$(date +%Y%m%d-%H%M%S)
-./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
+INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
+./target/release/inferadb-ledger
 ```
 
 **Snapshot-based backup** (node running):
@@ -237,7 +239,8 @@ Snapshots include:
 kill $(cat /var/lib/ledger/ledger.pid) 2>/dev/null || true
 rm -rf /var/lib/ledger
 cp -r /backup/ledger-20240115-030000 /var/lib/ledger
-./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
+INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
+./target/release/inferadb-ledger
 ```
 
 The node will:
@@ -254,8 +257,9 @@ If you only have a snapshot (not the full `data_dir`):
 mkdir -p /var/lib/ledger/snapshots
 cp /backup/000010000.snap /var/lib/ledger/snapshots/
 
+INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
 INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
-./target/release/inferadb-ledger --config /etc/ledger/inferadb-ledger.toml
+./target/release/inferadb-ledger
 ```
 
 The node will:
@@ -282,15 +286,49 @@ INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
 ./target/release/inferadb-ledger
 ```
 
-## Configuration
+## Configuration Reference
 
-See [`inferadb-ledger.example.toml`](../../inferadb-ledger.example.toml) for all options. Key settings:
+Configuration can be set via CLI arguments or environment variables. CLI arguments take precedence.
 
-```toml
-listen_addr = "0.0.0.0:50051"         # gRPC listen address
-data_dir = "/var/lib/ledger"          # Raft logs and state
-bootstrap_expect = 3                  # 0=join, 1=single-node, 2+=coordinated
-```
+### Core Options
+
+| CLI           | Environment Variable              | Default           | Description                               |
+| ------------- | --------------------------------- | ----------------- | ----------------------------------------- |
+| `--listen`    | `INFERADB__LEDGER__LISTEN_ADDR`   | `127.0.0.1:50051` | Host and port to accept connections       |
+| `--data`      | `INFERADB__LEDGER__DATA_DIR`      | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
+| `--bootstrap` | `INFERADB__LEDGER__BOOTSTRAP_EXPECT` | `3`            | Cluster size (1=solo, 2+=cluster, 0=join) |
+| `--metrics`   | `INFERADB__LEDGER__METRICS_ADDR`  | (disabled)        | Expose Prometheus metrics at this address |
+
+### Discovery Options
+
+How nodes find each other. See [discovery internals](../internals/discovery.md) for details.
+
+| CLI          | Environment Variable                         | Default     | Description                           |
+| ------------ | -------------------------------------------- | ----------- | ------------------------------------- |
+| `--discovery`| `INFERADB__LEDGER__DISCOVERY_DOMAIN`         | (disabled)  | Find nodes via DNS (for Kubernetes)   |
+| `--join`     | `INFERADB__LEDGER__DISCOVERY_CACHE_PATH`     | (disabled)  | File listing nodes to connect to      |
+| `--join-ttl` | `INFERADB__LEDGER__DISCOVERY_CACHE_TTL_SECS` | `3600`      | How long cached node list stays valid |
+
+### Tuning Options
+
+These defaults work well for most deployments. See [consensus internals](../internals/consensus.md) for batching details.
+
+| CLI                  | Environment Variable                        | Default | Description                             |
+| -------------------- | ------------------------------------------- | ------- | --------------------------------------- |
+| `--bootstrap-timeout`| `INFERADB__LEDGER__BOOTSTRAP_TIMEOUT_SECS`  | `60`    | How long to wait for other nodes (secs) |
+| `--poll`             | `INFERADB__LEDGER__BOOTSTRAP_POLL_SECS`     | `2`     | How often to check for other nodes      |
+| `--batch-size`       | `INFERADB__LEDGER__BATCH_MAX_SIZE`          | `100`   | Writes to group before committing       |
+| `--batch-delay`      | `INFERADB__LEDGER__BATCH_MAX_DELAY_MS`      | `10`    | Max wait before committing a batch (ms) |
+| `--concurrent`       | `INFERADB__LEDGER__REQUESTS_MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
+| `--timeout`          | `INFERADB__LEDGER__REQUESTS_TIMEOUT_SECS`   | `30`    | Max time for a request to complete      |
+
+### Notes
+
+**Ephemeral Mode**: When `--data` is not specified, the server runs in ephemeral mode using a temporary directory. All data is lost on shutdown. Useful for development and testing.
+
+**Security**: The default listen address is `127.0.0.1` (localhost only). Set `--listen 0.0.0.0:50051` or a specific IP to accept remote connections.
+
+Run `inferadb-ledger --help` for usage information.
 
 **Coordinated Bootstrap**: Nodes automatically generate Snowflake IDs (persisted to `{data_dir}/node_id`) and coordinate cluster formation:
 
@@ -300,8 +338,6 @@ bootstrap_expect = 3                  # 0=join, 1=single-node, 2+=coordinated
 4. Other nodes wait to be added as Raft voters
 
 This prevents split-brain scenarios where multiple nodes independently bootstrap separate clusters.
-
-Environment variables override config file values using the `INFERADB__LEDGER__` prefix (e.g., `INFERADB__LEDGER__BOOTSTRAP_EXPECT=3`).
 
 ## Kubernetes Deployment
 

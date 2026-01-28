@@ -22,30 +22,37 @@
 - **Multi-Tenancy** — Namespace isolation, multiple vaults per namespace, shard groups for scaling
 - **Storage** — Embedded ACID database, hybrid K/V + merkle architecture, tiered snapshots
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      gRPC API (HTTP/2)                      │
-├─────────────────────────────────────────────────────────────┤
-│                     Raft Consensus Layer                    │
-│         (Leader election, log replication, quorum)          │
-├─────────────────────────────────────────────────────────────┤
-│  Namespace: org_acme          │  Namespace: org_startup     │
-│  ├─ Vault: prod [chain]       │  ├─ Vault: main [chain]     │
-│  └─ Vault: staging [chain]    │  └─ ...                     │
-├─────────────────────────────────────────────────────────────┤
-│                State Layer (inferadb-ledger-store)          │
-│    Relationships │ Entities │ Indexes │ State Roots         │
-└─────────────────────────────────────────────────────────────┘
-```
-
 ## Quick Start
+
+### Installation
+
+### Configuration
+
+| CLI           | ENV                                  | Purpose                                                             | Default           |
+| ------------- | ------------------------------------ | ------------------------------------------------------------------- | ----------------- |
+| `--listen`    | `INFERADB__LEDGER__LISTEN_ADDR`      | Host and port to accept connections                                 | `127.0.0.1:50051` |
+| `--data`      | `INFERADB__LEDGER__DATA_DIR`         | Where to store data ([layout](docs/internals/storage.md#directory-layout)) | (ephemeral) |
+| `--bootstrap` | `INFERADB__LEDGER__BOOTSTRAP_EXPECT` | Cluster size ([modes](docs/operations/deployment.md#cluster-setup)) | `3`               |
+| `--discovery` | `INFERADB__LEDGER__DISCOVERY_DOMAIN` | Find nodes via [DNS](docs/operations/deployment.md#dns-based-discovery-production--kubernetes) | (disabled) |
+| `--join`      | `INFERADB__LEDGER__DISCOVERY_CACHE_PATH` | [Peer file](docs/operations/deployment.md#multi-node-cluster-3-nodes) listing nodes to connect to | (disabled) |
+
+See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for all options including metrics, batching, and tuning.
+
+### Run a Single Node
+
+```bash
+cargo run --release -p inferadb-ledger-server -- \
+  --listen 127.0.0.1:50051 --data /tmp/ledger --bootstrap 1
+```
+
+For multi-node clusters, backup/restore, environment variables, and Kubernetes deployment, see [docs/operations/](docs/operations/).
+
+## Development
 
 ### Prerequisites
 
-- [mise](https://mise.jdx.dev/) for development tools (Rust, protoc, buf)
-- [just](https://github.com/casey/just) command runner
+- [mise](https://mise.jdx.dev/) for tooling
+- [just](https://github.com/casey/just) for commands
 
 ### Build and Test
 
@@ -65,20 +72,6 @@ just test
 # See all commands
 just
 ```
-
-### Run a Single Node
-
-```bash
-cp inferadb-ledger.example.toml inferadb-ledger.toml
-
-INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
-INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
-
-cargo run --release -p inferadb-ledger-server
-```
-
-For multi-node clusters, backup/restore, and Kubernetes deployment, see [docs/operations/](docs/operations/).
 
 ## Design
 
