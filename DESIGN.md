@@ -394,6 +394,25 @@ Default batch configuration:
 
 Divergence indicates a bug or corruption, not consensus failure. The committing quorum is authoritative.
 
+### Degraded Operation Modes
+
+When failures occur, Ledger degrades gracefully rather than failing completely:
+
+| Failure Scenario              | Write Availability | Read Availability | Recovery Action                     |
+| ----------------------------- | ------------------ | ----------------- | ----------------------------------- |
+| Single node down (3-node)     | ✓ Available        | ✓ Available       | Automatic failover                  |
+| Minority nodes down           | ✓ Available        | ✓ Available       | Reduced redundancy, monitor closely |
+| Majority nodes down           | ✗ Unavailable      | ✓ Stale reads     | Manual intervention required        |
+| Leader network isolated       | ✓ After election   | ✓ Available       | New leader elected (~10s)           |
+| State root divergence (vault) | ✗ Vault halted     | ✓ Available       | Rebuild vault from snapshot         |
+| Disk full                     | ✗ Unavailable      | ✓ Available       | Expand storage, compact logs        |
+
+**Partial availability**: When writes are unavailable, Ledger continues serving eventually consistent reads from any healthy replica. Applications can implement read-only degraded modes.
+
+**Vault-level isolation**: A diverged vault does not affect other vaults in the same namespace. Only the affected vault halts writes pending recovery.
+
+**Automatic recovery scope**: Ledger automatically recovers from transient failures (network blips, brief partitions). Persistent failures (disk corruption, state divergence) require operator intervention to prevent data loss.
+
 ---
 
 ## Scaling Architecture: Shard Groups
@@ -654,9 +673,7 @@ This section consolidates all design trade-offs for decision archaeology.
 | State verification  | O(log n) proof   | Replay from snapshot |
 | Query latency       | O(log n)         | O(1)                 |
 
-**Trade-off accepted**: We sacrifice instant per-key proofs for 10x lower write amplification and O(1) query latency. Verification via replay is acceptable for audit scenarios (not real-time).
-
-**When to reconsider**: If instant per-key proofs become a hard requirement.
+We sacrifice instant per-key proofs for 10x lower write amplification and O(1) query latency. Verification via replay is acceptable for audit scenarios (not real-time).
 
 ### gRPC/HTTP/2 vs. Custom Protocol
 
@@ -668,9 +685,7 @@ This section consolidates all design trade-offs for decision archaeology.
 | Operational complexity | Low (standard load balancers)     | High (custom tooling)       |
 | Per-request overhead   | ~0.5ms                            | ~0.1-0.2ms                  |
 
-**Trade-off accepted**: ~0.3ms overhead per request is negligible compared to consensus latency (~2-5ms). Development velocity wins.
-
-**When to reconsider**: If throughput exceeds 100K ops/sec per shard or serialization exceeds 5% of request latency.
+~0.3ms overhead per request is negligible compared to consensus latency (~2-5ms). Development velocity wins.
 
 ### Raft vs. Byzantine Consensus
 
@@ -683,9 +698,7 @@ This section consolidates all design trade-offs for decision archaeology.
 | Fault model | Crash faults only  | Malicious nodes      |
 | Complexity  | Moderate           | High                 |
 
-**Trade-off accepted**: We assume trusted operators. Byzantine tolerance would 3x latency for a threat model that doesn't apply.
-
-**When to reconsider**: Multi-party deployments where no single operator is trusted.
+We assume trusted operators. Byzantine tolerance would 3x latency for a threat model that doesn't apply.
 
 ### Per-Vault Chains vs. Single Chain
 
@@ -702,7 +715,7 @@ This section consolidates all design trade-offs for decision archaeology.
 - No cross-vault transactions
 - More complex routing
 
-**Trade-off accepted**: Isolation is more important than cross-vault atomicity for authorization workloads.
+Isolation is more important than cross-vault atomicity for authorization workloads.
 
 ### Bucket-Based State Roots vs. Traditional Merkle Trees
 
@@ -714,15 +727,64 @@ This section consolidates all design trade-offs for decision archaeology.
 | Proof size   | O(log n)           | O(256) = O(1) fixed       |
 | Range proofs | Efficient          | Not supported             |
 
-**Trade-off accepted**: O(k) updates independent of database size. Larger proof size acceptable for audit scenarios.
-
-**When to reconsider**: If range proofs become necessary.
+O(k) updates independent of database size. Larger proof size acceptable for audit scenarios.
 
 ### Single Leader vs. Multi-Leader
 
 **Decision**: Single Raft leader per shard handles all writes.
 
-**Trade-off accepted**: Single leader is a bottleneck but simplifies consistency. Horizontal scaling via sharding.
+Single leader is a bottleneck but simplifies consistency. Horizontal scaling via sharding.
+
+### SHA-256 vs. Alternative Hash Functions
+
+**Decision**: SHA-256 for all cryptographic commitments (state roots, block hashes, merkle proofs).
+
+| Factor               | SHA-256                | BLAKE3      | SHA-3     |
+| -------------------- | ---------------------- | ----------- | --------- |
+| Performance          | ~500 MB/s              | ~6 GB/s     | ~300 MB/s |
+| Hardware accel       | Widespread (SHA-NI)    | Limited     | Growing   |
+| Standardization      | FIPS 180-4, ubiquitous | Not FIPS    | FIPS 202  |
+| Tooling/verification | Excellent              | Growing     | Good      |
+| Audit familiarity    | Universal              | Less common | Growing   |
+
+SHA-256's universal recognition and hardware acceleration trump BLAKE3's raw speed. For authorization audits, auditors must be able to verify hashes with standard tools—SHA-256 is understood everywhere. Cryptographic operations are not the bottleneck (<5% of request latency).
+
+### seahash vs. Alternative Non-Cryptographic Hashes
+
+**Decision**: seahash for bucket assignment and internal indexing (non-security-critical paths).
+
+| Factor        | seahash  | xxhash         | FNV-1a         | SipHash           |
+| ------------- | -------- | -------------- | -------------- | ----------------- |
+| Speed         | ~15 GB/s | ~30 GB/s       | ~5 GB/s        | ~2 GB/s           |
+| Pure Rust     | Yes      | Requires C FFI | Yes            | Yes (std default) |
+| Distribution  | Good     | Excellent      | Poor for short | Good              |
+| DoS resistant | No       | No             | No             | Yes               |
+
+seahash provides excellent speed in pure Rust without FFI complexity. For bucket assignment from already-authenticated data, DoS resistance is unnecessary—we're hashing internal keys, not untrusted input.
+
+---
+
+## Threat Model
+
+### Trusted Operator Assumption
+
+Ledger assumes a **trusted operator model**: the organization running the cluster controls all nodes and does not act maliciously. This is distinct from permissionless blockchains where nodes may be adversarial.
+
+**What Ledger protects against**:
+
+- **Crash failures**: Nodes may crash, lose power, or experience hardware failures. Raft tolerates (n-1)/2 simultaneous failures.
+- **Network partitions**: Nodes may become temporarily unreachable. Raft maintains safety (no conflicting commits) and makes progress when majority is reachable.
+- **Disk corruption**: State root verification detects corruption. Recovery via snapshot + log replay.
+- **Accidental misconfiguration**: Sequence numbers and idempotency prevent duplicate operations.
+- **Post-hoc tampering**: Cryptographic chain linking makes undetected modification computationally infeasible.
+
+**What Ledger does NOT protect against**:
+
+- **Malicious operator**: A compromised operator with access to majority of nodes can forge state. Raft is not Byzantine fault tolerant.
+- **Compromised leader**: A Byzantine leader can propose invalid blocks. Followers verify state roots but cannot prevent a malicious majority from accepting invalid state.
+- **Side-channel attacks**: Memory inspection, timing attacks on cryptographic operations are out of scope.
+
+**Mitigation for untrusted environments**: Organizations requiring Byzantine fault tolerance should evaluate Tendermint-based systems or PBFT variants, accepting 3x latency overhead.
 
 ---
 
@@ -763,11 +825,9 @@ This section consolidates all design trade-offs for decision archaeology.
 
 ### Future Considerations
 
-1. **Hardware acceleration**: Can cryptographic operations benefit from GPU/FPGA offload?
+1. **Zero-knowledge proofs**: Could ZK-SNARKs enable private verification without revealing data?
 
-2. **Zero-knowledge proofs**: Could ZK-SNARKs enable private verification without revealing data?
-
-3. **Tiered storage**: Hot data in memory, warm on SSD, cold in object storage?
+2. **Tiered storage**: Hot data in memory, warm on SSD, cold in object storage?
 
 ---
 
