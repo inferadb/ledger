@@ -122,11 +122,14 @@ INFERADB__LEDGER__PEERS=./peers.json
 JSON format:
 
 ```json
-[
-  { "addr": "10.0.0.1:50051" },
-  { "addr": "10.0.0.2:50051" },
-  { "addr": "10.0.0.3:50051" }
-]
+{
+  "cached_at": 0,
+  "peers": [
+    { "addr": "10.0.0.1:50051" },
+    { "addr": "10.0.0.2:50051" },
+    { "addr": "10.0.0.3:50051" }
+  ]
+}
 ```
 
 Detection: Values containing `/` or `\` or ending with `.json` are treated as file paths.

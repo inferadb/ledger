@@ -55,11 +55,15 @@ systemctl stop ledger
 
 2. **Force new cluster from surviving node**:
 
+> **⚠️ WARNING: Split-Brain Risk**
+>
+> Using `--single` creates a NEW cluster from this node's data, abandoning the old cluster identity. If other nodes from the old cluster come back online, you will have TWO separate clusters with potentially diverged data.
+>
+> **Only use `--single` when you are CERTAIN the old cluster is permanently destroyed** or all other nodes' data will be wiped before rejoining.
+
 ```bash
 # Start single node as new cluster
-INFERADB__LEDGER__DATA=/data \
-INFERADB__LEDGER__SINGLE=true \
-inferadb-ledger
+inferadb-ledger --single --data /data
 ```
 
 3. **Verify data**:
@@ -106,10 +110,12 @@ tar -xzf $RESTORE_DIR/snapshot.tar.gz -C $RESTORE_DIR
 
 2. **Start first node with restored data**:
 
+> **⚠️ WARNING: New Cluster Identity**
+>
+> Using `--single` creates a NEW cluster. This is appropriate here because you're restoring from backup after total loss. Do NOT use this if any nodes from the original cluster might still have data.
+
 ```bash
-INFERADB__LEDGER__DATA=$RESTORE_DIR \
-INFERADB__LEDGER__SINGLE=true \
-inferadb-ledger
+inferadb-ledger --single --data $RESTORE_DIR
 ```
 
 3. **Verify restored state**:

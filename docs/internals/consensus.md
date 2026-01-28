@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Internals > Consensus
+
 # Consensus
 
 This document covers Raft integration, write/read paths, batching, and state determinism.

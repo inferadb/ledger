@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Internals > Discovery
+
 # Discovery & Coordination
 
 This document covers the `_system` namespace, bootstrap discovery, node lifecycle, and namespace routing.

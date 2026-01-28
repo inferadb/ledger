@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Client API
+
 # Client API
 
 This document covers read and write operations, error handling, and pagination.
@@ -24,6 +26,7 @@ enum Operation {
     // Entity operations
     SetEntity { key: String, value: Bytes, expires_at: Option<u64>, condition: Option<SetCondition> },
     DeleteEntity { key: String },
+    ExpireEntity { key: String, expired_at: u64 },  // GC-initiated removal (distinct from user delete)
 }
 ```
 
@@ -159,6 +162,53 @@ let verified = client.verified_read(VerifiedReadRequest {
     include_chain_proof: false,
 }).await?;
 ```
+
+### Batch Read
+
+Read multiple keys in a single RPC call for higher throughput:
+
+```rust
+let results = client.batch_read(BatchReadRequest {
+    namespace_id,
+    vault_id: Some(vault_id),
+    keys: vec!["user:1".into(), "user:2".into(), "user:3".into()],
+    consistency: ReadConsistency::Eventual,
+}).await?;
+
+for result in results.results {
+    if result.found {
+        println!("{}: {:?}", result.key, result.value);
+    } else {
+        println!("{}: not found", result.key);
+    }
+}
+```
+
+**Request:**
+
+| Field          | Type            | Description                     |
+| -------------- | --------------- | ------------------------------- |
+| `namespace_id` | NamespaceId     | Target namespace                |
+| `vault_id`     | VaultId         | (Optional) Target vault         |
+| `keys`         | string[]        | Keys to read (max 1000)         |
+| `consistency`  | ReadConsistency | Consistency level for all reads |
+
+**Response:**
+
+| Field          | Type              | Description                   |
+| -------------- | ----------------- | ----------------------------- |
+| `results`      | BatchReadResult[] | Result for each requested key |
+| `block_height` | uint64            | Block height at time of read  |
+
+**BatchReadResult fields:**
+
+| Field   | Type   | Description                |
+| ------- | ------ | -------------------------- |
+| `key`   | string | Requested key              |
+| `value` | bytes  | Value (empty if not found) |
+| `found` | bool   | Whether key exists         |
+
+Results are returned in the same order as requested keys.
 
 ### Historical Reads
 

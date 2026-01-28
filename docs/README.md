@@ -21,13 +21,16 @@ Blockchain database for cryptographically verifiable authorization.
 ### Deployment
 
 - [Deployment Guide](operations/deployment.md) - Production deployment patterns
+- [Production Tutorial](operations/production-deployment-tutorial.md) - Step-by-step Kubernetes deployment
 - [Configuration](operations/configuration.md) - Environment variables reference
 - [Security](operations/security.md) - Trust model and network security
 - [Multi-Region](operations/multi-region.md) - Geographic distribution
+- [Shard Management](operations/shard-management.md) - Namespace-to-shard routing
 
 ### Monitoring
 
 - [Metrics Reference](operations/metrics-reference.md) - All Prometheus metrics
+- [Alerting Guide](operations/alerting.md) - Prometheus alerting rules
 - [Capacity Planning](operations/capacity-planning.md) - Sizing and scaling
 
 ### Runbooks
@@ -37,9 +40,21 @@ Blockchain database for cryptographically verifiable authorization.
 - [Disaster Recovery](operations/runbooks/disaster-recovery.md) - Recovery procedures
 - [Troubleshooting](troubleshooting.md) - Common issues and solutions
 
+## Internals
+
+Implementation details for contributors and advanced operators.
+
+- [Consensus](internals/consensus.md) - Raft integration, write/read paths, batching
+- [Raft Protocol](internals/raft-protocol.md) - Node-to-node gRPC protocol
+- [Storage](internals/storage.md) - Directory layout, database schemas, snapshots
+- [Discovery](internals/discovery.md) - Peer discovery implementation
+
 ## Development
 
+- [Architecture](development/architecture.md) - Crate structure and code organization
 - [Testing Guide](development/testing.md) - Test categories and commands
+- [Debugging Guide](development/debugging.md) - Logging, profiling, common issues
+- [Release Process](development/release.md) - Versioning and publishing
 - [Contributing](CONTRIBUTING.md) - Development workflow
 
 ## Quick Reference

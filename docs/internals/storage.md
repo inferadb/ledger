@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Internals > Storage
+
 # Storage
 
 This document covers directory layout, database schemas, snapshots, and crash recovery.

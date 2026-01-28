@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Client API > Errors
+
 # Error Reference
 
 gRPC error codes and Ledger-specific error conditions.

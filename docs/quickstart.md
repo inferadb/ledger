@@ -6,6 +6,19 @@ Get Ledger running in under 5 minutes.
 
 - Rust 1.92+ (for building from source)
 - OR Docker (for containerized deployment)
+- grpcurl (for testing the API)
+
+**Installing grpcurl:**
+
+```bash
+# macOS
+brew install grpcurl
+
+# Linux (via Go)
+go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+
+# Or download from https://github.com/fullstorydev/grpcurl/releases
+```
 
 ## Option 1: Docker (Fastest)
 

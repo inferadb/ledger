@@ -1,59 +1,84 @@
 # Operations Guide
 
-This directory contains operational documentation for running InferaDB Ledger in production.
+Operational documentation for running InferaDB Ledger in production.
 
-## Contents
+## Getting Started
 
-| Document                           | Description                                    |
-| ---------------------------------- | ---------------------------------------------- |
-| [deployment.md](deployment.md)     | Cluster setup, scaling, backup, and Kubernetes |
-| [vault-repair.md](vault-repair.md) | Diagnosing and repairing diverged vaults       |
+| Document                                                            | Description                             |
+| ------------------------------------------------------------------- | --------------------------------------- |
+| [Production Deployment Tutorial](production-deployment-tutorial.md) | Step-by-step Kubernetes deployment      |
+| [Deployment Guide](deployment.md)                                   | Cluster setup, bootstrap modes, backup  |
+| [Configuration](configuration.md)                                   | Environment variables and CLI reference |
+
+## Day-to-Day Operations
+
+| Document                                  | Description                        |
+| ----------------------------------------- | ---------------------------------- |
+| [Alerting](alerting.md)                   | Prometheus alerting rules and SLOs |
+| [Metrics Reference](metrics-reference.md) | All Prometheus metrics             |
+| [Troubleshooting](troubleshooting.md)     | Common issues and solutions        |
+| [Capacity Planning](capacity-planning.md) | Sizing and scaling guidelines      |
+
+## Architecture & Security
+
+| Document                                | Description                              |
+| --------------------------------------- | ---------------------------------------- |
+| [Security](security.md)                 | Trust model, network security, hardening |
+| [Multi-Region](multi-region.md)         | Geographic distribution patterns         |
+| [Shard Management](shard-management.md) | Namespace-to-shard routing               |
+
+## Maintenance & Recovery
+
+| Document                        | Description                              |
+| ------------------------------- | ---------------------------------------- |
+| [Vault Repair](vault-repair.md) | Diagnosing and repairing diverged vaults |
+| [Runbooks](runbooks/)           | Operational procedures                   |
+
+### Runbooks
+
+| Runbook                                                | Description              |
+| ------------------------------------------------------ | ------------------------ |
+| [Rolling Upgrade](runbooks/rolling-upgrade.md)         | Zero-downtime upgrades   |
+| [Backup Verification](runbooks/backup-verification.md) | Testing backup integrity |
+| [Disaster Recovery](runbooks/disaster-recovery.md)     | Recovery procedures      |
 
 ## Quick Reference
 
 ### Health Checks
 
-Use the gRPC `HealthService` to check node status:
-
 ```bash
-# Check node health via custom HealthService
+# Node health
 grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check
 
-# Check vault-specific health
-grpcurl -plaintext -d '{"namespace_id": {"id": 1}, "vault_id": {"id": 123}}' \
+# Vault-specific health
+grpcurl -plaintext \
+  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.HealthService/Check
 ```
-
-Note: The standard `grpc-health-probe` tool is not compatible with InferaDB's custom health service.
 
 ### Key Metrics
 
 | Metric                                   | Normal     | Warning     | Critical    |
 | ---------------------------------------- | ---------- | ----------- | ----------- |
 | `inferadb_ledger_raft_proposals_pending` | < 10       | > 50        | > 100       |
-| `ledger_grpc_request_latency_seconds`    | p99 < 50ms | p99 > 100ms | p99 > 500ms |
-| `ledger_recovery_failure_total`          | 0          | > 0         | increasing  |
+| `ledger_write_latency_seconds`           | p99 < 50ms | p99 > 100ms | p99 > 500ms |
+| `ledger_determinism_bug_total`           | 0          | -           | > 0         |
+
+### Common Commands
+
+```bash
+# Cluster info
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetClusterInfo
+
+# List namespaces
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListNamespaces
+
+# Metrics
+curl localhost:9090/metrics
+```
 
 ## Related Documentation
 
-### Technical Reference
-
-- [Overview](../overview.md) - Architecture, data model, terminology
-- [Client API](../client/api.md) - Read/write operations, errors, pagination
-- [Idempotency](../client/idempotency.md) - Sequence tracking, retry semantics
-
-### Internals
-
-- [Consensus](../internals/consensus.md) - Raft integration, write/read paths, batching
-- [Storage](../internals/storage.md) - Directory layout, snapshots, crash recovery
-- [Discovery](../internals/discovery.md) - Bootstrap, node lifecycle, `_system` namespace
-
-### Specifications
-
-- [Cryptographic Specs](../specs/crypto.md) - Hash algorithms, proof formats
-- [System Invariants](../specs/invariants.md) - Formal guarantees
-
-### Source
-
-- [DESIGN.md](../../DESIGN.md) - Complete system design specification
-- [proto/README.md](../../proto/README.md) - Protobuf API documentation
+- [Client API](../client/api.md) - Read/write operations
+- [Admin API](../client/admin.md) - Cluster management
+- [DESIGN.md](../../DESIGN.md) - System design specification

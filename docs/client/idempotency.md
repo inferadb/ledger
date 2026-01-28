@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Client API > Idempotency
+
 # Idempotency & Retry Semantics
 
 This document covers transaction identification, sequence tracking, and retry behavior.

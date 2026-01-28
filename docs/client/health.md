@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Client API > HealthService
+
 # HealthService API
 
 Liveness and readiness checks for Ledger nodes.
@@ -12,49 +14,57 @@ service HealthService {
 
 ## Check
 
-Returns the health status of the node and optionally specific vaults.
+Returns the health status of the node, or a specific vault if specified.
 
 ```bash
-# Basic health check
+# Basic node health check
 grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check
 
 # Check specific vault health
 grpcurl -plaintext \
-  -d '{"vault_checks": [{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}]}' \
+  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.HealthService/Check
 ```
 
 **Request:**
 
-| Field          | Type         | Description                         |
-| -------------- | ------------ | ----------------------------------- |
-| `vault_checks` | VaultCheck[] | (Optional) Specific vaults to check |
+| Field          | Type        | Description                          |
+| -------------- | ----------- | ------------------------------------ |
+| `namespace_id` | NamespaceId | (Optional) Namespace for vault check |
+| `vault_id`     | VaultId     | (Optional) Specific vault to check   |
+
+If both `namespace_id` and `vault_id` are omitted, returns overall node health.
 
 **Response:**
 
-| Field          | Type          | Description                     |
-| -------------- | ------------- | ------------------------------- |
-| `status`       | HealthStatus  | Overall node health             |
-| `vault_health` | VaultHealth[] | Per-vault health (if requested) |
+| Field     | Type                | Description                   |
+| --------- | ------------------- | ----------------------------- |
+| `status`  | HealthStatus        | Health status                 |
+| `message` | string              | Human-readable status message |
+| `details` | map<string, string> | Additional diagnostic details |
 
 **HealthStatus values:**
 
-| Value       | Description                                   |
-| ----------- | --------------------------------------------- |
-| `HEALTHY`   | Node is operational and accepting requests    |
-| `DEGRADED`  | Node is operational but some vaults unhealthy |
-| `UNHEALTHY` | Node cannot serve requests                    |
-| `STARTING`  | Node is starting up, not yet ready            |
+| Value                       | Description                 |
+| --------------------------- | --------------------------- |
+| `HEALTH_STATUS_UNSPECIFIED` | Status unknown              |
+| `HEALTH_STATUS_HEALTHY`     | Node/vault is operational   |
+| `HEALTH_STATUS_DEGRADED`    | Operational but with issues |
+| `HEALTH_STATUS_UNAVAILABLE` | Not accepting requests      |
 
-**VaultHealth fields:**
+**Example response:**
 
-| Field          | Type        | Description                       |
-| -------------- | ----------- | --------------------------------- |
-| `namespace_id` | NamespaceId | Vault's namespace                 |
-| `vault_id`     | VaultId     | Vault identifier                  |
-| `status`       | VaultStatus | Vault health status               |
-| `is_leader`    | bool        | Whether this node is vault leader |
-| `height`       | uint64      | Current block height              |
+```json
+{
+  "status": "HEALTH_STATUS_HEALTHY",
+  "message": "Node is healthy",
+  "details": {
+    "leader": "true",
+    "term": "42",
+    "commit_index": "12345"
+  }
+}
+```
 
 ## Kubernetes Integration
 
@@ -143,3 +153,15 @@ backend ledger
   server ledger-1 ledger-1:50051 check port 9090
   server ledger-2 ledger-2:50051 check port 9090
 ```
+
+## Vault Health Status
+
+When checking vault health via `AdminService/GetVault` or `AdminService/RecoverVault`, the `VaultHealthProto` enum indicates vault state:
+
+| Value                           | Description                               |
+| ------------------------------- | ----------------------------------------- |
+| `VAULT_HEALTH_PROTO_HEALTHY`    | Vault is operational                      |
+| `VAULT_HEALTH_PROTO_DIVERGED`   | State divergence detected, needs recovery |
+| `VAULT_HEALTH_PROTO_RECOVERING` | Recovery in progress                      |
+
+See [Vault Repair](../operations/vault-repair.md) for recovery procedures.

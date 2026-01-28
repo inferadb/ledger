@@ -1,3 +1,5 @@
+[Documentation](../README.md) > Client API > AdminService
+
 # AdminService API
 
 Operations for namespace, vault, and cluster management.
@@ -216,7 +218,7 @@ Requests to join an existing cluster. The target node must be a cluster member.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"node_id": {"id": "123"}, "addr": "10.0.0.4:50051"}' \
+  -d '{"node_id": "123", "address": "10.0.0.4:50051"}' \
   localhost:50051 ledger.v1.AdminService/JoinCluster
 ```
 
@@ -226,7 +228,7 @@ Gracefully removes a node from the cluster.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"node_id": {"id": "123"}}' \
+  -d '{"node_id": "123"}' \
   localhost:50051 ledger.v1.AdminService/LeaveCluster
 ```
 
@@ -241,11 +243,19 @@ grpcurl -plaintext \
 
 **Response fields:**
 
-| Field       | Type       | Description         |
-| ----------- | ---------- | ------------------- |
-| `leader_id` | NodeId     | Current Raft leader |
-| `members`   | NodeInfo[] | All cluster members |
-| `term`      | uint64     | Current Raft term   |
+| Field       | Type            | Description         |
+| ----------- | --------------- | ------------------- |
+| `leader_id` | uint64          | Current Raft leader |
+| `members`   | ClusterMember[] | All cluster members |
+| `term`      | uint64          | Current Raft term   |
+
+**ClusterMember fields:**
+
+| Field     | Type   | Description       |
+| --------- | ------ | ----------------- |
+| `node_id` | uint64 | Node identifier   |
+| `address` | string | Node gRPC address |
+| `role`    | string | VOTER or LEARNER  |
 
 ### GetNodeInfo
 
@@ -313,6 +323,48 @@ grpcurl -plaintext \
 
 Only works on vaults in `DIVERGED` state unless `force: true` is set.
 
+**Response:**
+
+| Field              | Type             | Description                 |
+| ------------------ | ---------------- | --------------------------- |
+| `success`          | bool             | Whether recovery succeeded  |
+| `message`          | string           | Status or error message     |
+| `health_status`    | VaultHealthProto | Vault health after recovery |
+| `final_height`     | uint64           | Block height after recovery |
+| `final_state_root` | Hash             | State root after recovery   |
+
+### SimulateDivergence
+
+Simulates vault divergence for testing recovery procedures. Forces a vault into the `DIVERGED` state without actual data corruption.
+
+**Note**: Only available when the server is built with the `test-utils` feature.
+
+```bash
+grpcurl -plaintext \
+  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}, "expected_state_root": {"bytes": "AAAA..."}, "computed_state_root": {"bytes": "BBBB..."}, "at_height": 100}' \
+  localhost:50051 ledger.v1.AdminService/SimulateDivergence
+```
+
+**Request:**
+
+| Field                 | Type        | Description                          |
+| --------------------- | ----------- | ------------------------------------ |
+| `namespace_id`        | NamespaceId | Target namespace                     |
+| `vault_id`            | VaultId     | Target vault                         |
+| `expected_state_root` | Hash        | Fake expected state root             |
+| `computed_state_root` | Hash        | Fake computed state root (different) |
+| `at_height`           | uint64      | Height where "divergence" occurred   |
+
+**Response:**
+
+| Field           | Type             | Description                             |
+| --------------- | ---------------- | --------------------------------------- |
+| `success`       | bool             | Whether simulation succeeded            |
+| `message`       | string           | Status message                          |
+| `health_status` | VaultHealthProto | Should be `VAULT_HEALTH_PROTO_DIVERGED` |
+
+Use `RecoverVault` to restore the vault to `HEALTHY` state after testing.
+
 ### ForceGc
 
 Forces a garbage collection cycle for expired entities.
@@ -324,3 +376,12 @@ grpcurl -plaintext \
 ```
 
 Only the leader can run GC. Returns error on followers.
+
+**Response:**
+
+| Field            | Type   | Description                        |
+| ---------------- | ------ | ---------------------------------- |
+| `success`        | bool   | Whether GC completed successfully  |
+| `message`        | string | Status or error message            |
+| `expired_count`  | uint64 | Number of expired entities removed |
+| `vaults_scanned` | uint64 | Number of vaults scanned           |
