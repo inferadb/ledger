@@ -28,24 +28,83 @@
 
 ### Configuration
 
-| CLI           | ENV                                  | Purpose                                                             | Default           |
-| ------------- | ------------------------------------ | ------------------------------------------------------------------- | ----------------- |
-| `--listen`    | `INFERADB__LEDGER__LISTEN_ADDR`      | Host and port to accept connections                                 | `127.0.0.1:50051` |
-| `--data`      | `INFERADB__LEDGER__DATA_DIR`         | Where to store data ([layout](docs/internals/storage.md#directory-layout)) | (ephemeral) |
-| `--bootstrap` | `INFERADB__LEDGER__BOOTSTRAP_EXPECT` | Cluster size ([modes](docs/operations/deployment.md#cluster-setup)) | `3`               |
-| `--discovery` | `INFERADB__LEDGER__DISCOVERY_DOMAIN` | Find nodes via [DNS](docs/operations/deployment.md#dns-based-discovery-production--kubernetes) | (disabled) |
-| `--join`      | `INFERADB__LEDGER__DISCOVERY_CACHE_PATH` | [Peer file](docs/operations/deployment.md#multi-node-cluster-3-nodes) listing nodes to connect to | (disabled) |
+| CLI           | ENV                                      | Purpose                                                                                                         | Default           |
+| ------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `--listen`    | `INFERADB__LEDGER__LISTEN_ADDR`          | Bind address for gRPC API                                                                                       | `127.0.0.1:50051` |
+| `--data`      | `INFERADB__LEDGER__DATA_DIR`             | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                       | (ephemeral)       |
+| `--bootstrap` | `INFERADB__LEDGER__BOOTSTRAP_EXPECT`     | `1`=single node, `N`=wait for N nodes, `0`=join existing ([guide](docs/operations/deployment.md#cluster-setup)) | `3`               |
+| `--discovery` | `INFERADB__LEDGER__DISCOVERY_DOMAIN`     | [Kubernetes](docs/operations/deployment.md#dns-based-discovery-production--kubernetes): find peers via DNS      | (disabled)        |
+| `--join`      | `INFERADB__LEDGER__DISCOVERY_CACHE_PATH` | [Static peers](docs/operations/deployment.md#multi-node-cluster-3-nodes): JSON file with node addresses         | (disabled)        |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for all options including metrics, batching, and tuning.
 
 ### Run a Single Node
 
 ```bash
-cargo run --release -p inferadb-ledger-server -- \
-  --listen 127.0.0.1:50051 --data /tmp/ledger --bootstrap 1
+inferadb-ledger --data /var/lib/ledger --bootstrap 1
 ```
 
-For multi-node clusters, backup/restore, environment variables, and Kubernetes deployment, see [docs/operations/](docs/operations/).
+### Run Multiple Nodes
+
+#### In Development or Staging
+
+Each node needs `--bootstrap N` (where N is cluster size) and a way to find peers. For local testing, create a peer file:
+
+```bash
+cat > /tmp/peers.json << 'EOF'
+{"peers": [
+  {"addr": "127.0.0.1:50051"},
+  {"addr": "127.0.0.1:50052"},
+  {"addr": "127.0.0.1:50053"}
+]}
+EOF
+```
+
+Then start each node (in separate terminals):
+
+```bash
+# Node 1
+inferadb-ledger --listen 127.0.0.1:50051 --data /tmp/ledger-1 \
+  --bootstrap 3 --join /tmp/peers.json
+
+# Node 2
+inferadb-ledger --listen 127.0.0.1:50052 --data /tmp/ledger-2 \
+  --bootstrap 3 --join /tmp/peers.json
+
+# Node 3
+inferadb-ledger --listen 127.0.0.1:50053 --data /tmp/ledger-3 \
+  --bootstrap 3 --join /tmp/peers.json
+```
+
+Nodes discover each other, coordinate, and the lowest-ID node bootstraps the cluster. For production, use `--discovery` with [DNS-based discovery](docs/operations/deployment.md#dns-based-discovery-production--kubernetes) instead of static peer files.
+
+#### In Production
+
+Configure DNS A records pointing to each node:
+
+```
+ledger.example.com.  A  192.168.1.101
+ledger.example.com.  A  192.168.1.102
+ledger.example.com.  A  192.168.1.103
+```
+
+Then start each node with `--discovery`:
+
+```bash
+# On 192.168.1.101
+inferadb-ledger --listen 192.168.1.101:50051 --data /var/lib/ledger \
+  --bootstrap 3 --discovery ledger.example.com
+
+# On 192.168.1.102
+inferadb-ledger --listen 192.168.1.102:50051 --data /var/lib/ledger \
+  --bootstrap 3 --discovery ledger.example.com
+
+# On 192.168.1.103
+inferadb-ledger --listen 192.168.1.103:50051 --data /var/lib/ledger \
+  --bootstrap 3 --discovery ledger.example.com
+```
+
+For Kubernetes, use a [headless Service](docs/operations/deployment.md#dns-based-discovery-production--kubernetes) which automatically creates DNS records for each pod.
 
 ## Development
 
