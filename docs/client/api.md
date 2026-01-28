@@ -50,6 +50,7 @@ message SetCondition {
     bool not_exists = 1;     // Only set if key doesn't exist
     uint64 version = 2;      // Only set if version matches
     bytes value_equals = 3;  // Only set if current value matches
+    bool must_exists = 4;    // Only set if key already exists
   }
 }
 ```
@@ -57,6 +58,7 @@ message SetCondition {
 | Condition      | Use Case                        | Error Code         |
 | -------------- | ------------------------------- | ------------------ |
 | `not_exists`   | Create-only, unique constraints | `KEY_EXISTS`       |
+| `must_exists`  | Update-only, safe modifications | `KEY_NOT_FOUND`    |
 | `version`      | Optimistic locking              | `VERSION_MISMATCH` |
 | `value_equals` | Exact state assertions          | `VALUE_MISMATCH`   |
 
@@ -219,11 +221,12 @@ Index usage:
 ```rust
 let entities = client.list_entities(ListEntitiesRequest {
     namespace_id,
-    vault_id: None,  // Namespace-level entities
     key_prefix: "user:".into(),
+    at_height: None,           // Current state (or specific height)
     include_expired: false,
     limit: 100,
     page_token: String::new(),
+    consistency: ReadConsistency::Eventual,
 }).await?;
 ```
 
@@ -309,10 +312,10 @@ message WriteError {
 }
 ```
 
-| Error Type      | Codes                                                                                   | Purpose                   |
-| --------------- | --------------------------------------------------------------------------------------- | ------------------------- |
-| `WriteError`    | `KEY_EXISTS`, `VERSION_MISMATCH`, `VALUE_MISMATCH`, `ALREADY_COMMITTED`, `SEQUENCE_GAP` | CAS failures, idempotency |
-| `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                    | Historical read failures  |
+| Error Type      | Codes                                                                                                   | Purpose                   |
+| --------------- | ------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `WriteError`    | `KEY_EXISTS`, `KEY_NOT_FOUND`, `VERSION_MISMATCH`, `VALUE_MISMATCH`, `ALREADY_COMMITTED`, `SEQUENCE_GAP` | CAS failures, idempotency |
+| `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                                    | Historical read failures  |
 
 **Smart retry pattern**:
 

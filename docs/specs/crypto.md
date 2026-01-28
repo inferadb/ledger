@@ -40,42 +40,32 @@ tx_hash = SHA-256(
     sequence            || # u64, big-endian
     actor_len           || # u32, little-endian
     actor               || # UTF-8 bytes
+    op_count            || # u32, little-endian
+    operations          || # Inline operation encoding (type byte + fields)
     timestamp_secs      || # i64, big-endian
-    timestamp_nanos     || # u32, big-endian
-    op_count            || # u32, big-endian
-    operations             # Concatenated operation hashes (32 bytes each)
+    timestamp_nanos        # u32, big-endian
 )
 ```
 
-## Operation Hash
+Operations are encoded inline (not as separate hashes) with a type byte followed by type-specific fields.
 
-```
-op_hash = SHA-256(op_type || op_data)
-```
+## Operation Encoding
+
+Operations are encoded inline within the transaction hash (not as separate hashes).
 
 **op_type** (single byte):
 
 | Type               | Value  |
 | ------------------ | ------ |
-| SetEntity          | `0x01` |
-| DeleteEntity       | `0x02` |
-| ExpireEntity       | `0x03` |
-| CreateRelationship | `0x04` |
-| DeleteRelationship | `0x05` |
+| CreateRelationship | `0x01` |
+| DeleteRelationship | `0x02` |
+| SetEntity          | `0x03` |
+| DeleteEntity       | `0x04` |
+| ExpireEntity       | `0x05` |
 
 **op_data by type**:
 
 ```
-SetEntity:
-    key_len (u32 LE) || key || value_len (u32 LE) || value ||
-    expires_at (u64 BE, 0 = never) || condition_type (u8) || condition_data
-
-DeleteEntity:
-    key_len (u32 LE) || key
-
-ExpireEntity:
-    key_len (u32 LE) || key || expired_at (u64 BE)
-
 CreateRelationship:
     resource_len (u32 LE) || resource ||
     relation_len (u32 LE) || relation ||
@@ -85,7 +75,20 @@ DeleteRelationship:
     resource_len (u32 LE) || resource ||
     relation_len (u32 LE) || relation ||
     subject_len (u32 LE) || subject
+
+SetEntity:
+    key_len (u32 LE) || key || value_len (u32 LE) || value ||
+    condition_type (u8) || condition_data ||
+    expires_at (u64 BE, 0 = never)
+
+DeleteEntity:
+    key_len (u32 LE) || key
+
+ExpireEntity:
+    key_len (u32 LE) || key || expired_at (u64 BE)
 ```
+
+Note: SetEntity encodes condition before expires_at.
 
 **Condition types** for SetEntity:
 

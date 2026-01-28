@@ -42,17 +42,17 @@ spec:
               containerPort: 9090
               protocol: TCP
           env:
-            - name: INFERADB__LEDGER__LISTEN_ADDR
+            - name: INFERADB__LEDGER__LISTEN
               value: "0.0.0.0:50051"
-            - name: INFERADB__LEDGER__DATA_DIR
+            - name: INFERADB__LEDGER__DATA
               value: "/var/lib/ledger"
-            - name: INFERADB__LEDGER__METRICS_ADDR
+            - name: INFERADB__LEDGER__METRICS
               value: "0.0.0.0:9090"
             # Discovery via headless service DNS
-            - name: INFERADB__LEDGER__DISCOVERY_DOMAIN
+            - name: INFERADB__LEDGER__PEERS
               value: "ledger.inferadb.svc.cluster.local"
             # Match replica count for coordinated bootstrap
-            - name: INFERADB__LEDGER__BOOTSTRAP_EXPECT
+            - name: INFERADB__LEDGER__CLUSTER
               value: "3"
             - name: INFERADB__LEDGER__BOOTSTRAP_TIMEOUT_SECS
               value: "120"

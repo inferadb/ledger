@@ -13,22 +13,15 @@ This directory contains operational documentation for running InferaDB Ledger in
 
 ### Health Checks
 
+Use the gRPC `HealthService` to check node status:
+
 ```bash
-# Check cluster health
-ledger-admin cluster-status
+# Check cluster health via gRPC health check
+grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
 
-# Check specific vault
-ledger-admin vault-status --namespace <NS> --vault <ID>
+# Use grpc-health-probe for scripting
+grpc-health-probe -addr=localhost:50051
 ```
-
-### Common Operations
-
-| Operation             | Command                                                            |
-| --------------------- | ------------------------------------------------------------------ |
-| View logs             | `ledger-admin logs --since 1h`                                     |
-| Check replication lag | `ledger-admin lag-report`                                          |
-| Force leader election | `ledger-admin stepdown --node <ID>`                                |
-| Vault recovery        | `ledger-admin recover-vault --namespace <NS> --vault <ID> --force` |
 
 ### Key Metrics
 
