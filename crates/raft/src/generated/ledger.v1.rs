@@ -155,6 +155,10 @@ pub struct BlockHeader {
     pub state_root: ::core::option::Option<Hash>,
     #[prost(message, optional, tag="7")]
     pub timestamp: ::core::option::Option<super::super::google::protobuf::Timestamp>,
+    /// Note: leader_id is included in proto for API completeness but excluded from
+    /// the 148-byte deterministic block hash computation. This ensures blocks hash
+    /// identically regardless of which leader committed them. The leader_id is stored
+    /// in ShardBlock and populated when extracting VaultBlock for client responses.
     #[prost(message, optional, tag="8")]
     pub leader_id: ::core::option::Option<NodeId>,
     #[prost(uint64, tag="9")]
@@ -557,13 +561,22 @@ pub struct WatchBlocksRequest {
     pub vault_id: ::core::option::Option<VaultId>,
     /// First block height to stream. Must be >= 1 (0 is rejected with INVALID_ARGUMENT).
     ///
-    /// Behavior:
-    /// - If start_height <= current tip: replays committed blocks first, then streams new
-    /// - If start_height > current tip: waits for that block, then streams
+    /// Streaming behavior:
+    /// 1. Historical replay: Streams committed blocks from start_height to current tip
+    /// 2. Real-time push: After historical replay, stream stays open and pushes new
+    ///     blocks as they are committed (zero-polling live synchronization)
+    /// 3. Stream lifetime: Remains open indefinitely until client disconnects
     ///
-    /// Typical usage:
-    ///    tip = GetTip()
-    ///    stream = WatchBlocks(start_height = tip.height + 1)
+    /// Backpressure handling:
+    /// - Uses tokio::sync::broadcast internally with buffer size 1024
+    /// - Slow consumers that fall >1024 blocks behind receive a Lagged error
+    /// - On Lagged error, reconnect with start_height = last_received_height + 1
+    ///
+    /// Typical usage for live sync:
+    ///    stream = WatchBlocks(start_height = last_known_height + 1)
+    ///    for block in stream:
+    ///      process(block)
+    ///      last_known_height = block.height
     #[prost(uint64, tag="3")]
     pub start_height: u64,
 }

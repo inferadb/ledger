@@ -14,11 +14,12 @@ use std::{
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
     LedgerServer, LedgerTypeConfig, RaftLogStore, TtlGarbageCollector,
-    proto::{JoinClusterRequest, admin_service_client::AdminServiceClient},
+    proto::{BlockAnnouncement, JoinClusterRequest, admin_service_client::AdminServiceClient},
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use openraft::{BasicNode, Raft, storage::Adaptor};
+use tokio::sync::broadcast;
 use tonic::transport::Channel;
 use tracing::info;
 
@@ -134,12 +135,17 @@ pub async fn bootstrap_node(
     );
     let block_archive = Arc::new(BlockArchive::new(blocks_db));
 
+    // Create block announcements broadcast channel for real-time notifications.
+    // Buffer size of 1024 allows for burst handling during high commit rates.
+    let (block_announcements, _) = broadcast::channel::<BlockAnnouncement>(1024);
+
     let log_path = data_dir.join("raft.db");
     let log_store = RaftLogStore::open(&log_path)
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
-        .with_shard_config(0, node_id.to_string()); // Default shard 0
+        .with_shard_config(0, node_id.to_string()) // Default shard 0
+        .with_block_announcements(block_announcements.clone());
 
     // Determine bootstrap behavior before log_store is consumed by Adaptor
     let is_initialized = log_store.is_initialized();
@@ -247,6 +253,7 @@ pub async fn bootstrap_node(
         .state(state.clone())
         .applied_state(applied_state_accessor.clone())
         .block_archive(Some(block_archive))
+        .block_announcements(block_announcements)
         .addr(config.listen_addr)
         .max_concurrent(config.max_concurrent)
         .timeout_secs(config.timeout_secs)

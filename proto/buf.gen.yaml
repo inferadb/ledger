@@ -1,13 +1,16 @@
+# Proto code generation is handled by build.rs using tonic-prost-build.
+# This file exists for future language targets (e.g., TypeScript SDK).
+#
+# Rust code generation:
+# - Development: build.rs compiles protos at build time
+# - crates.io: Pre-generated code in crates/raft/src/generated/ledger.v1.rs
+#
+# To update the pre-generated fallback file, copy the build output:
+#   cargo build -p inferadb-ledger-raft
+#   cp target/debug/build/inferadb-ledger-raft-*/out/ledger.v1.rs \
+#      crates/raft/src/generated/
+
 version: v2
 managed:
   enabled: true
-plugins:
-  # Rust (prost + tonic)
-  - remote: buf.build/community/neoeinstein-prost
-    out: ../gen/rust
-    opt:
-      - compile_well_known_types
-  - remote: buf.build/community/neoeinstein-tonic
-    out: ../gen/rust
-    opt:
-      - compile_well_known_types
+plugins: []

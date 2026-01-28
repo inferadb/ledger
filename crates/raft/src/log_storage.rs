@@ -40,9 +40,11 @@ use openraft::{
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
 use crate::{
     metrics,
+    proto::BlockAnnouncement,
     types::{
         BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
         SystemRequest,
@@ -421,6 +423,11 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// Consolidated into single lock to avoid lock ordering issues.
     /// See: apply_to_state_machine, restore_from_db
     shard_chain: RwLock<ShardChainState>,
+    /// Block announcement broadcast channel for real-time block notifications.
+    ///
+    /// When set, announcements are broadcast after each successful block commit.
+    /// Receivers subscribe via `WatchBlocks` gRPC streaming endpoint.
+    block_announcements: Option<broadcast::Sender<BlockAnnouncement>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -469,6 +476,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 height: 0,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
             }),
+            block_announcements: None,
         };
 
         // Load cached values
@@ -494,6 +502,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self.shard_id = shard_id;
         self.node_id = node_id;
         self
+    }
+
+    /// Configure the block announcements broadcast channel.
+    ///
+    /// When set, the log store will broadcast `BlockAnnouncement` messages
+    /// after each successful block commit in `apply_to_state_machine`.
+    pub fn with_block_announcements(
+        mut self,
+        sender: broadcast::Sender<BlockAnnouncement>,
+    ) -> Self {
+        self.block_announcements = Some(sender);
+        self
+    }
+
+    /// Get a reference to the block announcements sender (if configured).
+    pub fn block_announcements(&self) -> Option<&broadcast::Sender<BlockAnnouncement>> {
+        self.block_announcements.as_ref()
     }
 
     /// Get the current shard height.
@@ -1456,6 +1481,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             shard_id: self.shard_id,
             node_id: self.node_id.clone(),
             shard_chain: RwLock::new(*self.shard_chain.read()),
+            block_announcements: self.block_announcements.clone(),
         }
     }
 
@@ -1661,6 +1687,32 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             {
                 tracing::error!("Failed to store block: {}", e);
                 // Continue - block storage failure is logged but doesn't fail the operation
+            }
+
+            // Broadcast block announcements for real-time subscribers
+            if let Some(sender) = &self.block_announcements {
+                for entry in &vault_entries {
+                    let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
+                    let announcement = BlockAnnouncement {
+                        namespace_id: Some(crate::proto::NamespaceId { id: entry.namespace_id }),
+                        vault_id: Some(crate::proto::VaultId { id: entry.vault_id }),
+                        height: entry.vault_height,
+                        block_hash: Some(crate::proto::Hash { value: block_hash.to_vec() }),
+                        state_root: Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
+                        timestamp: Some(prost_types::Timestamp {
+                            seconds: timestamp.timestamp(),
+                            nanos: timestamp.timestamp_subsec_nanos() as i32,
+                        }),
+                    };
+                    // Ignore send errors - no receivers is valid (fire-and-forget)
+                    let _ = sender.send(announcement);
+                    tracing::debug!(
+                        namespace_id = entry.namespace_id,
+                        vault_id = entry.vault_id,
+                        height = entry.vault_height,
+                        "Block announcement broadcast"
+                    );
+                }
             }
 
             // Update previous vault hashes for each entry
@@ -2674,7 +2726,8 @@ mod tests {
             _ => panic!("expected VaultDeleted"),
         }
 
-        // Try to delete namespace - should transition to Deleting, but only vault2 should be in blocking list
+        // Try to delete namespace - should transition to Deleting, but only vault2 should be in
+        // blocking list
         let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
@@ -3052,7 +3105,6 @@ mod tests {
         assert_eq!(meta.status, NamespaceStatus::Active);
     }
 
-
     // ========================================================================
     // Migration Tests
     // ========================================================================
@@ -3075,8 +3127,7 @@ mod tests {
         };
 
         // Start migration to shard 1
-        let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
@@ -3102,7 +3153,8 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        let start_migration = LedgerRequest::StartMigration { namespace_id: 999, target_shard_id: 1 };
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id: 999, target_shard_id: 1 };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
@@ -3131,14 +3183,12 @@ mod tests {
         };
 
         // Start migration
-        let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
         let (response, _) = store.apply_request(&start_migration, &mut state);
         assert!(matches!(response, LedgerResponse::MigrationStarted { .. }));
 
         // Try to start another migration - should fail
-        let start_migration2 =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: 2 };
+        let start_migration2 = LedgerRequest::StartMigration { namespace_id, target_shard_id: 2 };
         let (response, _) = store.apply_request(&start_migration2, &mut state);
 
         match response {
@@ -3170,8 +3220,7 @@ mod tests {
         store.apply_request(&suspend, &mut state);
 
         // Try to start migration - should fail
-        let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
@@ -3200,8 +3249,7 @@ mod tests {
         };
 
         // Start migration to shard 1
-        let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
         store.apply_request(&start_migration, &mut state);
 
         // Complete migration
@@ -3209,7 +3257,11 @@ mod tests {
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
-            LedgerResponse::MigrationCompleted { namespace_id: ns_id, old_shard_id, new_shard_id } => {
+            LedgerResponse::MigrationCompleted {
+                namespace_id: ns_id,
+                old_shard_id,
+                new_shard_id,
+            } => {
                 assert_eq!(ns_id, namespace_id);
                 assert_eq!(old_shard_id, 0);
                 assert_eq!(new_shard_id, 1);
@@ -3282,16 +3334,11 @@ mod tests {
         };
 
         // Start migration
-        let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
         store.apply_request(&start_migration, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Write {
-            namespace_id,
-            vault_id,
-            transactions: vec![],
-        };
+        let write = LedgerRequest::Write { namespace_id, vault_id, transactions: vec![] };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
@@ -3320,8 +3367,7 @@ mod tests {
         };
 
         // Start migration
-        let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
         store.apply_request(&start_migration, &mut state);
 
         // Try to create vault - should be blocked
@@ -3436,11 +3482,7 @@ mod tests {
         store.apply_request(&delete_ns, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Write {
-            namespace_id,
-            vault_id,
-            transactions: vec![],
-        };
+        let write = LedgerRequest::Write { namespace_id, vault_id, transactions: vec![] };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
@@ -4285,8 +4327,8 @@ mod tests {
                     shard_id: 0,
                     name: "test".to_string(),
                     status: NamespaceStatus::Active,
-                pending_shard_id: None,
-            },
+                    pending_shard_id: None,
+                },
             );
         }
 
@@ -4495,6 +4537,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_block_announcements_sender_stored() {
+        use crate::proto::{BlockAnnouncement, Hash, NamespaceId, VaultId};
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        // Open store without sender - should be None
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        assert!(store.block_announcements().is_none());
+
+        // Create new store with sender
+        let (sender, mut receiver) = broadcast::channel::<BlockAnnouncement>(16);
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_block_announcements(sender);
+
+        // Verify sender is stored and accessible
+        assert!(store.block_announcements().is_some());
+
+        // Verify we can send through the stored sender
+        let announcement = BlockAnnouncement {
+            namespace_id: Some(NamespaceId { id: 1 }),
+            vault_id: Some(VaultId { id: 2 }),
+            height: 3,
+            block_hash: Some(Hash { value: vec![0u8; 32] }),
+            state_root: Some(Hash { value: vec![0u8; 32] }),
+            timestamp: None, // Optional field
+        };
+
+        store.block_announcements().unwrap().send(announcement.clone()).expect("send");
+
+        // Verify receiver gets the announcement
+        let received = receiver.recv().await.expect("receive");
+        assert_eq!(received.namespace_id, announcement.namespace_id);
+        assert_eq!(received.vault_id, announcement.vault_id);
+        assert_eq!(received.height, announcement.height);
+    }
+
+    #[tokio::test]
     async fn test_append_and_read_log_entries() {
         // This test simulates what openraft does during replication
         let dir = tempdir().expect("create temp dir");
@@ -4538,5 +4619,137 @@ mod tests {
         // Test partial range (what openraft does when replicating to a follower)
         let partial = store.try_get_log_entries(50u64..=75u64).await.expect("read partial");
         assert_eq!(partial.len(), 26, "Expected 26 entries, got {}", partial.len());
+    }
+
+    #[tokio::test]
+    async fn test_apply_to_state_machine_broadcasts_block_announcements() {
+        use std::time::{Duration, Instant};
+
+        use openraft::RaftStorage;
+
+        use crate::proto::{BlockAnnouncement, NamespaceId, VaultId};
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        // Create store with broadcast sender
+        let (sender, mut receiver) = broadcast::channel::<BlockAnnouncement>(16);
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_block_announcements(sender);
+
+        // First, create namespace and vault using apply_request (sets up state)
+        {
+            let mut state = store.applied_state.write();
+
+            let create_ns =
+                LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+            let (response, _) = store.apply_request(&create_ns, &mut state);
+            let namespace_id = match response {
+                LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+                _ => panic!("expected NamespaceCreated"),
+            };
+            assert_eq!(namespace_id, 1);
+
+            let create_vault = LedgerRequest::CreateVault {
+                namespace_id,
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            };
+            let (response, _) = store.apply_request(&create_vault, &mut state);
+            let vault_id = match response {
+                LedgerResponse::VaultCreated { vault_id } => vault_id,
+                _ => panic!("expected VaultCreated"),
+            };
+            assert_eq!(vault_id, 1);
+        }
+
+        // Now call apply_to_state_machine with a Write entry
+        // This should broadcast a BlockAnnouncement
+        let write_request = LedgerRequest::Write {
+            namespace_id: 1,
+            vault_id: 1,
+            transactions: vec![], // Empty transactions still create a block
+        };
+
+        let entry =
+            Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(write_request) };
+
+        let start = Instant::now();
+        let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
+
+        // Verify response is WriteCompleted
+        assert_eq!(responses.len(), 1);
+        match &responses[0] {
+            LedgerResponse::Write { block_height: height, .. } => {
+                assert_eq!(*height, 1, "Expected height 1 for first block");
+            },
+            other => panic!("expected WriteCompleted, got {:?}", other),
+        }
+
+        // Verify announcement was broadcast (should be near-instant)
+        let timeout = Duration::from_millis(100);
+        let received = tokio::time::timeout(timeout, receiver.recv())
+            .await
+            .expect("announcement should arrive within 100ms")
+            .expect("should receive announcement");
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "Announcement should be received within 100ms, took {:?}",
+            elapsed
+        );
+
+        // Verify announcement contents
+        assert_eq!(received.namespace_id, Some(NamespaceId { id: 1 }));
+        assert_eq!(received.vault_id, Some(VaultId { id: 1 }));
+        assert_eq!(received.height, 1);
+        assert!(received.block_hash.is_some(), "block_hash should be set");
+        assert!(received.state_root.is_some(), "state_root should be set");
+        assert!(received.timestamp.is_some(), "timestamp should be set");
+    }
+
+    #[tokio::test]
+    async fn test_apply_to_state_machine_no_broadcast_without_sender() {
+        // Verify that without a sender, apply_to_state_machine still works
+        // (graceful handling of None sender)
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        // Store without broadcast sender
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Create namespace and vault
+        {
+            let mut state = store.applied_state.write();
+
+            let create_ns =
+                LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+            store.apply_request(&create_ns, &mut state);
+
+            let create_vault = LedgerRequest::CreateVault {
+                namespace_id: 1,
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            };
+            store.apply_request(&create_vault, &mut state);
+        }
+
+        // Apply write - should not panic even without sender
+        let write_request =
+            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] };
+
+        let entry =
+            Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(write_request) };
+
+        let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
+        assert_eq!(responses.len(), 1);
+        match &responses[0] {
+            LedgerResponse::Write { .. } => {},
+            other => panic!("expected WriteCompleted, got {:?}", other),
+        }
     }
 }

@@ -26,19 +26,19 @@ curl -sSL https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-x86
 chmod +x /usr/local/bin/buf
 ```
 
-## Generating Code
+## Code Generation
 
-From the `proto/` directory:
+**Development builds** use `build.rs` with `tonic-prost-build` to compile protos at build time.
+
+**Published crates** (crates.io) use pre-generated code in `crates/raft/src/generated/` since proto files aren't included in the package.
+
+To update the pre-generated fallback file:
 
 ```bash
-cd proto
-buf generate
+cargo build -p inferadb-ledger-raft
+cp target/debug/build/inferadb-ledger-raft-*/out/ledger.v1.rs \
+   crates/raft/src/generated/
 ```
-
-This generates Rust code to `../gen/rust/`:
-
-- `ledger.v1.rs` - Message types (prost)
-- `ledger.v1.tonic.rs` - gRPC service traits (tonic)
 
 ## Linting and Breaking Change Detection
 

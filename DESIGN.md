@@ -2720,22 +2720,55 @@ Clients subscribe to block updates via `WatchBlocks` gRPC streaming:
 // Returns lightweight announcements; clients fetch full blocks via GetBlock if needed
 ```
 
-**Current implementation**: `WatchBlocks` supports historical block replay. When a client subscribes with `start_height`, all committed blocks from that height forward are streamed until the current tip. Real-time push notifications for newly committed blocks are not yet implemented.
+**Streaming behavior:**
 
-**Subscription pattern:**
+1. **Historical replay**: All committed blocks from `start_height` to current tip are streamed
+2. **Real-time push**: After historical replay, stream stays open and pushes new blocks as they commit
+3. **Stream lifetime**: Remains open indefinitely until client disconnects or errors
+
+The implementation uses a `tokio::sync::broadcast` channel internally. When `RaftLogStore::apply_to_state_machine()` commits a block, it broadcasts a `BlockAnnouncement` to all subscribers. `WatchBlocks` chains historical replay with the broadcast receiver for seamless live synchronization.
+
+**Backpressure handling:**
+
+- Broadcast buffer size: 1024 announcements
+- Slow consumers that fall >1024 blocks behind receive a `Lagged` error
+- On `Lagged` error, clients should reconnect with `start_height = last_received_height + 1`
+
+**Subscription patterns:**
 
 ```rust
-// Replay all blocks from height 1 to current tip
+// Full sync: replay all blocks, then receive live updates
 let stream = client.watch_blocks(WatchBlocksRequest {
     vault_id,
-    start_height: 1,
+    start_height: 1,  // Genesis
 }).await?;
 
-// For incremental sync: track last processed height, replay from there
-// Note: Stream ends at current tip; re-subscribe to catch new blocks
+// Incremental sync: resume from last known height
+let stream = client.watch_blocks(WatchBlocksRequest {
+    vault_id,
+    start_height: last_known_height + 1,
+}).await?;
+
+// Live event handling
+while let Some(announcement) = stream.next().await {
+    match announcement {
+        Ok(block) => {
+            process_block(&block);
+            last_known_height = block.height;
+        }
+        Err(status) if is_lagged_error(&status) => {
+            // Reconnect from last known position
+            stream = client.watch_blocks(WatchBlocksRequest {
+                vault_id,
+                start_height: last_known_height + 1,
+            }).await?;
+        }
+        Err(e) => return Err(e),
+    }
+}
 ```
 
-`start_height` must be >= 1 (no magic values). For full replay from genesis, use `start_height = 1`.
+`start_height` must be >= 1 (0 is rejected with `INVALID_ARGUMENT`). For full replay from genesis, use `start_height = 1`.
 
 ### Peer-to-Peer Properties
 

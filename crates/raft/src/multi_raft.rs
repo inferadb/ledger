@@ -100,9 +100,14 @@ pub enum MultiRaftError {
 /// Result type for multi-raft operations.
 pub type Result<T> = std::result::Result<T, MultiRaftError>;
 
-/// Storage components for a shard (state layer, block archive, raft log store).
-type ShardStorage =
-    (Arc<StateLayer<FileBackend>>, Arc<BlockArchive<FileBackend>>, RaftLogStore<FileBackend>);
+/// Storage components for a shard (state layer, block archive, raft log store, block
+/// announcements).
+type ShardStorage = (
+    Arc<StateLayer<FileBackend>>,
+    Arc<BlockArchive<FileBackend>>,
+    RaftLogStore<FileBackend>,
+    broadcast::Sender<BlockAnnouncement>,
+);
 
 // ============================================================================
 // Configuration
@@ -429,8 +434,9 @@ impl MultiRaftManager {
             message: format!("Failed to create shard directory: {}", e),
         })?;
 
-        // Open storage
-        let (state, block_archive, log_store) = self.open_shard_storage(shard_id, &shard_dir)?;
+        // Open storage (includes block announcements channel wired to RaftLogStore)
+        let (state, block_archive, log_store, block_announcements) =
+            self.open_shard_storage(shard_id, &shard_dir)?;
 
         // Get accessor before log_store is consumed
         let applied_state = log_store.accessor();
@@ -482,10 +488,6 @@ impl MultiRaftManager {
         } else {
             ShardBackgroundJobs::none()
         };
-
-        // Create block announcements broadcast channel for real-time notifications.
-        // Buffer size of 1024 allows for burst handling during high commit rates.
-        let (block_announcements, _) = broadcast::channel(1024);
 
         // Create shard group
         let shard_group = Arc::new(ShardGroup {
@@ -592,6 +594,10 @@ impl MultiRaftManager {
         })?;
         let block_archive = Arc::new(BlockArchive::new(Arc::new(blocks_db)));
 
+        // Create block announcements broadcast channel for real-time notifications.
+        // Buffer size of 1024 allows for burst handling during high commit rates.
+        let (block_announcements, _) = broadcast::channel(1024);
+
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
         let log_path = shard_dir.join("raft.db");
         let log_store = RaftLogStore::<FileBackend>::open(&log_path)
@@ -601,9 +607,10 @@ impl MultiRaftManager {
             })?
             .with_state_layer(state.clone())
             .with_block_archive(block_archive.clone())
-            .with_shard_config(shard_id, self.config.node_id.to_string());
+            .with_shard_config(shard_id, self.config.node_id.to_string())
+            .with_block_announcements(block_announcements.clone());
 
-        Ok((state, block_archive, log_store))
+        Ok((state, block_archive, log_store, block_announcements))
     }
 
     /// Bootstrap a shard as a new cluster.

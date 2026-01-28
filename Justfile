@@ -87,9 +87,10 @@ doc-open:
 # Protobuf
 # ============================================================================
 
-# Generate protobuf code (requires buf)
+# Update pre-generated proto code for crates.io publishing
 proto:
-    cd proto && buf generate
+    cargo +{{rust}} build -p inferadb-ledger-raft
+    cp target/debug/build/inferadb-ledger-raft-*/out/ledger.v1.rs crates/raft/src/generated/
 
 # Lint protobuf definitions
 proto-lint:
