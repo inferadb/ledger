@@ -250,7 +250,7 @@ jobs:
             artifact_name: inferadb-ledger
             asset_name: inferadb-ledger-linux-aarch64
 
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact_name: inferadb-ledger
             asset_name: inferadb-ledger-macos-x86_64
