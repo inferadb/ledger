@@ -86,9 +86,6 @@ just build
 
 # Run tests
 just test
-
-# See all commands
-just
 ```
 
 ## Design
