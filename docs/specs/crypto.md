@@ -92,13 +92,15 @@ Note: SetEntity encodes condition before expires_at.
 
 **Condition types** for SetEntity:
 
-| Type          | Value  | Data                  |
-| ------------- | ------ | --------------------- |
-| None          | `0x00` | (none)                |
-| MustNotExist  | `0x01` | (none)                |
-| MustExist     | `0x02` | (none)                |
-| VersionEquals | `0x03` | u64 BE version        |
-| ValueEquals   | `0x04` | u32 LE length + bytes |
+| Condition     | Type Byte | Data                  |
+| ------------- | --------- | --------------------- |
+| (no condition)| `0x00`    | (none)                |
+| MustNotExist  | `0x01`    | (none)                |
+| MustExist     | `0x02`    | (none)                |
+| VersionEquals | `0x03`    | u64 BE version        |
+| ValueEquals   | `0x04`    | u32 LE length + bytes |
+
+Note: `0x00` represents `Option<SetCondition>::None`, not a SetCondition variant.
 
 ## Transaction Merkle Tree
 

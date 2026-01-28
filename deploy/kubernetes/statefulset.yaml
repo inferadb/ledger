@@ -54,7 +54,7 @@ spec:
             # Match replica count for coordinated bootstrap
             - name: INFERADB__LEDGER__CLUSTER
               value: "3"
-            - name: INFERADB__LEDGER__BOOTSTRAP_TIMEOUT_SECS
+            - name: INFERADB__LEDGER__PEERS_TIMEOUT
               value: "120"
           volumeMounts:
             - name: data

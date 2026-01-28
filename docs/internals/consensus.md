@@ -65,7 +65,7 @@ Batching amortizes Raft consensus overhead across transactions.
 
 ```rust
 struct BatchConfig {
-    max_batch_size: usize,     // Default: 50
+    max_batch_size: usize,     // Default: 100
     batch_timeout: Duration,   // Default: 2ms
     eager_commit: bool,        // Default: true
 }

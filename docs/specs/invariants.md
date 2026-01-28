@@ -85,6 +85,15 @@ Formal guarantees the system maintains under all conditions.
 | 32  | Block archive append-only | Segment files are never modified after creation                   |
 | 33  | Snapshot validity         | Snapshot `state_root` matches block header at `shard_height`      |
 
+## Multi-Vault Failure Isolation Invariants
+
+| #   | Invariant                         | Description                                                      |
+| --- | --------------------------------- | ---------------------------------------------------------------- |
+| 34  | Vault divergence read isolation   | Vault divergence does not affect read availability of other vaults in the same shard |
+| 35  | Vault divergence write isolation  | Vault divergence does not block writes to other vaults in the same shard |
+| 36  | Vault recovery independence       | Vault recovery requires no shard-wide coordination               |
+| 37  | Determinism bug surfacing         | Determinism bugs surface during recovery replay                  |
+
 ## Storage Layer Boundaries
 
 | Layer         | Contents                                  | Truncatable                       | Purpose                    |

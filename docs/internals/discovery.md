@@ -15,32 +15,30 @@ A dedicated `_system` Raft group serves as the authoritative service registry, r
 
 ### Data Model
 
-```rust
-struct SystemState {
-    users: HashMap<UserId, User>,
-    user_emails: HashMap<EmailId, UserEmail>,
-    email_index: HashMap<String, EmailId>,
-    namespaces: HashMap<NamespaceId, NamespaceRegistry>,
-    nodes: HashMap<NodeId, NodeInfo>,
-    version: u64,
-}
+The `_system` namespace stores individual entities (not a unified struct):
 
+```rust
 struct NamespaceRegistry {
     namespace_id: NamespaceId,
+    name: String,
     shard_id: ShardId,
     member_nodes: Vec<NodeId>,
-    leader_hint: Option<NodeId>,  // May be stale
+    status: NamespaceStatus,
     config_version: u64,
+    created_at: DateTime<Utc>,
 }
 
 struct NodeInfo {
     node_id: NodeId,
-    addresses: Vec<SocketAddr>,  // WireGuard IPs
+    addresses: Vec<SocketAddr>,
     grpc_port: u16,
-    capabilities: Capabilities,
+    role: NodeRole,               // Voter or Learner
     last_heartbeat: DateTime<Utc>,
+    joined_at: DateTime<Utc>,
 }
 ```
+
+Note: `leader_hint` is computed dynamically from Raft state, not stored in `NamespaceRegistry`.
 
 ### Voter/Learner Scaling
 

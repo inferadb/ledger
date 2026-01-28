@@ -6,38 +6,24 @@ This document covers directory layout, database schemas, snapshots, and crash re
 
 ```
 /var/lib/ledger/
-├── node.toml                    # Node configuration
-├── node_id                      # Persisted node identity (UUID)
-├── shards/
-│   ├── _system/                 # System Raft group
-│   │   ├── raft/
-│   │   │   ├── log.db           # Raft log entries
-│   │   │   └── vote             # Current term + voted_for
-│   │   ├── state.db             # State machine (system registry)
-│   │   └── snapshots/
-│   │       ├── 000001000.snap   # Snapshot at height 1000
-│   │       └── 000002000.snap
-│   ├── shard_0001/              # User shard group
-│   │   ├── raft/
-│   │   │   ├── log.db
-│   │   │   └── vote
-│   │   ├── state.db             # State for all vaults in shard
-│   │   ├── blocks/
-│   │   │   ├── segment_000000.blk   # Blocks 0-9999
-│   │   │   ├── segment_000001.blk   # Blocks 10000-19999
-│   │   │   └── segment_000002.blk
-│   │   └── snapshots/
-│   └── shard_0002/
-└── tmp/                         # Temporary files (snapshot staging)
+├── node_id                      # Persisted node identity (snowflake ID)
+├── state.db                     # Unified database for state, Raft log, blocks
+├── raft.db                      # Raft-specific storage
+├── blocks.db                    # Block archive storage
+└── snapshots/
+    ├── 000001000.snap           # Snapshot at height 1000
+    └── 000002000.snap
 ```
+
+The current implementation uses a unified database approach rather than per-shard directories. All data is stored in B+ tree tables within these databases.
 
 ### Design Decisions
 
 | Decision                    | Rationale                                                  |
 | --------------------------- | ---------------------------------------------------------- |
-| Per-shard directories       | Matches Raft group boundaries; independent failure domains |
-| Separate raft/ and state.db | Raft log is append-heavy; state is random-access heavy     |
-| Block segments              | Append-only writes; easy archival of old segments          |
+| Unified database files      | Custom Inkwell B+ tree engine with MVCC                    |
+| Table-based storage         | 15 tables for different data types (see tables.rs)         |
+| Dual-slot commit            | Atomic commits without traditional WAL overhead            |
 | Snapshots by height         | Predictable naming; simple retention policy                |
 
 ## Database Backend
@@ -58,41 +44,36 @@ Key operations:
 - `purge(log_id)`: Remove entries before log_id (after snapshot)
 - `save_vote(vote)`: Persist current term and voted_for
 
-### State Storage (state.db)
+### State Storage
 
-```rust
-const RELATIONSHIPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rel");
-const ENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("ent");
-const OBJ_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("obj_idx");
-const SUBJ_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("subj_idx");
-const VAULT_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vault_meta");
-```
+The database uses 15 tables (see `crates/store/src/tables.rs`):
 
-**Key format**: `vault_id (8 bytes) + key bytes`
+| Table           | Key Format                              | Purpose                    |
+| --------------- | --------------------------------------- | -------------------------- |
+| Relationships   | `{vault_id:8BE}{bucket_id:1}{key}`      | Relationship tuples        |
+| Entities        | `{vault_id:8BE}{bucket_id:1}{key}`      | Key-value entities         |
+| ObjIndex        | `{vault_id:8BE}{resource}#{relation}`   | Resource→subject lookup    |
+| SubjIndex       | `{vault_id:8BE}{subject}#{relation}`    | Subject→resource lookup    |
+| VaultMeta       | `{namespace_id:8BE}{vault_id:8BE}`      | Vault metadata             |
+| Blocks          | `{shard_height:8BE}`                    | Block storage              |
+| VaultBlockIndex | `{namespace_id:8BE}{vault_id:8BE}{h:8}` | Vault height→block mapping |
+| RaftLog         | `{log_id:8BE}`                          | Raft log entries           |
+| RaftState       | `{key}`                                 | Raft persistent state      |
 
-All vaults in a shard share a single database. Keys are prefixed with `vault_id` for isolation.
+**Key format**: `vault_id (8 bytes BE) + bucket_id (1 byte) + local_key`
+
+The bucket_id (0-255) enables incremental state root computation.
 
 ## Block Archive
 
-Blocks stored in append-only segment files:
+Blocks are stored in the `Blocks` table within the database:
 
 ```
-┌──────────────────────────────────────────────────────┐
-│ Block 0: [length: u32][ShardBlock bytes...]          │
-│ Block 1: [length: u32][ShardBlock bytes...]          │
-│ ...                                                  │
-│ Block 9999: [length: u32][ShardBlock bytes...]       │
-└──────────────────────────────────────────────────────┘
+Key: shard_height (u64 BE)
+Value: postcard-serialized ShardBlock
 ```
 
-**Index file** (`.idx`): Stored alongside each segment for fast block lookup:
-
-```
-┌──────────────────────────────────────────────────────┐
-│ Entry 0: [vault_id: u64][height: u64][offset: u64]   │
-│ Entry 1: ...                                         │
-└──────────────────────────────────────────────────────┘
-```
+A secondary `VaultBlockIndex` table provides fast vault-specific lookups by vault height.
 
 ### Segment Management
 
@@ -155,7 +136,7 @@ This enables verification without full block replay.
 
 ### Triggering
 
-- **Time-based**: Every 1 hour
+- **Time-based**: Every 5 minutes
 - **Size-based**: Every 10,000 blocks
 - **Manual**: On-demand via admin API
 

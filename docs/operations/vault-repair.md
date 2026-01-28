@@ -57,11 +57,13 @@ The follower:
 
 Diverged vaults attempt automatic recovery with exponential backoff:
 
-| Attempt | Backoff   | Action                                  |
-| ------- | --------- | --------------------------------------- |
-| 1       | Immediate | Clear state, replay from snapshot + log |
-| 2       | 1 minute  | Same as attempt 1                       |
-| 3       | 5 minutes | Require manual intervention             |
+| Attempt | Backoff    | Action                                  |
+| ------- | ---------- | --------------------------------------- |
+| 1       | 5 seconds  | Clear state, replay from snapshot + log |
+| 2       | 10 seconds | Same as attempt 1                       |
+| 3       | 20 seconds | Require manual intervention if fails    |
+
+Backoff formula: `base_delay × 2^(attempt-1)` with base=5s, max=300s.
 
 The recovery process:
 
