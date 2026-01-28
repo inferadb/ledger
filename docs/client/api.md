@@ -30,15 +30,17 @@ enum Operation {
 
 All operations are idempotent, resolved by Raft total ordering:
 
-| Operation            | Pre-state  | Post-state | Return           |
-| -------------------- | ---------- | ---------- | ---------------- |
-| `CreateRelationship` | not exists | created    | `CREATED`        |
-| `CreateRelationship` | exists     | no change  | `ALREADY_EXISTS` |
-| `DeleteRelationship` | exists     | deleted    | `DELETED`        |
-| `DeleteRelationship` | not exists | no change  | `NOT_FOUND`      |
-| `SetEntity`          | any        | value set  | `OK`             |
-| `DeleteEntity`       | exists     | deleted    | `DELETED`        |
-| `DeleteEntity`       | not exists | no change  | `NOT_FOUND`      |
+| Operation            | Pre-state  | Post-state | Behavior           |
+| -------------------- | ---------- | ---------- | ------------------ |
+| `CreateRelationship` | not exists | created    | Transaction succeeds |
+| `CreateRelationship` | exists     | no change  | Transaction succeeds (no-op) |
+| `DeleteRelationship` | exists     | deleted    | Transaction succeeds |
+| `DeleteRelationship` | not exists | no change  | Transaction succeeds (no-op) |
+| `SetEntity`          | any        | value set  | Transaction succeeds |
+| `DeleteEntity`       | exists     | deleted    | Transaction succeeds |
+| `DeleteEntity`       | not exists | no change  | Transaction succeeds (no-op) |
+
+Note: `WriteResponse` is transaction-level (success or error), not per-operation. All operations in a transaction either succeed together or fail together.
 
 ### Conditional Writes
 
@@ -62,15 +64,7 @@ message SetCondition {
 | `version`      | Optimistic locking              | `VERSION_MISMATCH` |
 | `value_equals` | Exact state assertions          | `VALUE_MISMATCH`   |
 
-**Version tracking**: Each entity stores version (block height of last modification) embedded in the value:
-
-```rust
-struct StoredEntity {
-    version: u64,       // 8 bytes, block height
-    expires_at: u64,    // 8 bytes, 0 = never
-    value: Vec<u8>,     // User-provided value
-}
-```
+**Version tracking**: Each entity stores version (block height of last modification) as a separate field in the Entity response.
 
 ### Batch Writes
 
@@ -93,21 +87,23 @@ struct StoredEntity {
 
 ```rust
 ledger.batch_write(BatchWriteRequest {
-    vault_id,
-    writes: vec![WriteRequest {
-        operations: vec![
-            SetEntity {
-                key: format!("_idx:user:email:{}", email),
-                value: user_id.as_bytes().to_vec(),
-                condition: Some(SetCondition::NotExists(true)),
-            },
-            SetEntity {
-                key: format!("user:{}", user_id),
-                value: serialize(&user),
-                condition: None,
-            },
-        ],
-    }],
+    namespace_id,
+    client_id: "my-client".into(),
+    sequence: 1,
+    operations: vec![
+        Operation::SetEntity {
+            key: format!("_idx:user:email:{}", email),
+            value: user_id.as_bytes().to_vec(),
+            condition: Some(SetCondition { not_exists: true, ..Default::default() }),
+            expires_at: None,
+        },
+        Operation::SetEntity {
+            key: format!("user:{}", user_id),
+            value: serialize(&user),
+            condition: None,
+            expires_at: None,
+        },
+    ],
 }).await?;
 ```
 

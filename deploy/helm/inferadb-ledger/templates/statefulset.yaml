@@ -75,29 +75,29 @@ spec:
               protocol: TCP
             {{- end }}
           env:
-            - name: INFERADB__LEDGER__LISTEN_ADDR
+            - name: INFERADB__LEDGER__LISTEN
               value: {{ .Values.config.listenAddr | quote }}
-            - name: INFERADB__LEDGER__DATA_DIR
+            - name: INFERADB__LEDGER__DATA
               value: {{ .Values.config.dataDir | quote }}
             {{- if .Values.config.metricsAddr }}
-            - name: INFERADB__LEDGER__METRICS_ADDR
+            - name: INFERADB__LEDGER__METRICS
               value: {{ .Values.config.metricsAddr | quote }}
             {{- end }}
-            - name: INFERADB__LEDGER__DISCOVERY_DOMAIN
+            - name: INFERADB__LEDGER__PEERS
               value: {{ include "inferadb-ledger.discoveryDomain" . | quote }}
-            - name: INFERADB__LEDGER__BOOTSTRAP_EXPECT
+            - name: INFERADB__LEDGER__CLUSTER
               value: {{ .Values.replicaCount | quote }}
-            - name: INFERADB__LEDGER__BOOTSTRAP_TIMEOUT_SECS
+            - name: INFERADB__LEDGER__PEERS_TIMEOUT
               value: {{ .Values.config.bootstrap.timeoutSecs | quote }}
-            - name: INFERADB__LEDGER__BOOTSTRAP_POLL_SECS
+            - name: INFERADB__LEDGER__PEERS_POLL
               value: {{ .Values.config.bootstrap.pollSecs | quote }}
-            - name: INFERADB__LEDGER__REQUESTS_MAX_CONCURRENT
+            - name: INFERADB__LEDGER__MAX_CONCURRENT
               value: {{ .Values.config.requests.maxConcurrent | quote }}
-            - name: INFERADB__LEDGER__REQUESTS_TIMEOUT_SECS
+            - name: INFERADB__LEDGER__TIMEOUT
               value: {{ .Values.config.requests.timeoutSecs | quote }}
-            - name: INFERADB__LEDGER__BATCH_MAX_SIZE
+            - name: INFERADB__LEDGER__BATCH_SIZE
               value: {{ .Values.config.batch.maxSize | quote }}
-            - name: INFERADB__LEDGER__BATCH_MAX_DELAY_MS
+            - name: INFERADB__LEDGER__BATCH_DELAY
               value: {{ .Values.config.batch.maxDelayMs | quote }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:

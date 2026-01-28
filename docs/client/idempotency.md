@@ -19,16 +19,10 @@ struct Transaction {
 
 ## Sequence Tracking
 
-The leader maintains persistent sequence state per client:
+The leader maintains sequence state per client:
 
-```rust
-struct ClientState {
-    last_committed_seq: u64,
-    last_committed_tx_id: TxId,
-    last_committed_block_height: u64,
-    recent_responses: LruCache<u64, WriteResponse>,  // max 1000 entries
-}
-```
+- **Persistent**: `last_committed_seq` (survives restarts via Raft snapshots)
+- **In-memory cache**: Recent `WriteSuccess` responses (max 10,000 entries, 5-minute TTL)
 
 ### Validation Rules
 
@@ -42,13 +36,12 @@ struct ClientState {
 
 When `seq <= last_committed_seq`:
 
-1. If response is in LRU cache → return cached `WriteSuccess`
-2. If response is evicted → return `WriteError` with:
-   - `code = ALREADY_COMMITTED`
-   - `committed_tx_id` from durable state
-   - `committed_block_height` from durable state
+1. If response is in cache (≤5 min old, ≤10,000 entries) → return cached `WriteSuccess`
+2. If cache is evicted → return `SEQUENCE_GAP` error
 
-The server durably stores the last committed transaction's identity, enabling recovery even after LRU eviction.
+**Cache limitation**: After cache eviction, the server cannot distinguish "already committed" from "actual gap". Clients should complete retries within the cache window (5 minutes) for best UX.
+
+The server durably stores only the sequence number, not transaction metadata.
 
 ### Gap Handling
 
@@ -63,13 +56,13 @@ Client should call `GetClientState` to recover, then resume from `last_committed
 
 ## Retry Behavior
 
-| Scenario             | Client Action                           | Server Response                              |
-| -------------------- | --------------------------------------- | -------------------------------------------- |
-| Network timeout      | Retry with same `(client_id, sequence)` | Cached `WriteSuccess` or `ALREADY_COMMITTED` |
-| `SEQUENCE_GAP` error | Call `GetClientState`, resume sequence  | Reject until correct sequence                |
-| Success              | Increment sequence for next write       | N/A                                          |
+| Scenario             | Client Action                           | Server Response                  |
+| -------------------- | --------------------------------------- | -------------------------------- |
+| Network timeout      | Retry with same `(client_id, sequence)` | Cached `WriteSuccess` (if fresh) |
+| `SEQUENCE_GAP` error | Call `GetClientState`, resume sequence  | Reject until correct sequence    |
+| Success              | Increment sequence for next write       | N/A                              |
 
-**Exactly-once semantics**: Retrying any previously-committed sequence returns the cached result (if in LRU) or `ALREADY_COMMITTED` with recovery data.
+**Exactly-once semantics**: Retrying within the cache window (5 minutes) returns the cached result. After cache eviction, retries return `SEQUENCE_GAP`—use `GetClientState` to recover.
 
 ## Client Requirements
 

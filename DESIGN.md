@@ -234,6 +234,9 @@ Each vault maintains its own logical blockchain within a namespace. Physically, 
 
 ```rust
 /// Per-vault block (logical view, extracted from ShardBlock for verification)
+/// Implementation note: VaultBlock wraps BlockHeader (which excludes leader_id for
+/// deterministic hashing) plus transactions. The leader_id is stored in ShardBlock
+/// and populated when extracting VaultBlock via extract_vault_block().
 struct VaultBlock {
     // Identity
     height: u64,
@@ -252,9 +255,9 @@ struct VaultBlock {
 
     // Metadata
     timestamp: DateTime<Utc>,
-    leader_id: NodeId,
 
     // Raft integration (from containing ShardBlock)
+    leader_id: NodeId,        // Populated from ShardBlock during extraction
     term: u64,
     committed_index: u64,
 }
@@ -298,7 +301,7 @@ Ledger operates under strict **determinism requirements** for Raft consensus—a
 
 **Sequence counter storage:**
 
-Sequence counters are stored in `_system` namespace as entities:
+Sequence counters are logically modeled as entities in `_system` namespace with these key patterns:
 
 ```
 Key: "_meta:seq:namespace"    → next NamespaceId (int64), starts at 1 (0 = _system)
@@ -307,6 +310,8 @@ Key: "_meta:seq:user"         → next UserId (int64)
 Key: "_meta:seq:user_email"   → next UserEmailId (int64)
 Key: "_meta:seq:email_verify" → next TokenId (int64)
 ```
+
+**Implementation note:** The current implementation stores these counters in an in-memory `SequenceCounters` struct within the Raft `AppliedState`, which is persisted as part of Raft snapshots. This provides the same guarantees (leader-assigned, deterministic replay, survives restarts) with lower per-allocation overhead than entity lookups.
 
 **Reserved IDs:**
 
@@ -631,7 +636,7 @@ struct VaultCommitment {
     bucket_roots: [Hash; 256],
 
     /// Buckets modified since last state_root computation
-    dirty_buckets: BitSet<256>,
+    dirty_buckets: BTreeSet<u8>,  // Ordered set for deterministic iteration
 }
 
 impl ShardState {
@@ -788,10 +793,10 @@ tx_hash = SHA-256(
     sequence            || # u64, big-endian
     actor_len           || # u32, little-endian
     actor               || # UTF-8 bytes
+    op_count            || # u32, little-endian
+    operations          || # Operation data hashed inline (see op_hash below)
     timestamp_secs      || # i64, big-endian
-    timestamp_nanos     || # u32, big-endian
-    op_count            || # u32, big-endian
-    operations             # Concatenated operation hashes (32 bytes each)
+    timestamp_nanos        # u32, big-endian
 )
 ```
 
@@ -801,23 +806,13 @@ tx_hash = SHA-256(
 op_hash = SHA-256(op_type || op_data)
 
 # op_type: single byte
-#   0x01 = SetEntity
-#   0x02 = DeleteEntity
-#   0x03 = ExpireEntity
-#   0x04 = CreateRelationship
-#   0x05 = DeleteRelationship
+#   0x01 = CreateRelationship
+#   0x02 = DeleteRelationship
+#   0x03 = SetEntity
+#   0x04 = DeleteEntity
+#   0x05 = ExpireEntity
 
 # op_data varies by type:
-
-SetEntity:
-    key_len (u32 LE) || key || value_len (u32 LE) || value ||
-    expires_at (u64 BE, 0 = never) || condition_type (u8) || condition_data
-
-DeleteEntity:
-    key_len (u32 LE) || key
-
-ExpireEntity:
-    key_len (u32 LE) || key || expired_at (u64 BE)
 
 CreateRelationship:
     resource_len (u32 LE) || resource ||
@@ -828,15 +823,25 @@ DeleteRelationship:
     resource_len (u32 LE) || resource ||
     relation_len (u32 LE) || relation ||
     subject_len (u32 LE) || subject
+
+SetEntity:
+    key_len (u32 LE) || key || value_len (u32 LE) || value ||
+    condition_type (u8) || condition_data || expires_at (u64 BE, 0 = never)
+
+DeleteEntity:
+    key_len (u32 LE) || key
+
+ExpireEntity:
+    key_len (u32 LE) || key || expired_at (u64 BE)
 ```
 
 **Condition types** for SetEntity:
 
-- `0x00` = None
-- `0x01` = MustNotExist
-- `0x02` = MustExist
-- `0x03` = VersionEquals (followed by u64 BE version)
-- `0x04` = ValueEquals (followed by u32 LE length + bytes)
+- `0x00` = None (no condition)
+- `0x01` = MustNotExist (key must not exist; for create-only operations)
+- `0x02` = MustExist (key must exist; for safe updates)
+- `0x03` = VersionEquals (followed by u64 BE version; for optimistic locking)
+- `0x04` = ValueEquals (followed by u32 LE length + bytes; for exact state assertions)
 
 #### Transaction Merkle Tree
 
@@ -1175,7 +1180,7 @@ struct BatchConfig {
     max_batch_size: usize,        // Default: 100
 
     /// Maximum wait time for first transaction in batch
-    max_batch_delay: Duration,    // Default: 5ms
+    max_batch_delay: Duration,    // Default: 2ms
 
     /// Commit immediately when queue drains to zero
     eager_commit: bool,           // Default: true
@@ -1244,7 +1249,7 @@ let interactive_vault = BatchConfig {
 
 | Workload              | max_batch_size | max_batch_delay | eager_commit |
 | --------------------- | -------------- | --------------- | ------------ |
-| Interactive (default) | 50             | 2ms             | true         |
+| Interactive (default) | 100            | 2ms             | true         |
 | Batch import          | 500            | 20ms            | false        |
 | Real-time sync        | 10             | 1ms             | true         |
 
@@ -3631,6 +3636,7 @@ message SetCondition {
     bool not_exists = 1;     // Only set if key doesn't exist
     uint64 version = 2;      // Only set if version matches
     bytes value_equals = 3;  // Only set if current value matches
+    bool must_exist = 4;     // Only set if key exists (safe updates)
   }
 }
 ```
@@ -3638,6 +3644,7 @@ message SetCondition {
 | Condition      | Use Case                                         | Error Code         |
 | -------------- | ------------------------------------------------ | ------------------ |
 | `not_exists`   | Create-only operations, unique constraints       | `KEY_EXISTS`       |
+| `must_exist`   | Safe updates requiring key to exist              | `KEY_NOT_FOUND`    |
 | `version`      | Optimistic locking, concurrent update protection | `VERSION_MISMATCH` |
 | `value_equals` | Exact state assertions                           | `VALUE_MISMATCH`   |
 
@@ -3695,7 +3702,7 @@ Ledger uses a two-tier error strategy:
 
 | Error Type      | Codes                                                                                   | Purpose                   |
 | --------------- | --------------------------------------------------------------------------------------- | ------------------------- |
-| `WriteError`    | `KEY_EXISTS`, `VERSION_MISMATCH`, `VALUE_MISMATCH`, `ALREADY_COMMITTED`, `SEQUENCE_GAP` | CAS failures, idempotency |
+| `WriteError`    | `KEY_EXISTS`, `KEY_NOT_FOUND`, `VERSION_MISMATCH`, `VALUE_MISMATCH`, `ALREADY_COMMITTED`, `SEQUENCE_GAP` | CAS failures, idempotency |
 | `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                    | Historical read failures  |
 
 **Rationale**: gRPC status codes handle failures before the request reaches domain logic. Response-level errors convey actionable domain state (current version, committed tx_id) that clients need for intelligent retry.
