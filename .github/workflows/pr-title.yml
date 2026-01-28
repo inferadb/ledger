@@ -29,7 +29,8 @@ jobs:
       !startsWith(github.event.pull_request.title, 'revert') &&
       !startsWith(github.event.pull_request.title, 'dx') &&
       !startsWith(github.event.pull_request.title, 'ai') &&
-      !startsWith(github.event.pull_request.title, 'imp')
+      !startsWith(github.event.pull_request.title, 'imp') &&
+      !startsWith(github.event.pull_request.title, 'release')
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
@@ -66,7 +67,7 @@ jobs:
               }
             }
             // Generic fallback for other bots
-            else if (!title.match(/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?:/)) {
+            else if (!title.match(/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|release)(\(.+\))?:/)) {
               newTitle = `chore: ${title.toLowerCase()}`;
             }
 
