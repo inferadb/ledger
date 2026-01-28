@@ -18,13 +18,13 @@ kubectl -n inferadb logs -f ledger-0
 
 ## Components
 
-| File              | Description                                       |
-| ----------------- | ------------------------------------------------- |
-| namespace.yaml    | Dedicated namespace for isolation                 |
-| service.yaml      | Headless service (peer discovery) + client access |
-| statefulset.yaml  | StatefulSet with PVC for persistent storage       |
-| pdb.yaml          | PodDisruptionBudget to maintain Raft quorum       |
-| kustomization.yaml| Kustomize configuration                           |
+| File               | Description                                       |
+| ------------------ | ------------------------------------------------- |
+| namespace.yaml     | Dedicated namespace for isolation                 |
+| service.yaml       | Headless service (peer discovery) + client access |
+| statefulset.yaml   | StatefulSet with PVC for persistent storage       |
+| pdb.yaml           | PodDisruptionBudget to maintain Raft quorum       |
+| kustomization.yaml | Kustomize configuration                           |
 
 ## How Discovery Works
 
@@ -41,10 +41,10 @@ Edit `statefulset.yaml`:
 
 ```yaml
 spec:
-  replicas: 5  # Must be odd for Raft quorum
+  replicas: 5 # Must be odd for Raft quorum
 ```
 
-Update `INFERADB__LEDGER__BOOTSTRAP_EXPECT` to match.
+Update `INFERADB__LEDGER__CLUSTER` to match.
 
 ### Change Storage
 
@@ -53,7 +53,7 @@ Edit the `volumeClaimTemplates` in `statefulset.yaml`:
 ```yaml
 volumeClaimTemplates:
   - spec:
-      storageClassName: fast-ssd  # Your storage class
+      storageClassName: fast-ssd # Your storage class
       resources:
         requests:
           storage: 100Gi

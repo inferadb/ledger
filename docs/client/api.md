@@ -13,6 +13,7 @@ struct WriteRequest {
     client_id: ClientId,
     sequence: u64,
     operations: Vec<Operation>,
+    include_tx_proof: bool,     // Include transaction proof in response
 }
 
 enum Operation {

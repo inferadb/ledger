@@ -1034,8 +1034,16 @@ When a follower computes a `state_root` that differs from the block header:
 6. Continue replicating Raft log; store but don't apply diverged vault's entries
 
 ```rust
+// Public type (types crate) - exposed to clients
 #[derive(Debug, Clone, PartialEq)]
 enum VaultHealth {
+    Healthy,
+    Diverged { expected: Hash, computed: Hash, at_height: u64 },
+}
+
+// Internal type (raft crate) - tracks recovery state machine
+#[derive(Debug, Clone, PartialEq)]
+enum VaultHealthStatus {
     Healthy,
     Diverged { expected: Hash, computed: Hash, at_height: u64 },
     Recovering { started_at: i64, attempt: u8 },  // Unix timestamp
@@ -1200,9 +1208,10 @@ struct BatchConfig {
     max_batch_size: usize,        // Default: 100
 
     /// Maximum wait time for first transaction in batch
-    batch_timeout: Duration,    // Default: 2ms
+    batch_timeout: Duration,      // Default: 2ms (batching.rs) or 5ms (config.rs)
 
     /// Commit immediately when queue drains to zero
+    /// Note: Named `coalesce_enabled` in types/config.rs
     eager_commit: bool,           // Default: true
 }
 
@@ -1288,6 +1297,65 @@ Total p99:              ~10-15ms
 
 This meets the <50ms p99 target with margin.
 
+### Batch Writes
+
+BatchWrite provides atomic multi-operation transactions:
+
+```proto
+rpc BatchWrite(BatchWriteRequest) returns (BatchWriteResponse);
+
+message BatchWriteRequest {
+  NamespaceId namespace_id = 1;
+  optional VaultId vault_id = 2;           // All writes must target same scope
+  ClientId client_id = 3;                  // Batch-level idempotency
+  uint64 sequence = 4;                     // Batch-level sequence
+  repeated BatchWriteOperation operations = 5;
+  bool include_tx_proofs = 6;
+}
+
+message BatchWriteOperation {
+  repeated Operation operations = 1;       // Operations in this group
+}
+```
+
+**Atomicity semantics**:
+
+- All operations commit in a **single block** (shared `block_height` in response)
+- Operations apply in **array order** (`operations[0]` before `operations[1]`)
+- If **any** operation's condition fails, the **entire batch fails**
+- On failure, **no writes are applied**—vault state is unchanged
+
+**Idempotency**:
+
+- Uses **batch-level** `client_id`/`sequence` (not per-operation)
+- The entire batch is the idempotency unit
+- Retry with same `(client_id, sequence)` returns the original result
+- Per-operation `client_id`/`sequence` values are **ignored**
+
+**Response**:
+
+```proto
+message BatchWriteResponse {
+  oneof result {
+    BatchWriteSuccess success = 1;
+    WriteError error = 2;   // First failing operation; no writes applied
+  }
+}
+
+message BatchWriteSuccess {
+  TxId tx_id = 1;           // Single transaction ID for entire batch
+  uint64 block_height = 2;  // Block containing this transaction
+  optional BlockHeader block_header = 3;
+  optional MerkleProof tx_proof = 4;
+}
+```
+
+**Use cases**:
+
+- Multi-key CAS operations (read-modify-write across keys)
+- Ordered operations where later writes depend on earlier effects
+- Policy updates requiring atomic commit (e.g., revoke + grant)
+
 ### Read Path
 
 ```mermaid
@@ -1309,6 +1377,81 @@ Read options:
 - List resources: Get all resources matching a type prefix
 
 **VerifiedRead vs HistoricalRead**: Use `VerifiedRead(at_height)` when you need proofs for client-side verification. Use `HistoricalRead(include_proof=false)` for archival queries (audits, debugging) where proof generation adds unnecessary overhead.
+
+#### Batch Reads
+
+BatchRead amortizes network overhead when reading multiple keys:
+
+```proto
+rpc BatchRead(BatchReadRequest) returns (BatchReadResponse);
+
+message BatchReadRequest {
+  NamespaceId namespace_id = 1;
+  optional VaultId vault_id = 2;
+  repeated string keys = 3;           // Keys to read (max 1000)
+  ReadConsistency consistency = 4;    // Applied to all reads
+}
+
+message BatchReadResponse {
+  repeated BatchReadResult results = 1;
+  uint64 block_height = 2;            // Block height at time of read
+}
+
+message BatchReadResult {
+  string key = 1;
+  optional bytes value = 2;           // None if key not found
+  bool found = 3;                     // Explicit found flag for clarity
+}
+```
+
+**Constraints**:
+
+- Maximum 1000 keys per request
+- All keys must be in the same namespace/vault scope
+- Single consistency level applies to all reads
+- Results maintain request order (results[i] corresponds to keys[i])
+
+**Use cases**:
+
+- Bulk permission checks (verify multiple resources in one round-trip)
+- Cache warming after client reconnect
+- Batch entity lookups for UI rendering
+
+#### Block Retrieval
+
+For sync, catchup, and audit scenarios:
+
+```proto
+// Get single block by height
+rpc GetBlock(GetBlockRequest) returns (GetBlockResponse);
+
+// Get multiple blocks for sync/catchup
+rpc GetBlockRange(GetBlockRangeRequest) returns (GetBlockRangeResponse);
+
+message GetBlockRangeRequest {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  uint64 start_height = 3;  // First block (inclusive)
+  uint64 end_height = 4;    // Last block (inclusive), max range: 1000
+}
+
+message GetBlockRangeResponse {
+  repeated Block blocks = 1;  // Ordered by height ascending
+  uint64 current_tip = 2;     // Current chain tip
+}
+```
+
+**Constraints**:
+
+- Maximum 1000 blocks per GetBlockRange request
+- Blocks returned in ascending height order
+- `current_tip` indicates if more blocks exist beyond the requested range
+
+**Use cases**:
+
+- Client sync after disconnect (fetch missed blocks)
+- Audit trail reconstruction
+- Cross-datacenter replication
 
 #### Query Operations
 
@@ -1354,6 +1497,11 @@ struct PageToken {
     last_key: Vec<u8>,     // Position: last key returned
     at_height: u64,        // Consistent reads: height when pagination started
     query_hash: [u8; 8],   // SeaHash of query params (prevents filter changes)
+}
+
+// Wire format wraps token with HMAC for tamper detection
+struct EncodedToken {
+    token: PageToken,
     hmac: [u8; 16],        // HMAC-SHA256 truncated (prevents tampering)
 }
 ```
@@ -1673,13 +1821,13 @@ async fn delete_namespace(namespace_id: NamespaceId) -> Result<(), Error> {
 
 **Current implementation status:**
 
-| Feature                     | Status            | Notes                             |
-| --------------------------- | ----------------- | --------------------------------- |
-| Create with explicit shard  | ✓ Implemented     | `CreateNamespace(name, shard_id)` |
-| Load-based shard assignment | ✗ Not implemented | Defaults to shard 0               |
-| Namespace migration         | ✗ Not implemented | Planned for future                |
-| Suspension/billing hold     | ✗ Not implemented | Planned for future                |
-| Deletion cascade            | Partial           | Requires manual vault deletion    |
+| Feature                     | Status            | Notes                                         |
+| --------------------------- | ----------------- | --------------------------------------------- |
+| Create with explicit shard  | ✓ Implemented     | `CreateNamespace(name, shard_id)`             |
+| Load-based shard assignment | ✓ Implemented     | Least-namespaces strategy, lowest-id tiebreak |
+| Namespace migration         | ✗ Not implemented | Planned for future                            |
+| Suspension/billing hold     | ✗ Not implemented | Planned for future                            |
+| Deletion cascade            | Partial           | Requires manual vault deletion                |
 
 **Design note**: The `NamespaceStatus` enum defines five states (Active, Migrating, Suspended, Deleting, Deleted) for future extensibility. Currently, only Active and Deleted are used. The internal model uses a simple `deleted: bool` flag rather than the full enum.
 
@@ -1724,6 +1872,270 @@ Deletion:
 
 - Mark vault as deleted (metadata operation)
 - After retention period: garbage collect chain + state, or archive to cold storage for compliance
+
+### Admin Service
+
+The AdminService gRPC service provides namespace management, vault management, cluster membership, and maintenance operations.
+
+#### Namespace Management
+
+```proto
+// Create a new namespace. NamespaceId is leader-assigned.
+rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+
+// Delete a namespace (fails if vaults exist)
+rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+
+// Get namespace info including shard assignment
+rpc GetNamespace(GetNamespaceRequest) returns (GetNamespaceResponse);
+
+// List all namespaces (paginated)
+rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+```
+
+**CreateNamespace:**
+
+```proto
+message CreateNamespaceRequest {
+  string name = 1;                  // Human-readable name (e.g., "acme_corp")
+  optional ShardId shard_id = 2;    // Target shard (auto-assigned if not specified)
+}
+
+message CreateNamespaceResponse {
+  NamespaceId namespace_id = 1;     // Leader-assigned from _meta:seq:namespace
+  ShardId shard_id = 2;             // Assigned shard
+}
+```
+
+**GetNamespace:**
+
+```proto
+message GetNamespaceRequest {
+  oneof lookup {
+    NamespaceId namespace_id = 1;   // Lookup by ID
+    string name = 2;                // Lookup by name
+  }
+}
+
+message GetNamespaceResponse {
+  NamespaceId namespace_id = 1;
+  string name = 2;
+  ShardId shard_id = 3;             // Which shard hosts this namespace
+  repeated NodeId member_nodes = 4; // Nodes in the shard
+  NamespaceStatus status = 5;       // ACTIVE, MIGRATING, SUSPENDED, DELETING, DELETED
+  uint64 config_version = 6;        // For cache invalidation
+}
+```
+
+**ListNamespaces:**
+
+```proto
+message ListNamespacesRequest {
+  optional bytes page_token = 1;
+  uint32 page_size = 2;             // Default: 100, Max: 1000
+}
+```
+
+#### Vault Management
+
+```proto
+// Create a new vault. VaultId is leader-assigned.
+rpc CreateVault(CreateVaultRequest) returns (CreateVaultResponse);
+
+// Delete a vault (marks for garbage collection)
+rpc DeleteVault(DeleteVaultRequest) returns (DeleteVaultResponse);
+
+// Get vault info
+rpc GetVault(GetVaultRequest) returns (GetVaultResponse);
+
+// List all vaults on this node
+rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
+```
+
+**CreateVault:**
+
+```proto
+message CreateVaultRequest {
+  NamespaceId namespace_id = 1;
+  uint32 replication_factor = 2;
+  repeated NodeId initial_nodes = 3;
+  optional BlockRetentionPolicy retention_policy = 4;  // Default: FULL
+}
+
+message CreateVaultResponse {
+  VaultId vault_id = 1;             // Leader-assigned from _meta:seq:vault
+  BlockHeader genesis = 2;          // Genesis block header
+}
+
+enum BlockRetentionMode {
+  BLOCK_RETENTION_MODE_FULL = 1;      // Keep all blocks indefinitely
+  BLOCK_RETENTION_MODE_COMPACTED = 2; // Remove tx bodies after snapshot
+}
+```
+
+**GetVault:**
+
+```proto
+message GetVaultResponse {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  uint64 height = 3;                // Current chain height
+  Hash state_root = 4;              // Current state root
+  repeated NodeId nodes = 5;        // Nodes hosting this vault
+  NodeId leader = 6;                // Current Raft leader
+  VaultStatus status = 7;           // ACTIVE, READ_ONLY, DELETED
+  BlockRetentionPolicy retention_policy = 8;
+}
+```
+
+#### Cluster Membership
+
+```proto
+// Request to join an existing cluster (called by new node)
+rpc JoinCluster(JoinClusterRequest) returns (JoinClusterResponse);
+
+// Gracefully leave the cluster
+rpc LeaveCluster(LeaveClusterRequest) returns (LeaveClusterResponse);
+
+// Get current cluster membership
+rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
+
+// Get node identity (available before cluster formation)
+rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
+```
+
+**JoinCluster:**
+
+```proto
+message JoinClusterRequest {
+  uint64 node_id = 1;               // Numeric node ID for Raft
+  string address = 2;               // gRPC address (e.g., "10.0.0.5:50051")
+}
+
+message JoinClusterResponse {
+  bool success = 1;
+  string message = 2;               // Error details if !success
+  uint64 leader_id = 3;             // Current leader (for redirect)
+  string leader_address = 4;        // Leader's gRPC address
+}
+```
+
+**GetClusterInfo:**
+
+```proto
+message GetClusterInfoResponse {
+  repeated ClusterMember members = 1;
+  uint64 leader_id = 2;
+  uint64 term = 3;                  // Current Raft term
+}
+
+message ClusterMember {
+  uint64 node_id = 1;
+  string address = 2;
+  ClusterMemberRole role = 3;       // VOTER or LEARNER
+  bool is_leader = 4;
+}
+```
+
+**GetNodeInfo:**
+
+```proto
+message GetNodeInfoResponse {
+  uint64 node_id = 1;               // Snowflake ID (auto-generated, persisted)
+  string address = 2;               // gRPC address
+  bool is_cluster_member = 3;       // True if already in a cluster
+  uint64 term = 4;                  // Current Raft term (0 if not in cluster)
+}
+```
+
+#### Maintenance Operations
+
+```proto
+// Trigger snapshot
+rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+// Run integrity check
+rpc CheckIntegrity(CheckIntegrityRequest) returns (CheckIntegrityResponse);
+
+// Recover a diverged vault by replaying blocks from archive
+rpc RecoverVault(RecoverVaultRequest) returns (RecoverVaultResponse);
+
+// Simulate vault divergence for testing (requires test-utils feature)
+rpc SimulateDivergence(SimulateDivergenceRequest) returns (SimulateDivergenceResponse);
+
+// Force garbage collection for expired entities (leader only)
+rpc ForceGc(ForceGcRequest) returns (ForceGcResponse);
+```
+
+**CreateSnapshot:**
+
+```proto
+message CreateSnapshotRequest {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+}
+
+message CreateSnapshotResponse {
+  uint64 block_height = 1;          // Snapshot height
+  Hash state_root = 2;              // State root at snapshot
+  string snapshot_path = 3;         // Local path to snapshot file
+}
+```
+
+**CheckIntegrity:**
+
+```proto
+message CheckIntegrityRequest {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  bool full_check = 3;              // Replay from genesis vs quick check
+}
+
+message CheckIntegrityResponse {
+  bool healthy = 1;
+  repeated IntegrityIssue issues = 2;
+}
+
+message IntegrityIssue {
+  uint64 block_height = 1;
+  string issue_type = 2;            // "chain_break", "state_divergence", etc.
+  string description = 3;
+}
+```
+
+**RecoverVault:**
+
+```proto
+message RecoverVaultRequest {
+  NamespaceId namespace_id = 1;
+  VaultId vault_id = 2;
+  bool force = 3;                   // Force recovery even if vault is healthy
+}
+
+message RecoverVaultResponse {
+  bool success = 1;
+  string message = 2;
+  VaultHealthProto health_status = 3;  // HEALTHY, DIVERGED, RECOVERING
+  uint64 final_height = 4;
+  Hash final_state_root = 5;
+}
+```
+
+**ForceGc:**
+
+```proto
+message ForceGcRequest {
+  optional NamespaceId namespace_id = 1;  // If omitted, cluster-wide GC
+  optional VaultId vault_id = 2;
+}
+
+message ForceGcResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 expired_count = 3;         // Entities removed
+  uint64 vaults_scanned = 4;        // Vaults processed
+}
+```
 
 ### Performance Characteristics
 
@@ -2754,12 +3166,13 @@ This section documents the file system layout, storage backends, and data organi
 
 ### Directory Layout
 
-Each node uses a single data directory with databases per concern:
+Each node uses a data directory with databases per concern. Two layouts exist:
+
+**Single-shard mode** (bootstrap.rs, default):
 
 ```
 /var/lib/ledger/
-├── node.toml                    # Node configuration (optional)
-├── node_id                      # Persisted Snowflake node identity
+├── node_id                      # Persisted node identity
 ├── state.db                     # State machine (entities, relationships, metadata)
 ├── blocks.db                    # Block archive (VaultBlocks)
 ├── raft.db                      # Raft log entries and vote state
@@ -2768,14 +3181,33 @@ Each node uses a single data directory with databases per concern:
     └── 000002000.snap           # Snapshot at height 2000
 ```
 
+**Multi-shard mode** (multi_raft.rs):
+
+```
+/var/lib/ledger/
+├── node_id                      # Persisted node identity (shared)
+└── shards/
+    ├── _system/                 # System namespace (shard 0)
+    │   ├── state.db
+    │   ├── blocks.db
+    │   ├── raft.db
+    │   └── snapshots/
+    └── shard_0001/              # User shard
+        ├── state.db
+        ├── blocks.db
+        ├── raft.db
+        └── snapshots/
+```
+
+> **Note**: Configuration is via CLI arguments and environment variables (`INFERADB__LEDGER__*` prefix), not config files.
+
 **Key design decisions:**
 
-| Decision              | Rationale                                                         |
-| --------------------- | ----------------------------------------------------------------- |
-| Flat directory layout | Simple deployment; all databases at same level                    |
-| Separate databases    | Raft log is append-heavy; state is random-access heavy            |
-| Single block archive  | B+ tree storage with height-indexed lookup; no segment management |
-| Snapshots by height   | Predictable naming; simple retention policy                       |
+| Decision            | Rationale                                                        |
+| ------------------- | ---------------------------------------------------------------- |
+| Separate databases  | Raft log is append-heavy; state is random-access heavy           |
+| Per-shard isolation | Each shard has independent Raft state and snapshots              |
+| Snapshots by height | Predictable naming (`{height:09}.snap`); simple retention policy |
 
 ### Storage Backend: inferadb-ledger-store
 
