@@ -47,13 +47,15 @@ See [Configuration Reference](docs/operations/deployment.md#configuration-refere
 
 ## Quick Start
 
-```bash
-# Development or single-server deployment
-inferadb-ledger --data /var/lib/ledger --single
+- Development or single-server deployment:
+  ```bash
+  inferadb-ledger --data /var/lib/ledger --single
+  ```
 
-# Production cluster (run on each of 3 nodes)
-inferadb-ledger --data /var/lib/ledger --cluster 3 --peers ledger.example.com
-```
+- Production cluster (run on each of 3 nodes)
+  ```bash
+  inferadb-ledger --data /var/lib/ledger --cluster 3 --peers ledger.example.com
+  ```
 
 For clusters, `--peers` tells each node how to find the others. The format is auto-detected:
 
