@@ -14,36 +14,21 @@
 
 [InferaDB](https://inferadb.com) Ledger is a distributed blockchain database optimized for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently. Ledger is the persistent storage layer used by the [InferaDB Engine](https://github.com/inferadb/engine) and [InferaDB Control](https://github.com/inferadb/control).
 
-- [Features](#Features)
-- [Installation](#Installation)
-- [Quick Start](#Quick-Start)
-- [Development](#Development)
-- [Design](#Design)
-- [Community](#Community)
-- [License](#License)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Documentation](#documentation)
+- [Community](#community)
+- [License](#license)
 
 ## Features
 
-- **Cryptographic Verification** — Per-vault blockchain with chain-linked state roots, Merkle proofs, SHA-256 commitments
-- **Raft Consensus** — Strong consistency, automatic leader election, deterministic state recovery
-- **Performance** — Sub-millisecond reads, <50ms p99 writes, bucket-based O(k) state roots, batched transactions
-- **Multi-Tenancy** — Namespace isolation, multiple vaults per namespace, shard groups for scaling
-- **Storage** — Embedded ACID database, hybrid K/V + merkle architecture, tiered snapshots
-
-## Installation
-
-## Configuration
-
-| CLI         | Purpose                                                                                                | Default           |
-| ----------- | ------------------------------------------------------------------------------------------------------ | ----------------- |
-| `--listen`  | Bind address for gRPC API                                                                              | `127.0.0.1:50051` |
-| `--data`    | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)              | _(ephemeral)_     |
-| `--single`  | Development or single-server deployment ([details](docs/operations/deployment.md#single-node-cluster)) |                   |
-| `--join`    | Add this server to an existing cluster ([details](docs/operations/deployment.md#adding-a-node))        |                   |
-| `--cluster` | Start a new N-node cluster ([details](docs/operations/deployment.md#multi-node-cluster-3-nodes))       | `3`               |
-| `--peers`   | How to [find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or file path    | _(disabled)_      |
-
-See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
+- **Sub-millisecond Reads** — O(1) lookups via B+ tree indexes, no merkle overhead on hot path
+- **Cryptographic Auditability** — Per-vault blockchain with chain-linked state roots, SHA-256 commitments, tamper-evident history
+- **Strong Consistency** — Raft consensus ensures permission changes are immediately visible cluster-wide
+- **Fault Isolation** — Per-vault chains prevent failures from cascading across tenants
+- **Horizontal Scaling** — Shard groups distribute namespaces across independent Raft clusters
 
 ## Quick Start
 
@@ -59,14 +44,27 @@ inferadb-ledger --data /var/lib/ledger --single
 inferadb-ledger --data /var/lib/ledger --cluster 3 --peers ledger.example.com
 ```
 
-For clusters, `--peers` tells each node how to find the others. The format is auto-detected:
+For clusters, `--peers` tells each node how to find the others. Pass one of:
 
 - **DNS domain** (e.g., `ledger.example.com`) — looks up A records
 - **File path** (e.g., `/var/lib/ledger/peers.json`) — reads addresses from JSON
 
 See the [deployment guide](docs/operations/deployment.md) for multi-node setup, Kubernetes, adding/removing nodes, backup, and recovery.
 
-## Development
+## Configuration
+
+| CLI         | Purpose                                                                                                | Default           |
+| ----------- | ------------------------------------------------------------------------------------------------------ | ----------------- |
+| `--listen`  | Bind address for gRPC API                                                                              | `127.0.0.1:50051` |
+| `--data`    | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)              | _(ephemeral)_     |
+| `--single`  | Development or single-server deployment ([details](docs/operations/deployment.md#single-node-cluster)) |                   |
+| `--join`    | Add this server to an existing cluster ([details](docs/operations/deployment.md#adding-a-node))        |                   |
+| `--cluster` | Start a new N-node cluster ([details](docs/operations/deployment.md#multi-node-cluster-3-nodes))       | `3`               |
+| `--peers`   | How to [find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or file path    | _(disabled)_      |
+
+See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
+
+## Contributing
 
 ### Prerequisites
 
@@ -90,9 +88,10 @@ just build
 just test
 ```
 
-## Design
+## Documentation
 
-See [DESIGN.md](DESIGN.md) for details on block structure, state root computation, ID generation, historical reads, multi-vault isolation, and shard group scaling.
+- [WHITEPAPER.md](WHITEPAPER.md) — Architecture overview, performance characteristics, comparison with alternatives
+- [DESIGN.md](DESIGN.md) — Problem statement, goals/non-goals, trade-off analysis, architectural decisions, success criteria
 
 ## Community
 
