@@ -34,13 +34,13 @@
 
 ## Configuration
 
-| CLI           | Purpose                                                                                                         | Default           |
-| ------------- | --------------------------------------------------------------------------------------------------------------- | ----------------- |
-| `--listen`    | Bind address for gRPC API                                                                                       | `127.0.0.1:50051` |
-| `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                       | (ephemeral)       |
+| CLI           | Purpose                                                                                                             | Default           |
+| ------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `--listen`    | Bind address for gRPC API                                                                                           | `127.0.0.1:50051` |
+| `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                           | (ephemeral)       |
 | `--expect`    | Nodes to wait for before [bootstrapping](docs/operations/deployment.md#cluster-setup) (`1`=solo, `0`=join existing) | `3`               |
-| `--discovery` | [Kubernetes](docs/operations/deployment.md#dns-based-discovery-production--kubernetes): find peers via DNS      | (disabled)        |
-| `--join`      | [Static peers](docs/operations/deployment.md#multi-node-cluster-3-nodes): JSON file with node addresses         | (disabled)        |
+| `--discovery` | [Kubernetes](docs/operations/deployment.md#dns-based-discovery-production--kubernetes): find peers via DNS          | (disabled)        |
+| `--join`      | [Static peers](docs/operations/deployment.md#multi-node-cluster-3-nodes): JSON file with node addresses             | (disabled)        |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 
