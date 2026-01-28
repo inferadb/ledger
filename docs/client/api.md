@@ -253,6 +253,10 @@ struct PageToken {
     last_key: Vec<u8>,
     at_height: u64,        // Consistent reads
     query_hash: [u8; 8],   // Prevents filter changes
+}
+
+struct EncodedToken {
+    token: PageToken,
     hmac: [u8; 16],        // Prevents tampering
 }
 ```

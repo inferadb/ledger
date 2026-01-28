@@ -23,7 +23,7 @@ The current implementation uses a unified database approach rather than per-shar
 | ---------------------- | -------------------------------------------------- |
 | Unified database files | Custom Inkwell B+ tree engine with MVCC            |
 | Table-based storage    | 15 tables for different data types (see tables.rs) |
-| Dual-slot commit       | Atomic commits without traditional WAL overhead    |
+| Dual-slot commit       | Atomic commits using header slot flipping          |
 | Snapshots by height    | Predictable naming; simple retention policy        |
 
 ## Database Backend

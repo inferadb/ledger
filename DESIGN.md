@@ -270,6 +270,7 @@ struct Transaction {
     id: TxId,                 // Unique transaction ID
     client_id: ClientId,      // Identifies submitting client
     sequence: u64,            // Monotonic per-client (for idempotency)
+    actor: String,            // Actor identifier for audit logging
     operations: Vec<Operation>,
     timestamp: DateTime<Utc>,
 }
@@ -280,9 +281,17 @@ enum Operation {
     DeleteRelationship { resource: String, relation: String, subject: String },
 
     // Entity operations (Control)
-    SetEntity { key: String, value: Bytes, expires_at: Option<u64> },
+    SetEntity { key: String, value: Bytes, condition: Option<SetCondition>, expires_at: Option<u64> },
     DeleteEntity { key: String },
     ExpireEntity { key: String, expired_at: u64 },  // GC-initiated, distinct from delete
+}
+
+/// Conditional write conditions for optimistic locking.
+enum SetCondition {
+    MustNotExist,            // Key must not exist (create-only)
+    MustExist,               // Key must exist (safe updates)
+    VersionEquals(u64),      // Key version must equal value (optimistic locking)
+    ValueEquals(Vec<u8>),    // Key value must equal bytes (exact state assertions)
 }
 ```
 
@@ -1126,7 +1135,12 @@ Recovery behavior (exponential backoff with base=5s, max=300s):
 
 Backoff formula: `base_delay × 2^(attempt-1)`, capped at 300 seconds.
 
-After 3 failed attempts, the vault remains in `Recovering` state and emits `vault_recovery_exhausted{vault_id}`. Operators must investigate the root cause before manually triggering recovery via `ledger-admin recover-vault <vault_id> --force`.
+After 3 failed attempts, the vault remains in `Recovering` state and emits `vault_recovery_exhausted{vault_id}`. Operators must investigate the root cause before manually triggering recovery via:
+
+```bash
+grpcurl -plaintext -d '{"namespace_id": {"id": X}, "vault_id": {"id": Y}, "force": true}' \
+  localhost:50051 ledger.v1.AdminService/RecoverVault
+```
 
 **Determinism requirements:**
 
@@ -1186,7 +1200,7 @@ struct BatchConfig {
     max_batch_size: usize,        // Default: 100
 
     /// Maximum wait time for first transaction in batch
-    max_batch_delay: Duration,    // Default: 2ms
+    batch_timeout: Duration,    // Default: 2ms
 
     /// Commit immediately when queue drains to zero
     eager_commit: bool,           // Default: true
@@ -1197,7 +1211,7 @@ impl Leader {
         loop {
             // Wait for first transaction
             let first_tx = self.pending.recv().await;
-            let deadline = Instant::now() + self.config.max_batch_delay;
+            let deadline = Instant::now() + self.config.batch_timeout;
 
             let mut batch = vec![first_tx];
 
@@ -1239,25 +1253,25 @@ struct VaultConfig {
 // High-throughput vault (batch processing)
 let batch_vault = BatchConfig {
     max_batch_size: 500,
-    max_batch_delay: Duration::from_millis(20),
+    batch_timeout: Duration::from_millis(20),
     eager_commit: false,
 };
 
 // Low-latency vault (interactive)
 let interactive_vault = BatchConfig {
     max_batch_size: 50,
-    max_batch_delay: Duration::from_millis(2),
+    batch_timeout: Duration::from_millis(2),
     eager_commit: true,
 };
 ```
 
 **Tuning guidance**:
 
-| Workload              | max_batch_size | max_batch_delay | eager_commit |
-| --------------------- | -------------- | --------------- | ------------ |
-| Interactive (default) | 100            | 2ms             | true         |
-| Batch import          | 500            | 20ms            | false        |
-| Real-time sync        | 10             | 1ms             | true         |
+| Workload              | max_batch_size | batch_timeout | eager_commit |
+| --------------------- | -------------- | ------------- | ------------ |
+| Interactive (default) | 100            | 2ms           | true         |
+| Batch import          | 500            | 20ms          | false        |
+| Real-time sync        | 10             | 1ms           | true         |
 
 **Latency breakdown** (single transaction, eager commit):
 
@@ -1598,6 +1612,76 @@ async fn list_all_entities(vault: VaultId, at_height: u64) -> Result<Vec<Entity>
 - Configure retention window > expected pagination duration
 - Default: 10,000 blocks (~8 hours at 3s/block) provides ample margin
 - For long-running queries, clients should use `WatchBlocks` to maintain local state
+
+### Namespace Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active: CreateNamespace
+    Active --> Deleted: DeleteNamespace
+    Deleted --> [*]: (tombstone)
+
+    note right of Active: Accepting requests
+    note right of Deleted: All vaults must be deleted first
+```
+
+**Creation:**
+
+```rust
+async fn create_namespace(name: String, shard_id: Option<ShardId>) -> NamespaceId {
+    // 1. Leader assigns next sequential NamespaceId
+    let namespace_id = state.sequences.next_namespace();
+
+    // 2. Assign to specified shard or default shard 0
+    let assigned_shard = shard_id.unwrap_or(ShardId(0));
+
+    // 3. Create NamespaceMeta and persist
+    let meta = NamespaceMeta {
+        namespace_id,
+        name,
+        shard_id: assigned_shard,
+        deleted: false,
+    };
+
+    // 4. Write to _system namespace for routing
+    state_layer.set_namespace_registry(namespace_id, NamespaceRegistry { ... });
+
+    namespace_id
+}
+```
+
+**Deletion:**
+
+```rust
+async fn delete_namespace(namespace_id: NamespaceId) -> Result<(), Error> {
+    // 1. Verify no active vaults exist
+    let has_vaults = state.vaults.iter().any(|((ns, _), v)|
+        *ns == namespace_id && !v.deleted);
+
+    if has_vaults {
+        return Err(Error::NamespaceHasActiveVaults);
+    }
+
+    // 2. Mark as deleted (tombstone)
+    if let Some(ns) = state.namespaces.get_mut(&namespace_id) {
+        ns.deleted = true;
+    }
+
+    Ok(())
+}
+```
+
+**Current implementation status:**
+
+| Feature                     | Status            | Notes                             |
+| --------------------------- | ----------------- | --------------------------------- |
+| Create with explicit shard  | ✓ Implemented     | `CreateNamespace(name, shard_id)` |
+| Load-based shard assignment | ✗ Not implemented | Defaults to shard 0               |
+| Namespace migration         | ✗ Not implemented | Planned for future                |
+| Suspension/billing hold     | ✗ Not implemented | Planned for future                |
+| Deletion cascade            | Partial           | Requires manual vault deletion    |
+
+**Design note**: The `NamespaceStatus` enum defines five states (Active, Migrating, Suspended, Deleting, Deleted) for future extensibility. Currently, only Active and Deleted are used. The internal model uses a simple `deleted: bool` flag rather than the full enum.
 
 ### Vault Lifecycle
 
@@ -1995,12 +2079,15 @@ struct EmailVerificationToken {
     used_at: Option<DateTime<Utc>>,
 }
 
+/// Namespace lifecycle states (extensible enum)
+/// Note: Currently only Active and Deleted are implemented.
+/// Other states are reserved for future features.
 enum NamespaceStatus {
-    Active,     // Accepting requests
-    Migrating,  // Being migrated to another shard
-    Suspended,  // Billing or policy suspension
-    Deleting,   // Deletion in progress
-    Deleted,    // Tombstone
+    Active,     // Accepting requests (implemented)
+    Migrating,  // Being migrated to another shard (reserved)
+    Suspended,  // Billing or policy suspension (reserved)
+    Deleting,   // Deletion in progress (reserved)
+    Deleted,    // Tombstone (implemented)
 }
 
 struct NamespaceRegistry {
@@ -2680,51 +2767,34 @@ This section documents the file system layout, storage backends, and data organi
 
 ### Directory Layout
 
-Each node uses a single data directory with subdirectories per concern:
+Each node uses a single data directory with databases per concern:
 
 ```
 /var/lib/ledger/
-├── node.toml                    # Node configuration
-├── node_id                      # Persisted node identity (UUID)
-├── shards/
-│   ├── _system/                 # System Raft group
-│   │   ├── raft/                # Openraft storage
-│   │   │   ├── log.db         # Raft log entries
-│   │   │   └── vote             # Current term + voted_for
-│   │   ├── state.db           # State machine (system registry)
-│   │   └── snapshots/
-│   │       ├── 000001000.snap   # Snapshot at height 1000
-│   │       └── 000002000.snap   # Snapshot at height 2000
-│   ├── shard_0001/              # User shard group
-│   │   ├── raft/
-│   │   │   ├── log.db
-│   │   │   └── vote
-│   │   ├── state.db           # State for all vaults in shard
-│   │   ├── blocks/
-│   │   │   ├── segment_000000.blk   # Blocks 0-9999
-│   │   │   ├── segment_000001.blk   # Blocks 10000-19999
-│   │   │   └── segment_000002.blk   # Blocks 20000-...
-│   │   └── snapshots/
-│   │       └── ...
-│   └── shard_0002/
-│       └── ...
-└── tmp/                         # Temporary files (snapshot staging)
+├── node.toml                    # Node configuration (optional)
+├── node_id                      # Persisted Snowflake node identity
+├── state.db                     # State machine (entities, relationships, metadata)
+├── blocks.db                    # Block archive (VaultBlocks)
+├── raft.db                      # Raft log entries and vote state
+└── snapshots/                   # State snapshots for recovery
+    ├── 000001000.snap           # Snapshot at height 1000
+    └── 000002000.snap           # Snapshot at height 2000
 ```
 
 **Key design decisions:**
 
-| Decision                    | Rationale                                                  |
-| --------------------------- | ---------------------------------------------------------- |
-| Per-shard directories       | Matches Raft group boundaries; independent failure domains |
-| Separate raft/ and state.db | Raft log is append-heavy; state is random-access heavy     |
-| Block segments              | Append-only writes; easy archival of old segments          |
-| Snapshots by height         | Predictable naming; simple retention policy                |
+| Decision              | Rationale                                                         |
+| --------------------- | ----------------------------------------------------------------- |
+| Flat directory layout | Simple deployment; all databases at same level                    |
+| Separate databases    | Raft log is append-heavy; state is random-access heavy            |
+| Single block archive  | B+ tree storage with height-indexed lookup; no segment management |
+| Snapshots by height   | Predictable naming; simple retention policy                       |
 
 ### Storage Backend: inferadb-ledger-store
 
-inferadb-ledger-store is our custom B+ tree storage engine providing ACID transactions with MVCC. Each shard uses two inferadb-ledger-store databases:
+inferadb-ledger-store is our custom B+ tree storage engine providing ACID transactions with MVCC. Each node uses three inferadb-ledger-store databases:
 
-**raft/log.db** — Raft log storage:
+**raft.db** — Raft log storage:
 
 ```rust
 // Tables in log.db
@@ -2840,110 +2910,69 @@ fn make_key(vault_id: VaultId, key: &[u8]) -> Vec<u8> {
 
 ### Block Archive Format
 
-Blocks are stored in append-only segment files for efficient sequential writes and easy archival:
+Blocks are stored in a B+ tree database (`blocks.db`) for efficient height-indexed lookup:
 
 ```rust
-const SEGMENT_SIZE: u64 = 10_000;  // Blocks per segment
-
-struct BlockArchive {
-    shard_dir: PathBuf,
-    current_segment: Option<SegmentWriter>,
+/// Block archive uses inferadb-ledger-store for primary storage.
+struct BlockArchive<B: StorageBackend> {
+    db: Arc<Database<B>>,
 }
 
-struct SegmentWriter {
-    file: File,
-    segment_id: u64,
-    index: Vec<BlockIndex>,  // In-memory index for segment
-}
+impl<B: StorageBackend> BlockArchive<B> {
+    /// Append a block to the archive.
+    pub fn append_block(&self, block: ShardBlock) -> Result<(), BlockArchiveError> {
+        let mut txn = self.db.begin_write().context(TransactionSnafu)?;
+        let data = bincode::serialize(&block).context(SerializationSnafu)?;
+        txn.insert::<Blocks>(block.shard_height, &data).context(InsertSnafu)?;
 
-struct BlockIndex {
-    vault_id: VaultId,
-    height: u64,
-    offset: u64,
-    length: u32,
-}
-
-impl BlockArchive {
-    fn segment_path(&self, segment_id: u64) -> PathBuf {
-        self.shard_dir.join("blocks")
-            .join(format!("segment_{:06}.blk", segment_id))
-    }
-
-    async fn append_block(&mut self, block: &ShardBlock) -> Result<()> {
-        let segment_id = block.shard_height / SEGMENT_SIZE;
-
-        // Rotate segment if needed
-        if self.current_segment.as_ref().map(|s| s.segment_id) != Some(segment_id) {
-            self.rotate_segment(segment_id).await?;
-        }
-
-        let writer = self.current_segment.as_mut().unwrap();
-
-        // Append block with length prefix
-        let data = serialize(block)?;
-        let offset = writer.file.seek(SeekFrom::End(0))?;
-
-        writer.file.write_all(&(data.len() as u32).to_le_bytes())?;
-        writer.file.write_all(&data)?;
-        writer.file.sync_data()?;
-
-        // Update index for each vault entry
+        // Update vault block index for O(1) vault height lookups
         for entry in &block.vault_entries {
-            writer.index.push(BlockIndex {
-                vault_id: entry.vault_id,
-                height: entry.vault_height,
-                offset,
-                length: data.len() as u32 + 4,
-            });
+            let key = VaultBlockIndexKey::new(
+                entry.namespace_id,
+                entry.vault_id,
+                entry.vault_height,
+            );
+            txn.insert::<VaultBlockIndex>(key.to_bytes(), block.shard_height)
+                .context(InsertSnafu)?;
         }
 
+        txn.commit().context(CommitSnafu)?;
         Ok(())
     }
 
-    async fn read_block(&self, shard_height: u64) -> Result<ShardBlock> {
-        let segment_id = shard_height / SEGMENT_SIZE;
-        let segment_path = self.segment_path(segment_id);
+    /// Read a block by shard height.
+    pub fn read_block(&self, shard_height: u64) -> Result<Option<ShardBlock>, BlockArchiveError> {
+        let txn = self.db.begin_read().context(TransactionSnafu)?;
+        let data = txn.get::<Blocks>(shard_height).context(ReadSnafu)?;
+        match data {
+            Some(bytes) => {
+                let block = bincode::deserialize(&bytes).context(DeserializationSnafu)?;
+                Ok(Some(block))
+            }
+            None => Ok(None),
+        }
+    }
 
-        // Load segment index (cached in practice)
-        let index = self.load_segment_index(segment_id)?;
-
-        let block_offset = shard_height % SEGMENT_SIZE;
-        let entry = &index[block_offset as usize];
-
-        let mut file = File::open(segment_path)?;
-        file.seek(SeekFrom::Start(entry.offset))?;
-
-        let mut len_buf = [0u8; 4];
-        file.read_exact(&mut len_buf)?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        let mut data = vec![0u8; len];
-        file.read_exact(&mut data)?;
-
-        deserialize(&data)
+    /// Look up shard height for a vault block.
+    pub fn get_shard_height(
+        &self,
+        namespace_id: i64,
+        vault_id: i64,
+        vault_height: u64,
+    ) -> Result<Option<u64>, BlockArchiveError> {
+        let txn = self.db.begin_read().context(TransactionSnafu)?;
+        let key = VaultBlockIndexKey::new(namespace_id, vault_id, vault_height);
+        txn.get::<VaultBlockIndex>(key.to_bytes()).context(ReadSnafu)
     }
 }
 ```
 
-**Segment file format:**
+**Storage tables:**
 
-```
-┌──────────────────────────────────────────────────────┐
-│ Block 0: [length: u32][ShardBlock bytes...]          │
-│ Block 1: [length: u32][ShardBlock bytes...]          │
-│ ...                                                  │
-│ Block 9999: [length: u32][ShardBlock bytes...]       │
-└──────────────────────────────────────────────────────┘
-```
-
-**Index file** (`.idx`): Stored alongside each segment for fast block lookup without scanning:
-
-```
-┌──────────────────────────────────────────────────────┐
-│ Entry 0: [vault_id: u64][height: u64][offset: u64]   │
-│ Entry 1: ...                                         │
-└──────────────────────────────────────────────────────┘
-```
+| Table             | Key Format                                  | Value                 |
+| ----------------- | ------------------------------------------- | --------------------- |
+| `blocks`          | `shard_height: u64`                         | Serialized ShardBlock |
+| `vault_block_idx` | `(namespace_id, vault_id, vault_height)` BE | `shard_height: u64`   |
 
 ### Snapshot Format
 
@@ -2994,50 +3023,49 @@ impl Node {
         // 1. Load node identity
         let node_id = self.load_or_create_node_id()?;
 
-        // 2. Discover shards from directory structure
-        for shard_dir in self.data_dir.join("shards").read_dir()? {
-            let shard_id = parse_shard_id(&shard_dir.file_name())?;
+        // 2. Open databases
+        let state_db = Database::open(self.data_dir.join("state.db"))?;
+        let blocks_db = Database::open(self.data_dir.join("blocks.db"))?;
+        let raft_storage = RaftLogStore::open(self.data_dir.join("raft.db"))?;
 
-            // 3. Recover Raft state
-            let raft_storage = RaftLogStore::open(shard_dir.join("raft/log.db"))?;
-            let vote = raft_storage.read_vote().await?;
-            let log_state = raft_storage.get_log_state().await?;
+        // 3. Recover Raft state
+        let vote = raft_storage.read_vote().await?;
+        let log_state = raft_storage.get_log_state().await?;
 
-            // 4. Find latest valid snapshot
-            let snapshot = self.find_latest_snapshot(&shard_dir)?;
+        // 4. Find latest valid snapshot
+        let snapshot = self.find_latest_snapshot()?;
 
-            // 5. Load state from snapshot
-            let mut state = if let Some(snap) = snapshot {
-                StateTree::from_snapshot(&snap)?
-            } else {
-                StateTree::empty()
-            };
+        // 5. Load state from snapshot
+        let mut state = if let Some(snap) = snapshot {
+            StateTree::from_snapshot(&snap)?
+        } else {
+            StateTree::empty()
+        };
 
-            // 6. Replay committed log entries after snapshot
-            let start_index = snapshot.map(|s| s.shard_height + 1).unwrap_or(0);
-            for entry in raft_storage.read_range(start_index..)? {
-                if entry.log_id.index <= log_state.last_purged_log_id.index {
-                    continue;  // Already in snapshot
-                }
-                state.apply(&entry.payload)?;
+        // 6. Replay committed log entries after snapshot
+        let start_index = snapshot.map(|s| s.height + 1).unwrap_or(0);
+        for entry in raft_storage.read_range(start_index..)? {
+            if entry.log_id.index <= log_state.last_purged_log_id.index {
+                continue;  // Already in snapshot
             }
-
-            // 7. Verify state root matches last committed block
-            let last_block = self.block_archive.read_block(log_state.last_log_id.index)?;
-            for vault_entry in &last_block.vault_entries {
-                let computed = state.compute_state_root(vault_entry.vault_id)?;
-                if computed != vault_entry.state_root {
-                    return Err(Error::StateRootMismatch {
-                        vault_id: vault_entry.vault_id,
-                        expected: vault_entry.state_root,
-                        computed,
-                    });
-                }
-            }
-
-            // 8. Initialize Raft and join cluster
-            self.start_raft(shard_id, raft_storage, state).await?;
+            state.apply(&entry.payload)?;
         }
+
+        // 7. Verify state root matches last committed block
+        let last_block = self.block_archive.read_block(log_state.last_log_id.index)?;
+        for vault_entry in &last_block.vault_entries {
+            let computed = state.compute_state_root(vault_entry.vault_id)?;
+            if computed != vault_entry.state_root {
+                return Err(Error::StateRootMismatch {
+                    vault_id: vault_entry.vault_id,
+                    expected: vault_entry.state_root,
+                    computed,
+                });
+            }
+        }
+
+        // 8. Initialize Raft and join cluster
+        self.start_raft(raft_storage, state).await?;
 
         Ok(())
     }
@@ -3046,13 +3074,13 @@ impl Node {
 
 **Recovery guarantees:**
 
-| Failure Mode         | Recovery Action                                                |
-| -------------------- | -------------------------------------------------------------- |
-| Clean shutdown       | Replay from last snapshot + committed log                      |
-| Crash during write   | Incomplete inferadb-ledger-store txn rolled back automatically |
-| Corrupted snapshot   | Skip to older snapshot, replay more log                        |
-| Corrupted log entry  | Fetch from peer, or rebuild from snapshot                      |
-| Missing segment file | Fetch from peer (block archive is replicated)                  |
+| Failure Mode        | Recovery Action                                                |
+| ------------------- | -------------------------------------------------------------- |
+| Clean shutdown      | Replay from last snapshot + committed log                      |
+| Crash during write  | Incomplete inferadb-ledger-store txn rolled back automatically |
+| Corrupted snapshot  | Skip to older snapshot, replay more log                        |
+| Corrupted log entry | Fetch from peer, or rebuild from snapshot                      |
+| Missing block       | Fetch from peer (block archive is replicated)                  |
 
 ### File Locking
 
@@ -3939,37 +3967,48 @@ struct Transaction {
 }
 ```
 
-### Persistent Sequence Tracking
+### Sequence Tracking Architecture
 
-The leader maintains persistent sequence state per client (not a time-based window):
+The leader maintains two-tier tracking per client:
 
 ```rust
-struct ClientState {
-    last_committed_seq: u64,
-    last_committed_tx_id: TxId,           // For ALREADY_COMMITTED recovery
-    last_committed_block_height: u64,     // For ALREADY_COMMITTED recovery
-    // Bounded LRU cache for full response replay
-    recent_responses: LruCache<u64, WriteResponse>,  // max 1000 entries
+/// Persistent state (survives leader failover)
+/// Stored in AppliedState, replicated via Raft
+struct PersistentClientState {
+    last_committed_seq: u64,  // Only the sequence number is persisted
+}
+
+/// In-memory cache (lost on failover)
+/// TinyLFU cache with TTL eviction
+struct IdempotencyCache {
+    entries: moka::Cache<ClientKey, CachedResult>,  // max 10,000 entries, 5-minute TTL
+}
+
+struct CachedResult {
+    sequence: u64,
+    response: WriteSuccess,  // Full response for replay
 }
 ```
 
 **Sequence validation rules:**
 
-| Condition                       | Response                                      | Rationale                              |
-| ------------------------------- | --------------------------------------------- | -------------------------------------- |
-| `seq <= last_committed_seq`     | Return cached response or `ALREADY_COMMITTED` | Duplicate/retry                        |
-| `seq == last_committed_seq + 1` | Process transaction                           | Expected next                          |
-| `seq > last_committed_seq + 1`  | Reject with `SEQUENCE_GAP`                    | Gap indicates client bug or lost state |
+| Condition                       | Response                     | Rationale                              |
+| ------------------------------- | ---------------------------- | -------------------------------------- |
+| `seq <= last_committed_seq`     | Return cached `WriteSuccess` | Duplicate/retry                        |
+| `seq == last_committed_seq + 1` | Process transaction          | Expected next                          |
+| `seq > last_committed_seq + 1`  | Reject with `SEQUENCE_GAP`   | Gap indicates client bug or lost state |
 
 **Duplicate handling (`seq <= last_committed_seq`):**
 
-1. If response is in LRU cache → return cached `WriteSuccess` (identical to original)
-2. If response is evicted → return `WriteError` with:
-   - `code = ALREADY_COMMITTED`
-   - `committed_tx_id` = from durable `ClientState.last_committed_tx_id`
-   - `committed_block_height` = from durable `ClientState.last_committed_block_height`
+1. If response is in cache → return cached `WriteSuccess` (identical to original)
+2. If cache miss (TTL expired or leader failover) → process as new write with same sequence
 
-Note: The server durably stores the last committed transaction's identity (not just the sequence number), enabling recovery even after LRU eviction. Storage cost is O(clients), not O(transactions).
+**Important**: The in-memory cache does NOT survive leader failover. After failover:
+
+- Sequence tracking is preserved (persisted via Raft)
+- Retry of a committed transaction may succeed as a "new" write
+- The new write is logically idempotent (same client_id + sequence creates same-shaped response)
+- Client receives a new `tx_id` (not the original)
 
 **Gap handling (`seq > last_committed_seq + 1`):**
 
@@ -3987,13 +4026,15 @@ Return `WriteError` with:
 
 ### Retry Behavior
 
-| Scenario             | Client Action                           | Server Response                                                             |
-| -------------------- | --------------------------------------- | --------------------------------------------------------------------------- |
-| Network timeout      | Retry with same `(client_id, sequence)` | Idempotent: cached `WriteSuccess` or `ALREADY_COMMITTED` with recovery data |
-| `SEQUENCE_GAP` error | Call `GetClientState`, resume sequence  | Reject until client uses correct next sequence                              |
-| Success              | Increment sequence for next write       | N/A                                                                         |
+| Scenario             | Client Action                           | Server Response                                            |
+| -------------------- | --------------------------------------- | ---------------------------------------------------------- |
+| Network timeout      | Retry with same `(client_id, sequence)` | Cached `WriteSuccess` if in cache, else new `WriteSuccess` |
+| `SEQUENCE_GAP` error | Call `GetClientState`, resume sequence  | Reject until client uses correct next sequence             |
+| Success              | Increment sequence for next write       | N/A                                                        |
 
-**Exactly-once semantics**: Retrying any previously-committed sequence returns the cached result (if in LRU) or `ALREADY_COMMITTED` with `committed_tx_id` and `committed_block_height` (if evicted). Either way, the client can proceed knowing the write succeeded.
+**At-least-once delivery guarantee**: The server returns cached responses when available, providing effectively idempotent behavior during normal operation. After cache expiry or leader failover, retries succeed as new writes but produce logically equivalent results (same data written).
+
+**Failover behavior**: Clients should be prepared to receive different `tx_id` values when retrying after leader failover. The operation outcome is idempotent (same state change), even though the transaction identifiers differ.
 
 ### Sequence Number Rules
 
@@ -4006,9 +4047,11 @@ Return `WriteError` with:
 
 **Server guarantees:**
 
-1. Never accept `sequence <= last_committed_seq` as new transaction
-2. Reject gaps (`sequence > last_committed_seq + 1`) to catch client bugs early
-3. Persist `last_committed_seq` as part of vault state (survives leader failover)
+1. Reject gaps (`sequence > last_committed_seq + 1`) to catch client bugs early
+2. Persist `last_committed_seq` as part of vault state (survives leader failover)
+3. Return cached responses when available (within cache TTL on same leader)
+
+**Note**: Duplicates (`sequence <= last_committed_seq`) return cached responses when in cache, or succeed as new writes after cache expiry. The strict duplicate rejection model is relaxed for operational simplicity—idempotency is achieved through write semantics rather than strict deduplication.
 
 ### Client Recovery
 
@@ -4507,9 +4550,13 @@ async fn list_user_orgs(user_id: UserId) -> Vec<OrgSummary> {
 
 **Triggering**:
 
-- Time-based: Every 1 hour
-- Size-based: Every 10,000 blocks
-- Manual: On-demand via admin API
+| Trigger    | Status            | Description                                 |
+| ---------- | ----------------- | ------------------------------------------- |
+| Manual     | ✓ Implemented     | On-demand via `AdminService.CreateSnapshot` |
+| Time-based | ✗ Not implemented | Planned: Every 1 hour (configurable)        |
+| Size-based | ✗ Not implemented | Planned: Every 10,000 blocks                |
+
+**Current behavior**: Snapshots are created manually or internally by OpenRaft for replication. Automatic periodic snapshotting is not yet implemented. Configuration fields `snapshot_interval` and `snapshot_threshold` exist but are not actively used.
 
 **Contents**:
 
