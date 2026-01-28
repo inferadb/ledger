@@ -296,7 +296,7 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 | ------------- | --------------------------------- | ----------------- | ----------------------------------------- |
 | `--listen`    | `INFERADB__LEDGER__LISTEN_ADDR`   | `127.0.0.1:50051` | Host and port to accept connections       |
 | `--data`      | `INFERADB__LEDGER__DATA_DIR`      | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
-| `--bootstrap` | `INFERADB__LEDGER__BOOTSTRAP_EXPECT` | `3`            | Cluster size (1=solo, 2+=cluster, 0=join) |
+| `--expect`    | `INFERADB__LEDGER__BOOTSTRAP_EXPECT` | `3`            | Nodes to wait for before bootstrapping (1=solo, 0=join existing) |
 | `--metrics`   | `INFERADB__LEDGER__METRICS_ADDR`  | (disabled)        | Expose Prometheus metrics at this address |
 
 ### Discovery Options

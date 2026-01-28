@@ -38,7 +38,7 @@
 | ------------- | --------------------------------------------------------------------------------------------------------------- | ----------------- |
 | `--listen`    | Bind address for gRPC API                                                                                       | `127.0.0.1:50051` |
 | `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                       | (ephemeral)       |
-| `--bootstrap` | `1`=single node, `N`=wait for N nodes, `0`=join existing ([guide](docs/operations/deployment.md#cluster-setup)) | `3`               |
+| `--expect`    | Nodes to wait for before [bootstrapping](docs/operations/deployment.md#cluster-setup) (`1`=solo, `0`=join existing) | `3`               |
 | `--discovery` | [Kubernetes](docs/operations/deployment.md#dns-based-discovery-production--kubernetes): find peers via DNS      | (disabled)        |
 | `--join`      | [Static peers](docs/operations/deployment.md#multi-node-cluster-3-nodes): JSON file with node addresses         | (disabled)        |
 
@@ -49,7 +49,7 @@ See [Configuration Reference](docs/operations/deployment.md#configuration-refere
 ### Run a Single Node
 
 ```bash
-inferadb-ledger --data /var/lib/ledger --bootstrap 1
+inferadb-ledger --data /var/lib/ledger --expect 1
 ```
 
 ### Run Multiple Nodes
@@ -68,20 +68,20 @@ cat > /tmp/peers.json << 'EOF'
 EOF
 ```
 
-Then start each node in separate terminals. Each node needs `--bootstrap N` (where N is the minimum expected cluster size) and use the `--join` argument to coordinate peers.
+Then start each node in separate terminals with `--expect 3` (wait for 3 nodes) and `--join` pointing to the peer file:
 
 ```bash
 # Node 1
 inferadb-ledger --listen 127.0.0.1:50051 --data /tmp/ledger-1 \
-  --bootstrap 3 --join /tmp/peers.json
+  --expect 3 --join /tmp/peers.json
 
 # Node 2
 inferadb-ledger --listen 127.0.0.1:50052 --data /tmp/ledger-2 \
-  --bootstrap 3 --join /tmp/peers.json
+  --expect 3 --join /tmp/peers.json
 
 # Node 3
 inferadb-ledger --listen 127.0.0.1:50053 --data /tmp/ledger-3 \
-  --bootstrap 3 --join /tmp/peers.json
+  --expect 3 --join /tmp/peers.json
 ```
 
 Nodes discover each other, coordinate, and the lowest-ID node bootstraps the cluster.
@@ -101,15 +101,15 @@ Then start each node with `--discovery`:
 ```bash
 # On 192.168.1.101
 inferadb-ledger --listen 192.168.1.101:50051 --data /var/lib/ledger \
-  --bootstrap 3 --discovery ledger.example.com
+  --expect 3 --discovery ledger.example.com
 
 # On 192.168.1.102
 inferadb-ledger --listen 192.168.1.102:50051 --data /var/lib/ledger \
-  --bootstrap 3 --discovery ledger.example.com
+  --expect 3 --discovery ledger.example.com
 
 # On 192.168.1.103
 inferadb-ledger --listen 192.168.1.103:50051 --data /var/lib/ledger \
-  --bootstrap 3 --discovery ledger.example.com
+  --expect 3 --discovery ledger.example.com
 ```
 
 For Kubernetes, use a [headless Service](docs/operations/deployment.md#dns-based-discovery-production--kubernetes) which automatically creates DNS records for each pod.
