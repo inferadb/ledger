@@ -128,15 +128,22 @@ impl AdminService for AdminServiceImpl {
         };
 
         match ns_meta {
-            Some(ns) => Ok(Response::new(GetNamespaceResponse {
-                namespace_id: Some(NamespaceId { id: ns.namespace_id }),
-                name: ns.name,
-                shard_id: Some(ShardId { id: ns.shard_id }),
-                member_nodes: vec![],
-                leader_hint: None,
-                config_version: 0,
-                status: crate::proto::NamespaceStatus::Active.into(),
-            })),
+            Some(ns) => {
+                let status = if ns.deleted {
+                    crate::proto::NamespaceStatus::Deleted
+                } else {
+                    crate::proto::NamespaceStatus::Active
+                };
+                Ok(Response::new(GetNamespaceResponse {
+                    namespace_id: Some(NamespaceId { id: ns.namespace_id }),
+                    name: ns.name,
+                    shard_id: Some(ShardId { id: ns.shard_id }),
+                    member_nodes: vec![],
+                    status: status.into(),
+                    config_version: 0,
+                    created_at: None,
+                }))
+            },
             None => Err(ServiceError::not_found("Namespace", "unknown").into()),
         }
     }
@@ -149,14 +156,21 @@ impl AdminService for AdminServiceImpl {
             .applied_state
             .list_namespaces()
             .into_iter()
-            .map(|ns| crate::proto::GetNamespaceResponse {
-                namespace_id: Some(NamespaceId { id: ns.namespace_id }),
-                name: ns.name,
-                shard_id: Some(ShardId { id: ns.shard_id }),
-                member_nodes: vec![],
-                leader_hint: None,
-                config_version: 0,
-                status: crate::proto::NamespaceStatus::Active.into(),
+            .map(|ns| {
+                let status = if ns.deleted {
+                    crate::proto::NamespaceStatus::Deleted
+                } else {
+                    crate::proto::NamespaceStatus::Active
+                };
+                crate::proto::GetNamespaceResponse {
+                    namespace_id: Some(NamespaceId { id: ns.namespace_id }),
+                    name: ns.name,
+                    shard_id: Some(ShardId { id: ns.shard_id }),
+                    member_nodes: vec![],
+                    status: status.into(),
+                    config_version: 0,
+                    created_at: None,
+                }
             })
             .collect();
 

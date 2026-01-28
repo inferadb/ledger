@@ -1187,9 +1187,9 @@ impl AdminService for MockAdminService {
             name: data.name.clone(),
             shard_id: Some(proto::ShardId { id: data.shard_id }),
             member_nodes: vec![],
-            leader_hint: None,
-            config_version: 1,
             status: data.status,
+            config_version: 1,
+            created_at: None,
         }))
     }
 
@@ -1210,9 +1210,9 @@ impl AdminService for MockAdminService {
                 name: data.name.clone(),
                 shard_id: Some(proto::ShardId { id: data.shard_id }),
                 member_nodes: vec![],
-                leader_hint: None,
-                config_version: 1,
                 status: data.status,
+                config_version: 1,
+                created_at: None,
             })
             .collect();
 

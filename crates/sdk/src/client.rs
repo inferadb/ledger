@@ -185,8 +185,6 @@ pub struct NamespaceInfo {
     pub shard_id: u32,
     /// Node IDs of shard members (node IDs are strings).
     pub member_nodes: Vec<String>,
-    /// Hint for current leader (may be stale).
-    pub leader_hint: Option<String>,
     /// Configuration version number.
     pub config_version: u64,
     /// Current namespace status.
@@ -201,7 +199,6 @@ impl NamespaceInfo {
             name: proto.name,
             shard_id: proto.shard_id.map(|s| s.id).unwrap_or(0),
             member_nodes: proto.member_nodes.into_iter().map(|n| n.id).collect(),
-            leader_hint: proto.leader_hint.map(|n| n.id),
             config_version: proto.config_version,
             status: NamespaceStatus::from_proto(proto.status),
         }
@@ -3929,9 +3926,9 @@ mod tests {
                 proto::NodeId { id: "node-100".to_string() },
                 proto::NodeId { id: "node-101".to_string() },
             ],
-            leader_hint: Some(proto::NodeId { id: "node-100".to_string() }),
-            config_version: 5,
             status: proto::NamespaceStatus::Active as i32,
+            config_version: 5,
+            created_at: None,
         };
 
         let info = NamespaceInfo::from_proto(proto);
@@ -3940,7 +3937,6 @@ mod tests {
         assert_eq!(info.name, "test-namespace");
         assert_eq!(info.shard_id, 1);
         assert_eq!(info.member_nodes, vec!["node-100", "node-101"]);
-        assert_eq!(info.leader_hint, Some("node-100".to_string()));
         assert_eq!(info.config_version, 5);
         assert_eq!(info.status, NamespaceStatus::Active);
     }
@@ -3952,9 +3948,9 @@ mod tests {
             name: "minimal".to_string(),
             shard_id: None,
             member_nodes: vec![],
-            leader_hint: None,
-            config_version: 0,
             status: proto::NamespaceStatus::Unspecified as i32,
+            config_version: 0,
+            created_at: None,
         };
 
         let info = NamespaceInfo::from_proto(proto);
@@ -3963,7 +3959,6 @@ mod tests {
         assert_eq!(info.name, "minimal");
         assert_eq!(info.shard_id, 0);
         assert!(info.member_nodes.is_empty());
-        assert_eq!(info.leader_hint, None);
         assert_eq!(info.config_version, 0);
         assert_eq!(info.status, NamespaceStatus::Unspecified);
     }
@@ -4026,7 +4021,6 @@ mod tests {
             name: "test".to_string(),
             shard_id: 1,
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
-            leader_hint: Some("node-1".to_string()),
             config_version: 1,
             status: NamespaceStatus::Active,
         };

@@ -22,7 +22,7 @@ use crate::{
     proto::{
         AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
         GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry,
-        NodeCapabilities, NodeId, NodeInfo, PeerInfo, ShardId,
+        NodeId, NodeInfo, NodeRole, PeerInfo, ShardId,
         system_discovery_service_server::SystemDiscoveryService,
     },
     types::LedgerTypeConfig,
@@ -358,14 +358,25 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
 
         // Build node info from Raft membership
         let membership = metrics.membership_config.membership();
+        let voter_ids: std::collections::HashSet<_> =
+            membership.voter_ids().collect();
+
         let nodes: Vec<NodeInfo> = membership
             .nodes()
-            .map(|(id, node)| NodeInfo {
-                node_id: Some(NodeId { id: id.to_string() }),
-                addresses: vec![node.addr.clone()],
-                grpc_port: 5000,
-                capabilities: Some(NodeCapabilities { can_lead: true, max_vaults: 1000 }),
-                last_heartbeat: None,
+            .map(|(id, node)| {
+                let role = if voter_ids.contains(id) {
+                    NodeRole::Voter
+                } else {
+                    NodeRole::Learner
+                };
+                NodeInfo {
+                    node_id: Some(NodeId { id: id.to_string() }),
+                    addresses: vec![node.addr.clone()],
+                    grpc_port: 5000,
+                    role: role.into(),
+                    last_heartbeat: None,
+                    joined_at: None,
+                }
             })
             .collect();
 
@@ -373,18 +384,25 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
         let member_nodes: Vec<NodeId> =
             membership.nodes().map(|(id, _)| NodeId { id: id.to_string() }).collect();
 
-        let leader_hint = metrics.current_leader.map(|id| NodeId { id: id.to_string() });
-
         let namespaces: Vec<NamespaceRegistry> = self
             .applied_state
             .list_namespaces()
             .into_iter()
-            .map(|ns| NamespaceRegistry {
-                namespace_id: Some(NamespaceId { id: ns.namespace_id }),
-                shard_id: Some(ShardId { id: ns.shard_id }),
-                members: member_nodes.clone(),
-                leader_hint: leader_hint.clone(),
-                config_version: current_version,
+            .map(|ns| {
+                let status = if ns.deleted {
+                    crate::proto::NamespaceStatus::Deleted
+                } else {
+                    crate::proto::NamespaceStatus::Active
+                };
+                NamespaceRegistry {
+                    namespace_id: Some(NamespaceId { id: ns.namespace_id }),
+                    name: ns.name,
+                    shard_id: Some(ShardId { id: ns.shard_id }),
+                    members: member_nodes.clone(),
+                    status: status.into(),
+                    config_version: current_version,
+                    created_at: None,
+                }
             })
             .collect();
 

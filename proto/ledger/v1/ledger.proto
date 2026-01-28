@@ -44,33 +44,42 @@ message UserId {
   int64 id = 1;
 }
 
+// User account status (lifecycle state machine)
+enum UserStatus {
+  USER_STATUS_UNSPECIFIED = 0;
+  USER_STATUS_ACTIVE = 1;      // User can authenticate
+  USER_STATUS_PENDING_ORG = 2; // Pending organization creation (saga in progress)
+  USER_STATUS_SUSPENDED = 3;   // User cannot authenticate
+  USER_STATUS_DELETING = 4;    // Deletion cascade in progress
+  USER_STATUS_DELETED = 5;     // Tombstone for audit
+}
+
 // User record (stored in _system namespace as Entity with key "user:{id}")
 // Users can have multiple email addresses via separate UserEmail entities.
 // Namespace access is derived from membership records (member:{id} in each org namespace).
 // ID assigned by Ledger leader from sequence counter "_meta:seq:user"
 message User {
   UserId id = 1;
-  string name = 2; // Display name (1-200 characters)
-  string password_hash = 3; // Argon2id PHC string format (empty for passkey-only users)
-  google.protobuf.Timestamp created_at = 4;
-  google.protobuf.Timestamp updated_at = 5;
-  google.protobuf.Timestamp tos_accepted_at = 6; // When Terms of Service was accepted
-  google.protobuf.Timestamp deleted_at = 7; // Soft-delete timestamp (null if active)
-  bool disabled = 8; // Admin-disabled flag
-  int64 primary_email_id = 9; // References UserEmail.id (single source of truth)
+  string name = 2;              // Display name (1-200 characters)
+  int64 primary_email_id = 3;   // References UserEmail.id
+  UserStatus status = 4;        // Lifecycle state
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
 }
 
 // User email address (stored in _system namespace as Entity with key "user_email:{id}")
-// Each user can have multiple emails; primary is referenced by User.primary_email_id.
+// Each user can have multiple emails; primary is tracked by UserEmail.primary field.
 // Constraint: Primary email cannot be deleted (must reassign primary first).
 // Global email uniqueness is enforced via index: "_idx:email:{email}" → email_id
 // ID assigned by Ledger leader from sequence counter "_meta:seq:user_email"
 message UserEmail {
-  int64 id = 1; // Sequential ID (Ledger-assigned)
-  UserId user_id = 2; // Owning user
-  string email = 3; // Normalized to lowercase (max 320 chars per RFC 5321)
-  google.protobuf.Timestamp verified_at = 4; // When verified (null if unverified)
-  google.protobuf.Timestamp created_at = 5;
+  int64 id = 1;                 // Sequential ID (Ledger-assigned)
+  UserId user_id = 2;           // Owning user
+  string email = 3;             // Normalized to lowercase (max 320 chars per RFC 5321)
+  bool verified = 4;            // Whether email has been verified
+  bool primary = 5;             // Whether this is the user's primary email
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp verified_at = 7; // When verified (null if unverified)
 }
 
 // Email verification token (stored in _system namespace with TTL)
@@ -759,20 +768,24 @@ message GetNamespaceRequest {
 }
 
 // Namespace registry info (routing metadata from _system)
+// Note: leader_hint is computed dynamically from Raft state via GetSystemState
 message GetNamespaceResponse {
   NamespaceId namespace_id = 1;
   string name = 2;
-  ShardId shard_id = 3; // Which shard hosts this namespace
+  ShardId shard_id = 3;             // Which shard hosts this namespace
   repeated NodeId member_nodes = 4; // Nodes in the shard
-  optional NodeId leader_hint = 5; // May be stale
-  uint64 config_version = 6;
-  NamespaceStatus status = 7;
+  NamespaceStatus status = 5;       // Lifecycle state
+  uint64 config_version = 6;        // For cache invalidation
+  google.protobuf.Timestamp created_at = 7;
 }
 
 enum NamespaceStatus {
   NAMESPACE_STATUS_UNSPECIFIED = 0;
-  NAMESPACE_STATUS_ACTIVE = 1;
-  NAMESPACE_STATUS_DELETED = 2;
+  NAMESPACE_STATUS_ACTIVE = 1;    // Accepting requests
+  NAMESPACE_STATUS_MIGRATING = 2; // Being migrated to another shard
+  NAMESPACE_STATUS_SUSPENDED = 3; // Billing or policy suspension
+  NAMESPACE_STATUS_DELETING = 4;  // Deletion in progress
+  NAMESPACE_STATUS_DELETED = 5;   // Tombstone
 }
 
 message ListNamespacesRequest {
@@ -1100,6 +1113,13 @@ message GetSystemStateResponse {
   repeated NamespaceRegistry namespaces = 3; // Routing table: namespace → shard
 }
 
+// Node role in the cluster (Raft membership type)
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  NODE_ROLE_VOTER = 1;   // Participates in Raft elections (max 5 per cluster)
+  NODE_ROLE_LEARNER = 2; // Replicates data but doesn't vote (for scaling)
+}
+
 message NodeInfo {
   NodeId node_id = 1;
   // IP addresses only (no port). IPv4 or IPv6, e.g., ["10.0.0.1", "fd00::1"].
@@ -1107,22 +1127,21 @@ message NodeInfo {
   // Connect via: addresses[i] + ":" + grpc_port
   repeated string addresses = 2;
   uint32 grpc_port = 3; // gRPC port (same for all addresses), typically 5000
-  NodeCapabilities capabilities = 4;
+  NodeRole role = 4;    // Voter or Learner
   google.protobuf.Timestamp last_heartbeat = 5;
-}
-
-message NodeCapabilities {
-  bool can_lead = 1;
-  uint64 max_vaults = 2;
+  google.protobuf.Timestamp joined_at = 6; // For voter election ordering
 }
 
 // Routing entry: namespace → shard assignment
+// Note: leader_hint is computed dynamically from Raft state, not stored here
 message NamespaceRegistry {
   NamespaceId namespace_id = 1;
-  ShardId shard_id = 2; // Which Raft group hosts this namespace
-  repeated NodeId members = 3; // Nodes in the shard
-  optional NodeId leader_hint = 4; // May be stale
-  uint64 config_version = 5;
+  string name = 2;                // Human-readable namespace name
+  ShardId shard_id = 3;           // Which Raft group hosts this namespace
+  repeated NodeId members = 4;    // Nodes in the shard
+  NamespaceStatus status = 5;     // Lifecycle state
+  uint64 config_version = 6;      // For cache invalidation
+  google.protobuf.Timestamp created_at = 7;
 }
 
 // =============================================================================

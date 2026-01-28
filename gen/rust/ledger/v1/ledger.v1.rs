@@ -56,28 +56,19 @@ pub struct User {
     /// Display name (1-200 characters)
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
-    /// Argon2id PHC string format (empty for passkey-only users)
-    #[prost(string, tag="3")]
-    pub password_hash: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="4")]
-    pub created_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
-    #[prost(message, optional, tag="5")]
-    pub updated_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
-    /// When Terms of Service was accepted
-    #[prost(message, optional, tag="6")]
-    pub tos_accepted_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
-    /// Soft-delete timestamp (null if active)
-    #[prost(message, optional, tag="7")]
-    pub deleted_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
-    /// Admin-disabled flag
-    #[prost(bool, tag="8")]
-    pub disabled: bool,
-    /// References UserEmail.id (single source of truth)
-    #[prost(int64, tag="9")]
+    /// References UserEmail.id
+    #[prost(int64, tag="3")]
     pub primary_email_id: i64,
+    /// Lifecycle state
+    #[prost(enumeration="UserStatus", tag="4")]
+    pub status: i32,
+    #[prost(message, optional, tag="5")]
+    pub created_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
+    #[prost(message, optional, tag="6")]
+    pub updated_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
 }
 /// User email address (stored in _system namespace as Entity with key "user_email:{id}")
-/// Each user can have multiple emails; primary is referenced by User.primary_email_id.
+/// Each user can have multiple emails; primary is tracked by UserEmail.primary field.
 /// Constraint: Primary email cannot be deleted (must reassign primary first).
 /// Global email uniqueness is enforced via index: "_idx:email:{email}" → email_id
 /// ID assigned by Ledger leader from sequence counter "_meta:seq:user_email"
@@ -92,11 +83,17 @@ pub struct UserEmail {
     /// Normalized to lowercase (max 320 chars per RFC 5321)
     #[prost(string, tag="3")]
     pub email: ::prost::alloc::string::String,
-    /// When verified (null if unverified)
-    #[prost(message, optional, tag="4")]
-    pub verified_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
-    #[prost(message, optional, tag="5")]
+    /// Whether email has been verified
+    #[prost(bool, tag="4")]
+    pub verified: bool,
+    /// Whether this is the user's primary email
+    #[prost(bool, tag="5")]
+    pub primary: bool,
+    #[prost(message, optional, tag="6")]
     pub created_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
+    /// When verified (null if unverified)
+    #[prost(message, optional, tag="7")]
+    pub verified_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
 }
 /// Email verification token (stored in _system namespace with TTL)
 /// Key: "email_verify:{id}", Index: "_idx:email_verify:token:{token}" → token_id
@@ -955,6 +952,7 @@ pub mod get_namespace_request {
     }
 }
 /// Namespace registry info (routing metadata from _system)
+/// Note: leader_hint is computed dynamically from Raft state via GetSystemState
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetNamespaceResponse {
     #[prost(message, optional, tag="1")]
@@ -967,13 +965,14 @@ pub struct GetNamespaceResponse {
     /// Nodes in the shard
     #[prost(message, repeated, tag="4")]
     pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
-    /// May be stale
-    #[prost(message, optional, tag="5")]
-    pub leader_hint: ::core::option::Option<NodeId>,
+    /// Lifecycle state
+    #[prost(enumeration="NamespaceStatus", tag="5")]
+    pub status: i32,
+    /// For cache invalidation
     #[prost(uint64, tag="6")]
     pub config_version: u64,
-    #[prost(enumeration="NamespaceStatus", tag="7")]
-    pub status: i32,
+    #[prost(message, optional, tag="7")]
+    pub created_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListNamespacesRequest {
@@ -1370,34 +1369,38 @@ pub struct NodeInfo {
     /// gRPC port (same for all addresses), typically 5000
     #[prost(uint32, tag="3")]
     pub grpc_port: u32,
-    #[prost(message, optional, tag="4")]
-    pub capabilities: ::core::option::Option<NodeCapabilities>,
+    /// Voter or Learner
+    #[prost(enumeration="NodeRole", tag="4")]
+    pub role: i32,
     #[prost(message, optional, tag="5")]
     pub last_heartbeat: ::core::option::Option<super::super::google::protobuf::Timestamp>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct NodeCapabilities {
-    #[prost(bool, tag="1")]
-    pub can_lead: bool,
-    #[prost(uint64, tag="2")]
-    pub max_vaults: u64,
+    /// For voter election ordering
+    #[prost(message, optional, tag="6")]
+    pub joined_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
 }
 /// Routing entry: namespace → shard assignment
+/// Note: leader_hint is computed dynamically from Raft state, not stored here
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NamespaceRegistry {
     #[prost(message, optional, tag="1")]
     pub namespace_id: ::core::option::Option<NamespaceId>,
+    /// Human-readable namespace name
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
     /// Which Raft group hosts this namespace
-    #[prost(message, optional, tag="2")]
+    #[prost(message, optional, tag="3")]
     pub shard_id: ::core::option::Option<ShardId>,
     /// Nodes in the shard
-    #[prost(message, repeated, tag="3")]
+    #[prost(message, repeated, tag="4")]
     pub members: ::prost::alloc::vec::Vec<NodeId>,
-    /// May be stale
-    #[prost(message, optional, tag="4")]
-    pub leader_hint: ::core::option::Option<NodeId>,
-    #[prost(uint64, tag="5")]
+    /// Lifecycle state
+    #[prost(enumeration="NamespaceStatus", tag="5")]
+    pub status: i32,
+    /// For cache invalidation
+    #[prost(uint64, tag="6")]
     pub config_version: u64,
+    #[prost(message, optional, tag="7")]
+    pub created_at: ::core::option::Option<super::super::google::protobuf::Timestamp>,
 }
 /// Raft vote (term + node_id + committed flag).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1509,6 +1512,50 @@ pub struct RaftMembershipConfig {
     /// Map of node_id -> address
     #[prost(map="uint64, string", tag="1")]
     pub members: ::std::collections::HashMap<u64, ::prost::alloc::string::String>,
+}
+/// User account status (lifecycle state machine)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum UserStatus {
+    Unspecified = 0,
+    /// User can authenticate
+    Active = 1,
+    /// Pending organization creation (saga in progress)
+    PendingOrg = 2,
+    /// User cannot authenticate
+    Suspended = 3,
+    /// Deletion cascade in progress
+    Deleting = 4,
+    /// Tombstone for audit
+    Deleted = 5,
+}
+impl UserStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "USER_STATUS_UNSPECIFIED",
+            Self::Active => "USER_STATUS_ACTIVE",
+            Self::PendingOrg => "USER_STATUS_PENDING_ORG",
+            Self::Suspended => "USER_STATUS_SUSPENDED",
+            Self::Deleting => "USER_STATUS_DELETING",
+            Self::Deleted => "USER_STATUS_DELETED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "USER_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "USER_STATUS_ACTIVE" => Some(Self::Active),
+            "USER_STATUS_PENDING_ORG" => Some(Self::PendingOrg),
+            "USER_STATUS_SUSPENDED" => Some(Self::Suspended),
+            "USER_STATUS_DELETING" => Some(Self::Deleting),
+            "USER_STATUS_DELETED" => Some(Self::Deleted),
+            _ => None,
+        }
+    }
 }
 // =============================================================================
 // Merkle Proof Types
@@ -1664,8 +1711,16 @@ impl ReadErrorCode {
 #[repr(i32)]
 pub enum NamespaceStatus {
     Unspecified = 0,
+    /// Accepting requests
     Active = 1,
-    Deleted = 2,
+    /// Being migrated to another shard
+    Migrating = 2,
+    /// Billing or policy suspension
+    Suspended = 3,
+    /// Deletion in progress
+    Deleting = 4,
+    /// Tombstone
+    Deleted = 5,
 }
 impl NamespaceStatus {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1676,6 +1731,9 @@ impl NamespaceStatus {
         match self {
             Self::Unspecified => "NAMESPACE_STATUS_UNSPECIFIED",
             Self::Active => "NAMESPACE_STATUS_ACTIVE",
+            Self::Migrating => "NAMESPACE_STATUS_MIGRATING",
+            Self::Suspended => "NAMESPACE_STATUS_SUSPENDED",
+            Self::Deleting => "NAMESPACE_STATUS_DELETING",
             Self::Deleted => "NAMESPACE_STATUS_DELETED",
         }
     }
@@ -1684,6 +1742,9 @@ impl NamespaceStatus {
         match value {
             "NAMESPACE_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
             "NAMESPACE_STATUS_ACTIVE" => Some(Self::Active),
+            "NAMESPACE_STATUS_MIGRATING" => Some(Self::Migrating),
+            "NAMESPACE_STATUS_SUSPENDED" => Some(Self::Suspended),
+            "NAMESPACE_STATUS_DELETING" => Some(Self::Deleting),
             "NAMESPACE_STATUS_DELETED" => Some(Self::Deleted),
             _ => None,
         }
@@ -1848,6 +1909,38 @@ impl HealthStatus {
             "HEALTH_STATUS_HEALTHY" => Some(Self::Healthy),
             "HEALTH_STATUS_DEGRADED" => Some(Self::Degraded),
             "HEALTH_STATUS_UNAVAILABLE" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+/// Node role in the cluster (Raft membership type)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum NodeRole {
+    Unspecified = 0,
+    /// Participates in Raft elections (max 5 per cluster)
+    Voter = 1,
+    /// Replicates data but doesn't vote (for scaling)
+    Learner = 2,
+}
+impl NodeRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "NODE_ROLE_UNSPECIFIED",
+            Self::Voter => "NODE_ROLE_VOTER",
+            Self::Learner => "NODE_ROLE_LEARNER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "NODE_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+            "NODE_ROLE_VOTER" => Some(Self::Voter),
+            "NODE_ROLE_LEARNER" => Some(Self::Learner),
             _ => None,
         }
     }
