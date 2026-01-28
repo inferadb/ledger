@@ -16,7 +16,7 @@
 
 - [Features](#Features)
 - [Installation](#Installation)
-- [Quick Start](<#Quick Start>)
+- [Quick Start](#QuickStart)
 - [Development](#Development)
 - [Design](#Design)
 - [Community](#Community)
