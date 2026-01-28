@@ -21,8 +21,8 @@ use crate::{
     peer_tracker::PeerTracker,
     proto::{
         AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-        GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry,
-        NodeId, NodeInfo, NodeRole, PeerInfo, ShardId,
+        GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry, NodeId,
+        NodeInfo, NodeRole, PeerInfo, ShardId,
         system_discovery_service_server::SystemDiscoveryService,
     },
     types::LedgerTypeConfig,
@@ -358,17 +358,12 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
 
         // Build node info from Raft membership
         let membership = metrics.membership_config.membership();
-        let voter_ids: std::collections::HashSet<_> =
-            membership.voter_ids().collect();
+        let voter_ids: std::collections::HashSet<_> = membership.voter_ids().collect();
 
         let nodes: Vec<NodeInfo> = membership
             .nodes()
             .map(|(id, node)| {
-                let role = if voter_ids.contains(id) {
-                    NodeRole::Voter
-                } else {
-                    NodeRole::Learner
-                };
+                let role = if voter_ids.contains(id) { NodeRole::Voter } else { NodeRole::Learner };
                 NodeInfo {
                     node_id: Some(NodeId { id: id.to_string() }),
                     addresses: vec![node.addr.clone()],

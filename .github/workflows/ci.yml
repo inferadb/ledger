@@ -218,8 +218,6 @@ jobs:
             name: Linux AMD64
           - runner: ubuntu-24.04-arm
             name: Linux ARM64
-          - runner: macos-15-intel
-            name: macOS Intel
           - runner: macos-latest
             name: macOS Apple Silicon
     steps:
