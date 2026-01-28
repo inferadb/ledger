@@ -305,7 +305,7 @@ How nodes find each other. See [discovery internals](../internals/discovery.md) 
 
 | CLI          | Environment Variable                         | Default     | Description                           |
 | ------------ | -------------------------------------------- | ----------- | ------------------------------------- |
-| `--discovery`| `INFERADB__LEDGER__DISCOVERY_DOMAIN`         | (disabled)  | Find nodes via DNS (for Kubernetes)   |
+| `--discover`| `INFERADB__LEDGER__DISCOVERY_DOMAIN`         | (disabled)  | Find nodes via DNS (for Kubernetes)   |
 | `--join`     | `INFERADB__LEDGER__DISCOVERY_CACHE_PATH`     | (disabled)  | File listing nodes to connect to      |
 | `--join-ttl` | `INFERADB__LEDGER__DISCOVERY_CACHE_TTL_SECS` | `3600`      | How long cached node list stays valid |
 

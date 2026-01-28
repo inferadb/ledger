@@ -39,7 +39,7 @@
 | `--listen`    | Bind address for gRPC API                                                                                           | `127.0.0.1:50051` |
 | `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                           | (ephemeral)       |
 | `--expect`    | Nodes to wait for before [bootstrapping](docs/operations/deployment.md#cluster-setup) (`1`=solo, `0`=join existing) | `3`               |
-| `--discovery` | [Kubernetes](docs/operations/deployment.md#dns-based-discovery-production--kubernetes): find peers via DNS          | (disabled)        |
+| `--discover` | [Kubernetes](docs/operations/deployment.md#dns-based-discovery-production--kubernetes): find peers via DNS          | (disabled)        |
 | `--join`      | [Static peers](docs/operations/deployment.md#multi-node-cluster-3-nodes): JSON file with node addresses             | (disabled)        |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
@@ -96,20 +96,20 @@ ledger.example.com.  A  192.168.1.102
 ledger.example.com.  A  192.168.1.103
 ```
 
-Then start each node with `--discovery`:
+Then start each node with `--discover`:
 
 ```bash
 # On 192.168.1.101
 inferadb-ledger --listen 192.168.1.101:50051 --data /var/lib/ledger \
-  --expect 3 --discovery ledger.example.com
+  --expect 3 --discover ledger.example.com
 
 # On 192.168.1.102
 inferadb-ledger --listen 192.168.1.102:50051 --data /var/lib/ledger \
-  --expect 3 --discovery ledger.example.com
+  --expect 3 --discover ledger.example.com
 
 # On 192.168.1.103
 inferadb-ledger --listen 192.168.1.103:50051 --data /var/lib/ledger \
-  --expect 3 --discovery ledger.example.com
+  --expect 3 --discover ledger.example.com
 ```
 
 For Kubernetes, use a [headless Service](docs/operations/deployment.md#dns-based-discovery-production--kubernetes) which automatically creates DNS records for each pod.
