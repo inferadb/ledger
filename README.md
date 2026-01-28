@@ -14,6 +14,14 @@
 
 [InferaDB](https://inferadb.com) Ledger is a distributed blockchain database optimized for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently.
 
+- [Features](#Features)
+- [Installation](#Installation)
+- [Quick Start](#Quick Start)
+- [Development](#Development)
+- [Design](#Design)
+- [Community](#Community)
+- [License](#License)
+
 ## Features
 
 - **Cryptographic Verification** — Per-vault blockchain with chain-linked state roots, Merkle proofs, SHA-256 commitments
@@ -22,11 +30,9 @@
 - **Multi-Tenancy** — Namespace isolation, multiple vaults per namespace, shard groups for scaling
 - **Storage** — Embedded ACID database, hybrid K/V + merkle architecture, tiered snapshots
 
-## Quick Start
+## Installation
 
-### Installation
-
-### Configuration
+## Configuration
 
 | CLI           | ENV                                      | Purpose                                                                                                         | Default           |
 | ------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------- |
@@ -37,6 +43,8 @@
 | `--join`      | `INFERADB__LEDGER__DISCOVERY_CACHE_PATH` | [Static peers](docs/operations/deployment.md#multi-node-cluster-3-nodes): JSON file with node addresses         | (disabled)        |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for all options including metrics, batching, and tuning.
+
+## Quick Start
 
 ### Run a Single Node
 
