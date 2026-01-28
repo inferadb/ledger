@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
-use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_state::{BlockArchive, StateLayer, system::NamespaceStatus};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{VaultEntry, ZERO_HASH};
 use openraft::{BasicNode, Raft};
@@ -135,10 +135,15 @@ impl AdminService for AdminServiceImpl {
 
         match ns_meta {
             Some(ns) => {
-                let status = if ns.deleted {
-                    crate::proto::NamespaceStatus::Deleted
-                } else {
-                    crate::proto::NamespaceStatus::Active
+                // Map internal NamespaceStatus to proto NamespaceStatus
+                let status = match ns.status {
+                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
+                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
+                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
+                    // For other states (Migrating, Deleting), map to Active for now
+                    NamespaceStatus::Migrating | NamespaceStatus::Deleting => {
+                        crate::proto::NamespaceStatus::Active
+                    },
                 };
                 Ok(Response::new(GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id }),
@@ -163,10 +168,15 @@ impl AdminService for AdminServiceImpl {
             .list_namespaces()
             .into_iter()
             .map(|ns| {
-                let status = if ns.deleted {
-                    crate::proto::NamespaceStatus::Deleted
-                } else {
-                    crate::proto::NamespaceStatus::Active
+                // Map internal NamespaceStatus to proto NamespaceStatus
+                let status = match ns.status {
+                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
+                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
+                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
+                    // For other states (Migrating, Deleting), map to Active for now
+                    NamespaceStatus::Migrating | NamespaceStatus::Deleting => {
+                        crate::proto::NamespaceStatus::Active
+                    },
                 };
                 crate::proto::GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id }),

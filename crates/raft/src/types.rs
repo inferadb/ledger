@@ -140,6 +140,21 @@ pub enum LedgerRequest {
         vault_id: VaultId,
     },
 
+    /// Suspend a namespace (billing hold or policy violation).
+    /// Suspended namespaces reject writes but allow reads.
+    SuspendNamespace {
+        /// Namespace to suspend.
+        namespace_id: NamespaceId,
+        /// Optional reason for suspension (e.g., "Payment overdue", "TOS violation").
+        reason: Option<String>,
+    },
+
+    /// Resume a suspended namespace.
+    ResumeNamespace {
+        /// Namespace to resume.
+        namespace_id: NamespaceId,
+    },
+
     /// Update vault health status (used during recovery).
     UpdateVaultHealth {
         /// Namespace containing the vault.
@@ -252,6 +267,28 @@ pub enum LedgerResponse {
         blocking_vault_ids: Vec<VaultId>,
     },
 
+    /// Namespace migrated to a new shard.
+    NamespaceMigrated {
+        /// Namespace that was migrated.
+        namespace_id: NamespaceId,
+        /// Previous shard assignment.
+        old_shard_id: ShardId,
+        /// New shard assignment.
+        new_shard_id: ShardId,
+    },
+
+    /// Namespace suspended.
+    NamespaceSuspended {
+        /// Namespace that was suspended.
+        namespace_id: NamespaceId,
+    },
+
+    /// Namespace resumed (suspension lifted).
+    NamespaceResumed {
+        /// Namespace that was resumed.
+        namespace_id: NamespaceId,
+    },
+
     /// Vault deleted.
     VaultDeleted {
         /// Whether the deletion was successful.
@@ -325,6 +362,19 @@ impl fmt::Display for LedgerResponse {
                         blocking_vault_ids
                     )
                 }
+            },
+            LedgerResponse::NamespaceMigrated { namespace_id, old_shard_id, new_shard_id } => {
+                write!(
+                    f,
+                    "NamespaceMigrated(id={}, {}->{})",
+                    namespace_id, old_shard_id, new_shard_id
+                )
+            },
+            LedgerResponse::NamespaceSuspended { namespace_id } => {
+                write!(f, "NamespaceSuspended(id={})", namespace_id)
+            },
+            LedgerResponse::NamespaceResumed { namespace_id } => {
+                write!(f, "NamespaceResumed(id={})", namespace_id)
             },
             LedgerResponse::VaultDeleted { success } => {
                 write!(f, "VaultDeleted(success={})", success)

@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_state::{StateLayer, system::NamespaceStatus};
 use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
 use parking_lot::RwLock;
@@ -384,10 +384,15 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             .list_namespaces()
             .into_iter()
             .map(|ns| {
-                let status = if ns.deleted {
-                    crate::proto::NamespaceStatus::Deleted
-                } else {
-                    crate::proto::NamespaceStatus::Active
+                // Map internal NamespaceStatus to proto NamespaceStatus
+                let status = match ns.status {
+                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
+                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
+                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
+                    // For other states (Migrating, Deleting), map to Active for now
+                    NamespaceStatus::Migrating | NamespaceStatus::Deleting => {
+                        crate::proto::NamespaceStatus::Active
+                    },
                 };
                 NamespaceRegistry {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id }),
