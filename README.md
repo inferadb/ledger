@@ -46,73 +46,19 @@ See [Configuration Reference](docs/operations/deployment.md#configuration-refere
 
 ## Quick Start
 
-### Run a Single Node
-
 ```bash
+# Single node
 inferadb-ledger --data /var/lib/ledger --expect 1
+
+# Cluster (run on each node)
+inferadb-ledger --data /var/lib/ledger --expect 3 --discover ledger.example.com
 ```
 
-### Run Multiple Nodes
+For clusters, each node needs `--expect N` (nodes to wait for) and a way to find peers:
+- **DNS** (`--discover`): Point to a domain with A records for each node, or a [Kubernetes headless Service](docs/operations/deployment.md#kubernetes-deployment)
+- **Static** (`--join`): Point to a [JSON file](docs/operations/deployment.md#multi-node-cluster-3-nodes) listing peer addresses
 
-#### In Development or Staging
-
-For local testing, create a peer file:
-
-```bash
-cat > /tmp/peers.json << 'EOF'
-{"peers": [
-  {"addr": "127.0.0.1:50051"},
-  {"addr": "127.0.0.1:50052"},
-  {"addr": "127.0.0.1:50053"}
-]}
-EOF
-```
-
-Then start each node in separate terminals with `--expect 3` (wait for 3 nodes) and `--join` pointing to the peer file:
-
-```bash
-# Node 1
-inferadb-ledger --listen 127.0.0.1:50051 --data /tmp/ledger-1 \
-  --expect 3 --join /tmp/peers.json
-
-# Node 2
-inferadb-ledger --listen 127.0.0.1:50052 --data /tmp/ledger-2 \
-  --expect 3 --join /tmp/peers.json
-
-# Node 3
-inferadb-ledger --listen 127.0.0.1:50053 --data /tmp/ledger-3 \
-  --expect 3 --join /tmp/peers.json
-```
-
-Nodes discover each other, coordinate, and the lowest-ID node bootstraps the cluster.
-
-#### In Production
-
-Configure DNS A records pointing to each node:
-
-```text
-ledger.example.com.  A  192.168.1.101
-ledger.example.com.  A  192.168.1.102
-ledger.example.com.  A  192.168.1.103
-```
-
-Then start each node with `--discover`:
-
-```bash
-# On 192.168.1.101
-inferadb-ledger --listen 192.168.1.101:50051 --data /var/lib/ledger \
-  --expect 3 --discover ledger.example.com
-
-# On 192.168.1.102
-inferadb-ledger --listen 192.168.1.102:50051 --data /var/lib/ledger \
-  --expect 3 --discover ledger.example.com
-
-# On 192.168.1.103
-inferadb-ledger --listen 192.168.1.103:50051 --data /var/lib/ledger \
-  --expect 3 --discover ledger.example.com
-```
-
-For Kubernetes, use a [headless Service](docs/operations/deployment.md#dns-based-discovery-production--kubernetes) which automatically creates DNS records for each pod.
+See the [deployment guide](docs/operations/deployment.md) for complete single-machine, multi-node, and Kubernetes examples.
 
 ## Development
 
