@@ -2262,27 +2262,30 @@ ledger.infra.example.com. 300 IN A 192.168.1.103
 
 ```rust
 struct BootstrapConfig {
-    /// DNS domain for A record lookup (e.g., "ledger.inferadb.svc.cluster.local")
-    discovery_domain: Option<String>,
+    /// DNS domain or file path for peer discovery (auto-detected).
+    /// - Contains `/` or `\` or ends with `.json` → file path
+    /// - Otherwise → DNS domain for A record lookup
+    peers: Option<String>,
 
     /// Port to use with discovered IPs
     listen_port: u16,
-
-    /// Cached peers from previous session
-    cached_peers_path: PathBuf,
 }
 
 async fn resolve_bootstrap_peers(config: &BootstrapConfig) -> Vec<SocketAddr> {
+    let Some(peers_value) = &config.peers else {
+        return Vec::new();
+    };
+
     let mut peers = Vec::new();
 
-    // 1. Try cached peers first (fastest, survives DNS outages)
-    if let Ok(cached) = load_cached_peers(&config.cached_peers_path) {
-        peers.extend(cached);
-    }
-
-    // 2. DNS A lookup (dynamic, K8s-native)
-    if let Some(domain) = &config.discovery_domain {
-        if let Ok(ips) = dns_lookup(domain).await {
+    if is_file_path(peers_value) {
+        // File-based discovery (static peers)
+        if let Ok(cached) = load_peers_from_file(peers_value) {
+            peers.extend(cached);
+        }
+    } else {
+        // DNS-based discovery (dynamic, K8s-native)
+        if let Ok(ips) = dns_lookup(peers_value).await {
             for ip in ips {
                 peers.push(SocketAddr::new(ip, config.listen_port));
             }
@@ -2293,6 +2296,10 @@ async fn resolve_bootstrap_peers(config: &BootstrapConfig) -> Vec<SocketAddr> {
     peers.shuffle(&mut thread_rng());
     peers.dedup();
     peers
+}
+
+fn is_file_path(value: &str) -> bool {
+    value.contains('/') || value.contains('\\') || value.ends_with(".json")
 }
 ```
 

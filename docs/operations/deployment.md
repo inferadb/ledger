@@ -17,81 +17,81 @@ Ledger uses coordinated bootstrap based on `bootstrap_expect`:
 ```bash
 mkdir -p /var/lib/ledger
 
-INFERADB__LEDGER__LISTEN_ADDR=127.0.0.1:50051 \
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
+INFERADB__LEDGER__LISTEN=127.0.0.1:50051 \
+INFERADB__LEDGER__DATA=/var/lib/ledger \
+INFERADB__LEDGER__EXPECT=1 \
 ./target/release/inferadb-ledger
 ```
 
 ### Multi-Node Cluster (3 nodes)
 
-Each node needs its own data directory and a peer cache file listing other nodes.
+Each node needs its own data directory and a peer file listing other nodes.
 
 **Node 1** (`/var/lib/ledger-1`):
 
 ```bash
-cat > /var/lib/ledger-1/peers.cache << 'EOF'
+cat > /var/lib/ledger-1/peers.json << 'EOF'
 {"cached_at": 0, "peers": [
   {"addr": "192.168.1.102:50051"},
   {"addr": "192.168.1.103:50051"}
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN_ADDR=192.168.1.101:50051 \
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-1 \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
-INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-1/peers.cache \
+INFERADB__LEDGER__LISTEN=192.168.1.101:50051 \
+INFERADB__LEDGER__DATA=/var/lib/ledger-1 \
+INFERADB__LEDGER__EXPECT=3 \
+INFERADB__LEDGER__PEERS=/var/lib/ledger-1/peers.json \
 ./target/release/inferadb-ledger
 ```
 
 **Node 2** (`/var/lib/ledger-2`):
 
 ```bash
-cat > /var/lib/ledger-2/peers.cache << 'EOF'
+cat > /var/lib/ledger-2/peers.json << 'EOF'
 {"cached_at": 0, "peers": [
   {"addr": "192.168.1.101:50051"},
   {"addr": "192.168.1.103:50051"}
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN_ADDR=192.168.1.102:50051 \
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-2 \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
-INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-2/peers.cache \
+INFERADB__LEDGER__LISTEN=192.168.1.102:50051 \
+INFERADB__LEDGER__DATA=/var/lib/ledger-2 \
+INFERADB__LEDGER__EXPECT=3 \
+INFERADB__LEDGER__PEERS=/var/lib/ledger-2/peers.json \
 ./target/release/inferadb-ledger
 ```
 
 **Node 3** (`/var/lib/ledger-3`):
 
 ```bash
-cat > /var/lib/ledger-3/peers.cache << 'EOF'
+cat > /var/lib/ledger-3/peers.json << 'EOF'
 {"cached_at": 0, "peers": [
   {"addr": "192.168.1.101:50051"},
   {"addr": "192.168.1.102:50051"}
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN_ADDR=192.168.1.103:50051 \
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-3 \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
-INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-3/peers.cache \
+INFERADB__LEDGER__LISTEN=192.168.1.103:50051 \
+INFERADB__LEDGER__DATA=/var/lib/ledger-3 \
+INFERADB__LEDGER__EXPECT=3 \
+INFERADB__LEDGER__PEERS=/var/lib/ledger-3/peers.json \
 ./target/release/inferadb-ledger
 ```
 
 Start all three nodes. They will:
 
-1. Discover each other via peer cache
+1. Discover each other via peer file
 2. Exchange node info via `GetNodeInfo` RPC
 3. The node with lowest Snowflake ID bootstraps the cluster
 4. Other nodes join automatically
 
 ### DNS-Based Discovery (Production / Kubernetes)
 
-For production, use DNS A records instead of static peer caches:
+For production, use DNS A records instead of static peer files:
 
 ```bash
-INFERADB__LEDGER__DISCOVERY_DOMAIN=ledger.default.svc.cluster.local \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 \
+INFERADB__LEDGER__PEERS=ledger.default.svc.cluster.local \
+INFERADB__LEDGER__EXPECT=3 \
 ./target/release/inferadb-ledger
 ```
 
@@ -127,7 +127,7 @@ The node will:
 Start the node with the same `data_dir`. The persisted `node_id` file ensures it rejoins with its original identity:
 
 ```bash
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
+INFERADB__LEDGER__DATA=/var/lib/ledger \
 ./target/release/inferadb-ledger
 ```
 
@@ -152,19 +152,19 @@ For a 3-node cluster, maintain quorum (2 nodes) during rolling restarts:
 
 ### Adding a Node
 
-Start the new node with `bootstrap_expect=0` (join mode) and a peer cache pointing to existing nodes:
+Start the new node with `bootstrap_expect=0` (join mode) and a peer file pointing to existing nodes:
 
 ```bash
-cat > /var/lib/ledger-new/peers.cache << 'EOF'
+cat > /var/lib/ledger-new/peers.json << 'EOF'
 {"cached_at": 0, "peers": [
   {"addr": "192.168.1.101:50051"}
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN_ADDR=192.168.1.104:50051 \
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger-new \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
-INFERADB__LEDGER__DISCOVERY_CACHE_PATH=/var/lib/ledger-new/peers.cache \
+INFERADB__LEDGER__LISTEN=192.168.1.104:50051 \
+INFERADB__LEDGER__DATA=/var/lib/ledger-new \
+INFERADB__LEDGER__EXPECT=0 \
+INFERADB__LEDGER__PEERS=/var/lib/ledger-new/peers.json \
 ./target/release/inferadb-ledger
 ```
 
@@ -203,7 +203,7 @@ The `data_dir` contains all persistent state:
 ```bash
 kill $(cat /var/lib/ledger/ledger.pid)
 cp -r /var/lib/ledger /backup/ledger-$(date +%Y%m%d-%H%M%S)
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
+INFERADB__LEDGER__DATA=/var/lib/ledger \
 ./target/release/inferadb-ledger
 ```
 
@@ -239,7 +239,7 @@ Snapshots include:
 kill $(cat /var/lib/ledger/ledger.pid) 2>/dev/null || true
 rm -rf /var/lib/ledger
 cp -r /backup/ledger-20240115-030000 /var/lib/ledger
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
+INFERADB__LEDGER__DATA=/var/lib/ledger \
 ./target/release/inferadb-ledger
 ```
 
@@ -257,8 +257,8 @@ If you only have a snapshot (not the full `data_dir`):
 mkdir -p /var/lib/ledger/snapshots
 cp /backup/000010000.snap /var/lib/ledger/snapshots/
 
-INFERADB__LEDGER__DATA_DIR=/var/lib/ledger \
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
+INFERADB__LEDGER__DATA=/var/lib/ledger \
+INFERADB__LEDGER__EXPECT=0 \
 ./target/release/inferadb-ledger
 ```
 
@@ -278,11 +278,11 @@ If all nodes are lost, restore from the most recent backup:
 cp -r /backup/ledger-node1 /var/lib/ledger
 
 # Start first node with bootstrap_expect=1 to force bootstrap
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
+INFERADB__LEDGER__EXPECT=1 \
 ./target/release/inferadb-ledger
 
 # Start remaining nodes with bootstrap_expect=0
-INFERADB__LEDGER__BOOTSTRAP_EXPECT=0 \
+INFERADB__LEDGER__EXPECT=0 \
 ./target/release/inferadb-ledger
 ```
 
@@ -294,20 +294,23 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 
 | CLI           | Environment Variable              | Default           | Description                               |
 | ------------- | --------------------------------- | ----------------- | ----------------------------------------- |
-| `--listen`    | `INFERADB__LEDGER__LISTEN_ADDR`   | `127.0.0.1:50051` | Host and port to accept connections       |
-| `--data`      | `INFERADB__LEDGER__DATA_DIR`      | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
-| `--expect`    | `INFERADB__LEDGER__BOOTSTRAP_EXPECT` | `3`            | Nodes to wait for before bootstrapping (1=solo, 0=join existing) |
-| `--metrics`   | `INFERADB__LEDGER__METRICS_ADDR`  | (disabled)        | Expose Prometheus metrics at this address |
+| `--listen`    | `INFERADB__LEDGER__LISTEN`   | `127.0.0.1:50051` | Host and port to accept connections       |
+| `--data`      | `INFERADB__LEDGER__DATA`      | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
+| `--expect`    | `INFERADB__LEDGER__EXPECT` | `3`            | Nodes to wait for before bootstrapping (1=solo, 0=join existing) |
+| `--metrics`   | `INFERADB__LEDGER__METRICS`  | (disabled)        | Expose Prometheus metrics at this address |
 
 ### Discovery Options
 
 How nodes find each other. See [discovery internals](../internals/discovery.md) for details.
 
-| CLI          | Environment Variable                         | Default     | Description                           |
-| ------------ | -------------------------------------------- | ----------- | ------------------------------------- |
-| `--discover`| `INFERADB__LEDGER__DISCOVERY_DOMAIN`         | (disabled)  | Find nodes via DNS (for Kubernetes)   |
-| `--join`     | `INFERADB__LEDGER__DISCOVERY_CACHE_PATH`     | (disabled)  | File listing nodes to connect to      |
-| `--join-ttl` | `INFERADB__LEDGER__DISCOVERY_CACHE_TTL_SECS` | `3600`      | How long cached node list stays valid |
+| CLI          | Environment Variable              | Default     | Description                                            |
+| ------------ | --------------------------------- | ----------- | ------------------------------------------------------ |
+| `--peers`    | `INFERADB__LEDGER__PEERS`         | (disabled)  | DNS domain or file path (auto-detected)                |
+| `--peers-ttl`| `INFERADB__LEDGER__PEERS_TTL`| `3600`      | How long cached node list stays valid                  |
+
+The `--peers` value is auto-detected:
+- **DNS domain** (no `/` or `\`, not `.json`): Performs A record lookup (e.g., `ledger.default.svc.cluster.local`)
+- **File path** (contains `/` or `\`, or ends with `.json`): Loads from JSON file (e.g., `/var/lib/ledger/peers.json`)
 
 ### Tuning Options
 
@@ -315,12 +318,12 @@ These defaults work well for most deployments. See [consensus internals](../inte
 
 | CLI                  | Environment Variable                        | Default | Description                             |
 | -------------------- | ------------------------------------------- | ------- | --------------------------------------- |
-| `--bootstrap-timeout`| `INFERADB__LEDGER__BOOTSTRAP_TIMEOUT_SECS`  | `60`    | How long to wait for other nodes (secs) |
-| `--poll`             | `INFERADB__LEDGER__BOOTSTRAP_POLL_SECS`     | `2`     | How often to check for other nodes      |
-| `--batch-size`       | `INFERADB__LEDGER__BATCH_MAX_SIZE`          | `100`   | Writes to group before committing       |
-| `--batch-delay`      | `INFERADB__LEDGER__BATCH_MAX_DELAY_MS`      | `10`    | Max wait before committing a batch (ms) |
-| `--concurrent`       | `INFERADB__LEDGER__REQUESTS_MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
-| `--timeout`          | `INFERADB__LEDGER__REQUESTS_TIMEOUT_SECS`   | `30`    | Max time for a request to complete      |
+| `--peers-timeout`| `INFERADB__LEDGER__PEERS_TIMEOUT`  | `60`    | How long to wait for other nodes (secs) |
+| `--peers-poll`             | `INFERADB__LEDGER__PEERS_POLL`     | `2`     | How often to check for other nodes      |
+| `--batch-size`       | `INFERADB__LEDGER__BATCH_SIZE`          | `100`   | Writes to group before committing       |
+| `--batch-delay`      | `INFERADB__LEDGER__BATCH_DELAY`      | `10`    | Max wait before committing a batch (ms) |
+| `--max-concurrent`       | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
+| `--timeout`          | `INFERADB__LEDGER__TIMEOUT`   | `30`    | Max time for a request to complete      |
 
 ### Notes
 
@@ -363,6 +366,6 @@ The Kubernetes deployment uses:
 - **Headless Service** for DNS-based peer discovery
 - **PodDisruptionBudget** to maintain Raft quorum during rolling updates
 
-Pods discover each other via DNS A records from the headless service. Set `discovery_domain` to the service FQDN (e.g., `ledger.inferadb.svc.cluster.local`).
+Pods discover each other via DNS A records from the headless service. Set `--peers` to the service FQDN (e.g., `ledger.inferadb.svc.cluster.local`).
 
 See [`deploy/kubernetes/`](../../deploy/kubernetes/) for raw manifests and [`deploy/helm/`](../../deploy/helm/) for the Helm chart.

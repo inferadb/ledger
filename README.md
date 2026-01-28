@@ -23,7 +23,7 @@
 - [License](#License)
 
 ## Features
-
+  
 - **Cryptographic Verification** — Per-vault blockchain with chain-linked state roots, Merkle proofs, SHA-256 commitments
 - **Raft Consensus** — Strong consistency, automatic leader election, deterministic state recovery
 - **Performance** — Sub-millisecond reads, <50ms p99 writes, bucket-based O(k) state roots, batched transactions
@@ -34,13 +34,12 @@
 
 ## Configuration
 
-| CLI           | Purpose                                                                                                             | Default           |
-| ------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| `--listen`    | Bind address for gRPC API                                                                                           | `127.0.0.1:50051` |
-| `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                           | (ephemeral)       |
-| `--expect`    | Nodes to wait for before [bootstrapping](docs/operations/deployment.md#cluster-setup) (`1`=solo, `0`=join existing) | `3`               |
-| `--discover` | [Kubernetes](docs/operations/deployment.md#dns-based-discovery-production--kubernetes): find peers via DNS          | (disabled)        |
-| `--join`      | [Static peers](docs/operations/deployment.md#multi-node-cluster-3-nodes): JSON file with node addresses             | (disabled)        |
+| CLI        | Purpose                                                                                                             | Default           |
+| ---------- | ------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `--listen` | Bind address for gRPC API                                                                                           | `127.0.0.1:50051` |
+| `--data`   | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                           | (ephemeral)       |
+| `--expect` | Nodes to wait for before [bootstrapping](docs/operations/deployment.md#cluster-setup) (`1`=solo, `0`=join existing) | `3`               |
+| `--peers`  | [Find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or JSON file path                   | (disabled)        |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 
@@ -51,12 +50,12 @@ See [Configuration Reference](docs/operations/deployment.md#configuration-refere
 inferadb-ledger --data /var/lib/ledger --expect 1
 
 # Cluster (run on each node)
-inferadb-ledger --data /var/lib/ledger --expect 3 --discover ledger.example.com
+inferadb-ledger --data /var/lib/ledger --expect 3 --peers ledger.example.com
 ```
 
-For clusters, each node needs `--expect N` (nodes to wait for) and a way to find peers:
-- **DNS** (`--discover`): Point to a domain with A records for each node, or a [Kubernetes headless Service](docs/operations/deployment.md#kubernetes-deployment)
-- **Static** (`--join`): Point to a [JSON file](docs/operations/deployment.md#multi-node-cluster-3-nodes) listing peer addresses
+For clusters, each node needs `--expect N` (nodes to wait for) and `--peers` to find other nodes. The value is auto-detected:
+- **DNS domain** (e.g., `ledger.example.com`): Performs A record lookup
+- **File path** (e.g., `/var/lib/ledger/peers.json`): Loads from JSON file
 
 See the [deployment guide](docs/operations/deployment.md) for complete single-machine, multi-node, and Kubernetes examples.
 
@@ -64,8 +63,9 @@ See the [deployment guide](docs/operations/deployment.md) for complete single-ma
 
 ### Prerequisites
 
-- [mise](https://mise.jdx.dev/) for tooling
-- [just](https://github.com/casey/just) for commands
+- Rust 1.92+
+- [mise](https://mise.jdx.dev/) for synchronized development tooling
+- [just](https://github.com/casey/just) for convenient development commands
 
 ### Build and Test
 
