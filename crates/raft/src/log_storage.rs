@@ -137,6 +137,9 @@ pub struct NamespaceMeta {
     /// Namespace lifecycle status.
     #[serde(default)]
     pub status: NamespaceStatus,
+    /// Target shard for pending migration (only set when status is Migrating).
+    #[serde(default)]
+    pub pending_shard_id: Option<ShardId>,
 }
 
 /// Metadata for a vault.
@@ -591,19 +594,44 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ) -> (LedgerResponse, Option<VaultEntry>) {
         match request {
             LedgerRequest::Write { namespace_id, vault_id, transactions } => {
-                // Check namespace suspension before processing write
-                if let Some(ns_meta) = state.namespaces.get(namespace_id)
-                    && ns_meta.status == NamespaceStatus::Suspended
-                {
-                    return (
-                        LedgerResponse::Error {
-                            message: format!(
-                                "Namespace {} is suspended and not accepting writes",
-                                namespace_id
-                            ),
+                // Check namespace status before processing write
+                if let Some(ns_meta) = state.namespaces.get(namespace_id) {
+                    match ns_meta.status {
+                        NamespaceStatus::Suspended => {
+                            return (
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is suspended and not accepting writes",
+                                        namespace_id
+                                    ),
+                                },
+                                None,
+                            );
                         },
-                        None,
-                    );
+                        NamespaceStatus::Migrating => {
+                            return (
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is migrating and not accepting writes",
+                                        namespace_id
+                                    ),
+                                },
+                                None,
+                            );
+                        },
+                        NamespaceStatus::Deleting | NamespaceStatus::Deleted => {
+                            return (
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is deleted and not accepting writes",
+                                        namespace_id
+                                    ),
+                                },
+                                None,
+                            );
+                        },
+                        NamespaceStatus::Active => {}, // OK to proceed
+                    }
                 }
 
                 let key = (*namespace_id, *vault_id);
@@ -734,6 +762,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         name: name.clone(),
                         shard_id: assigned_shard,
                         status: NamespaceStatus::Active,
+                        pending_shard_id: None,
                     },
                 );
 
@@ -783,19 +812,44 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::CreateVault { namespace_id, name, retention_policy } => {
-                // Check namespace suspension before creating vault
-                if let Some(ns_meta) = state.namespaces.get(namespace_id)
-                    && ns_meta.status == NamespaceStatus::Suspended
-                {
-                    return (
-                        LedgerResponse::Error {
-                            message: format!(
-                                "Namespace {} is suspended and not accepting new vaults",
-                                namespace_id
-                            ),
+                // Check namespace status before creating vault
+                if let Some(ns_meta) = state.namespaces.get(namespace_id) {
+                    match ns_meta.status {
+                        NamespaceStatus::Suspended => {
+                            return (
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is suspended and not accepting new vaults",
+                                        namespace_id
+                                    ),
+                                },
+                                None,
+                            );
                         },
-                        None,
-                    );
+                        NamespaceStatus::Migrating => {
+                            return (
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is migrating and not accepting new vaults",
+                                        namespace_id
+                                    ),
+                                },
+                                None,
+                            );
+                        },
+                        NamespaceStatus::Deleting | NamespaceStatus::Deleted => {
+                            return (
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is deleted and not accepting new vaults",
+                                        namespace_id
+                                    ),
+                                },
+                                None,
+                            );
+                        },
+                        NamespaceStatus::Active => {}, // OK to proceed
+                    }
                 }
 
                 let vault_id = state.sequences.next_vault();
@@ -825,12 +879,47 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     .map(|((_, vault_id), _)| *vault_id)
                     .collect();
 
-                let response = if !blocking_vault_ids.is_empty() {
-                    // Cannot delete namespace with active vaults
-                    LedgerResponse::NamespaceDeleted { success: false, blocking_vault_ids }
-                } else if let Some(ns) = state.namespaces.get_mut(namespace_id) {
-                    ns.status = NamespaceStatus::Deleted;
-                    LedgerResponse::NamespaceDeleted { success: true, blocking_vault_ids: vec![] }
+                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
+                    // Check current status
+                    match ns.status {
+                        NamespaceStatus::Deleted => LedgerResponse::Error {
+                            message: format!("Namespace {} is already deleted", namespace_id),
+                        },
+                        NamespaceStatus::Deleting => {
+                            // Already deleting - check if vaults are gone now
+                            if blocking_vault_ids.is_empty() {
+                                ns.status = NamespaceStatus::Deleted;
+                                LedgerResponse::NamespaceDeleted {
+                                    success: true,
+                                    blocking_vault_ids: vec![],
+                                }
+                            } else {
+                                // Still has vaults
+                                LedgerResponse::NamespaceDeleting {
+                                    namespace_id: *namespace_id,
+                                    blocking_vault_ids,
+                                }
+                            }
+                        },
+                        _ => {
+                            // Active, Suspended, or Migrating
+                            if blocking_vault_ids.is_empty() {
+                                // No blocking vaults - delete immediately
+                                ns.status = NamespaceStatus::Deleted;
+                                LedgerResponse::NamespaceDeleted {
+                                    success: true,
+                                    blocking_vault_ids: vec![],
+                                }
+                            } else {
+                                // Has vaults - transition to Deleting state
+                                ns.status = NamespaceStatus::Deleting;
+                                LedgerResponse::NamespaceDeleting {
+                                    namespace_id: *namespace_id,
+                                    blocking_vault_ids,
+                                }
+                            }
+                        },
+                    }
                 } else {
                     LedgerResponse::Error {
                         message: format!("Namespace {} not found", namespace_id),
@@ -844,6 +933,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault) = state.vaults.get_mut(&key) {
                     vault.deleted = true;
+
+                    // Check if namespace is in Deleting state and this was the last vault
+                    if let Some(ns) = state.namespaces.get_mut(namespace_id)
+                        && ns.status == NamespaceStatus::Deleting
+                    {
+                        // Check if any active vaults remain
+                        let remaining_vaults = state
+                            .vaults
+                            .iter()
+                            .any(|((ns_id, _), v)| *ns_id == *namespace_id && !v.deleted);
+
+                        if !remaining_vaults {
+                            // Auto-transition namespace to Deleted
+                            ns.status = NamespaceStatus::Deleted;
+                            tracing::info!(
+                                namespace_id,
+                                "Namespace auto-transitioned to Deleted after last vault deleted"
+                            );
+                        }
+                    }
+
                     LedgerResponse::VaultDeleted { success: true }
                 } else {
                     LedgerResponse::Error {
@@ -891,6 +1001,95 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         other => LedgerResponse::Error {
                             message: format!(
                                 "Cannot resume namespace {} in state {:?}",
+                                namespace_id, other
+                            ),
+                        },
+                    }
+                } else {
+                    LedgerResponse::Error {
+                        message: format!("Namespace {} not found", namespace_id),
+                    }
+                };
+                (response, None)
+            },
+
+            LedgerRequest::StartMigration { namespace_id, target_shard_id } => {
+                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
+                    match ns.status {
+                        NamespaceStatus::Active => {
+                            // Validate target shard is different
+                            if *target_shard_id == ns.shard_id {
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is already on shard {}",
+                                        namespace_id, target_shard_id
+                                    ),
+                                }
+                            } else {
+                                ns.status = NamespaceStatus::Migrating;
+                                ns.pending_shard_id = Some(*target_shard_id);
+                                LedgerResponse::MigrationStarted {
+                                    namespace_id: *namespace_id,
+                                    target_shard_id: *target_shard_id,
+                                }
+                            }
+                        },
+                        NamespaceStatus::Migrating => LedgerResponse::Error {
+                            message: format!("Namespace {} is already migrating", namespace_id),
+                        },
+                        NamespaceStatus::Suspended => LedgerResponse::Error {
+                            message: format!(
+                                "Cannot start migration on suspended namespace {}",
+                                namespace_id
+                            ),
+                        },
+                        NamespaceStatus::Deleting | NamespaceStatus::Deleted => {
+                            LedgerResponse::Error {
+                                message: format!(
+                                    "Cannot start migration on deleted namespace {}",
+                                    namespace_id
+                                ),
+                            }
+                        },
+                    }
+                } else {
+                    LedgerResponse::Error {
+                        message: format!("Namespace {} not found", namespace_id),
+                    }
+                };
+                (response, None)
+            },
+
+            LedgerRequest::CompleteMigration { namespace_id } => {
+                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
+                    match ns.status {
+                        NamespaceStatus::Migrating => {
+                            if let Some(target_shard) = ns.pending_shard_id {
+                                let old_shard = ns.shard_id;
+                                ns.shard_id = target_shard;
+                                ns.status = NamespaceStatus::Active;
+                                ns.pending_shard_id = None;
+                                LedgerResponse::MigrationCompleted {
+                                    namespace_id: *namespace_id,
+                                    old_shard_id: old_shard,
+                                    new_shard_id: target_shard,
+                                }
+                            } else {
+                                // Should not happen, but handle gracefully
+                                LedgerResponse::Error {
+                                    message: format!(
+                                        "Namespace {} is migrating but has no target shard",
+                                        namespace_id
+                                    ),
+                                }
+                            }
+                        },
+                        NamespaceStatus::Active => LedgerResponse::Error {
+                            message: format!("Namespace {} is not migrating", namespace_id),
+                        },
+                        other => LedgerResponse::Error {
+                            message: format!(
+                                "Cannot complete migration for namespace {} in state {:?}",
                                 namespace_id, other
                             ),
                         },
@@ -1743,6 +1942,7 @@ mod tests {
                 name: "ns1".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1752,6 +1952,7 @@ mod tests {
                 name: "ns2".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         // Only shard 0 exists, so it should be selected
@@ -1769,6 +1970,7 @@ mod tests {
                 name: "ns1".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1778,6 +1980,7 @@ mod tests {
                 name: "ns2".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         // Shard 1: 2 namespaces (equal load)
@@ -1788,6 +1991,7 @@ mod tests {
                 name: "ns3".to_string(),
                 shard_id: 1,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1797,6 +2001,7 @@ mod tests {
                 name: "ns4".to_string(),
                 shard_id: 1,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         // Tie-breaker: lower shard_id wins
@@ -1814,6 +2019,7 @@ mod tests {
                 name: "ns1".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1823,6 +2029,7 @@ mod tests {
                 name: "ns2".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1832,6 +2039,7 @@ mod tests {
                 name: "ns3".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         // Shard 1: 1 namespace (lighter)
@@ -1842,6 +2050,7 @@ mod tests {
                 name: "ns4".to_string(),
                 shard_id: 1,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         // Shard 1 has fewer namespaces
@@ -1859,6 +2068,7 @@ mod tests {
                 name: "ns1".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1868,6 +2078,7 @@ mod tests {
                 name: "ns2".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Deleted,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1877,6 +2088,7 @@ mod tests {
                 name: "ns3".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Deleted,
+                pending_shard_id: None,
             },
         );
         // Shard 1: 2 active
@@ -1887,6 +2099,7 @@ mod tests {
                 name: "ns4".to_string(),
                 shard_id: 1,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         namespaces.insert(
@@ -1896,6 +2109,7 @@ mod tests {
                 name: "ns5".to_string(),
                 shard_id: 1,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         // Shard 0 has only 1 active namespace (deleted don't count)
@@ -1914,6 +2128,7 @@ mod tests {
                     name: format!("ns{}", i),
                     shard_id: 0,
                     status: NamespaceStatus::Active,
+                    pending_shard_id: None,
                 },
             );
         }
@@ -1926,6 +2141,7 @@ mod tests {
                     name: format!("ns{}", i),
                     shard_id: 1,
                     status: NamespaceStatus::Active,
+                    pending_shard_id: None,
                 },
             );
         }
@@ -1938,6 +2154,7 @@ mod tests {
                     name: format!("ns{}", i),
                     shard_id: 2,
                     status: NamespaceStatus::Active,
+                    pending_shard_id: None,
                 },
             );
         }
@@ -1963,6 +2180,7 @@ mod tests {
                     name: format!("existing-ns-{}", i),
                     shard_id: 0,
                     status: NamespaceStatus::Active,
+                    pending_shard_id: None,
                 },
             );
         }
@@ -1974,6 +2192,7 @@ mod tests {
                 name: "existing-ns-4".to_string(),
                 shard_id: 1,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         state.sequences.namespace = 5; // Next ID is 5
@@ -2011,6 +2230,7 @@ mod tests {
                 name: "existing".to_string(),
                 shard_id: 0,
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         state.sequences.namespace = 2;
@@ -2284,22 +2504,22 @@ mod tests {
             _ => panic!("expected VaultCreated"),
         };
 
-        // Try to delete namespace - should fail with blocking vault IDs
+        // Try to delete namespace - should transition to Deleting with blocking vault IDs
         let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
-                assert!(!success);
+            LedgerResponse::NamespaceDeleting { namespace_id: ns_id, blocking_vault_ids } => {
+                assert_eq!(ns_id, namespace_id);
                 assert_eq!(blocking_vault_ids.len(), 2);
                 assert!(blocking_vault_ids.contains(&vault1_id));
                 assert!(blocking_vault_ids.contains(&vault2_id));
             },
-            _ => panic!("expected NamespaceDeleted"),
+            _ => panic!("expected NamespaceDeleting"),
         }
 
-        // Verify namespace is still active
-        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Active);
+        // Verify namespace is now in Deleting state
+        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
     }
 
     #[tokio::test]
@@ -2454,20 +2674,23 @@ mod tests {
             _ => panic!("expected VaultDeleted"),
         }
 
-        // Try to delete namespace - should fail, but only vault2 should be in blocking list
+        // Try to delete namespace - should transition to Deleting, but only vault2 should be in blocking list
         let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
-                assert!(!success);
+            LedgerResponse::NamespaceDeleting { namespace_id: ns_id, blocking_vault_ids } => {
+                assert_eq!(ns_id, namespace_id);
                 assert_eq!(blocking_vault_ids.len(), 1);
                 assert!(blocking_vault_ids.contains(&vault2_id));
                 // vault1 was deleted, so it should NOT be in blocking list
                 assert!(!blocking_vault_ids.contains(&vault1_id));
             },
-            _ => panic!("expected NamespaceDeleted"),
+            _ => panic!("expected NamespaceDeleting"),
         }
+
+        // Verify namespace is now in Deleting state
+        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
     }
 
     // ========================================================================
@@ -2827,6 +3050,449 @@ mod tests {
         // Verify resumed state
         let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
         assert_eq!(meta.status, NamespaceStatus::Active);
+    }
+
+
+    // ========================================================================
+    // Migration Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_start_migration_success() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace on shard 0
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Start migration to shard 1
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let (response, _) = store.apply_request(&start_migration, &mut state);
+
+        match response {
+            LedgerResponse::MigrationStarted { namespace_id: ns_id, target_shard_id } => {
+                assert_eq!(ns_id, namespace_id);
+                assert_eq!(target_shard_id, 1);
+            },
+            _ => panic!("expected MigrationStarted"),
+        }
+
+        // Verify namespace is in Migrating state with pending shard
+        let ns = state.namespaces.get(&namespace_id).unwrap();
+        assert_eq!(ns.status, NamespaceStatus::Migrating);
+        assert_eq!(ns.shard_id, 0); // Still on old shard
+        assert_eq!(ns.pending_shard_id, Some(1)); // Target shard stored
+    }
+
+    #[tokio::test]
+    async fn test_start_migration_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let start_migration = LedgerRequest::StartMigration { namespace_id: 999, target_shard_id: 1 };
+        let (response, _) = store.apply_request(&start_migration, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("not found"));
+            },
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_migration_already_migrating() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Start migration
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let (response, _) = store.apply_request(&start_migration, &mut state);
+        assert!(matches!(response, LedgerResponse::MigrationStarted { .. }));
+
+        // Try to start another migration - should fail
+        let start_migration2 =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: 2 };
+        let (response, _) = store.apply_request(&start_migration2, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("already migrating"));
+            },
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_migration_suspended_namespace() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create and suspend namespace
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        store.apply_request(&suspend, &mut state);
+
+        // Try to start migration - should fail
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let (response, _) = store.apply_request(&start_migration, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("suspended"));
+            },
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_migration_success() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace on shard 0
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Start migration to shard 1
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        store.apply_request(&start_migration, &mut state);
+
+        // Complete migration
+        let complete_migration = LedgerRequest::CompleteMigration { namespace_id };
+        let (response, _) = store.apply_request(&complete_migration, &mut state);
+
+        match response {
+            LedgerResponse::MigrationCompleted { namespace_id: ns_id, old_shard_id, new_shard_id } => {
+                assert_eq!(ns_id, namespace_id);
+                assert_eq!(old_shard_id, 0);
+                assert_eq!(new_shard_id, 1);
+            },
+            _ => panic!("expected MigrationCompleted"),
+        }
+
+        // Verify namespace is back to Active on new shard
+        let ns = state.namespaces.get(&namespace_id).unwrap();
+        assert_eq!(ns.status, NamespaceStatus::Active);
+        assert_eq!(ns.shard_id, 1);
+        assert_eq!(ns.pending_shard_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_complete_migration_not_migrating() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace (Active state)
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Try to complete migration without starting - should fail
+        let complete_migration = LedgerRequest::CompleteMigration { namespace_id };
+        let (response, _) = store.apply_request(&complete_migration, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("not migrating"));
+            },
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_migrating_namespace_blocks_writes() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace and vault
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        let create_vault = LedgerRequest::CreateVault {
+            namespace_id,
+            name: Some("vault".to_string()),
+            retention_policy: None,
+        };
+        let (response, _) = store.apply_request(&create_vault, &mut state);
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        // Start migration
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        store.apply_request(&start_migration, &mut state);
+
+        // Try to write - should be blocked
+        let write = LedgerRequest::Write {
+            namespace_id,
+            vault_id,
+            transactions: vec![],
+        };
+        let (response, _) = store.apply_request(&write, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("migrating"));
+            },
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_migrating_namespace_blocks_create_vault() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Start migration
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        store.apply_request(&start_migration, &mut state);
+
+        // Try to create vault - should be blocked
+        let create_vault = LedgerRequest::CreateVault {
+            namespace_id,
+            name: Some("vault".to_string()),
+            retention_policy: None,
+        };
+        let (response, _) = store.apply_request(&create_vault, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("migrating"));
+            },
+            _ => panic!("expected Error"),
+        }
+    }
+
+    // ========================================================================
+    // Deleting State Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_deleting_namespace_auto_transitions_on_last_vault_delete() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Create two vaults
+        let create_vault1 = LedgerRequest::CreateVault {
+            namespace_id,
+            name: Some("vault1".to_string()),
+            retention_policy: None,
+        };
+        let (response, _) = store.apply_request(&create_vault1, &mut state);
+        let vault1_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        let create_vault2 = LedgerRequest::CreateVault {
+            namespace_id,
+            name: Some("vault2".to_string()),
+            retention_policy: None,
+        };
+        let (response, _) = store.apply_request(&create_vault2, &mut state);
+        let vault2_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        // Mark namespace for deletion (transitions to Deleting)
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        assert!(matches!(response, LedgerResponse::NamespaceDeleting { .. }));
+        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
+
+        // Delete first vault - namespace should still be Deleting
+        let delete_vault1 = LedgerRequest::DeleteVault { namespace_id, vault_id: vault1_id };
+        let (response, _) = store.apply_request(&delete_vault1, &mut state);
+        assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
+        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
+
+        // Delete second (last) vault - namespace should auto-transition to Deleted
+        let delete_vault2 = LedgerRequest::DeleteVault { namespace_id, vault_id: vault2_id };
+        let (response, _) = store.apply_request(&delete_vault2, &mut state);
+        assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
+        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleted);
+    }
+
+    #[tokio::test]
+    async fn test_deleting_namespace_blocks_writes() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace and vault
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        let create_vault = LedgerRequest::CreateVault {
+            namespace_id,
+            name: Some("vault".to_string()),
+            retention_policy: None,
+        };
+        let (response, _) = store.apply_request(&create_vault, &mut state);
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        // Mark namespace for deletion
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        store.apply_request(&delete_ns, &mut state);
+
+        // Try to write - should be blocked
+        let write = LedgerRequest::Write {
+            namespace_id,
+            vault_id,
+            transactions: vec![],
+        };
+        let (response, _) = store.apply_request(&write, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("deleted") || message.contains("deleting"));
+            },
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deleting_namespace_blocks_create_vault() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace with a vault
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        let create_vault = LedgerRequest::CreateVault {
+            namespace_id,
+            name: Some("existing-vault".to_string()),
+            retention_policy: None,
+        };
+        store.apply_request(&create_vault, &mut state);
+
+        // Mark namespace for deletion
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        store.apply_request(&delete_ns, &mut state);
+
+        // Try to create another vault - should be blocked
+        let create_vault2 = LedgerRequest::CreateVault {
+            namespace_id,
+            name: Some("new-vault".to_string()),
+            retention_policy: None,
+        };
+        let (response, _) = store.apply_request(&create_vault2, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("deleted") || message.contains("deleting"));
+            },
+            _ => panic!("expected Error"),
+        }
     }
 
     #[tokio::test]
@@ -3561,6 +4227,7 @@ mod tests {
                 shard_id: 0,
                 name: "test-ns".to_string(),
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         original.vaults.insert(
@@ -3618,7 +4285,8 @@ mod tests {
                     shard_id: 0,
                     name: "test".to_string(),
                     status: NamespaceStatus::Active,
-                },
+                pending_shard_id: None,
+            },
             );
         }
 
@@ -3681,6 +4349,7 @@ mod tests {
                 shard_id: 0,
                 name: "production".to_string(),
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         applied_state.namespaces.insert(
@@ -3690,6 +4359,7 @@ mod tests {
                 shard_id: 0,
                 name: "staging".to_string(),
                 status: NamespaceStatus::Active,
+                pending_shard_id: None,
             },
         );
         applied_state.vaults.insert(

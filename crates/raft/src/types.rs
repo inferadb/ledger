@@ -155,6 +155,22 @@ pub enum LedgerRequest {
         namespace_id: NamespaceId,
     },
 
+    /// Start namespace migration to a new shard.
+    /// Sets status to Migrating, blocking writes until CompleteMigration.
+    StartMigration {
+        /// Namespace to migrate.
+        namespace_id: NamespaceId,
+        /// Target shard ID for migration.
+        target_shard_id: ShardId,
+    },
+
+    /// Complete a pending namespace migration.
+    /// Updates shard_id and returns status to Active.
+    CompleteMigration {
+        /// Namespace being migrated.
+        namespace_id: NamespaceId,
+    },
+
     /// Update vault health status (used during recovery).
     UpdateVaultHealth {
         /// Namespace containing the vault.
@@ -289,6 +305,33 @@ pub enum LedgerResponse {
         namespace_id: NamespaceId,
     },
 
+    /// Namespace migration started.
+    MigrationStarted {
+        /// Namespace entering migration.
+        namespace_id: NamespaceId,
+        /// Target shard for migration.
+        target_shard_id: ShardId,
+    },
+
+    /// Namespace migration completed.
+    MigrationCompleted {
+        /// Namespace that was migrated.
+        namespace_id: NamespaceId,
+        /// Previous shard assignment.
+        old_shard_id: ShardId,
+        /// New shard assignment.
+        new_shard_id: ShardId,
+    },
+
+    /// Namespace marked for deletion (has active vaults).
+    /// Transitions to Deleted once all vaults are deleted.
+    NamespaceDeleting {
+        /// Namespace marked for deletion.
+        namespace_id: NamespaceId,
+        /// Vault IDs that must be deleted first.
+        blocking_vault_ids: Vec<VaultId>,
+    },
+
     /// Vault deleted.
     VaultDeleted {
         /// Whether the deletion was successful.
@@ -375,6 +418,23 @@ impl fmt::Display for LedgerResponse {
             },
             LedgerResponse::NamespaceResumed { namespace_id } => {
                 write!(f, "NamespaceResumed(id={})", namespace_id)
+            },
+            LedgerResponse::MigrationStarted { namespace_id, target_shard_id } => {
+                write!(f, "MigrationStarted(id={}, target={})", namespace_id, target_shard_id)
+            },
+            LedgerResponse::MigrationCompleted { namespace_id, old_shard_id, new_shard_id } => {
+                write!(
+                    f,
+                    "MigrationCompleted(id={}, {}->{})",
+                    namespace_id, old_shard_id, new_shard_id
+                )
+            },
+            LedgerResponse::NamespaceDeleting { namespace_id, blocking_vault_ids } => {
+                write!(
+                    f,
+                    "NamespaceDeleting(id={}, blocking_vaults={:?})",
+                    namespace_id, blocking_vault_ids
+                )
             },
             LedgerResponse::VaultDeleted { success } => {
                 write!(f, "VaultDeleted(success={})", success)

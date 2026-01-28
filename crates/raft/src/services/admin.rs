@@ -138,12 +138,10 @@ impl AdminService for AdminServiceImpl {
                 // Map internal NamespaceStatus to proto NamespaceStatus
                 let status = match ns.status {
                     NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
+                    NamespaceStatus::Migrating => crate::proto::NamespaceStatus::Migrating,
                     NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
+                    NamespaceStatus::Deleting => crate::proto::NamespaceStatus::Deleting,
                     NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
-                    // For other states (Migrating, Deleting), map to Active for now
-                    NamespaceStatus::Migrating | NamespaceStatus::Deleting => {
-                        crate::proto::NamespaceStatus::Active
-                    },
                 };
                 Ok(Response::new(GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id }),
@@ -171,12 +169,10 @@ impl AdminService for AdminServiceImpl {
                 // Map internal NamespaceStatus to proto NamespaceStatus
                 let status = match ns.status {
                     NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
+                    NamespaceStatus::Migrating => crate::proto::NamespaceStatus::Migrating,
                     NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
+                    NamespaceStatus::Deleting => crate::proto::NamespaceStatus::Deleting,
                     NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
-                    // For other states (Migrating, Deleting), map to Active for now
-                    NamespaceStatus::Migrating | NamespaceStatus::Deleting => {
-                        crate::proto::NamespaceStatus::Active
-                    },
                 };
                 crate::proto::GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id }),

@@ -1821,15 +1821,21 @@ async fn delete_namespace(namespace_id: NamespaceId) -> Result<(), Error> {
 
 **Current implementation status:**
 
-| Feature                     | Status            | Notes                                         |
-| --------------------------- | ----------------- | --------------------------------------------- |
-| Create with explicit shard  | ✓ Implemented     | `CreateNamespace(name, shard_id)`             |
-| Load-based shard assignment | ✓ Implemented     | Least-namespaces strategy, lowest-id tiebreak |
-| Namespace migration         | ✗ Not implemented | Planned for future                            |
-| Suspension/billing hold     | ✗ Not implemented | Planned for future                            |
-| Deletion cascade            | ✓ Implemented     | Returns blocking vault IDs; requires explicit vault deletion |
+| Feature                     | Status        | Notes                                                              |
+| --------------------------- | ------------- | ------------------------------------------------------------------ |
+| Create with explicit shard  | ✓ Implemented | `CreateNamespace(name, shard_id)`                                  |
+| Load-based shard assignment | ✓ Implemented | Least-namespaces strategy, lowest-id tiebreak                      |
+| Namespace migration         | ✓ Implemented | `UpdateNamespaceRouting(namespace_id, shard_id)` via SystemRequest |
+| Two-phase migration         | ✓ Implemented | `StartMigration`/`CompleteMigration` - blocks writes during migration |
+| Suspension/billing hold     | ✓ Implemented | `SuspendNamespace`, `ResumeNamespace` - blocks writes              |
+| Graceful deletion           | ✓ Implemented | `DeleteNamespace` → Deleting state → auto-Deleted on last vault delete |
 
-**Design note**: The `NamespaceStatus` enum defines five states (Active, Migrating, Suspended, Deleting, Deleted) for future extensibility. Currently, only Active and Deleted are used. The internal model uses a simple `deleted: bool` flag rather than the full enum.
+**Design note**: The `NamespaceStatus` enum defines five states:
+- **Active**: Accepting requests normally
+- **Migrating**: Two-phase migration in progress via `StartMigration`/`CompleteMigration`. Blocks writes and vault creation until migration completes.
+- **Suspended**: Billing or policy suspension via `SuspendNamespace`/`ResumeNamespace`. Blocks writes but allows reads.
+- **Deleting**: Graceful deletion in progress. Set when `DeleteNamespace` is called with active vaults. Blocks writes. Auto-transitions to Deleted when last vault is deleted.
+- **Deleted**: Tombstone state for historical queries.
 
 ### Vault Lifecycle
 
@@ -2492,14 +2498,12 @@ struct EmailVerificationToken {
 }
 
 /// Namespace lifecycle states (extensible enum)
-/// Note: Currently only Active and Deleted are implemented.
-/// Other states are reserved for future features.
 enum NamespaceStatus {
-    Active,     // Accepting requests (implemented)
-    Migrating,  // Being migrated to another shard (reserved)
-    Suspended,  // Billing or policy suspension (reserved)
-    Deleting,   // Deletion in progress (reserved)
-    Deleted,    // Tombstone (implemented)
+    Active,     // Accepting requests
+    Migrating,  // Two-phase migration via StartMigration/CompleteMigration (blocks writes)
+    Suspended,  // Billing or policy suspension (blocks writes, allows reads)
+    Deleting,   // Graceful deletion in progress (blocks writes, auto-transitions on last vault delete)
+    Deleted,    // Tombstone
 }
 
 struct NamespaceRegistry {
@@ -2716,7 +2720,7 @@ Clients subscribe to block updates via `WatchBlocks` gRPC streaming:
 // Returns lightweight announcements; clients fetch full blocks via GetBlock if needed
 ```
 
-**Current implementation**: `WatchBlocks` supports historical block replay only. When a client subscribes with `start_height`, all committed blocks from that height forward are streamed until the current tip. Real-time push notifications for newly committed blocks are not yet implemented.
+**Current implementation**: `WatchBlocks` supports historical block replay. When a client subscribes with `start_height`, all committed blocks from that height forward are streamed until the current tip. Real-time push notifications for newly committed blocks are not yet implemented.
 
 **Subscription pattern:**
 
@@ -2739,7 +2743,7 @@ Fully decentralized:
 
 - **No privileged nodes**: Any node can serve discovery queries, bootstrap new nodes, or become `_system` leader
 - **Bootstrap nodes are entry points, not authorities**: After joining, nodes discover all peers
-- **Dynamic peer list**: Nodes cache peers from `_system` state in memory (disk persistence not yet implemented)
+- **Dynamic peer list**: Nodes cache peers from `_system` state in memory
 - **Symmetric roles**: All nodes participate equally in `_system` consensus
 
 ### Bootstrap Discovery
@@ -2760,8 +2764,6 @@ flowchart TD
     dns -->|Found| connected
     dns -->|Failed| failed
 ```
-
-> **Note**: Peer cache persistence is planned but not yet implemented. Currently, nodes must use config bootstrap addresses or DNS discovery on every startup.
 
 #### DNS A Records
 
