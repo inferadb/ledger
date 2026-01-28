@@ -245,7 +245,11 @@ pub enum LedgerResponse {
     /// Namespace deleted.
     NamespaceDeleted {
         /// Whether the deletion was successful.
+        /// If false, `blocking_vault_ids` contains the vaults that must be deleted first.
         success: bool,
+        /// Vault IDs that are blocking deletion (only set when success=false).
+        /// Clients should delete these vaults before retrying namespace deletion.
+        blocking_vault_ids: Vec<VaultId>,
     },
 
     /// Vault deleted.
@@ -311,8 +315,16 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::UserCreated { user_id } => {
                 write!(f, "UserCreated(id={})", user_id)
             },
-            LedgerResponse::NamespaceDeleted { success } => {
-                write!(f, "NamespaceDeleted(success={})", success)
+            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+                if *success {
+                    write!(f, "NamespaceDeleted(success=true)")
+                } else {
+                    write!(
+                        f,
+                        "NamespaceDeleted(success=false, blocking_vaults={:?})",
+                        blocking_vault_ids
+                    )
+                }
             },
             LedgerResponse::VaultDeleted { success } => {
                 write!(f, "VaultDeleted(success={})", success)

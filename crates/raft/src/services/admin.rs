@@ -94,7 +94,7 @@ impl AdminService for AdminServiceImpl {
         let result = self.raft.client_write(ledger_request).await.map_err(ServiceError::raft)?;
 
         match result.data {
-            LedgerResponse::NamespaceDeleted { success } => {
+            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
                 if success {
                     Ok(Response::new(DeleteNamespaceResponse {
                         deleted_at: Some(
@@ -102,7 +102,13 @@ impl AdminService for AdminServiceImpl {
                         ),
                     }))
                 } else {
-                    Err(ServiceError::precondition("Namespace has vaults, cannot delete").into())
+                    let vault_ids: Vec<String> =
+                        blocking_vault_ids.iter().map(|id| id.to_string()).collect();
+                    Err(ServiceError::precondition(format!(
+                        "Namespace has active vaults that must be deleted first: [{}]",
+                        vault_ids.join(", ")
+                    ))
+                    .into())
                 }
             },
             LedgerResponse::Error { message } => Err(Status::internal(message)),

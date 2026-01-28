@@ -1827,7 +1827,7 @@ async fn delete_namespace(namespace_id: NamespaceId) -> Result<(), Error> {
 | Load-based shard assignment | ✓ Implemented     | Least-namespaces strategy, lowest-id tiebreak |
 | Namespace migration         | ✗ Not implemented | Planned for future                            |
 | Suspension/billing hold     | ✗ Not implemented | Planned for future                            |
-| Deletion cascade            | Partial           | Requires manual vault deletion                |
+| Deletion cascade            | ✓ Implemented     | Returns blocking vault IDs; requires explicit vault deletion |
 
 **Design note**: The `NamespaceStatus` enum defines five states (Active, Migrating, Suspended, Deleting, Deleted) for future extensibility. Currently, only Active and Deleted are used. The internal model uses a simple `deleted: bool` flag rather than the full enum.
 

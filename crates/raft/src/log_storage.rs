@@ -166,12 +166,16 @@ pub struct SequenceCounters {
     pub vault: VaultId,
     /// Next user ID.
     pub user: i64,
+    /// Next user email ID.
+    pub user_email: i64,
+    /// Next email verification token ID.
+    pub email_verify: i64,
 }
 
 impl SequenceCounters {
     /// Create new counters with initial values.
     pub fn new() -> Self {
-        Self { namespace: 1, vault: 1, user: 1 }
+        Self { namespace: 1, vault: 1, user: 1, user_email: 1, email_verify: 1 }
     }
 
     /// Get and increment the next namespace ID.
@@ -194,6 +198,50 @@ impl SequenceCounters {
         self.user += 1;
         id
     }
+
+    /// Get and increment the next user email ID.
+    pub fn next_user_email(&mut self) -> i64 {
+        let id = self.user_email;
+        self.user_email += 1;
+        id
+    }
+
+    /// Get and increment the next email verification token ID.
+    pub fn next_email_verify(&mut self) -> i64 {
+        let id = self.email_verify;
+        self.email_verify += 1;
+        id
+    }
+}
+
+/// Select the least-loaded shard for a new namespace.
+///
+/// Returns the shard with the fewest active (non-deleted) namespaces.
+/// Tie-breaker: lowest shard_id wins.
+/// Fallback: shard 0 if no namespaces exist.
+pub fn select_least_loaded_shard(namespaces: &HashMap<NamespaceId, NamespaceMeta>) -> ShardId {
+    // Count active namespaces per shard
+    let mut shard_counts: HashMap<ShardId, usize> = HashMap::new();
+
+    for meta in namespaces.values() {
+        if !meta.deleted {
+            *shard_counts.entry(meta.shard_id).or_insert(0) += 1;
+        }
+    }
+
+    // If no namespaces exist, default to shard 0
+    if shard_counts.is_empty() {
+        return 0;
+    }
+
+    // Find shard with minimum count, preferring lower shard_id on ties
+    shard_counts
+        .into_iter()
+        .min_by(|(shard_a, count_a), (shard_b, count_b)| {
+            count_a.cmp(count_b).then_with(|| shard_a.cmp(shard_b))
+        })
+        .map(|(shard_id, _)| shard_id)
+        .unwrap_or(0)
 }
 
 /// Maximum recovery attempts before requiring manual intervention.
@@ -644,8 +692,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::CreateNamespace { name, shard_id } => {
                 let namespace_id = state.sequences.next_namespace();
-                // Use provided shard_id or default to 0 (system shard)
-                let assigned_shard = shard_id.unwrap_or(0);
+                // Use provided shard_id or select least-loaded shard
+                let assigned_shard =
+                    shard_id.unwrap_or_else(|| select_least_loaded_shard(&state.namespaces));
                 state.namespaces.insert(
                     namespace_id,
                     NamespaceMeta {
@@ -721,15 +770,26 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::DeleteNamespace { namespace_id } => {
-                // Check if namespace has active vaults
-                let has_vaults =
-                    state.vaults.iter().any(|((ns, _), v)| *ns == *namespace_id && !v.deleted);
+                // Collect active (non-deleted) vault IDs for this namespace
+                let blocking_vault_ids: Vec<VaultId> = state
+                    .vaults
+                    .iter()
+                    .filter(|((ns, _), v)| *ns == *namespace_id && !v.deleted)
+                    .map(|((_, vault_id), _)| *vault_id)
+                    .collect();
 
-                let response = if has_vaults {
-                    LedgerResponse::NamespaceDeleted { success: false }
+                let response = if !blocking_vault_ids.is_empty() {
+                    // Cannot delete namespace with active vaults
+                    LedgerResponse::NamespaceDeleted {
+                        success: false,
+                        blocking_vault_ids,
+                    }
                 } else if let Some(ns) = state.namespaces.get_mut(namespace_id) {
                     ns.deleted = true;
-                    LedgerResponse::NamespaceDeleted { success: true }
+                    LedgerResponse::NamespaceDeleted {
+                        success: true,
+                        blocking_vault_ids: vec![],
+                    }
                 } else {
                     LedgerResponse::Error {
                         message: format!("Namespace {} not found", namespace_id),
@@ -1514,6 +1574,10 @@ mod tests {
         assert_eq!(counters.next_vault(), 2);
         assert_eq!(counters.next_user(), 1);
         assert_eq!(counters.next_user(), 2);
+        assert_eq!(counters.next_user_email(), 1);
+        assert_eq!(counters.next_user_email(), 2);
+        assert_eq!(counters.next_email_verify(), 1);
+        assert_eq!(counters.next_email_verify(), 2);
     }
 
     #[tokio::test]
@@ -1532,6 +1596,236 @@ mod tests {
         match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => {
                 assert_eq!(namespace_id, 1);
+            },
+            _ => panic!("unexpected response"),
+        }
+    }
+
+    #[test]
+    fn test_select_least_loaded_shard_empty() {
+        let namespaces = HashMap::new();
+        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+    }
+
+    #[test]
+    fn test_select_least_loaded_shard_single_shard() {
+        let mut namespaces = HashMap::new();
+        namespaces.insert(
+            1,
+            NamespaceMeta { namespace_id: 1, name: "ns1".to_string(), shard_id: 0, deleted: false },
+        );
+        namespaces.insert(
+            2,
+            NamespaceMeta { namespace_id: 2, name: "ns2".to_string(), shard_id: 0, deleted: false },
+        );
+        // Only shard 0 exists, so it should be selected
+        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+    }
+
+    #[test]
+    fn test_select_least_loaded_shard_equal_load_prefers_lower_id() {
+        let mut namespaces = HashMap::new();
+        // Shard 0: 2 namespaces
+        namespaces.insert(
+            1,
+            NamespaceMeta { namespace_id: 1, name: "ns1".to_string(), shard_id: 0, deleted: false },
+        );
+        namespaces.insert(
+            2,
+            NamespaceMeta { namespace_id: 2, name: "ns2".to_string(), shard_id: 0, deleted: false },
+        );
+        // Shard 1: 2 namespaces (equal load)
+        namespaces.insert(
+            3,
+            NamespaceMeta { namespace_id: 3, name: "ns3".to_string(), shard_id: 1, deleted: false },
+        );
+        namespaces.insert(
+            4,
+            NamespaceMeta { namespace_id: 4, name: "ns4".to_string(), shard_id: 1, deleted: false },
+        );
+        // Tie-breaker: lower shard_id wins
+        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+    }
+
+    #[test]
+    fn test_select_least_loaded_shard_unequal_load() {
+        let mut namespaces = HashMap::new();
+        // Shard 0: 3 namespaces
+        namespaces.insert(
+            1,
+            NamespaceMeta { namespace_id: 1, name: "ns1".to_string(), shard_id: 0, deleted: false },
+        );
+        namespaces.insert(
+            2,
+            NamespaceMeta { namespace_id: 2, name: "ns2".to_string(), shard_id: 0, deleted: false },
+        );
+        namespaces.insert(
+            3,
+            NamespaceMeta { namespace_id: 3, name: "ns3".to_string(), shard_id: 0, deleted: false },
+        );
+        // Shard 1: 1 namespace (lighter)
+        namespaces.insert(
+            4,
+            NamespaceMeta { namespace_id: 4, name: "ns4".to_string(), shard_id: 1, deleted: false },
+        );
+        // Shard 1 has fewer namespaces
+        assert_eq!(select_least_loaded_shard(&namespaces), 1);
+    }
+
+    #[test]
+    fn test_select_least_loaded_shard_ignores_deleted() {
+        let mut namespaces = HashMap::new();
+        // Shard 0: 1 active, 2 deleted
+        namespaces.insert(
+            1,
+            NamespaceMeta { namespace_id: 1, name: "ns1".to_string(), shard_id: 0, deleted: false },
+        );
+        namespaces.insert(
+            2,
+            NamespaceMeta { namespace_id: 2, name: "ns2".to_string(), shard_id: 0, deleted: true },
+        );
+        namespaces.insert(
+            3,
+            NamespaceMeta { namespace_id: 3, name: "ns3".to_string(), shard_id: 0, deleted: true },
+        );
+        // Shard 1: 2 active
+        namespaces.insert(
+            4,
+            NamespaceMeta { namespace_id: 4, name: "ns4".to_string(), shard_id: 1, deleted: false },
+        );
+        namespaces.insert(
+            5,
+            NamespaceMeta { namespace_id: 5, name: "ns5".to_string(), shard_id: 1, deleted: false },
+        );
+        // Shard 0 has only 1 active namespace (deleted don't count)
+        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+    }
+
+    #[test]
+    fn test_select_least_loaded_shard_many_shards() {
+        let mut namespaces = HashMap::new();
+        // Shard 0: 5 namespaces
+        for i in 1..=5 {
+            namespaces.insert(
+                i,
+                NamespaceMeta {
+                    namespace_id: i,
+                    name: format!("ns{}", i),
+                    shard_id: 0,
+                    deleted: false,
+                },
+            );
+        }
+        // Shard 1: 3 namespaces
+        for i in 6..=8 {
+            namespaces.insert(
+                i,
+                NamespaceMeta {
+                    namespace_id: i,
+                    name: format!("ns{}", i),
+                    shard_id: 1,
+                    deleted: false,
+                },
+            );
+        }
+        // Shard 2: 2 namespaces (minimum)
+        for i in 9..=10 {
+            namespaces.insert(
+                i,
+                NamespaceMeta {
+                    namespace_id: i,
+                    name: format!("ns{}", i),
+                    shard_id: 2,
+                    deleted: false,
+                },
+            );
+        }
+        // Shard 2 has the fewest namespaces
+        assert_eq!(select_least_loaded_shard(&namespaces), 2);
+    }
+
+    #[tokio::test]
+    async fn test_apply_create_namespace_load_balanced() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Pre-populate with namespaces on different shards
+        // Shard 0: 3 namespaces
+        for i in 1..=3 {
+            state.namespaces.insert(
+                i,
+                NamespaceMeta {
+                    namespace_id: i,
+                    name: format!("existing-ns-{}", i),
+                    shard_id: 0,
+                    deleted: false,
+                },
+            );
+        }
+        // Shard 1: 1 namespace
+        state.namespaces.insert(
+            4,
+            NamespaceMeta {
+                namespace_id: 4,
+                name: "existing-ns-4".to_string(),
+                shard_id: 1,
+                deleted: false,
+            },
+        );
+        state.sequences.namespace = 5; // Next ID is 5
+
+        drop(state);
+
+        let mut state = store.applied_state.write();
+        let request =
+            LedgerRequest::CreateNamespace { name: "new-ns".to_string(), shard_id: None };
+
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
+                assert_eq!(namespace_id, 5);
+                // Should be assigned to shard 1 (fewer namespaces)
+                assert_eq!(shard_id, 1, "Should assign to least-loaded shard");
+            },
+            _ => panic!("unexpected response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_create_namespace_explicit_shard_overrides() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Pre-populate: shard 0 has fewer namespaces
+        state.namespaces.insert(
+            1,
+            NamespaceMeta {
+                namespace_id: 1,
+                name: "existing".to_string(),
+                shard_id: 0,
+                deleted: false,
+            },
+        );
+        state.sequences.namespace = 2;
+
+        // Request explicit shard 5 (even though it would be "heavy" if it existed)
+        let request =
+            LedgerRequest::CreateNamespace { name: "new-ns".to_string(), shard_id: Some(5) };
+
+        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
+                assert_eq!(namespace_id, 2);
+                // Explicit shard_id should override load balancing
+                assert_eq!(shard_id, 5, "Explicit shard_id should override load balancing");
             },
             _ => panic!("unexpected response"),
         }
@@ -1739,6 +2033,225 @@ mod tests {
                 assert_eq!(*attempt, 2);
             },
             _ => panic!("expected Recovering health status with attempt 2"),
+        }
+    }
+
+    // ========================================================================
+    // Deletion Cascade Tests
+    // ========================================================================
+    //
+    // These tests verify the namespace deletion behavior with blocking vaults.
+    // Per DESIGN.md: namespaces with active vaults cannot be deleted until
+    // all vaults are deleted first. The response includes blocking vault IDs.
+
+    #[tokio::test]
+    async fn test_delete_namespace_blocked_by_active_vaults() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Create two vaults
+        let create_vault1 =
+            LedgerRequest::CreateVault { namespace_id, name: Some("vault1".to_string()), retention_policy: None };
+        let (response, _) = store.apply_request(&create_vault1, &mut state);
+        let vault1_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        let create_vault2 =
+            LedgerRequest::CreateVault { namespace_id, name: Some("vault2".to_string()), retention_policy: None };
+        let (response, _) = store.apply_request(&create_vault2, &mut state);
+        let vault2_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        // Try to delete namespace - should fail with blocking vault IDs
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        let (response, _) = store.apply_request(&delete_ns, &mut state);
+
+        match response {
+            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+                assert!(!success);
+                assert_eq!(blocking_vault_ids.len(), 2);
+                assert!(blocking_vault_ids.contains(&vault1_id));
+                assert!(blocking_vault_ids.contains(&vault2_id));
+            },
+            _ => panic!("expected NamespaceDeleted"),
+        }
+
+        // Verify namespace is still active
+        assert!(!state.namespaces.get(&namespace_id).unwrap().deleted);
+    }
+
+    #[tokio::test]
+    async fn test_delete_namespace_succeeds_after_vaults_deleted() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Create vault
+        let create_vault =
+            LedgerRequest::CreateVault { namespace_id, name: Some("vault".to_string()), retention_policy: None };
+        let (response, _) = store.apply_request(&create_vault, &mut state);
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        // Delete vault first
+        let delete_vault = LedgerRequest::DeleteVault { namespace_id, vault_id };
+        let (response, _) = store.apply_request(&delete_vault, &mut state);
+        match response {
+            LedgerResponse::VaultDeleted { success } => assert!(success),
+            _ => panic!("expected VaultDeleted"),
+        }
+
+        // Now delete namespace - should succeed
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        let (response, _) = store.apply_request(&delete_ns, &mut state);
+
+        match response {
+            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+                assert!(success);
+                assert!(blocking_vault_ids.is_empty());
+            },
+            _ => panic!("expected NamespaceDeleted"),
+        }
+
+        // Verify namespace is marked as deleted
+        assert!(state.namespaces.get(&namespace_id).unwrap().deleted);
+    }
+
+    #[tokio::test]
+    async fn test_delete_namespace_empty_succeeds() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace with no vaults
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "empty-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Delete namespace immediately - should succeed (no vaults)
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        let (response, _) = store.apply_request(&delete_ns, &mut state);
+
+        match response {
+            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+                assert!(success);
+                assert!(blocking_vault_ids.is_empty());
+            },
+            _ => panic!("expected NamespaceDeleted"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_namespace_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Try to delete non-existent namespace
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id: 999 };
+        let (response, _) = store.apply_request(&delete_ns, &mut state);
+
+        match response {
+            LedgerResponse::Error { message } => {
+                assert!(message.contains("999"));
+                assert!(message.contains("not found"));
+            },
+            _ => panic!("expected Error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_namespace_ignores_deleted_vaults() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace
+        let create_ns =
+            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let (response, _) = store.apply_request(&create_ns, &mut state);
+        let namespace_id = match response {
+            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
+            _ => panic!("expected NamespaceCreated"),
+        };
+
+        // Create two vaults
+        let create_vault1 =
+            LedgerRequest::CreateVault { namespace_id, name: Some("vault1".to_string()), retention_policy: None };
+        let (response, _) = store.apply_request(&create_vault1, &mut state);
+        let vault1_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        let create_vault2 =
+            LedgerRequest::CreateVault { namespace_id, name: Some("vault2".to_string()), retention_policy: None };
+        let (response, _) = store.apply_request(&create_vault2, &mut state);
+        let vault2_id = match response {
+            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            _ => panic!("expected VaultCreated"),
+        };
+
+        // Delete vault1
+        let delete_vault = LedgerRequest::DeleteVault { namespace_id, vault_id: vault1_id };
+        let (response, _) = store.apply_request(&delete_vault, &mut state);
+        match response {
+            LedgerResponse::VaultDeleted { success } => assert!(success),
+            _ => panic!("expected VaultDeleted"),
+        }
+
+        // Try to delete namespace - should fail, but only vault2 should be in blocking list
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        let (response, _) = store.apply_request(&delete_ns, &mut state);
+
+        match response {
+            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+                assert!(!success);
+                assert_eq!(blocking_vault_ids.len(), 1);
+                assert!(blocking_vault_ids.contains(&vault2_id));
+                // vault1 was deleted, so it should NOT be in blocking list
+                assert!(!blocking_vault_ids.contains(&vault1_id));
+            },
+            _ => panic!("expected NamespaceDeleted"),
         }
     }
 
@@ -2067,6 +2580,8 @@ mod tests {
         assert_eq!(counters.namespace, 1, "Namespace counter should start at 1");
         assert_eq!(counters.vault, 1, "Vault counter should start at 1");
         assert_eq!(counters.user, 1, "User counter should start at 1");
+        assert_eq!(counters.user_email, 1, "User email counter should start at 1");
+        assert_eq!(counters.email_verify, 1, "Email verify counter should start at 1");
     }
 
     // ========================================================================
@@ -2404,7 +2919,13 @@ mod tests {
             applied_state: AppliedState {
                 last_applied: Some(make_log_id(2, 50)),
                 membership: StoredMembership::default(),
-                sequences: SequenceCounters { namespace: 5, vault: 10, user: 3 },
+                sequences: SequenceCounters {
+                    namespace: 5,
+                    vault: 10,
+                    user: 3,
+                    user_email: 7,
+                    email_verify: 12,
+                },
                 vault_heights: {
                     let mut h = HashMap::new();
                     h.insert((1, 1), 25);
@@ -2444,6 +2965,8 @@ mod tests {
         assert_eq!(store.current_shard_height(), 30);
         assert_eq!(store.applied_state.read().sequences.namespace, 5);
         assert_eq!(store.applied_state.read().sequences.vault, 10);
+        assert_eq!(store.applied_state.read().sequences.user_email, 7);
+        assert_eq!(store.applied_state.read().sequences.email_verify, 12);
         assert_eq!(store.applied_state.read().vault_heights.get(&(1, 1)), Some(&25));
     }
 
