@@ -6,8 +6,8 @@
   "include-component-in-tag": false,
   "include-v-in-tag": true,
   "tag-separator": "-",
-  "group-pull-request-title-pattern": "rel: ${version}",
-  "pull-request-title-pattern": "rel: ${version}",
+  "group-pull-request-title-pattern": "release: v${version}",
+  "pull-request-title-pattern": "release: v${version}",
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug Fixes" },
@@ -23,7 +23,7 @@
     { "type": "dx", "section": "Improvements" },
     { "type": "ai", "section": "Improvements" },
     { "type": "imp", "section": "Improvements" },
-    { "type": "rel", "section": "Release", "hidden": true }
+    { "type": "release", "section": "Release", "hidden": true }
   ],
   "packages": {
     ".": {
