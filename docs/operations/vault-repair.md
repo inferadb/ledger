@@ -87,21 +87,22 @@ Manual intervention is required.
 
 ### Prerequisites
 
-- Access to `ledger-admin` CLI
+- Access to gRPC tools (`grpcurl`) or AdminService client
 - Direct access to the diverged node
 - Ability to take the node offline if needed
 
 ### Step 1: Diagnose the Issue
 
 ```bash
-# Check vault health status
-ledger-admin vault-status --namespace 1 --vault 123
+# Check vault health status via HealthService
+grpcurl -plaintext -d '{"namespace_id": {"id": 1}, "vault_id": {"id": 123}}' \
+  localhost:50051 ledger.v1.HealthService/Check
 
-# View recent divergence events
-ledger-admin logs --filter "state_root_divergence" --since 1h
+# View recent divergence events in logs
+journalctl -u ledger --since "1 hour ago" | grep -E "(diverge|state_root)"
 
-# Compare state roots across replicas
-ledger-admin compare-state-roots --namespace 1 --vault 123 --height 45678
+# Check node info and cluster state
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetNodeInfo
 ```
 
 ### Step 2: Identify Root Cause
@@ -118,14 +119,16 @@ ledger-admin compare-state-roots --namespace 1 --vault 123 --height 45678
 Once you've identified and addressed the root cause:
 
 ```bash
-# Force recovery for a specific vault
-ledger-admin recover-vault --namespace 1 --vault 123 --force
+# Force recovery for a specific vault via AdminService
+grpcurl -plaintext -d '{"namespace_id": {"id": 1}, "vault_id": {"id": 123}}' \
+  localhost:50051 ledger.v1.AdminService/RecoverVault
 
-# Monitor recovery progress
-ledger-admin watch-recovery --namespace 1 --vault 123
+# Monitor recovery progress via health checks
+watch -n 5 'grpcurl -plaintext -d "{\"namespace_id\": {\"id\": 1}, \"vault_id\": {\"id\": 123}}" \
+  localhost:50051 ledger.v1.HealthService/Check'
 ```
 
-The `--force` flag:
+The `RecoverVault` RPC:
 
 - Resets the recovery attempt counter
 - Clears vault state immediately
@@ -135,13 +138,12 @@ The `--force` flag:
 
 ```bash
 # Check vault is healthy
-ledger-admin vault-status --namespace 1 --vault 123
+grpcurl -plaintext -d '{"namespace_id": {"id": 1}, "vault_id": {"id": 123}}' \
+  localhost:50051 ledger.v1.HealthService/Check
 
-# Verify state root matches cluster
-ledger-admin compare-state-roots --namespace 1 --vault 123
-
-# Test read/write operations
-ledger-admin ping --namespace 1 --vault 123
+# Test read operations
+grpcurl -plaintext -d '{"namespace_id": {"id": 1}, "vault_id": {"id": 123}, "key": "test"}' \
+  localhost:50051 ledger.v1.ReadService/Read
 ```
 
 ## Preventing Divergence
@@ -157,10 +159,10 @@ All state machine operations must be deterministic:
 
 ### Testing for Determinism
 
-Run the determinism test suite:
+Run the state determinism property tests:
 
 ```bash
-cargo test --package inferadb-ledger-raft -- determinism --nocapture
+cargo test --package inferadb-ledger-state -- proptest_determinism --nocapture
 ```
 
 This replays the same transactions on multiple state machines and verifies identical state roots.
@@ -183,31 +185,33 @@ For severe corruption or when automatic recovery fails repeatedly:
 systemctl stop ledger
 
 # 2. Backup current state (for investigation)
-cp -r /var/lib/ledger/state /var/lib/ledger/state.corrupt.$(date +%Y%m%d)
+cp -r /var/lib/ledger/state.db /var/lib/ledger/state.db.corrupt.$(date +%Y%m%d)
 
-# 3. Remove vault state only (preserve Raft log)
-ledger-admin clear-vault-state --namespace 1 --vault 123 --data-dir /var/lib/ledger
-
-# 4. Start the node
+# 3. Start the node (automatic recovery will replay from snapshot)
 systemctl start ledger
 
-# 5. Monitor recovery (will replay from snapshot)
-ledger-admin watch-recovery --namespace 1 --vault 123
+# 4. Monitor recovery via HealthService
+grpcurl -plaintext -d '{"namespace_id": {"id": 1}, "vault_id": {"id": 123}}' \
+  localhost:50051 ledger.v1.HealthService/Check
 
-# 6. Verify health
-ledger-admin vault-status --namespace 1 --vault 123
+# 5. Check logs for recovery progress
+journalctl -u ledger -f | grep -E "(recovery|diverged|Recovering)"
 ```
+
+Note: Vault state is automatically cleared and rebuilt during recovery. Manual state deletion is not required.
 
 ## Metrics and Alerts
 
 ### Key Metrics
 
-| Metric                                    | Alert Threshold | Meaning                      |
-| ----------------------------------------- | --------------- | ---------------------------- |
-| `vault_health{state="diverged"}`          | > 0             | Vault is diverged            |
-| `vault_health{state="recovering"}`        | > 0 for 10m     | Recovery taking too long     |
-| `vault_recovery_attempts_total`           | > 3             | Automatic recovery exhausted |
-| `state_root_computation_duration_seconds` | p99 > 100ms     | Performance issue            |
+| Metric                                       | Alert Threshold | Meaning                        |
+| -------------------------------------------- | --------------- | ------------------------------ |
+| `ledger_recovery_failure_total`              | > 0             | Recovery attempt failed        |
+| `ledger_determinism_bug_total`               | > 0             | Non-deterministic state change |
+| `ledger_recovery_success_total`              | increasing      | Recoveries completing          |
+| `inferadb_ledger_state_root_latency_seconds` | p99 > 100ms     | State computation slow         |
+
+Note: Vault health status is queried via `HealthService.Check()` RPC, not Prometheus metrics.
 
 ### Alert Responses
 

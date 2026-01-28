@@ -16,20 +16,23 @@ This directory contains operational documentation for running InferaDB Ledger in
 Use the gRPC `HealthService` to check node status:
 
 ```bash
-# Check cluster health via gRPC health check
-grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
+# Check node health via custom HealthService
+grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check
 
-# Use grpc-health-probe for scripting
-grpc-health-probe -addr=localhost:50051
+# Check vault-specific health
+grpcurl -plaintext -d '{"namespace_id": {"id": 1}, "vault_id": {"id": 123}}' \
+  localhost:50051 ledger.v1.HealthService/Check
 ```
+
+Note: The standard `grpc-health-probe` tool is not compatible with InferaDB's custom health service.
 
 ### Key Metrics
 
-| Metric                          | Normal      | Warning     | Critical     |
-| ------------------------------- | ----------- | ----------- | ------------ |
-| `raft_replication_lag`          | < 10 blocks | > 50 blocks | > 100 blocks |
-| `vault_health{state="healthy"}` | 100%        | < 100%      | < 90%        |
-| `request_latency_p99`           | < 50ms      | > 100ms     | > 500ms      |
+| Metric                                   | Normal     | Warning     | Critical    |
+| ---------------------------------------- | ---------- | ----------- | ----------- |
+| `inferadb_ledger_raft_proposals_pending` | < 10       | > 50        | > 100       |
+| `ledger_grpc_request_latency_seconds`    | p99 < 50ms | p99 > 100ms | p99 > 500ms |
+| `ledger_recovery_failure_total`          | 0          | > 0         | increasing  |
 
 ## Related Documentation
 

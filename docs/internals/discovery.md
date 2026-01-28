@@ -57,9 +57,9 @@ Raft quorum size limits voter count. Large clusters use a fixed voter set with l
 Learners receive updates via Raft replication but may lag:
 
 ```rust
-struct SystemConfig {
-    learner_cache_ttl: Duration,        // Default: 5s
-    learner_refresh_interval: Duration, // Default: 1s
+struct LearnerCacheConfig {
+    cache_ttl: Duration,        // Default: 5s
+    refresh_interval: Duration, // Default: 1s
 }
 ```
 
@@ -94,7 +94,7 @@ kind: Service
 metadata:
   name: ledger
 spec:
-  clusterIP: None  # headless
+  clusterIP: None # headless
   selector:
     app: ledger
   ports:

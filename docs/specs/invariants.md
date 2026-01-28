@@ -21,12 +21,12 @@ Formal guarantees the system maintains under all conditions.
 
 ## Integrity Invariants
 
-| #   | Invariant             | Description                                                                                          |
-| --- | --------------------- | ---------------------------------------------------------------------------------------------------- |
-| 8   | Merkle soundness      | Invalid values cannot produce valid proofs                                                           |
-| 9   | Hash chain integrity  | Modifying any block invalidates all subsequent blocks                                                |
-| 10  | Transaction atomicity | All operations in a transaction apply together or not at all                                         |
-| 11  | State determinism     | Identical transactions on identical state produce identical state_root; divergence halts the replica |
+| #   | Invariant             | Description                                                                                                    |
+| --- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 8   | Merkle soundness      | Invalid values cannot produce valid proofs                                                                     |
+| 9   | Hash chain integrity  | Modifying any block invalidates all subsequent blocks                                                          |
+| 10  | Transaction atomicity | All operations in a transaction apply together or not at all                                                   |
+| 11  | State determinism     | Identical transactions on identical state produce identical state_root; divergence isolates the affected vault |
 
 ## Operational Invariants
 
@@ -87,12 +87,12 @@ Formal guarantees the system maintains under all conditions.
 
 ## Multi-Vault Failure Isolation Invariants
 
-| #   | Invariant                         | Description                                                      |
-| --- | --------------------------------- | ---------------------------------------------------------------- |
-| 34  | Vault divergence read isolation   | Vault divergence does not affect read availability of other vaults in the same shard |
-| 35  | Vault divergence write isolation  | Vault divergence does not block writes to other vaults in the same shard |
-| 36  | Vault recovery independence       | Vault recovery requires no shard-wide coordination               |
-| 37  | Determinism bug surfacing         | Determinism bugs surface during recovery replay                  |
+| #   | Invariant                        | Description                                                                          |
+| --- | -------------------------------- | ------------------------------------------------------------------------------------ |
+| 34  | Vault divergence read isolation  | Vault divergence does not affect read availability of other vaults in the same shard |
+| 35  | Vault divergence write isolation | Vault divergence does not block writes to other vaults in the same shard             |
+| 36  | Vault recovery independence      | Vault recovery requires no shard-wide coordination                                   |
+| 37  | Determinism bug surfacing        | Determinism bugs surface during recovery replay                                      |
 
 ## Storage Layer Boundaries
 

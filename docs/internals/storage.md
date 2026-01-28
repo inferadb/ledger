@@ -7,8 +7,8 @@ This document covers directory layout, database schemas, snapshots, and crash re
 ```
 /var/lib/ledger/
 ├── node_id                      # Persisted node identity (snowflake ID)
-├── state.db                     # Unified database for state, Raft log, blocks
-├── raft.db                      # Raft-specific storage
+├── state.db                     # Entity/relationship state and indexes
+├── raft.db                      # Raft log entries and persistent state
 ├── blocks.db                    # Block archive storage
 └── snapshots/
     ├── 000001000.snap           # Snapshot at height 1000
@@ -19,12 +19,12 @@ The current implementation uses a unified database approach rather than per-shar
 
 ### Design Decisions
 
-| Decision                    | Rationale                                                  |
-| --------------------------- | ---------------------------------------------------------- |
-| Unified database files      | Custom Inkwell B+ tree engine with MVCC                    |
-| Table-based storage         | 15 tables for different data types (see tables.rs)         |
-| Dual-slot commit            | Atomic commits without traditional WAL overhead            |
-| Snapshots by height         | Predictable naming; simple retention policy                |
+| Decision               | Rationale                                          |
+| ---------------------- | -------------------------------------------------- |
+| Unified database files | Custom Inkwell B+ tree engine with MVCC            |
+| Table-based storage    | 15 tables for different data types (see tables.rs) |
+| Dual-slot commit       | Atomic commits without traditional WAL overhead    |
+| Snapshots by height    | Predictable naming; simple retention policy        |
 
 ## Database Backend
 
@@ -75,13 +75,6 @@ Value: postcard-serialized ShardBlock
 
 A secondary `VaultBlockIndex` table provides fast vault-specific lookups by vault height.
 
-### Segment Management
-
-- **Segment size**: 10,000 blocks
-- **Segment naming**: `segment_{:06}.blk`
-- **Rotation**: New segment when current reaches capacity
-- **Archival**: Old segments can be moved to cold storage
-
 ## Snapshots
 
 ### Format
@@ -93,18 +86,23 @@ struct SnapshotFile {
 }
 
 struct SnapshotHeader {
-    magic: [u8; 4],           // "LSNP"
+    magic: [u8; 4],                        // "LSNP"
     version: u32,
     shard_id: ShardId,
     shard_height: u64,
     vault_states: Vec<VaultSnapshotMeta>,
-    checksum: [u8; 32],       // SHA-256 of state_data
+    checksum: Hash,                        // SHA-256 of state_data
+    genesis_hash: Hash,                    // Links snapshot to shard origin
+    previous_snapshot_height: Option<u64>,
+    previous_snapshot_hash: Option<Hash>,
+    chain_commitment: ChainCommitment,     // Verification without full replay
 }
 
 struct VaultSnapshotMeta {
     vault_id: VaultId,
     vault_height: u64,
     state_root: Hash,
+    bucket_roots: Vec<Hash>,  // 256 bucket roots for incremental state
     key_count: u64,
 }
 ```

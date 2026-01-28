@@ -5,7 +5,7 @@ replicaCount: 3
 
 image:
   repository: inferadb/ledger
-  tag: ""  # Defaults to Chart appVersion
+  tag: "" # Defaults to Chart appVersion
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -38,7 +38,7 @@ config:
   # Transaction batching
   batch:
     maxSize: 100
-    maxDelayMs: 10
+    maxDelaySecs: 0.01 # 10ms in seconds
 
 # Persistence configuration
 persistence:

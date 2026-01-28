@@ -98,7 +98,7 @@ spec:
             - name: INFERADB__LEDGER__BATCH_SIZE
               value: {{ .Values.config.batch.maxSize | quote }}
             - name: INFERADB__LEDGER__BATCH_DELAY
-              value: {{ .Values.config.batch.maxDelayMs | quote }}
+              value: {{ .Values.config.batch.maxDelaySecs | quote }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: data

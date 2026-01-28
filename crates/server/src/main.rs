@@ -5,17 +5,17 @@
 //! # Usage
 //!
 //! ```bash
-//! # Start with CLI arguments
-//! inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger --expect 1
+//! # Start single-node cluster
+//! inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger --single
 //!
 //! # Start with environment variables
-//! INFERADB__LEDGER__LISTEN_ADDR=0.0.0.0:50051 \
-//! INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
-//! INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
+//! INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
+//! INFERADB__LEDGER__DATA=/tmp/ledger \
+//! INFERADB__LEDGER__CLUSTER=1 \
 //! inferadb-ledger
 //!
 //! # CLI arguments override environment variables
-//! INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 inferadb-ledger --expect 1
+//! INFERADB__LEDGER__CLUSTER=3 inferadb-ledger --single
 //! ```
 
 mod bootstrap;
@@ -78,7 +78,7 @@ async fn main() -> Result<(), ServerError> {
     if config.is_localhost_only() {
         tracing::warn!(
             "Listening on localhost only. Remote connections will be rejected. \
-             Set --listen or INFERADB__LEDGER__LISTEN_ADDR to accept remote connections."
+             Set --listen or INFERADB__LEDGER__LISTEN to accept remote connections."
         );
     }
 
@@ -87,7 +87,7 @@ async fn main() -> Result<(), ServerError> {
         tracing::warn!(
             data_dir = %data_dir.display(),
             "Running in ephemeral mode. All data will be lost on shutdown. \
-             Set --data or INFERADB__LEDGER__DATA_DIR for persistent storage."
+             Set --data or INFERADB__LEDGER__DATA for persistent storage."
         );
     }
 

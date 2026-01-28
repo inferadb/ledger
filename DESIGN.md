@@ -170,13 +170,13 @@ InferaDB uses **gRPC/HTTP/2** for both client-facing APIs and inter-node Raft co
 
 #### Why gRPC/HTTP/2
 
-| Factor | gRPC/HTTP/2 | Custom TCP Protocol |
-| ------ | ----------- | ------------------- |
-| **Development velocity** | High (generated clients, rich tooling) | Low (custom wire format, manual versioning) |
-| **Operational complexity** | Low (standard load balancers, observability) | High (custom monitoring, debugging tools) |
-| **Performance** | ~0.5ms per RPC overhead | ~0.1-0.2ms theoretical improvement |
-| **HTTP/2 multiplexing** | Natural fit for batch operations | Must implement manually |
-| **TLS integration** | Standard, well-audited | Custom implementation required |
+| Factor                     | gRPC/HTTP/2                                  | Custom TCP Protocol                         |
+| -------------------------- | -------------------------------------------- | ------------------------------------------- |
+| **Development velocity**   | High (generated clients, rich tooling)       | Low (custom wire format, manual versioning) |
+| **Operational complexity** | Low (standard load balancers, observability) | High (custom monitoring, debugging tools)   |
+| **Performance**            | ~0.5ms per RPC overhead                      | ~0.1-0.2ms theoretical improvement          |
+| **HTTP/2 multiplexing**    | Natural fit for batch operations             | Must implement manually                     |
+| **TLS integration**        | Standard, well-audited                       | Custom implementation required              |
 
 **Decision rationale**: At InferaDB's target scale (<50K ops/sec per cluster), the ~0.3ms per-request overhead of gRPC/HTTP/2 is negligible compared to consensus latency (~2-5ms) and disk I/O. The development velocity and operational simplicity far outweigh raw throughput gains from a custom protocol.
 
@@ -199,6 +199,7 @@ Client Request
 **Why postcard for storage**: Proto is optimized for wire transmission (extensible, schema-aware) while postcard is optimized for in-process speed (no schema overhead, minimal allocation, no_std compatible). Storing as postcard avoids proto parsing on every log replay.
 
 **Measured overhead** (see serialization metrics in Observability):
+
 - Proto decode: ~1-5μs per operation (varies with payload size)
 - Postcard encode: ~2-10μs per Raft entry (varies with batch size)
 - Total serialization: <1% of request latency at typical batch sizes
@@ -208,6 +209,7 @@ Client Request
 **QUIC/HTTP/3**: Would add ~0.1ms initial connection latency savings but introduces complexity (UDP NAT traversal, less mature ecosystem). Not justified for persistent connections between cluster nodes.
 
 **Custom binary protocol**: Would save ~0.3ms per request but requires:
+
 - Custom framing, flow control, backpressure
 - Version negotiation, backwards compatibility
 - Custom TLS integration
@@ -217,6 +219,7 @@ Client Request
 This is a net negative for systems targeting <100K ops/sec where developer and operator productivity dominates.
 
 **gRPC-only storage (no postcard)**: Would eliminate one serialization layer but:
+
 - Proto parsing is slower than postcard for repeated reads
 - Proto schema evolution adds replay complexity
 - Postcard's deterministic serialization simplifies snapshot verification
@@ -224,6 +227,7 @@ This is a net negative for systems targeting <100K ops/sec where developer and o
 #### When to Reconsider
 
 This decision should be revisited if:
+
 - Serialization latency exceeds 5% of request latency (monitor `ledger_serialization_*` metrics)
 - Target throughput exceeds 100K ops/sec per shard
 - Network latency becomes the primary bottleneck (currently consensus dominates)
@@ -972,16 +976,16 @@ StateProof {
 
 Not all operations are cryptographically verifiable. The design explicitly trades range/completeness proofs for O(1) write performance.
 
-| Operation               | Verifiable | Proof Type              | Notes                                      |
-| ----------------------- | ---------- | ----------------------- | ------------------------------------------ |
-| Point read (single key) | ✓          | StateProof              | Full bucket verification                   |
+| Operation               | Verifiable | Proof Type              | Notes                                                               |
+| ----------------------- | ---------- | ----------------------- | ------------------------------------------------------------------- |
+| Point read (single key) | ✓          | StateProof              | Full bucket verification                                            |
 | Historical point read   | ✓          | StateProof + ChainProof | Proofs optional (`include_proof`); requires height within retention |
-| Transaction inclusion   | ✓          | MerkleProof             | O(log n) proof against tx_merkle_root      |
-| Write committed         | ✓          | BlockHeader + TxProof   | Self-verifiable with optional proofs       |
-| List relationships      | ✗          | None                    | No range proofs; trust server completeness |
-| List entities           | ✗          | None                    | No range proofs; trust server completeness |
-| List resources          | ✗          | None                    | No range proofs; trust server completeness |
-| Pagination completeness | ✗          | None                    | Cannot prove no results were omitted       |
+| Transaction inclusion   | ✓          | MerkleProof             | O(log n) proof against tx_merkle_root                               |
+| Write committed         | ✓          | BlockHeader + TxProof   | Self-verifiable with optional proofs                                |
+| List relationships      | ✗          | None                    | No range proofs; trust server completeness                          |
+| List entities           | ✗          | None                    | No range proofs; trust server completeness                          |
+| List resources          | ✗          | None                    | No range proofs; trust server completeness                          |
+| Pagination completeness | ✗          | None                    | Cannot prove no results were omitted                                |
 
 **Design rationale**: Authorization workloads prioritize fast permission checks over cryptographic completeness proofs. Vault owners who require verifiable list operations must:
 
@@ -1025,7 +1029,7 @@ When a follower computes a `state_root` that differs from the block header:
 enum VaultHealth {
     Healthy,
     Diverged { expected: Hash, computed: Hash, at_height: u64 },
-    Recovering { started_at: DateTime<Utc>, attempt: u8 },
+    Recovering { started_at: i64, attempt: u8 },  // Unix timestamp
 }
 
 impl Node {
@@ -1112,13 +1116,15 @@ impl Node {
 }
 ```
 
-Recovery behavior:
+Recovery behavior (exponential backoff with base=5s, max=300s):
 
 | Attempt | Backoff    | Action on Failure           |
 | ------- | ---------- | --------------------------- |
-| 1       | Immediate  | Retry                       |
-| 2       | 30 seconds | Retry                       |
-| 3       | 5 minutes  | Require manual intervention |
+| 1       | 5 seconds  | Retry                       |
+| 2       | 10 seconds | Retry                       |
+| 3       | 20 seconds | Require manual intervention |
+
+Backoff formula: `base_delay × 2^(attempt-1)`, capped at 300 seconds.
 
 After 3 failed attempts, the vault remains in `Recovering` state and emits `vault_recovery_exhausted{vault_id}`. Operators must investigate the root cause before manually triggering recovery via `ledger-admin recover-vault <vault_id> --force`.
 
@@ -1442,11 +1448,11 @@ Historical reads return state as it existed at a specific block height. Since th
 
 **API options:**
 
-| RPC                               | Proofs      | Use Case                                    |
-| --------------------------------- | ----------- | ------------------------------------------- |
-| `VerifiedRead(at_height=H)`       | Always      | Client-side verification of historical data |
-| `HistoricalRead(include_proof=T)` | If T=true   | Archival queries with optional verification |
-| `HistoricalRead(include_proof=F)` | None        | Audits, debugging, compliance (fastest)     |
+| RPC                               | Proofs    | Use Case                                    |
+| --------------------------------- | --------- | ------------------------------------------- |
+| `VerifiedRead(at_height=H)`       | Always    | Client-side verification of historical data |
+| `HistoricalRead(include_proof=T)` | If T=true | Archival queries with optional verification |
+| `HistoricalRead(include_proof=F)` | None      | Audits, debugging, compliance (fastest)     |
 
 For archival queries where proof generation adds latency (5-20ms hot, 100ms-10s cold), use `HistoricalRead(include_proof=false)`.
 
@@ -1658,15 +1664,15 @@ Scaling dimensions:
 
 **Target metrics** (3-node Raft cluster, 1M keys in state tree, same datacenter):
 
-| Metric             | Target          | Measurement                    | Rationale                         |
-| ------------------ | --------------- | ------------------------------ | --------------------------------- |
-| Read (p50)         | <0.5ms          | Single key, no proof, follower | inferadb-ledger-store lookup + gRPC             |
-| Read (p99)         | <2ms            | Single key, no proof, follower | Tail latency from GC/compaction   |
-| Read + proof (p99) | <10ms           | With merkle proof generation   | Bucket-based O(k) proof           |
-| Write (p50)        | <10ms           | Single tx, quorum commit       | Raft RTT + fsync                  |
-| Write (p99)        | <50ms           | Single tx, quorum commit       | Includes state_root computation   |
-| Write throughput   | 5,000 tx/sec    | Batched, sustained             | 100 tx/batch × 50 batches/sec     |
-| Read throughput    | 100,000 req/sec | Per node, batched              | Follower reads scale horizontally |
+| Metric             | Target          | Measurement                    | Rationale                           |
+| ------------------ | --------------- | ------------------------------ | ----------------------------------- |
+| Read (p50)         | <0.5ms          | Single key, no proof, follower | inferadb-ledger-store lookup + gRPC |
+| Read (p99)         | <2ms            | Single key, no proof, follower | Tail latency from GC/compaction     |
+| Read + proof (p99) | <10ms           | With merkle proof generation   | Bucket-based O(k) proof             |
+| Write (p50)        | <10ms           | Single tx, quorum commit       | Raft RTT + fsync                    |
+| Write (p99)        | <50ms           | Single tx, quorum commit       | Includes state_root computation     |
+| Write throughput   | 5,000 tx/sec    | Batched, sustained             | 100 tx/batch × 50 batches/sec       |
+| Read throughput    | 100,000 req/sec | Per node, batched              | Follower reads scale horizontally   |
 
 **Why these targets are achievable:**
 
@@ -2685,12 +2691,12 @@ Each node uses a single data directory with subdirectories per concern:
 
 **Key design decisions:**
 
-| Decision                      | Rationale                                                  |
-| ----------------------------- | ---------------------------------------------------------- |
-| Per-shard directories         | Matches Raft group boundaries; independent failure domains |
+| Decision                    | Rationale                                                  |
+| --------------------------- | ---------------------------------------------------------- |
+| Per-shard directories       | Matches Raft group boundaries; independent failure domains |
 | Separate raft/ and state.db | Raft log is append-heavy; state is random-access heavy     |
-| Block segments                | Append-only writes; easy archival of old segments          |
-| Snapshots by height           | Predictable naming; simple retention policy                |
+| Block segments              | Append-only writes; easy archival of old segments          |
+| Snapshots by height         | Predictable naming; simple retention policy                |
 
 ### Storage Backend: inferadb-ledger-store
 
@@ -2929,11 +2935,17 @@ struct SnapshotFile {
 
 struct SnapshotHeader {
     magic: [u8; 4],           // "LSNP"
-    version: u32,             // Format version
+    version: u32,             // Format version (v2 adds chain verification)
     shard_id: ShardId,
     shard_height: u64,
     vault_states: Vec<VaultSnapshotMeta>,
     checksum: [u8; 32],       // SHA-256 of state_data
+
+    // Chain verification linkage (v2+)
+    genesis_hash: Hash,                        // Links snapshot chain to genesis
+    previous_snapshot_height: Option<u64>,     // Height of prior snapshot
+    previous_snapshot_hash: Option<Hash>,      // Hash of prior snapshot
+    chain_commitment: ChainCommitment,         // Accumulated header hashes
 }
 
 struct VaultSnapshotMeta {
@@ -2941,6 +2953,7 @@ struct VaultSnapshotMeta {
     vault_height: u64,
     state_root: Hash,
     key_count: u64,
+    bucket_roots: Vec<Hash>,  // All 256 bucket roots for verification
 }
 
 // Snapshot naming: {shard_height:09}.snap
@@ -3011,13 +3024,13 @@ impl Node {
 
 **Recovery guarantees:**
 
-| Failure Mode         | Recovery Action                               |
-| -------------------- | --------------------------------------------- |
-| Clean shutdown       | Replay from last snapshot + committed log     |
+| Failure Mode         | Recovery Action                                                |
+| -------------------- | -------------------------------------------------------------- |
+| Clean shutdown       | Replay from last snapshot + committed log                      |
 | Crash during write   | Incomplete inferadb-ledger-store txn rolled back automatically |
-| Corrupted snapshot   | Skip to older snapshot, replay more log       |
-| Corrupted log entry  | Fetch from peer, or rebuild from snapshot     |
-| Missing segment file | Fetch from peer (block archive is replicated) |
+| Corrupted snapshot   | Skip to older snapshot, replay more log                        |
+| Corrupted log entry  | Fetch from peer, or rebuild from snapshot                      |
+| Missing segment file | Fetch from peer (block archive is replicated)                  |
 
 ### File Locking
 
@@ -3700,10 +3713,10 @@ Ledger uses a two-tier error strategy:
 
 **Response-level errors** (domain-specific):
 
-| Error Type      | Codes                                                                                   | Purpose                   |
-| --------------- | --------------------------------------------------------------------------------------- | ------------------------- |
+| Error Type      | Codes                                                                                                    | Purpose                   |
+| --------------- | -------------------------------------------------------------------------------------------------------- | ------------------------- |
 | `WriteError`    | `KEY_EXISTS`, `KEY_NOT_FOUND`, `VERSION_MISMATCH`, `VALUE_MISMATCH`, `ALREADY_COMMITTED`, `SEQUENCE_GAP` | CAS failures, idempotency |
-| `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                    | Historical read failures  |
+| `ReadErrorCode` | `HEIGHT_UNAVAILABLE`                                                                                     | Historical read failures  |
 
 **Rationale**: gRPC status codes handle failures before the request reaches domain logic. Response-level errors convey actionable domain state (current version, committed tx_id) that clients need for intelligent retry.
 
