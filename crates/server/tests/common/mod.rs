@@ -87,18 +87,19 @@ impl TestCluster {
         // This allows it to immediately become leader, then we dynamically add nodes
         let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
         let temp_dir = TestDir::new();
+        let data_dir = temp_dir.path().to_path_buf();
 
         // Bootstrap node: no discovery configured → no peers found → bootstraps.
         // Uses auto-generated Snowflake ID for realistic testing.
         let config = inferadb_ledger_server::config::Config {
             listen_addr: addr,
             metrics_addr: None,
-            data_dir: temp_dir.path().to_path_buf(),
-            bootstrap_expect: 1, // Single-node mode for immediate bootstrap
+            data_dir: Some(data_dir.clone()),
+            single: true, // Single-node mode for immediate bootstrap
             ..inferadb_ledger_server::config::Config::default()
         };
 
-        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
+        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
             .await
             .expect("bootstrap node");
 
@@ -146,6 +147,7 @@ impl TestCluster {
         for i in 1..size {
             let port = base_port + i as u16;
             let temp_dir = TestDir::new();
+            let data_dir = temp_dir.path().to_path_buf();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
             // Joining node: use join mode (bootstrap_expect=0) for dynamic node addition.
@@ -155,17 +157,18 @@ impl TestCluster {
             let config = inferadb_ledger_server::config::Config {
                 listen_addr: addr,
                 metrics_addr: None,
-                data_dir: temp_dir.path().to_path_buf(),
-                bootstrap_expect: 0, // Join mode: wait to be added to existing cluster
+                data_dir: Some(data_dir.clone()),
+                join: true, // Join mode: wait to be added to existing cluster
                 ..inferadb_ledger_server::config::Config::default()
             };
 
             // Create the node - with bootstrap_expect=0, it won't initialize its own
             // Raft cluster. It just starts the gRPC server and waits to be added via
             // AdminService's JoinCluster RPC.
-            let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
-                .await
-                .expect("bootstrap node");
+            let bootstrapped =
+                inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
+                    .await
+                    .expect("bootstrap node");
 
             // Get the auto-generated Snowflake ID from Raft metrics
             let node_id = bootstrapped.raft.metrics().borrow().id;

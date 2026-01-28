@@ -396,6 +396,19 @@ mod tests {
             .expect("valid test config")
     }
 
+    /// Config that uses a non-routable address (TEST-NET-1) guaranteed to fail connection.
+    /// This avoids flaky tests when port 50051 happens to have a server running.
+    fn unreachable_config() -> ClientConfig {
+        ClientConfig::builder()
+            // 192.0.2.x is the TEST-NET-1 range, reserved for documentation/testing
+            // and guaranteed to be non-routable on any real network
+            .endpoints(vec!["http://192.0.2.1:50051".into()])
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .expect("valid test config")
+    }
+
     fn test_discovery_config() -> DiscoveryConfig {
         DiscoveryConfig::enabled().with_refresh_interval(Duration::from_secs(1))
     }
@@ -491,25 +504,25 @@ mod tests {
 
     #[tokio::test]
     async fn get_peers_returns_error_on_connection_failure() {
-        let pool = ConnectionPool::new(test_config());
+        let pool = ConnectionPool::new(unreachable_config());
         let config = test_discovery_config();
         let service = DiscoveryService::new(pool, config);
 
         let result = service.get_peers().await;
 
-        // Should fail since there's no server
+        // Should fail since the endpoint is non-routable
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn refresh_peers_returns_error_on_connection_failure() {
-        let pool = ConnectionPool::new(test_config());
+        let pool = ConnectionPool::new(unreachable_config());
         let config = test_discovery_config();
         let service = DiscoveryService::new(pool, config);
 
         let result = service.refresh_peers().await;
 
-        // Should fail since there's no server
+        // Should fail since the endpoint is non-routable
         assert!(result.is_err());
     }
 
@@ -614,13 +627,13 @@ mod tests {
 
     #[tokio::test]
     async fn get_peers_with_limit_returns_error_on_connection_failure() {
-        let pool = ConnectionPool::new(test_config());
+        let pool = ConnectionPool::new(unreachable_config());
         let config = test_discovery_config();
         let service = DiscoveryService::new(pool, config);
 
         let result = service.get_peers_with_limit(5).await;
 
-        // Should fail since there's no server
+        // Should fail since the endpoint is non-routable
         assert!(result.is_err());
     }
 }

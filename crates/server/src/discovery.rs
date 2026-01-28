@@ -26,7 +26,7 @@
 //! The `GetNodeInfo` RPC returns only non-sensitive coordination metadata,
 //! minimizing exposure risk even without transport encryption.
 
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use hickory_resolver::{
     Resolver,
@@ -75,18 +75,19 @@ struct CachedPeers {
 
 /// Resolve bootstrap peers using discovery methods.
 ///
-/// Tries in order:
-/// 1. Cached peers (if valid and not expired)
-/// 2. DNS A record lookup (if configured)
+/// The `--peers` value is auto-detected:
+/// - File path (contains `/` or `\`, or ends with `.json`): Load from JSON file
+/// - DNS domain: Perform A record lookup
 ///
 /// Returns addresses for cluster discovery.
 pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
     let mut addresses = Vec::new();
 
-    if let Some(cached_path) = &config.discovery_cache_path {
-        match load_cached_peers(cached_path, config.discovery_cache_ttl_secs) {
+    // Try file-based discovery
+    if let Some(file_path) = config.peers_as_file_path() {
+        match load_cached_peers(file_path, config.peers_ttl_secs) {
             Ok(cached) => {
-                debug!(count = cached.len(), "Loaded cached peers");
+                info!(count = cached.len(), path = %file_path, "Loaded peers from file");
                 for peer in cached {
                     if let Ok(addr) = peer.addr.parse::<SocketAddr>() {
                         addresses.push(addr);
@@ -94,22 +95,16 @@ pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
                 }
             },
             Err(e) => {
-                debug!(error = %e, "No valid cached peers");
+                warn!(error = %e, path = %file_path, "Failed to load peers from file");
             },
         }
     }
 
-    if let Some(domain) = &config.discovery_domain {
+    // Try DNS-based discovery
+    if let Some(domain) = config.peers_as_dns_domain() {
         match dns_lookup(domain, config.listen_addr.port()).await {
             Ok(peers) => {
                 info!(count = peers.len(), domain = %domain, "Discovered peers via DNS");
-
-                // Cache the discovered peers
-                if let Some(cached_path) = &config.discovery_cache_path
-                    && let Err(e) = save_cached_peers(cached_path, &peers)
-                {
-                    warn!(error = %e, "Failed to cache discovered peers");
-                }
 
                 for peer in peers {
                     if let Ok(addr) = peer.addr.parse::<SocketAddr>() {
@@ -264,7 +259,10 @@ fn load_cached_peers(path: &str, ttl_secs: u64) -> Result<Vec<DiscoveredPeer>, D
 }
 
 /// Save discovered peers to cache file.
+#[cfg(test)]
 fn save_cached_peers(path: &str, peers: &[DiscoveredPeer]) -> Result<(), DiscoveryError> {
+    use std::path::Path;
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -281,7 +279,6 @@ fn save_cached_peers(path: &str, peers: &[DiscoveredPeer]) -> Result<(), Discove
 
     std::fs::write(path, content).map_err(|e| DiscoveryError::CacheWrite(e.to_string()))?;
 
-    debug!(path, "Cached discovered peers");
     Ok(())
 }
 
@@ -296,7 +293,8 @@ pub enum DiscoveryError {
     CacheParse(String),
     /// Cache has expired.
     CacheExpired,
-    /// Failed to write cache file.
+    /// Failed to write cache file (used in tests).
+    #[allow(dead_code)]
     CacheWrite(String),
 }
 
@@ -366,14 +364,13 @@ mod tests {
     #[test]
     fn test_config_discovery_defaults() {
         let config = Config::default();
-        assert!(config.discovery_domain.is_none());
-        assert!(config.discovery_cache_path.is_none());
-        assert_eq!(config.discovery_cache_ttl_secs, 3600);
+        assert!(config.peers.is_none());
+        assert_eq!(config.peers_ttl_secs, 3600);
     }
 
     #[tokio::test]
     async fn test_resolve_with_no_discovery_configured() {
-        let config = Config { data_dir: PathBuf::from("/tmp/test"), ..Config::default() };
+        let config = Config { data_dir: Some(PathBuf::from("/tmp/test")), ..Config::default() };
 
         // With no discovery sources configured, should return empty
         let addresses = resolve_bootstrap_peers(&config).await;

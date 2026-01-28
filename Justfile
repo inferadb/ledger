@@ -100,12 +100,12 @@ proto-lint:
 # ============================================================================
 
 # Run the server in development mode
-run config="config.toml":
-    cargo +{{rust}} run -p inferadb-ledger-server -- --config {{config}}
+run:
+    cargo +{{rust}} run -p inferadb-ledger-server
 
 # Run the server in release mode
-run-release config="config.toml":
-    cargo +{{rust}} run -p inferadb-ledger-server --release -- --config {{config}}
+run-release:
+    cargo +{{rust}} run -p inferadb-ledger-server --release
 
 # ============================================================================
 # Maintenance

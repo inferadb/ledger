@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > Under active development. Not production-ready.
 
-[InferaDB](https://inferadb.com) Ledger is a distributed blockchain database optimized for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently.
+[InferaDB](https://inferadb.com) Ledger is a distributed blockchain database optimized for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently. Ledger is the persistent storage layer used by the [InferaDB Engine](https://github.com/inferadb/engine) and [InferaDB Control](https://github.com/inferadb/control).
 
 - [Features](#Features)
 - [Installation](#Installation)
@@ -23,7 +23,7 @@
 - [License](#License)
 
 ## Features
-  
+
 - **Cryptographic Verification** — Per-vault blockchain with chain-linked state roots, Merkle proofs, SHA-256 commitments
 - **Raft Consensus** — Strong consistency, automatic leader election, deterministic state recovery
 - **Performance** — Sub-millisecond reads, <50ms p99 writes, bucket-based O(k) state roots, batched transactions
@@ -34,30 +34,33 @@
 
 ## Configuration
 
-| CLI        | Purpose                                                                                                             | Default           |
-| ---------- | ------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| `--listen` | Bind address for gRPC API                                                                                           | `127.0.0.1:50051` |
-| `--data`   | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)                           | (ephemeral)       |
-| `--expect` | Nodes to wait for before [bootstrapping](docs/operations/deployment.md#cluster-setup) (`1`=solo, `0`=join existing) | `3`               |
-| `--peers`  | [Find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or JSON file path                   | (disabled)        |
+| CLI         | Purpose                                                                                                | Default           |
+| ----------- | ------------------------------------------------------------------------------------------------------ | ----------------- |
+| `--listen`  | Bind address for gRPC API                                                                              | `127.0.0.1:50051` |
+| `--data`    | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)              | _(ephemeral)_       |
+| `--single`  | Development or single-server deployment ([details](docs/operations/deployment.md#single-node-cluster)) |                   |
+| `--join`    | Add this server to an existing cluster ([details](docs/operations/deployment.md#adding-a-node))        |                   |
+| `--cluster` | Start a new N-node cluster ([details](docs/operations/deployment.md#multi-node-cluster-3-nodes))       | `3`               |
+| `--peers`   | How to [find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or file path    | _(disabled)_        |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 
 ## Quick Start
 
 ```bash
-# Single node
-inferadb-ledger --data /var/lib/ledger --expect 1
+# Development or single-server deployment
+inferadb-ledger --data /var/lib/ledger --single
 
-# Cluster (run on each node)
-inferadb-ledger --data /var/lib/ledger --expect 3 --peers ledger.example.com
+# Production cluster (run on each of 3 nodes)
+inferadb-ledger --data /var/lib/ledger --cluster 3 --peers ledger.example.com
 ```
 
-For clusters, each node needs `--expect N` (nodes to wait for) and `--peers` to find other nodes. The value is auto-detected:
-- **DNS domain** (e.g., `ledger.example.com`): Performs A record lookup
-- **File path** (e.g., `/var/lib/ledger/peers.json`): Loads from JSON file
+For clusters, `--peers` tells each node how to find the others. The format is auto-detected:
 
-See the [deployment guide](docs/operations/deployment.md) for complete single-machine, multi-node, and Kubernetes examples.
+- **DNS domain** (e.g., `ledger.example.com`) — looks up A records
+- **File path** (e.g., `/var/lib/ledger/peers.json`) — reads addresses from JSON
+
+See the [deployment guide](docs/operations/deployment.md) for multi-node setup, Kubernetes, adding/removing nodes, backup, and recovery.
 
 ## Development
 

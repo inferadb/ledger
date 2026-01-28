@@ -478,3 +478,140 @@ jobs:
             echo "Waiting for crates.io to index..."
             sleep 45
           done
+
+  # Clean up old canary releases to avoid clutter
+  # Keeps the last 7 days of releases, or at least the last 10
+  cleanup:
+    name: Cleanup
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      REPO: ${{ github.repository }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Clean up old canary releases and tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Configuration
+          KEEP_DAYS=7
+          MIN_KEEP=10
+
+          echo "=== Cleaning up old canary releases ==="
+
+          # Get all canary releases sorted by date (oldest first)
+          RELEASES=$(gh api "repos/${REPO}/releases" \
+            --jq '[.[] | select(.tag_name | test("canary")) | {id: .id, tag: .tag_name, date: .created_at}] | sort_by(.date)')
+
+          TOTAL=$(echo "$RELEASES" | jq 'length')
+          echo "Found $TOTAL canary releases"
+
+          if [ "$TOTAL" -le "$MIN_KEEP" ]; then
+            echo "Only $TOTAL releases exist, keeping all (minimum: $MIN_KEEP)"
+            exit 0
+          fi
+
+          # Calculate cutoff date (7 days ago)
+          CUTOFF_DATE=$(date -d "-${KEEP_DAYS} days" -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "Cutoff date: $CUTOFF_DATE"
+
+          # Find releases older than cutoff, but ensure we keep at least MIN_KEEP
+          OLD_RELEASES=$(echo "$RELEASES" | jq --arg cutoff "$CUTOFF_DATE" \
+            '[.[] | select(.date < $cutoff)]')
+          OLD_COUNT=$(echo "$OLD_RELEASES" | jq 'length')
+
+          # Calculate how many we can actually delete
+          CAN_DELETE=$((TOTAL - MIN_KEEP))
+          if [ "$OLD_COUNT" -gt "$CAN_DELETE" ]; then
+            TO_DELETE=$CAN_DELETE
+          else
+            TO_DELETE=$OLD_COUNT
+          fi
+
+          echo "Releases older than $KEEP_DAYS days: $OLD_COUNT"
+          echo "Will delete: $TO_DELETE (keeping at least $MIN_KEEP)"
+
+          if [ "$TO_DELETE" -eq 0 ]; then
+            echo "Nothing to delete"
+            exit 0
+          fi
+
+          # Delete oldest releases (up to TO_DELETE)
+          echo "$OLD_RELEASES" | jq -r ".[:$TO_DELETE][] | \"\(.id) \(.tag)\"" | while read -r ID TAG; do
+            echo "Deleting release: $TAG (ID: $ID)"
+            gh api -X DELETE "repos/${REPO}/releases/$ID" || true
+
+            # Also delete the associated tag
+            echo "Deleting tag: $TAG"
+            gh api -X DELETE "repos/${REPO}/git/refs/tags/$TAG" || true
+          done
+
+          echo "=== Cleanup complete ==="
+
+      - name: Clean up old GHCR images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Configuration
+          KEEP_DAYS=7
+          MIN_KEEP=10
+          PACKAGE_NAME="ledger"
+
+          echo "=== Cleaning up old GHCR canary images ==="
+
+          # Get all versions of the package, filter to canary tags
+          VERSIONS=$(gh api "orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions" \
+            --jq '[.[] | select(.metadata.container.tags | any(test("^canary"))) | {id: .id, tags: .metadata.container.tags, date: .created_at}] | sort_by(.date)' 2>/dev/null || echo "[]")
+
+          TOTAL=$(echo "$VERSIONS" | jq 'length')
+          echo "Found $TOTAL canary image versions"
+
+          if [ "$TOTAL" -le "$MIN_KEEP" ]; then
+            echo "Only $TOTAL versions exist, keeping all (minimum: $MIN_KEEP)"
+            exit 0
+          fi
+
+          # Calculate cutoff date
+          CUTOFF_DATE=$(date -d "-${KEEP_DAYS} days" -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "Cutoff date: $CUTOFF_DATE"
+
+          # Find versions older than cutoff
+          OLD_VERSIONS=$(echo "$VERSIONS" | jq --arg cutoff "$CUTOFF_DATE" \
+            '[.[] | select(.date < $cutoff)]')
+          OLD_COUNT=$(echo "$OLD_VERSIONS" | jq 'length')
+
+          # Calculate how many we can delete
+          CAN_DELETE=$((TOTAL - MIN_KEEP))
+          if [ "$OLD_COUNT" -gt "$CAN_DELETE" ]; then
+            TO_DELETE=$CAN_DELETE
+          else
+            TO_DELETE=$OLD_COUNT
+          fi
+
+          echo "Versions older than $KEEP_DAYS days: $OLD_COUNT"
+          echo "Will delete: $TO_DELETE (keeping at least $MIN_KEEP)"
+
+          if [ "$TO_DELETE" -eq 0 ]; then
+            echo "Nothing to delete"
+            exit 0
+          fi
+
+          # Delete oldest versions
+          echo "$OLD_VERSIONS" | jq -r ".[:$TO_DELETE][] | \"\(.id) \(.tags | join(\", \"))\"" | while read -r ID TAGS; do
+            echo "Deleting GHCR version: $TAGS (ID: $ID)"
+            gh api -X DELETE "orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions/$ID" || true
+          done
+
+          echo "=== GHCR cleanup complete ==="

@@ -93,15 +93,16 @@ impl TestCluster {
 
         // Bootstrap node: no discovery configured → no peers found → bootstraps.
         // Uses auto-generated Snowflake ID for realistic testing.
+        let data_dir = temp_dir.path().to_path_buf();
         let config = inferadb_ledger_server::config::Config {
             listen_addr: addr,
             metrics_addr: None,
-            data_dir: temp_dir.path().to_path_buf(),
-            bootstrap_expect: 1, // Single-node mode for immediate bootstrap
+            data_dir: Some(data_dir.clone()),
+            single: true, // Single-node mode for immediate bootstrap
             ..inferadb_ledger_server::config::Config::default()
         };
 
-        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
+        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
             .await
             .expect("bootstrap node");
 
@@ -150,21 +151,23 @@ impl TestCluster {
             let temp_dir = TestDir::new();
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-            // Joining node: use join mode (bootstrap_expect=0) for dynamic node addition.
+            // Joining node: use join mode for dynamic node addition.
             // This bypasses bootstrap entirely - no Raft cluster initialized, waiting
             // to be added via AdminService's JoinCluster RPC which we call below.
             // Uses auto-generated Snowflake ID for realistic testing.
+            let data_dir = temp_dir.path().to_path_buf();
             let config = inferadb_ledger_server::config::Config {
                 listen_addr: addr,
                 metrics_addr: None,
-                data_dir: temp_dir.path().to_path_buf(),
-                bootstrap_expect: 0, // Join mode: wait to be added to existing cluster
+                data_dir: Some(data_dir.clone()),
+                join: true, // Join mode: wait to be added to existing cluster
                 ..inferadb_ledger_server::config::Config::default()
             };
 
-            let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config)
-                .await
-                .expect("bootstrap node");
+            let bootstrapped =
+                inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
+                    .await
+                    .expect("bootstrap node");
 
             // Get the auto-generated Snowflake ID from Raft metrics
             let node_id = bootstrapped.raft.metrics().borrow().id;

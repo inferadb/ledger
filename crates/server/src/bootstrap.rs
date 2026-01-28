@@ -106,17 +106,20 @@ pub struct BootstrappedNode {
 ///   - If any peer is already a cluster member, waits to join existing cluster
 ///   - If enough peers found, the node with lowest Snowflake ID bootstraps all members
 ///   - If this node doesn't have lowest ID, waits to be added by the bootstrapping node
-pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, BootstrapError> {
+pub async fn bootstrap_node(
+    config: &Config,
+    data_dir: &std::path::Path,
+) -> Result<BootstrappedNode, BootstrapError> {
     // Validate bootstrap configuration
     config.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
 
     // Resolve the effective node ID (manual or auto-generated Snowflake ID)
-    let node_id = config.node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
+    let node_id = config.node_id(data_dir).map_err(|e| BootstrapError::NodeId(e.to_string()))?;
 
-    std::fs::create_dir_all(&config.data_dir)
+    std::fs::create_dir_all(data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
 
-    let state_db_path = config.data_dir.join("state.db");
+    let state_db_path = data_dir.join("state.db");
     let state_db = Arc::new(
         Database::<FileBackend>::create(&state_db_path)
             .map_err(|e| BootstrapError::Database(format!("failed to create state db: {}", e)))?,
@@ -124,14 +127,14 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
     // StateLayer is internally thread-safe via MVCC - no external lock needed
     let state = Arc::new(StateLayer::new(state_db));
 
-    let blocks_db_path = config.data_dir.join("blocks.db");
+    let blocks_db_path = data_dir.join("blocks.db");
     let blocks_db = Arc::new(
         Database::<FileBackend>::create(&blocks_db_path)
             .map_err(|e| BootstrapError::Database(format!("failed to create blocks db: {}", e)))?,
     );
     let block_archive = Arc::new(BlockArchive::new(blocks_db));
 
-    let log_path = config.data_dir.join("raft.db");
+    let log_path = data_dir.join("raft.db");
     let log_store = RaftLogStore::open(&log_path)
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
         .with_state_layer(state.clone())
@@ -216,8 +219,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
                     leader = %leader_addr,
                     "Waiting for cluster bootstrap by lowest-ID node"
                 );
-                let timeout = Duration::from_secs(config.bootstrap_timeout_secs);
-                let poll_interval = Duration::from_secs(config.bootstrap_poll_secs);
+                let timeout = Duration::from_secs(config.peers_timeout_secs);
+                let poll_interval = Duration::from_secs(config.peers_poll_secs);
                 wait_for_cluster_join(&raft, timeout, poll_interval).await?;
             },
             BootstrapDecision::JoinExisting { via_peer } => {
@@ -227,8 +230,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
                     peer = %via_peer,
                     "Found existing cluster, waiting to be added via AdminService"
                 );
-                let timeout = Duration::from_secs(config.bootstrap_timeout_secs);
-                let poll_interval = Duration::from_secs(config.bootstrap_poll_secs);
+                let timeout = Duration::from_secs(config.peers_timeout_secs);
+                let poll_interval = Duration::from_secs(config.peers_poll_secs);
                 wait_for_cluster_join(&raft, timeout, poll_interval).await?;
             },
         }
@@ -236,7 +239,7 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
 
     let block_archive_for_compactor = block_archive.clone();
     let block_archive_for_recovery = block_archive.clone();
-    let snapshot_dir = config.data_dir.join("snapshots");
+    let snapshot_dir = data_dir.join("snapshots");
     let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir, 5));
 
     let server = LedgerServer::builder()
@@ -245,8 +248,8 @@ pub async fn bootstrap_node(config: &Config) -> Result<BootstrappedNode, Bootstr
         .applied_state(applied_state_accessor.clone())
         .block_archive(Some(block_archive))
         .addr(config.listen_addr)
-        .max_concurrent(config.requests_max_concurrent)
-        .timeout_secs(config.requests_timeout_secs)
+        .max_concurrent(config.max_concurrent)
+        .timeout_secs(config.timeout_secs)
         .build();
 
     let gc = TtlGarbageCollector::builder()
@@ -412,8 +415,11 @@ async fn wait_for_cluster_join(
 /// Note: This should be called after the gRPC server has started, since the
 /// leader needs to be able to reach this node to replicate logs.
 #[allow(dead_code)] // reserved for join-cluster mode
-pub async fn join_cluster(config: &Config) -> Result<(), BootstrapError> {
-    let node_id = config.node_id().map_err(|e| BootstrapError::NodeId(e.to_string()))?;
+pub async fn join_cluster(
+    config: &Config,
+    data_dir: &std::path::Path,
+) -> Result<(), BootstrapError> {
+    let node_id = config.node_id(data_dir).map_err(|e| BootstrapError::NodeId(e.to_string()))?;
 
     let peer_addresses = resolve_bootstrap_peers(config).await;
 
@@ -515,9 +521,10 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_single_node() {
         let temp_dir = tempdir().expect("create temp dir");
-        let config = Config::for_test(1, 50051, temp_dir.path().to_path_buf());
+        let data_dir = temp_dir.path().to_path_buf();
+        let config = Config::for_test(1, 50051, data_dir.clone());
 
-        let result = bootstrap_node(&config).await;
+        let result = bootstrap_node(&config, &data_dir).await;
         assert!(result.is_ok(), "bootstrap should succeed: {:?}", result.err());
     }
 }

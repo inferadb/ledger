@@ -99,16 +99,16 @@ pub async fn coordinate_bootstrap(
     config: &Config,
 ) -> Result<BootstrapDecision, CoordinatorError> {
     let start = Instant::now();
-    let timeout = Duration::from_secs(config.bootstrap_timeout_secs);
-    let poll_interval = Duration::from_secs(config.bootstrap_poll_secs);
+    let timeout = Duration::from_secs(config.peers_timeout_secs);
+    let poll_interval = Duration::from_secs(config.peers_poll_secs);
     let rpc_timeout = Duration::from_secs(5);
 
     info!(
         my_id = my_node_id,
         my_address = %my_address,
-        bootstrap_expect = config.bootstrap_expect,
-        timeout_secs = config.bootstrap_timeout_secs,
-        poll_interval_secs = config.bootstrap_poll_secs,
+        bootstrap_expect = config.bootstrap_expect(),
+        timeout_secs = config.peers_timeout_secs,
+        poll_interval_secs = config.peers_poll_secs,
         "Starting bootstrap coordination"
     );
 
@@ -119,13 +119,14 @@ pub async fn coordinate_bootstrap(
                 my_id = my_node_id,
                 my_address = %my_address,
                 elapsed_secs = start.elapsed().as_secs(),
-                bootstrap_expect = config.bootstrap_expect,
+                bootstrap_expect = config.bootstrap_expect(),
                 decision = "timeout",
                 "Bootstrap coordination timed out waiting for peers"
             );
             return Err(CoordinatorError::Timeout(format!(
                 "did not discover {} peers within {}s",
-                config.bootstrap_expect, config.bootstrap_timeout_secs
+                config.bootstrap_expect(),
+                config.peers_timeout_secs
             )));
         }
 
@@ -152,11 +153,11 @@ pub async fn coordinate_bootstrap(
         // Count total nodes (discovered + self)
         let total_nodes = discovered.len() + 1;
 
-        if total_nodes >= config.bootstrap_expect as usize {
+        if total_nodes >= config.bootstrap_expect() as usize {
             return Ok(make_bootstrap_decision(my_node_id, my_address, &discovered));
         }
 
-        debug!(found = total_nodes, required = config.bootstrap_expect, "Waiting for peers");
+        debug!(found = total_nodes, required = config.bootstrap_expect(), "Waiting for peers");
         tokio::time::sleep(poll_interval).await;
     }
 }
@@ -367,10 +368,10 @@ mod tests {
     async fn test_coordinate_bootstrap_timeout() {
         // Use a very short timeout and no discoverable peers
         let config = Config {
-            bootstrap_expect: 3,
-            bootstrap_timeout_secs: 1, // Very short timeout
-            bootstrap_poll_secs: 1,
-            data_dir: PathBuf::from("/tmp/test"),
+            cluster: Some(3),
+            peers_timeout_secs: 1, // Very short timeout
+            peers_poll_secs: 1,
+            data_dir: Some(PathBuf::from("/tmp/test")),
             ..Config::default()
         };
 
@@ -390,8 +391,8 @@ mod tests {
     async fn test_coordinate_bootstrap_single_node_immediate() {
         // Single node mode should succeed immediately
         let config = Config {
-            bootstrap_expect: 1,
-            data_dir: PathBuf::from("/tmp/test"),
+            single: true,
+            data_dir: Some(PathBuf::from("/tmp/test")),
             ..Config::default()
         };
 

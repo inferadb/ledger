@@ -28,6 +28,7 @@ use serial_test::serial;
 #[tokio::test]
 async fn test_single_node_bootstrap() {
     let temp_dir = TestDir::new();
+    let data_dir = temp_dir.path().to_path_buf();
     let port = 45000 + (rand::random::<u16>() % 1000);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
@@ -35,13 +36,13 @@ async fn test_single_node_bootstrap() {
     let config = Config {
         listen_addr: addr,
         metrics_addr: None,
-        data_dir: temp_dir.path().to_path_buf(),
-        bootstrap_expect: 1, // Single-node mode
+        data_dir: Some(data_dir.clone()),
+        single: true, // Single-node mode
         ..Config::default()
     };
 
     // Bootstrap should succeed
-    let result = bootstrap_node(&config).await;
+    let result = bootstrap_node(&config, &data_dir).await;
     assert!(result.is_ok(), "single-node bootstrap should succeed: {:?}", result.err());
 
     let bootstrapped = result.unwrap();
@@ -83,20 +84,22 @@ async fn test_single_node_bootstrap() {
 #[tokio::test]
 async fn test_node_restart_preserves_id() {
     let temp_dir = TestDir::new();
+    let data_dir = temp_dir.path().to_path_buf();
     let port = 46000 + (rand::random::<u16>() % 1000);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
         listen_addr: addr,
         metrics_addr: None,
-        data_dir: temp_dir.path().to_path_buf(),
-        bootstrap_expect: 1, // Single-node mode
+        data_dir: Some(data_dir.clone()),
+        single: true, // Single-node mode
         ..Config::default()
     };
 
     // First startup - bootstrap fresh node
     let first_id = {
-        let bootstrapped = bootstrap_node(&config).await.expect("first bootstrap should succeed");
+        let bootstrapped =
+            bootstrap_node(&config, &data_dir).await.expect("first bootstrap should succeed");
 
         // Get the generated node ID
         let raft_metrics = bootstrapped.raft.metrics().borrow().clone();
@@ -129,12 +132,13 @@ async fn test_node_restart_preserves_id() {
         let config2 = Config {
             listen_addr: addr2,
             metrics_addr: None,
-            data_dir: temp_dir.path().to_path_buf(),
-            bootstrap_expect: 1, // Single-node mode
+            data_dir: Some(data_dir.clone()),
+            single: true, // Single-node mode
             ..Config::default()
         };
 
-        let bootstrapped = bootstrap_node(&config2).await.expect("restart should succeed");
+        let bootstrapped =
+            bootstrap_node(&config2, &data_dir).await.expect("restart should succeed");
 
         let raft_metrics = bootstrapped.raft.metrics().borrow().clone();
         let node_id = raft_metrics.id;
@@ -230,6 +234,7 @@ async fn test_three_node_cluster_uses_coordinated_bootstrap() {
 async fn test_late_joiner_finds_existing_cluster() {
     // Start a single-node cluster first
     let leader_dir = TestDir::new();
+    let leader_data_dir = leader_dir.path().to_path_buf();
     let leader_port = 47000 + (rand::random::<u16>() % 1000);
     let leader_addr: std::net::SocketAddr = format!("127.0.0.1:{}", leader_port).parse().unwrap();
 
@@ -239,12 +244,12 @@ async fn test_late_joiner_finds_existing_cluster() {
     let leader_config = Config {
         listen_addr: leader_addr,
         metrics_addr: None,
-        data_dir: leader_dir.path().to_path_buf(),
-        bootstrap_expect: 1, // Single-node mode
+        data_dir: Some(leader_data_dir.clone()),
+        single: true, // Single-node mode
         ..Config::default()
     };
 
-    let leader = bootstrap_node(&leader_config).await.expect("leader bootstrap");
+    let leader = bootstrap_node(&leader_config, &leader_data_dir).await.expect("leader bootstrap");
     let leader_server = leader.server;
     let leader_raft = leader.raft.clone();
 
@@ -303,19 +308,20 @@ async fn test_late_joiner_finds_existing_cluster() {
 #[tokio::test]
 async fn test_join_mode_does_not_bootstrap() {
     let temp_dir = TestDir::new();
+    let data_dir = temp_dir.path().to_path_buf();
     let port = 48500 + (rand::random::<u16>() % 1000);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
         listen_addr: addr,
         metrics_addr: None,
-        data_dir: temp_dir.path().to_path_buf(),
-        bootstrap_expect: 0, // Join mode
+        data_dir: Some(data_dir.clone()),
+        join: true, // Join mode
         ..Config::default()
     };
 
     // Bootstrap should succeed (node starts but doesn't initialize cluster)
-    let result = bootstrap_node(&config).await;
+    let result = bootstrap_node(&config, &data_dir).await;
     assert!(result.is_ok(), "join mode should start successfully: {:?}", result.err());
 
     let bootstrapped = result.unwrap();

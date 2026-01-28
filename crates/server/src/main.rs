@@ -5,11 +5,17 @@
 //! # Usage
 //!
 //! ```bash
-//! # Start with default config (./inferadb-ledger.toml)
-//! ledger
+//! # Start with CLI arguments
+//! inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger --expect 1
 //!
-//! # Start with custom config
-//! ledger --config /path/to/config.toml
+//! # Start with environment variables
+//! INFERADB__LEDGER__LISTEN_ADDR=0.0.0.0:50051 \
+//! INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
+//! INFERADB__LEDGER__BOOTSTRAP_EXPECT=1 \
+//! inferadb-ledger
+//!
+//! # CLI arguments override environment variables
+//! INFERADB__LEDGER__BOOTSTRAP_EXPECT=3 inferadb-ledger --expect 1
 //! ```
 
 mod bootstrap;
@@ -19,16 +25,15 @@ mod discovery;
 mod node_id;
 mod shutdown;
 
-use std::{env, net::SocketAddr};
+use std::net::SocketAddr;
 
-use config::{Config, ConfigError};
+use config::Config;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::EnvFilter;
 
 /// Server error type.
 #[derive(Debug)]
 enum ServerError {
-    Config(ConfigError),
     Bootstrap(bootstrap::BootstrapError),
     Server(Box<dyn std::error::Error>),
 }
@@ -36,7 +41,6 @@ enum ServerError {
 impl std::fmt::Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ServerError::Config(e) => write!(f, "configuration error: {}", e),
             ServerError::Bootstrap(e) => write!(f, "bootstrap error: {}", e),
             ServerError::Server(e) => write!(f, "server error: {}", e),
         }
@@ -53,21 +57,46 @@ async fn main() -> Result<(), ServerError> {
         )
         .init();
 
-    let config_path = parse_args();
+    // Parse CLI args and env vars (clap handles --help and --version)
+    let config = Config::parse_args();
 
-    let config = Config::load(config_path.as_deref()).map_err(ServerError::Config)?;
+    // Resolve data directory (creates ephemeral temp directory if not configured)
+    let data_dir = config.resolve_data_dir().map_err(|e| {
+        ServerError::Server(Box::new(std::io::Error::other(format!(
+            "Failed to resolve data directory: {}",
+            e
+        ))))
+    })?;
 
     tracing::info!(
         listen_addr = %config.listen_addr,
-        data_dir = %config.data_dir.display(),
+        data_dir = %data_dir.display(),
         "Starting InferaDB Ledger"
     );
+
+    // Warn if listening only on localhost
+    if config.is_localhost_only() {
+        tracing::warn!(
+            "Listening on localhost only. Remote connections will be rejected. \
+             Set --listen or INFERADB__LEDGER__LISTEN_ADDR to accept remote connections."
+        );
+    }
+
+    // Warn if running in ephemeral mode
+    if config.is_ephemeral() {
+        tracing::warn!(
+            data_dir = %data_dir.display(),
+            "Running in ephemeral mode. All data will be lost on shutdown. \
+             Set --data or INFERADB__LEDGER__DATA_DIR for persistent storage."
+        );
+    }
 
     if let Some(metrics_addr) = config.metrics_addr {
         init_metrics_exporter(metrics_addr)?;
     }
 
-    let node = bootstrap::bootstrap_node(&config).await.map_err(ServerError::Bootstrap)?;
+    let node =
+        bootstrap::bootstrap_node(&config, &data_dir).await.map_err(ServerError::Bootstrap)?;
 
     let shutdown_coordinator = shutdown::ShutdownCoordinator::new();
     let shutdown_handle = {
@@ -86,68 +115,6 @@ async fn main() -> Result<(), ServerError> {
 
     tracing::info!("Server shutdown complete");
     Ok(())
-}
-
-/// Parse command line arguments.
-fn parse_args() -> Option<String> {
-    let args: Vec<String> = env::args().collect();
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" | "-c" => {
-                if i + 1 < args.len() {
-                    return Some(args[i + 1].clone());
-                }
-            },
-            "--help" | "-h" => {
-                print_help();
-                std::process::exit(0);
-            },
-            "--version" | "-V" => {
-                println!("ledger {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            },
-            _ => {},
-        }
-        i += 1;
-    }
-
-    None
-}
-
-fn print_help() {
-    println!(
-        r#"InferaDB Ledger - Distributed consensus ledger
-
-USAGE:
-    ledger [OPTIONS]
-
-OPTIONS:
-    -c, --config <FILE>    Configuration file path [default: inferadb-ledger.toml]
-    -h, --help             Print help information
-    -V, --version          Print version information
-
-ENVIRONMENT VARIABLES:
-    INFERADB__LEDGER__NODE_ID       Node identifier (numeric)
-    INFERADB__LEDGER__LISTEN_ADDR   gRPC listen address (e.g., 0.0.0.0:50051)
-    INFERADB__LEDGER__METRICS_ADDR  Prometheus metrics address (e.g., 0.0.0.0:9090)
-    INFERADB__LEDGER__DATA_DIR      Data directory path
-
-EXAMPLES:
-    # Start with default configuration
-    ledger
-
-    # Start with custom config file
-    ledger --config /etc/ledger/config.toml
-
-    # Start a single-node cluster (auto-bootstraps on fresh data directory)
-    INFERADB__LEDGER__NODE_ID=1 \
-    INFERADB__LEDGER__LISTEN_ADDR=0.0.0.0:50051 \
-    INFERADB__LEDGER__DATA_DIR=/tmp/ledger \
-    ledger
-"#
-    );
 }
 
 /// Initialize the Prometheus metrics exporter.

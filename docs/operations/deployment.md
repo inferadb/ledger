@@ -4,23 +4,23 @@ This guide covers cluster deployment, scaling, backup, and recovery for InferaDB
 
 ## Cluster Setup
 
-Ledger uses coordinated bootstrap based on `bootstrap_expect`:
+Ledger uses explicit bootstrap modes:
 
-| Value | Mode        | Behavior                                              |
-| ----- | ----------- | ----------------------------------------------------- |
-| `0`   | Join        | Wait to be added to existing cluster via AdminService |
-| `1`   | Single-node | Bootstrap immediately, no coordination                |
-| `2+`  | Coordinated | Wait for N peers, lowest-ID node bootstraps all       |
+| Flag        | Behavior                                              |
+| ----------- | ----------------------------------------------------- |
+| `--single`  | Bootstrap immediately as single-node cluster          |
+| `--join`    | Wait to be added to existing cluster via AdminService |
+| `--cluster N` | Coordinated bootstrap: wait for N peers, lowest-ID node bootstraps all (default: 3) |
 
 ### Single-Node Cluster
 
 ```bash
 mkdir -p /var/lib/ledger
 
-INFERADB__LEDGER__LISTEN=127.0.0.1:50051 \
-INFERADB__LEDGER__DATA=/var/lib/ledger \
-INFERADB__LEDGER__EXPECT=1 \
-./target/release/inferadb-ledger
+./target/release/inferadb-ledger \
+  --listen 127.0.0.1:50051 \
+  --data /var/lib/ledger \
+  --single
 ```
 
 ### Multi-Node Cluster (3 nodes)
@@ -37,11 +37,11 @@ cat > /var/lib/ledger-1/peers.json << 'EOF'
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN=192.168.1.101:50051 \
-INFERADB__LEDGER__DATA=/var/lib/ledger-1 \
-INFERADB__LEDGER__EXPECT=3 \
-INFERADB__LEDGER__PEERS=/var/lib/ledger-1/peers.json \
-./target/release/inferadb-ledger
+./target/release/inferadb-ledger \
+  --listen 192.168.1.101:50051 \
+  --data /var/lib/ledger-1 \
+  --peers /var/lib/ledger-1/peers.json \
+  --cluster 3
 ```
 
 **Node 2** (`/var/lib/ledger-2`):
@@ -54,11 +54,11 @@ cat > /var/lib/ledger-2/peers.json << 'EOF'
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN=192.168.1.102:50051 \
-INFERADB__LEDGER__DATA=/var/lib/ledger-2 \
-INFERADB__LEDGER__EXPECT=3 \
-INFERADB__LEDGER__PEERS=/var/lib/ledger-2/peers.json \
-./target/release/inferadb-ledger
+./target/release/inferadb-ledger \
+  --listen 192.168.1.102:50051 \
+  --data /var/lib/ledger-2 \
+  --peers /var/lib/ledger-2/peers.json \
+  --cluster 3
 ```
 
 **Node 3** (`/var/lib/ledger-3`):
@@ -71,11 +71,11 @@ cat > /var/lib/ledger-3/peers.json << 'EOF'
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN=192.168.1.103:50051 \
-INFERADB__LEDGER__DATA=/var/lib/ledger-3 \
-INFERADB__LEDGER__EXPECT=3 \
-INFERADB__LEDGER__PEERS=/var/lib/ledger-3/peers.json \
-./target/release/inferadb-ledger
+./target/release/inferadb-ledger \
+  --listen 192.168.1.103:50051 \
+  --data /var/lib/ledger-3 \
+  --peers /var/lib/ledger-3/peers.json \
+  --cluster 3
 ```
 
 Start all three nodes. They will:
@@ -90,9 +90,9 @@ Start all three nodes. They will:
 For production, use DNS A records instead of static peer files:
 
 ```bash
-INFERADB__LEDGER__PEERS=ledger.default.svc.cluster.local \
-INFERADB__LEDGER__EXPECT=3 \
-./target/release/inferadb-ledger
+./target/release/inferadb-ledger \
+  --peers ledger.default.svc.cluster.local \
+  --cluster 3
 ```
 
 For non-Kubernetes environments, configure DNS A records:
@@ -152,7 +152,7 @@ For a 3-node cluster, maintain quorum (2 nodes) during rolling restarts:
 
 ### Adding a Node
 
-Start the new node with `bootstrap_expect=0` (join mode) and a peer file pointing to existing nodes:
+Start the new node with `--join` and a peer file pointing to existing nodes:
 
 ```bash
 cat > /var/lib/ledger-new/peers.json << 'EOF'
@@ -161,11 +161,11 @@ cat > /var/lib/ledger-new/peers.json << 'EOF'
 ]}
 EOF
 
-INFERADB__LEDGER__LISTEN=192.168.1.104:50051 \
-INFERADB__LEDGER__DATA=/var/lib/ledger-new \
-INFERADB__LEDGER__EXPECT=0 \
-INFERADB__LEDGER__PEERS=/var/lib/ledger-new/peers.json \
-./target/release/inferadb-ledger
+./target/release/inferadb-ledger \
+  --listen 192.168.1.104:50051 \
+  --data /var/lib/ledger-new \
+  --peers /var/lib/ledger-new/peers.json \
+  --join
 ```
 
 The node will:
@@ -257,9 +257,9 @@ If you only have a snapshot (not the full `data_dir`):
 mkdir -p /var/lib/ledger/snapshots
 cp /backup/000010000.snap /var/lib/ledger/snapshots/
 
-INFERADB__LEDGER__DATA=/var/lib/ledger \
-INFERADB__LEDGER__EXPECT=0 \
-./target/release/inferadb-ledger
+./target/release/inferadb-ledger \
+  --data /var/lib/ledger \
+  --join
 ```
 
 The node will:
@@ -277,13 +277,11 @@ If all nodes are lost, restore from the most recent backup:
 # On each node, restore from backup
 cp -r /backup/ledger-node1 /var/lib/ledger
 
-# Start first node with bootstrap_expect=1 to force bootstrap
-INFERADB__LEDGER__EXPECT=1 \
-./target/release/inferadb-ledger
+# Start first node with --single to force bootstrap
+./target/release/inferadb-ledger --data /var/lib/ledger --single
 
-# Start remaining nodes with bootstrap_expect=0
-INFERADB__LEDGER__EXPECT=0 \
-./target/release/inferadb-ledger
+# Start remaining nodes with --join
+./target/release/inferadb-ledger --data /var/lib/ledger --join
 ```
 
 ## Configuration Reference
@@ -296,8 +294,17 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 | ------------- | --------------------------------- | ----------------- | ----------------------------------------- |
 | `--listen`    | `INFERADB__LEDGER__LISTEN`   | `127.0.0.1:50051` | Host and port to accept connections       |
 | `--data`      | `INFERADB__LEDGER__DATA`      | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
-| `--expect`    | `INFERADB__LEDGER__EXPECT` | `3`            | Nodes to wait for before bootstrapping (1=solo, 0=join existing) |
 | `--metrics`   | `INFERADB__LEDGER__METRICS`  | (disabled)        | Expose Prometheus metrics at this address |
+
+### Bootstrap Mode
+
+These flags are mutually exclusive. If none is specified, `--cluster 3` is the default.
+
+| CLI           | Environment Variable              | Description                               |
+| ------------- | --------------------------------- | ----------------------------------------- |
+| `--single`    | —                                 | Bootstrap immediately as single-node cluster |
+| `--join`      | —                                 | Wait to be added to existing cluster via AdminService |
+| `--cluster N` | `INFERADB__LEDGER__CLUSTER`       | Coordinated bootstrap with N nodes (default: 3) |
 
 ### Discovery Options
 
@@ -321,8 +328,8 @@ These defaults work well for most deployments. See [consensus internals](../inte
 | `--peers-timeout`| `INFERADB__LEDGER__PEERS_TIMEOUT`  | `60`    | How long to wait for other nodes (secs) |
 | `--peers-poll`             | `INFERADB__LEDGER__PEERS_POLL`     | `2`     | How often to check for other nodes      |
 | `--batch-size`       | `INFERADB__LEDGER__BATCH_SIZE`          | `100`   | Writes to group before committing       |
-| `--batch-delay`      | `INFERADB__LEDGER__BATCH_DELAY`      | `10`    | Max wait before committing a batch (ms) |
-| `--max-concurrent`       | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
+| `--batch-delay`      | `INFERADB__LEDGER__BATCH_DELAY`      | `0.01`  | Max wait before committing a batch (secs) |
+| `--concurrent`       | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
 | `--timeout`          | `INFERADB__LEDGER__TIMEOUT`   | `30`    | Max time for a request to complete      |
 
 ### Notes
@@ -333,10 +340,10 @@ These defaults work well for most deployments. See [consensus internals](../inte
 
 Run `inferadb-ledger --help` for usage information.
 
-**Coordinated Bootstrap**: Nodes automatically generate Snowflake IDs (persisted to `{data_dir}/node_id`) and coordinate cluster formation:
+**Coordinated Bootstrap**: When using `--cluster N`, nodes automatically generate Snowflake IDs (persisted to `{data_dir}/node_id`) and coordinate cluster formation:
 
 1. Each node starts its gRPC server and polls discovery for peers
-2. Once `bootstrap_expect` nodes discover each other, they exchange node info via `GetNodeInfo` RPC
+2. Once N nodes discover each other, they exchange node info via `GetNodeInfo` RPC
 3. The node with the lowest Snowflake ID (earliest started) bootstraps the cluster
 4. Other nodes wait to be added as Raft voters
 
