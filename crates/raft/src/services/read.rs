@@ -11,7 +11,7 @@
 //!
 //! Use linearizable reads when you need read-after-write consistency guarantees.
 
-use std::{pin::Pin, sync::Arc, time::Instant};
+use std::{pin::Pin, sync::Arc};
 
 use futures::StreamExt;
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, warn};
 
 use crate::{
     IdempotencyCache,
@@ -39,6 +39,7 @@ use crate::{
     },
     proto_convert::vault_entry_to_proto_block,
     types::{LedgerNodeId, LedgerTypeConfig},
+    wide_events::{OperationType, RequestContext, Sampler},
 };
 
 /// Read service implementation.
@@ -69,6 +70,9 @@ pub struct ReadServiceImpl {
     /// Page token codec for secure pagination (HMAC-protected).
     #[builder(default = PageTokenCodec::with_random_key())]
     page_token_codec: PageTokenCodec,
+    /// Sampler for wide events tail sampling.
+    #[builder(default)]
+    sampler: Option<Sampler>,
 }
 
 impl ReadServiceImpl {
@@ -392,51 +396,79 @@ impl ReadServiceImpl {
 
 #[tonic::async_trait]
 impl ReadService for ReadServiceImpl {
-    #[instrument(
-        skip(self, request),
-        fields(vault_id = tracing::field::Empty, key = tracing::field::Empty)
-    )]
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
 
+        // Create wide event context
+        let mut ctx = RequestContext::new("ReadService", "read");
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
+        // Set read operation fields
+        ctx.set_key(&req.key);
+        let consistency = match ReadConsistency::try_from(req.consistency)
+            .unwrap_or(ReadConsistency::Unspecified)
+        {
+            ReadConsistency::Linearizable => "linearizable",
+            _ => "eventual",
+        };
+        ctx.set_consistency(consistency);
+        ctx.set_include_proof(false);
+
         // Check consistency requirements first
-        self.check_consistency(req.consistency)?;
+        if let Err(e) = self.check_consistency(req.consistency) {
+            ctx.set_error("consistency_error", e.message());
+            return Err(e);
+        }
 
         // Extract IDs
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
-
-        // Record span fields
-        tracing::Span::current().record("vault_id", vault_id);
-        tracing::Span::current().record("key", &req.key);
+        ctx.set_target(namespace_id, vault_id as i64);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(namespace_id, vault_id as i64);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(namespace_id, vault_id, at_height, "Read rejected: vault has diverged");
-            return Err(Status::unavailable(format!(
-                "Vault {}:{} has diverged at height {}",
-                namespace_id, vault_id, at_height
-            )));
+            let msg =
+                format!("Vault {}:{} has diverged at height {}", namespace_id, vault_id, at_height);
+            ctx.set_error("vault_diverged", &msg);
+            return Err(Status::unavailable(msg));
         }
+
+        // Start storage timer
+        ctx.start_storage_timer();
 
         // Read from state layer
         let state = &*self.state;
-        let entity = state.get_entity(vault_id as i64, req.key.as_bytes()).map_err(|e| {
-            warn!(error = %e, "Read failed");
-            metrics::record_read(false, start.elapsed().as_secs_f64());
-            Status::internal(format!("Storage error: {}", e))
-        })?;
+        let entity = match state.get_entity(vault_id as i64, req.key.as_bytes()) {
+            Ok(e) => e,
+            Err(e) => {
+                ctx.end_storage_timer();
+                let msg = format!("Storage error: {}", e);
+                ctx.set_error("storage_error", &msg);
+                metrics::record_read(false, ctx.elapsed_secs());
+                return Err(Status::internal(msg));
+            },
+        };
 
-        let latency = start.elapsed().as_secs_f64();
+        ctx.end_storage_timer();
+
         let found = entity.is_some();
-        debug!(found, latency_ms = latency * 1000.0, "Read completed");
-        metrics::record_read(true, latency);
+        let value_size = entity.as_ref().map(|e| e.value.len()).unwrap_or(0);
+        ctx.set_found(found);
+        ctx.set_value_size_bytes(value_size);
+
+        metrics::record_read(true, ctx.elapsed_secs());
+        ctx.set_success();
 
         // Get current block height for this vault
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let block_height = self.applied_state.vault_height(namespace_id, vault_id as i64);
+        ctx.set_block_height(block_height);
 
         Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
     }
@@ -445,61 +477,86 @@ impl ReadService for ReadServiceImpl {
     ///
     /// Amortizes network overhead across multiple reads for higher throughput.
     /// All reads use the same namespace/vault scope and consistency level.
-    #[instrument(
-        skip(self, request),
-        fields(vault_id = tracing::field::Empty, batch_size = tracing::field::Empty)
-    )]
     async fn batch_read(
         &self,
         request: Request<crate::proto::BatchReadRequest>,
     ) -> Result<Response<crate::proto::BatchReadResponse>, Status> {
         use crate::proto::{BatchReadResponse, BatchReadResult};
 
-        let start = Instant::now();
         let req = request.into_inner();
 
+        // Create wide event context
+        let mut ctx = RequestContext::new("ReadService", "batch_read");
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
+        // Set read operation fields
+        ctx.set_keys_count(req.keys.len());
+        let consistency = match ReadConsistency::try_from(req.consistency)
+            .unwrap_or(ReadConsistency::Unspecified)
+        {
+            ReadConsistency::Linearizable => "linearizable",
+            _ => "eventual",
+        };
+        ctx.set_consistency(consistency);
+        ctx.set_include_proof(false);
+
         // Check consistency requirements
-        self.check_consistency(req.consistency)?;
+        if let Err(e) = self.check_consistency(req.consistency) {
+            ctx.set_error("consistency_error", e.message());
+            return Err(e);
+        }
 
         // Limit batch size to prevent DoS
         const MAX_BATCH_SIZE: usize = 1000;
         if req.keys.len() > MAX_BATCH_SIZE {
-            return Err(Status::invalid_argument(format!(
-                "Batch size {} exceeds maximum {}",
-                req.keys.len(),
-                MAX_BATCH_SIZE
-            )));
+            let msg = format!("Batch size {} exceeds maximum {}", req.keys.len(), MAX_BATCH_SIZE);
+            ctx.set_error("batch_too_large", &msg);
+            return Err(Status::invalid_argument(msg));
         }
 
         // Extract IDs
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
-
-        // Record span fields
-        tracing::Span::current().record("vault_id", vault_id);
-        tracing::Span::current().record("batch_size", req.keys.len());
+        ctx.set_target(namespace_id, vault_id as i64);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(namespace_id, vault_id as i64);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(namespace_id, vault_id, at_height, "BatchRead rejected: vault has diverged");
-            return Err(Status::unavailable(format!(
-                "Vault {}:{} has diverged at height {}",
-                namespace_id, vault_id, at_height
-            )));
+            let msg =
+                format!("Vault {}:{} has diverged at height {}", namespace_id, vault_id, at_height);
+            ctx.set_error("vault_diverged", &msg);
+            return Err(Status::unavailable(msg));
         }
+
+        // Start storage timer
+        ctx.start_storage_timer();
 
         // Read all keys from state layer
         let state = &*self.state;
         let mut results = Vec::with_capacity(req.keys.len());
+        let mut found_count = 0usize;
 
         for key in &req.keys {
-            let entity = state.get_entity(vault_id as i64, key.as_bytes()).map_err(|e| {
-                warn!(error = %e, key = key, "BatchRead key failed");
-                Status::internal(format!("Storage error: {}", e))
-            })?;
+            let entity = match state.get_entity(vault_id as i64, key.as_bytes()) {
+                Ok(e) => e,
+                Err(e) => {
+                    ctx.end_storage_timer();
+                    let msg = format!("Storage error: {}", e);
+                    ctx.set_error("storage_error", &msg);
+                    return Err(Status::internal(msg));
+                },
+            };
 
             let found = entity.is_some();
+            if found {
+                found_count += 1;
+            }
             results.push(BatchReadResult {
                 key: key.clone(),
                 value: entity.map(|e| e.value),
@@ -507,61 +564,88 @@ impl ReadService for ReadServiceImpl {
             });
         }
 
-        let latency = start.elapsed().as_secs_f64();
+        ctx.end_storage_timer();
+        ctx.set_found_count(found_count);
+
         let batch_size = results.len();
-        debug!(batch_size, latency_ms = latency * 1000.0, "BatchRead completed");
 
         // Record metrics for each read in the batch
+        let latency = ctx.elapsed_secs();
         for _ in 0..batch_size {
             metrics::record_read(true, latency / batch_size as f64);
         }
 
+        ctx.set_success();
+
         // Get current block height for this vault
         let block_height = self.applied_state.vault_height(namespace_id, vault_id as i64);
+        ctx.set_block_height(block_height);
 
         Ok(Response::new(BatchReadResponse { results, block_height }))
     }
 
-    #[instrument(
-        skip(self, request),
-        fields(vault_id = tracing::field::Empty, key = tracing::field::Empty)
-    )]
     async fn verified_read(
         &self,
         request: Request<VerifiedReadRequest>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
+
+        // Create wide event context
+        let mut ctx = RequestContext::new("ReadService", "verified_read");
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
+        // Set read operation fields
+        ctx.set_key(&req.key);
+        ctx.set_include_proof(true);
+        ctx.set_consistency("linearizable"); // verified reads are always linearizable
 
         // Extract IDs
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
-
-        // Record span fields
-        tracing::Span::current().record("vault_id", vault_id);
-        tracing::Span::current().record("key", &req.key);
+        ctx.set_target(namespace_id, vault_id);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(namespace_id, vault_id, at_height, "Verified read rejected: vault has diverged");
-            metrics::record_verified_read(false, start.elapsed().as_secs_f64());
-            return Err(Status::unavailable(format!(
-                "Vault {}:{} has diverged at height {}",
-                namespace_id, vault_id, at_height
-            )));
+            let msg =
+                format!("Vault {}:{} has diverged at height {}", namespace_id, vault_id, at_height);
+            ctx.set_error("vault_diverged", &msg);
+            metrics::record_verified_read(false, ctx.elapsed_secs());
+            return Err(Status::unavailable(msg));
         }
+
+        // Start storage timer
+        ctx.start_storage_timer();
 
         // Read from state layer
         let state = &*self.state;
-        let entity = state.get_entity(vault_id, req.key.as_bytes()).map_err(|e| {
-            warn!(error = %e, "Verified read failed");
-            metrics::record_verified_read(false, start.elapsed().as_secs_f64());
-            Status::internal(format!("Storage error: {}", e))
-        })?;
+        let entity = match state.get_entity(vault_id, req.key.as_bytes()) {
+            Ok(e) => e,
+            Err(e) => {
+                ctx.end_storage_timer();
+                let msg = format!("Storage error: {}", e);
+                ctx.set_error("storage_error", &msg);
+                metrics::record_verified_read(false, ctx.elapsed_secs());
+                return Err(Status::internal(msg));
+            },
+        };
+
+        ctx.end_storage_timer();
+
+        let found = entity.is_some();
+        let value_size = entity.as_ref().map(|e| e.value.len()).unwrap_or(0);
+        ctx.set_found(found);
+        ctx.set_value_size_bytes(value_size);
 
         // Get current block height for this vault
         let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+        ctx.set_block_height(block_height);
 
         // Fetch block header from archive if available
         let block_header = if let Some(archive) = &self.block_archive {
@@ -594,10 +678,13 @@ impl ReadService for ReadServiceImpl {
             None
         };
 
-        let latency = start.elapsed().as_secs_f64();
-        let found = entity.is_some();
-        debug!(found, latency_ms = latency * 1000.0, "Verified read completed");
-        metrics::record_verified_read(true, latency);
+        // Calculate proof size (merkle proof + optional chain proof)
+        let proof_size = std::mem::size_of_val(&merkle_proof)
+            + chain_proof.as_ref().map(std::mem::size_of_val).unwrap_or(0);
+        ctx.set_proof_size_bytes(proof_size);
+
+        metrics::record_verified_read(true, ctx.elapsed_secs());
+        ctx.set_success();
 
         Ok(Response::new(VerifiedReadResponse {
             value: entity.map(|e| e.value),
@@ -612,22 +699,40 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<HistoricalReadRequest>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
+
+        // Create wide event context
+        let mut ctx = RequestContext::new("ReadService", "historical_read");
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
+        // Set read operation fields
+        ctx.set_key(&req.key);
+        ctx.set_at_height(req.at_height);
+        ctx.set_include_proof(req.include_proof);
+        ctx.set_consistency("historical");
 
         // Historical read requires at_height
         if req.at_height == 0 {
+            ctx.set_error("invalid_argument", "at_height is required for historical reads");
             return Err(Status::invalid_argument("at_height is required for historical reads"));
         }
 
         // Extract IDs
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
         let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        ctx.set_target(namespace_id, vault_id);
 
         // Get block archive - required for historical reads
         let archive = match &self.block_archive {
             Some(a) => a,
             None => {
+                ctx.set_error("unavailable", "Block archive not configured for historical reads");
                 return Err(Status::unavailable(
                     "Block archive not configured for historical reads",
                 ));
@@ -637,34 +742,43 @@ impl ReadService for ReadServiceImpl {
         // Check that requested height doesn't exceed current tip
         let tip_height = self.applied_state.vault_height(namespace_id, vault_id);
         if req.at_height > tip_height {
-            return Err(Status::invalid_argument(format!(
-                "Requested height {} exceeds current tip {}",
-                req.at_height, tip_height
-            )));
+            let msg =
+                format!("Requested height {} exceeds current tip {}", req.at_height, tip_height);
+            ctx.set_error("invalid_argument", &msg);
+            return Err(Status::invalid_argument(msg));
         }
 
+        // Start storage timer (covers replay and read)
+        ctx.start_storage_timer();
+
         // Create temporary state layer for replay using temp directory
-        let temp_dir = TempDir::new()
-            .map_err(|e| Status::internal(format!("Failed to create temp dir: {}", e)))?;
-        let temp_db = Arc::new(
-            Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
-                .map_err(|e| Status::internal(format!("Failed to create temp db: {}", e)))?,
-        );
+        let temp_dir = match TempDir::new() {
+            Ok(d) => d,
+            Err(e) => {
+                ctx.end_storage_timer();
+                let msg = format!("Failed to create temp dir: {}", e);
+                ctx.set_error("internal", &msg);
+                return Err(Status::internal(msg));
+            },
+        };
+
+        let temp_db = match Database::<FileBackend>::create(temp_dir.path().join("replay.db")) {
+            Ok(db) => Arc::new(db),
+            Err(e) => {
+                ctx.end_storage_timer();
+                let msg = format!("Failed to create temp db: {}", e);
+                ctx.set_error("internal", &msg);
+                return Err(Status::internal(msg));
+            },
+        };
         let temp_state = StateLayer::new(temp_db);
 
         // Track block timestamp for expiration check
         let mut block_timestamp = chrono::Utc::now();
 
         // Find the optimal starting point (snapshot or height 1)
-        let (start_height, snapshot_loaded) =
+        let (start_height, _snapshot_loaded) =
             self.load_nearest_snapshot_for_historical_read(vault_id, req.at_height, &temp_state);
-
-        debug!(
-            start_height,
-            snapshot_loaded,
-            target_height = req.at_height,
-            "Historical read replay starting"
-        );
 
         // Replay blocks from start_height to at_height
         for height in start_height..=req.at_height {
@@ -672,13 +786,24 @@ impl ReadService for ReadServiceImpl {
             let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => continue, // Block might not exist at this height (sparse)
-                Err(e) => return Err(Status::internal(format!("Index lookup failed: {:?}", e))),
+                Err(e) => {
+                    ctx.end_storage_timer();
+                    let msg = format!("Index lookup failed: {:?}", e);
+                    ctx.set_error("internal", &msg);
+                    return Err(Status::internal(msg));
+                },
             };
 
             // Read the shard block
-            let shard_block = archive
-                .read_block(shard_height)
-                .map_err(|e| Status::internal(format!("Block read failed: {:?}", e)))?;
+            let shard_block = match archive.read_block(shard_height) {
+                Ok(b) => b,
+                Err(e) => {
+                    ctx.end_storage_timer();
+                    let msg = format!("Block read failed: {:?}", e);
+                    ctx.set_error("internal", &msg);
+                    return Err(Status::internal(msg));
+                },
+            };
 
             // Find the vault entry
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
@@ -688,9 +813,12 @@ impl ReadService for ReadServiceImpl {
             if let Some(entry) = vault_entry {
                 // Apply all transactions in this block
                 for tx in &entry.transactions {
-                    temp_state
-                        .apply_operations(vault_id, &tx.operations, height)
-                        .map_err(|e| Status::internal(format!("Apply failed: {:?}", e)))?;
+                    if let Err(e) = temp_state.apply_operations(vault_id, &tx.operations, height) {
+                        ctx.end_storage_timer();
+                        let msg = format!("Apply failed: {:?}", e);
+                        ctx.set_error("internal", &msg);
+                        return Err(Status::internal(msg));
+                    }
                 }
 
                 // Track block timestamp at the target height for expiration check
@@ -701,9 +829,17 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Read entity from reconstructed state
-        let entity = temp_state
-            .get_entity(vault_id, req.key.as_bytes())
-            .map_err(|e| Status::internal(format!("Read failed: {:?}", e)))?;
+        let entity = match temp_state.get_entity(vault_id, req.key.as_bytes()) {
+            Ok(e) => e,
+            Err(e) => {
+                ctx.end_storage_timer();
+                let msg = format!("Read failed: {:?}", e);
+                ctx.set_error("internal", &msg);
+                return Err(Status::internal(msg));
+            },
+        };
+
+        ctx.end_storage_timer();
 
         // Check expiration using block timestamp (not current time)
         // This is critical for deterministic historical state reconstruction
@@ -712,6 +848,12 @@ impl ReadService for ReadServiceImpl {
             // expires_at == 0 means never expires
             e.expires_at == 0 || e.expires_at > block_ts
         });
+
+        let found = entity.is_some();
+        let value_size = entity.as_ref().map(|e| e.value.len()).unwrap_or(0);
+        ctx.set_found(found);
+        ctx.set_value_size_bytes(value_size);
+        ctx.set_block_height(req.at_height);
 
         // Get block header for proof (if include_proof is set)
         let block_header = if req.include_proof {
@@ -728,14 +870,13 @@ impl ReadService for ReadServiceImpl {
             None
         };
 
-        let latency = start.elapsed().as_secs_f64();
-        let found = entity.is_some();
-        debug!(
-            found,
-            height = req.at_height,
-            latency_ms = latency * 1000.0,
-            "Historical read completed"
-        );
+        // Calculate proof size if proofs were included
+        if req.include_proof {
+            let proof_size = chain_proof.as_ref().map(std::mem::size_of_val).unwrap_or(0);
+            ctx.set_proof_size_bytes(proof_size);
+        }
+
+        ctx.set_success();
 
         Ok(Response::new(HistoricalReadResponse {
             value: entity.map(|e| e.value),

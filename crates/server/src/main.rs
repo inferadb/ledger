@@ -25,11 +25,11 @@ mod discovery;
 mod node_id;
 mod shutdown;
 
-use std::net::SocketAddr;
+use std::{io::IsTerminal, net::SocketAddr};
 
-use config::Config;
+use config::{Config, LogFormat};
 use metrics_exporter_prometheus::PrometheusBuilder;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Server error type.
 #[derive(Debug)]
@@ -51,14 +51,11 @@ impl std::error::Error for ServerError {}
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     // Parse CLI args and env vars (clap handles --help and --version)
     let config = Config::parse_args();
+
+    // Initialize logging based on config
+    init_logging(&config);
 
     // Resolve data directory (creates ephemeral temp directory if not configured)
     let data_dir = config.resolve_data_dir().map_err(|e| {
@@ -115,6 +112,33 @@ async fn main() -> Result<(), ServerError> {
 
     tracing::info!("Server shutdown complete");
     Ok(())
+}
+
+/// Initialize the logging system based on configuration.
+///
+/// Supports three formats:
+/// - `Text`: Human-readable format (development)
+/// - `Json`: JSON structured logging (production)
+/// - `Auto`: JSON for non-TTY stdout, text otherwise
+fn init_logging(config: &Config) {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let use_json = match config.log_format {
+        LogFormat::Json => true,
+        LogFormat::Text => false,
+        LogFormat::Auto => !std::io::stdout().is_terminal(),
+    };
+
+    if use_json {
+        // JSON format for production / log aggregation
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt::layer().json().flatten_event(true).with_current_span(false))
+            .init();
+    } else {
+        // Human-readable text format for development
+        tracing_subscriber::registry().with(env_filter).with(fmt::layer()).init();
+    }
 }
 
 /// Initialize the Prometheus metrics exporter.

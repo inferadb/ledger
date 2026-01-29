@@ -23,6 +23,385 @@ use snafu::Snafu;
 
 use crate::node_id;
 
+/// Configuration for wide events sampling.
+///
+/// Controls tail sampling behavior: which events are logged based on
+/// outcome, latency, and namespace priority.
+#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[builder(derive(Debug))]
+pub struct WideEventsSamplingConfig {
+    /// Sample rate for error outcomes (0.0-1.0). Default: 1.0 (100%).
+    #[serde(default = "default_error_rate")]
+    #[builder(default = default_error_rate())]
+    pub error_rate: f64,
+
+    /// Sample rate for slow requests (0.0-1.0). Default: 1.0 (100%).
+    #[serde(default = "default_slow_rate")]
+    #[builder(default = default_slow_rate())]
+    pub slow_rate: f64,
+
+    /// Sample rate for VIP namespaces (0.0-1.0). Default: 0.5 (50%).
+    #[serde(default = "default_vip_rate")]
+    #[builder(default = default_vip_rate())]
+    pub vip_rate: f64,
+
+    /// Sample rate for successful write operations (0.0-1.0). Default: 0.1 (10%).
+    #[serde(default = "default_write_rate")]
+    #[builder(default = default_write_rate())]
+    pub write_rate: f64,
+
+    /// Sample rate for successful read operations (0.0-1.0). Default: 0.01 (1%).
+    #[serde(default = "default_read_rate")]
+    #[builder(default = default_read_rate())]
+    pub read_rate: f64,
+
+    /// Threshold for slow read operations, in milliseconds. Default: 10.0.
+    #[serde(default = "default_slow_threshold_read_ms")]
+    #[builder(default = default_slow_threshold_read_ms())]
+    pub slow_threshold_read_ms: f64,
+
+    /// Threshold for slow write operations, in milliseconds. Default: 100.0.
+    #[serde(default = "default_slow_threshold_write_ms")]
+    #[builder(default = default_slow_threshold_write_ms())]
+    pub slow_threshold_write_ms: f64,
+
+    /// Threshold for slow admin operations, in milliseconds. Default: 1000.0.
+    #[serde(default = "default_slow_threshold_admin_ms")]
+    #[builder(default = default_slow_threshold_admin_ms())]
+    pub slow_threshold_admin_ms: f64,
+}
+
+impl Default for WideEventsSamplingConfig {
+    fn default() -> Self {
+        Self {
+            error_rate: default_error_rate(),
+            slow_rate: default_slow_rate(),
+            vip_rate: default_vip_rate(),
+            write_rate: default_write_rate(),
+            read_rate: default_read_rate(),
+            slow_threshold_read_ms: default_slow_threshold_read_ms(),
+            slow_threshold_write_ms: default_slow_threshold_write_ms(),
+            slow_threshold_admin_ms: default_slow_threshold_admin_ms(),
+        }
+    }
+}
+
+impl WideEventsSamplingConfig {
+    /// Create a disabled sampling config (samples nothing except errors).
+    #[allow(dead_code)] // reserved for future use when wide events can be selectively disabled
+    pub fn disabled() -> Self {
+        Self {
+            error_rate: 1.0,
+            slow_rate: 0.0,
+            vip_rate: 0.0,
+            write_rate: 0.0,
+            read_rate: 0.0,
+            slow_threshold_read_ms: f64::MAX,
+            slow_threshold_write_ms: f64::MAX,
+            slow_threshold_admin_ms: f64::MAX,
+        }
+    }
+
+    /// Create a config for testing (samples everything).
+    pub fn for_test() -> Self {
+        Self {
+            error_rate: 1.0,
+            slow_rate: 1.0,
+            vip_rate: 1.0,
+            write_rate: 1.0,
+            read_rate: 1.0,
+            slow_threshold_read_ms: default_slow_threshold_read_ms(),
+            slow_threshold_write_ms: default_slow_threshold_write_ms(),
+            slow_threshold_admin_ms: default_slow_threshold_admin_ms(),
+        }
+    }
+
+    /// Validate sampling configuration.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // Validate rates are in range 0.0-1.0
+        let rates = [
+            ("error_rate", self.error_rate),
+            ("slow_rate", self.slow_rate),
+            ("vip_rate", self.vip_rate),
+            ("write_rate", self.write_rate),
+            ("read_rate", self.read_rate),
+        ];
+
+        for (name, rate) in rates {
+            if !(0.0..=1.0).contains(&rate) {
+                return Err(ConfigError::Validation {
+                    message: format!(
+                        "wide_events.sampling.{} must be between 0.0 and 1.0, got {}",
+                        name, rate
+                    ),
+                });
+            }
+        }
+
+        // Validate thresholds are positive
+        let thresholds = [
+            ("slow_threshold_read_ms", self.slow_threshold_read_ms),
+            ("slow_threshold_write_ms", self.slow_threshold_write_ms),
+            ("slow_threshold_admin_ms", self.slow_threshold_admin_ms),
+        ];
+
+        for (name, threshold) in thresholds {
+            if threshold <= 0.0 {
+                return Err(ConfigError::Validation {
+                    message: format!(
+                        "wide_events.sampling.{} must be positive, got {}",
+                        name, threshold
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// OTLP transport protocol.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OtelTransport {
+    /// gRPC transport (default, recommended for high-throughput).
+    #[default]
+    Grpc,
+    /// HTTP transport (for environments where gRPC is blocked).
+    Http,
+}
+
+/// Configuration for OpenTelemetry/OTLP trace export.
+///
+/// Enables exporting wide events as OpenTelemetry traces to observability
+/// backends like Jaeger, Tempo, or Honeycomb.
+///
+/// # Environment Variables
+///
+/// ```bash
+/// INFERADB__LEDGER__WIDE_EVENTS__OTEL__ENABLED=true
+/// INFERADB__LEDGER__WIDE_EVENTS__OTEL__ENDPOINT=http://localhost:4317
+/// INFERADB__LEDGER__WIDE_EVENTS__OTEL__TRANSPORT=grpc
+/// ```
+#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[builder(derive(Debug))]
+pub struct OtelConfig {
+    /// Whether OTLP export is enabled. Default: false.
+    #[serde(default)]
+    #[builder(default)]
+    pub enabled: bool,
+
+    /// OTLP endpoint URL (e.g., "http://localhost:4317" for gRPC).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+
+    /// Transport protocol. Default: gRPC.
+    #[serde(default)]
+    #[builder(default)]
+    #[allow(dead_code)] // used in OTEL tracer provider initialization
+    pub transport: OtelTransport,
+
+    /// Batch size (flush when reached). Default: 512 spans.
+    #[serde(default = "default_otel_batch_size")]
+    #[builder(default = default_otel_batch_size())]
+    pub batch_size: usize,
+
+    /// Batch interval in milliseconds (flush when elapsed). Default: 5000ms.
+    #[serde(default = "default_otel_batch_interval_ms")]
+    #[builder(default = default_otel_batch_interval_ms())]
+    pub batch_interval_ms: u64,
+
+    /// Export timeout in milliseconds. Default: 10000ms.
+    #[serde(default = "default_otel_timeout_ms")]
+    #[builder(default = default_otel_timeout_ms())]
+    pub timeout_ms: u64,
+
+    /// Graceful shutdown timeout in milliseconds. Default: 15000ms.
+    #[serde(default = "default_otel_shutdown_timeout_ms")]
+    #[builder(default = default_otel_shutdown_timeout_ms())]
+    pub shutdown_timeout_ms: u64,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: None,
+            transport: OtelTransport::default(),
+            batch_size: default_otel_batch_size(),
+            batch_interval_ms: default_otel_batch_interval_ms(),
+            timeout_ms: default_otel_timeout_ms(),
+            shutdown_timeout_ms: default_otel_shutdown_timeout_ms(),
+        }
+    }
+}
+
+impl OtelConfig {
+    /// Create a config for testing with OTEL disabled.
+    pub fn for_test() -> Self {
+        Self::default()
+    }
+
+    /// Validate OTEL configuration.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled && self.endpoint.is_none() {
+            return Err(ConfigError::Validation {
+                message: "wide_events.otel.endpoint is required when OTEL is enabled".to_string(),
+            });
+        }
+
+        if self.batch_size == 0 {
+            return Err(ConfigError::Validation {
+                message: "wide_events.otel.batch_size must be positive".to_string(),
+            });
+        }
+
+        if self.batch_interval_ms == 0 {
+            return Err(ConfigError::Validation {
+                message: "wide_events.otel.batch_interval_ms must be positive".to_string(),
+            });
+        }
+
+        if self.timeout_ms == 0 {
+            return Err(ConfigError::Validation {
+                message: "wide_events.otel.timeout_ms must be positive".to_string(),
+            });
+        }
+
+        if self.shutdown_timeout_ms == 0 {
+            return Err(ConfigError::Validation {
+                message: "wide_events.otel.shutdown_timeout_ms must be positive".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn default_otel_batch_size() -> usize {
+    512
+}
+fn default_otel_batch_interval_ms() -> u64 {
+    5000
+}
+fn default_otel_timeout_ms() -> u64 {
+    10000
+}
+fn default_otel_shutdown_timeout_ms() -> u64 {
+    15000
+}
+
+/// Configuration for wide events logging.
+///
+/// Wide events provide comprehensive request-level logging with 50+ contextual
+/// fields for debugging and observability.
+///
+/// # Environment Variables
+///
+/// Configure via environment variables with the `INFERADB__LEDGER__WIDE_EVENTS__` prefix:
+///
+/// ```bash
+/// INFERADB__LEDGER__WIDE_EVENTS__ENABLED=true
+/// INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__WRITE_RATE=0.1
+/// INFERADB__LEDGER__WIDE_EVENTS__VIP_NAMESPACES=1,2,3
+/// ```
+#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[builder(derive(Debug))]
+pub struct WideEventsConfig {
+    /// Whether wide events logging is enabled. Default: true.
+    #[serde(default = "default_wide_events_enabled")]
+    #[builder(default = default_wide_events_enabled())]
+    #[allow(dead_code)] // reserved for Phase 4 when wide events can be disabled
+    pub enabled: bool,
+
+    /// Sampling configuration for wide events.
+    #[serde(default)]
+    #[builder(default)]
+    pub sampling: WideEventsSamplingConfig,
+
+    /// List of VIP namespace IDs with elevated sampling rates.
+    #[serde(default)]
+    #[builder(default)]
+    #[allow(dead_code)] // reserved for Phase 4 dynamic VIP namespace discovery
+    pub vip_namespaces: Vec<i64>,
+
+    /// OpenTelemetry/OTLP export configuration.
+    #[serde(default)]
+    #[builder(default)]
+    pub otel: OtelConfig,
+}
+
+impl Default for WideEventsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_wide_events_enabled(),
+            sampling: WideEventsSamplingConfig::default(),
+            vip_namespaces: Vec::new(),
+            otel: OtelConfig::default(),
+        }
+    }
+}
+
+impl WideEventsConfig {
+    /// Create a config for testing with all sampling enabled.
+    pub fn for_test() -> Self {
+        Self {
+            enabled: true,
+            sampling: WideEventsSamplingConfig::for_test(),
+            vip_namespaces: Vec::new(),
+            otel: OtelConfig::for_test(),
+        }
+    }
+
+    /// Validate wide events configuration.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.sampling.validate()?;
+        self.otel.validate()
+    }
+}
+
+// Wide events sampling default value functions
+fn default_error_rate() -> f64 {
+    1.0
+}
+fn default_slow_rate() -> f64 {
+    1.0
+}
+fn default_vip_rate() -> f64 {
+    0.5
+}
+fn default_write_rate() -> f64 {
+    0.1
+}
+fn default_read_rate() -> f64 {
+    0.01
+}
+fn default_slow_threshold_read_ms() -> f64 {
+    10.0
+}
+fn default_slow_threshold_write_ms() -> f64 {
+    100.0
+}
+fn default_slow_threshold_admin_ms() -> f64 {
+    1000.0
+}
+fn default_wide_events_enabled() -> bool {
+    true
+}
+
+/// Log output format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable text format (default for development).
+    #[default]
+    Text,
+    /// JSON structured logging (recommended for production).
+    Json,
+    /// Automatically detect: JSON for non-TTY stdout, text otherwise.
+    Auto,
+}
+
 /// Default listen address for the gRPC server (localhost only for security).
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 
@@ -91,6 +470,21 @@ pub struct Config {
     #[arg(long = "metrics", env = "INFERADB__LEDGER__METRICS")]
     #[serde(default)]
     pub metrics_addr: Option<SocketAddr>,
+
+    /// Log output format.
+    ///
+    /// - `text`: Human-readable format (default for development)
+    /// - `json`: JSON structured logging (recommended for production)
+    /// - `auto`: JSON for non-TTY stdout, text otherwise
+    #[arg(
+        long = "log-format",
+        env = "INFERADB__LEDGER__LOG_FORMAT",
+        value_enum,
+        default_value = "auto"
+    )]
+    #[serde(default)]
+    #[builder(default)]
+    pub log_format: LogFormat,
 
     /// Data directory for Raft logs and snapshots.
     ///
@@ -186,6 +580,16 @@ pub struct Config {
     #[serde(default = "default_timeout_secs")]
     #[builder(default = default_timeout_secs())]
     pub timeout_secs: u64,
+
+    // === Wide Events ===
+    /// Wide events configuration for comprehensive request logging.
+    ///
+    /// Wide events emit a single JSON log line per request with 50+ contextual
+    /// fields for debugging and observability.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub wide_events: WideEventsConfig,
 }
 
 // Default value functions
@@ -224,6 +628,7 @@ impl Default for Config {
         Self {
             listen_addr: default_listen_addr(),
             metrics_addr: None,
+            log_format: LogFormat::default(),
             data_dir: None,
             single: false,
             join: false,
@@ -236,6 +641,7 @@ impl Default for Config {
             batch_max_delay_secs: default_batch_max_delay_secs(),
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
+            wide_events: WideEventsConfig::default(),
         }
     }
 }
@@ -266,6 +672,7 @@ impl Config {
             single: true,
             join: false,
             cluster: None,
+            wide_events: WideEventsConfig::for_test(),
             ..Self::default()
         }
     }
@@ -357,10 +764,12 @@ impl Config {
 
     /// Validate the configuration.
     ///
-    /// Validates bootstrap mode settings:
+    /// Validates bootstrap mode settings and wide events configuration:
     /// - `--single`: Single-node deployment
     /// - `--join`: Join existing cluster
     /// - `--cluster N`: Coordinated bootstrap (N must be >= 2)
+    /// - Wide events sampling rates must be 0.0-1.0
+    /// - Wide events thresholds must be positive
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(n) = self.cluster
             && n < 2
@@ -372,6 +781,7 @@ impl Config {
                 ),
             });
         }
+        self.wide_events.validate()?;
         Ok(())
     }
 
@@ -692,5 +1102,311 @@ mod tests {
         let config = Config::default();
         assert!(config.peers_as_dns_domain().is_none());
         assert!(config.peers_as_file_path().is_none());
+    }
+
+    // === Wide Events Config Tests ===
+
+    #[test]
+    fn test_wide_events_sampling_config_defaults() {
+        let config = WideEventsSamplingConfig::default();
+        assert!((config.error_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.slow_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.vip_rate - 0.5).abs() < f64::EPSILON);
+        assert!((config.write_rate - 0.1).abs() < f64::EPSILON);
+        assert!((config.read_rate - 0.01).abs() < f64::EPSILON);
+        assert!((config.slow_threshold_read_ms - 10.0).abs() < f64::EPSILON);
+        assert!((config.slow_threshold_write_ms - 100.0).abs() < f64::EPSILON);
+        assert!((config.slow_threshold_admin_ms - 1000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_wide_events_sampling_config_disabled() {
+        let config = WideEventsSamplingConfig::disabled();
+        assert!((config.error_rate - 1.0).abs() < f64::EPSILON); // Errors always sampled
+        assert!((config.slow_rate - 0.0).abs() < f64::EPSILON);
+        assert!((config.vip_rate - 0.0).abs() < f64::EPSILON);
+        assert!((config.write_rate - 0.0).abs() < f64::EPSILON);
+        assert!((config.read_rate - 0.0).abs() < f64::EPSILON);
+        assert!(config.slow_threshold_read_ms > 1_000_000.0); // Effectively disabled
+    }
+
+    #[test]
+    fn test_wide_events_sampling_config_for_test() {
+        let config = WideEventsSamplingConfig::for_test();
+        // Test config samples everything
+        assert!((config.error_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.slow_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.vip_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.write_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.read_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_wide_events_sampling_config_validate_rates() {
+        // Valid rates
+        let config = WideEventsSamplingConfig::builder()
+            .error_rate(0.0)
+            .slow_rate(0.5)
+            .vip_rate(1.0)
+            .write_rate(0.1)
+            .read_rate(0.01)
+            .build();
+        assert!(config.validate().is_ok());
+
+        // Invalid: rate > 1.0
+        let config = WideEventsSamplingConfig::builder().error_rate(1.5).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("error_rate"));
+        assert!(err.to_string().contains("0.0 and 1.0"));
+
+        // Invalid: rate < 0.0
+        let config = WideEventsSamplingConfig::builder().write_rate(-0.1).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("write_rate"));
+    }
+
+    #[test]
+    fn test_wide_events_sampling_config_validate_thresholds() {
+        // Valid thresholds
+        let config = WideEventsSamplingConfig::builder()
+            .slow_threshold_read_ms(5.0)
+            .slow_threshold_write_ms(50.0)
+            .slow_threshold_admin_ms(500.0)
+            .build();
+        assert!(config.validate().is_ok());
+
+        // Invalid: threshold <= 0
+        let config = WideEventsSamplingConfig::builder().slow_threshold_read_ms(0.0).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("slow_threshold_read_ms"));
+        assert!(err.to_string().contains("positive"));
+
+        let config = WideEventsSamplingConfig::builder().slow_threshold_write_ms(-10.0).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("slow_threshold_write_ms"));
+    }
+
+    #[test]
+    fn test_wide_events_config_defaults() {
+        let config = WideEventsConfig::default();
+        assert!(config.enabled);
+        assert!(config.vip_namespaces.is_empty());
+        // Sampling defaults are covered by sampling config tests
+    }
+
+    #[test]
+    fn test_wide_events_config_for_test() {
+        let config = WideEventsConfig::for_test();
+        assert!(config.enabled);
+        assert!(config.vip_namespaces.is_empty());
+        // Test config samples everything
+        assert!((config.sampling.read_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.sampling.write_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_wide_events_config_validate() {
+        // Valid config
+        let config = WideEventsConfig::default();
+        assert!(config.validate().is_ok());
+
+        // Invalid sampling config propagates error
+        let config = WideEventsConfig {
+            sampling: WideEventsSamplingConfig::builder().error_rate(2.0).build(),
+            ..WideEventsConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_includes_wide_events() {
+        let config = Config::default();
+        assert!(config.wide_events.enabled);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_for_test_uses_test_wide_events() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+        let config = Config::for_test(1, 50051, data_dir);
+
+        // for_test uses WideEventsConfig::for_test() which samples everything
+        assert!(config.wide_events.enabled);
+        assert!((config.wide_events.sampling.read_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.wide_events.sampling.write_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_config_validate_includes_wide_events() {
+        // Config with invalid wide_events should fail validation
+        let config = Config {
+            wide_events: WideEventsConfig {
+                sampling: WideEventsSamplingConfig::builder().vip_rate(-0.5).build(),
+                ..WideEventsConfig::default()
+            },
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("vip_rate"));
+    }
+
+    #[test]
+    fn test_wide_events_sampling_config_builder() {
+        let config = WideEventsSamplingConfig::builder()
+            .error_rate(0.9)
+            .slow_rate(0.8)
+            .vip_rate(0.7)
+            .write_rate(0.5)
+            .read_rate(0.1)
+            .slow_threshold_read_ms(20.0)
+            .slow_threshold_write_ms(200.0)
+            .slow_threshold_admin_ms(2000.0)
+            .build();
+
+        assert!((config.error_rate - 0.9).abs() < f64::EPSILON);
+        assert!((config.slow_rate - 0.8).abs() < f64::EPSILON);
+        assert!((config.vip_rate - 0.7).abs() < f64::EPSILON);
+        assert!((config.write_rate - 0.5).abs() < f64::EPSILON);
+        assert!((config.read_rate - 0.1).abs() < f64::EPSILON);
+        assert!((config.slow_threshold_read_ms - 20.0).abs() < f64::EPSILON);
+        assert!((config.slow_threshold_write_ms - 200.0).abs() < f64::EPSILON);
+        assert!((config.slow_threshold_admin_ms - 2000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_wide_events_config_builder() {
+        let sampling = WideEventsSamplingConfig::builder().read_rate(0.05).build();
+        let config = WideEventsConfig::builder()
+            .enabled(false)
+            .sampling(sampling)
+            .vip_namespaces(vec![1, 2, 3])
+            .build();
+
+        assert!(!config.enabled);
+        assert!((config.sampling.read_rate - 0.05).abs() < f64::EPSILON);
+        assert_eq!(config.vip_namespaces, vec![1, 2, 3]);
+    }
+
+    // === OTEL Config Tests ===
+
+    #[test]
+    fn test_otel_config_defaults() {
+        let config = OtelConfig::default();
+        assert!(!config.enabled);
+        assert!(config.endpoint.is_none());
+        assert_eq!(config.transport, OtelTransport::Grpc);
+        assert_eq!(config.batch_size, 512);
+        assert_eq!(config.batch_interval_ms, 5000);
+        assert_eq!(config.timeout_ms, 10000);
+        assert_eq!(config.shutdown_timeout_ms, 15000);
+    }
+
+    #[test]
+    fn test_otel_config_for_test() {
+        let config = OtelConfig::for_test();
+        assert!(!config.enabled); // Disabled by default for tests
+    }
+
+    #[test]
+    fn test_otel_config_validate_disabled() {
+        // Disabled config is valid even without endpoint
+        let config = OtelConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_otel_config_validate_enabled_requires_endpoint() {
+        // Enabled without endpoint should fail
+        let config = OtelConfig::builder().enabled(true).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("endpoint"));
+        assert!(err.to_string().contains("required"));
+    }
+
+    #[test]
+    fn test_otel_config_validate_enabled_with_endpoint() {
+        let config = OtelConfig::builder()
+            .enabled(true)
+            .endpoint("http://localhost:4317".to_string())
+            .build();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_otel_config_validate_batch_size() {
+        // Zero batch size is invalid
+        let config = OtelConfig::builder().batch_size(0).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("batch_size"));
+        assert!(err.to_string().contains("positive"));
+    }
+
+    #[test]
+    fn test_otel_config_validate_batch_interval() {
+        // Zero interval is invalid
+        let config = OtelConfig::builder().batch_interval_ms(0).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("batch_interval_ms"));
+    }
+
+    #[test]
+    fn test_otel_config_validate_timeout() {
+        // Zero timeout is invalid
+        let config = OtelConfig::builder().timeout_ms(0).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("timeout_ms"));
+    }
+
+    #[test]
+    fn test_otel_config_validate_shutdown_timeout() {
+        // Zero shutdown timeout is invalid
+        let config = OtelConfig::builder().shutdown_timeout_ms(0).build();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("shutdown_timeout_ms"));
+    }
+
+    #[test]
+    fn test_otel_config_builder() {
+        let config = OtelConfig::builder()
+            .enabled(true)
+            .endpoint("http://localhost:4317".to_string())
+            .transport(OtelTransport::Http)
+            .batch_size(256)
+            .batch_interval_ms(2500)
+            .timeout_ms(5000)
+            .shutdown_timeout_ms(7500)
+            .build();
+
+        assert!(config.enabled);
+        assert_eq!(config.endpoint, Some("http://localhost:4317".to_string()));
+        assert_eq!(config.transport, OtelTransport::Http);
+        assert_eq!(config.batch_size, 256);
+        assert_eq!(config.batch_interval_ms, 2500);
+        assert_eq!(config.timeout_ms, 5000);
+        assert_eq!(config.shutdown_timeout_ms, 7500);
+    }
+
+    #[test]
+    fn test_otel_transport_default() {
+        assert_eq!(OtelTransport::default(), OtelTransport::Grpc);
+    }
+
+    #[test]
+    fn test_wide_events_config_includes_otel() {
+        let config = WideEventsConfig::default();
+        assert!(!config.otel.enabled);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_wide_events_config_validate_includes_otel() {
+        // Invalid OTEL config should fail validation
+        let config = WideEventsConfig {
+            otel: OtelConfig::builder().enabled(true).build(), // Missing endpoint
+            ..WideEventsConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("endpoint"));
     }
 }

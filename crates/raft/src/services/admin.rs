@@ -30,6 +30,7 @@ use crate::{
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
     },
+    wide_events::{OperationType, RequestContext, Sampler},
 };
 
 /// Admin service implementation.
@@ -47,6 +48,12 @@ pub struct AdminServiceImpl {
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// The node's listen address (for GetNodeInfo RPC).
     listen_addr: SocketAddr,
+    /// Sampler for wide events tail sampling.
+    #[builder(default)]
+    sampler: Option<Sampler>,
+    /// Node ID for wide events system context.
+    #[builder(default)]
+    node_id: Option<u64>,
 }
 
 #[tonic::async_trait]
@@ -57,22 +64,48 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<CreateNamespaceResponse>, Status> {
         let req = request.into_inner();
 
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "create_namespace");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("create_namespace");
+        ctx.set_target_namespace_name(&req.name);
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         // Submit create namespace through Raft
         // Map proto ShardId to inferadb_ledger_types::ShardId (i32)
         let ledger_request =
             LedgerRequest::CreateNamespace { name: req.name, shard_id: req.shard_id.map(|s| s.id) };
 
-        let result = self.raft.client_write(ledger_request).await.map_err(ServiceError::raft)?;
+        ctx.start_raft_timer();
+        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
+            ctx.end_raft_timer();
+            ctx.set_error("RaftError", &e.to_string());
+            ServiceError::raft(e)
+        })?;
+        ctx.end_raft_timer();
 
         match result.data {
             LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
+                ctx.set_namespace_id(namespace_id);
+                ctx.set_success();
                 Ok(Response::new(CreateNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: namespace_id }),
                     shard_id: Some(ShardId { id: shard_id }),
                 }))
             },
-            LedgerResponse::Error { message } => Err(Status::internal(message)),
-            _ => Err(Status::internal("Unexpected response type")),
+            LedgerResponse::Error { message } => {
+                ctx.set_error("Unspecified", &message);
+                Err(Status::internal(message))
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(Status::internal("Unexpected response type"))
+            },
         }
     }
 
@@ -82,20 +115,39 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<DeleteNamespaceResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| ServiceError::invalid_arg("Missing namespace_id"))?;
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "delete_namespace");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("delete_namespace");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing namespace_id");
+            ServiceError::invalid_arg("Missing namespace_id")
+        })?;
+
+        ctx.set_namespace_id(namespace_id);
 
         // Submit delete namespace through Raft
         let ledger_request = LedgerRequest::DeleteNamespace { namespace_id };
 
-        let result = self.raft.client_write(ledger_request).await.map_err(ServiceError::raft)?;
+        ctx.start_raft_timer();
+        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
+            ctx.end_raft_timer();
+            ctx.set_error("RaftError", &e.to_string());
+            ServiceError::raft(e)
+        })?;
+        ctx.end_raft_timer();
 
         match result.data {
             LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
                 if success {
+                    ctx.set_success();
                     Ok(Response::new(DeleteNamespaceResponse {
                         deleted_at: Some(
                             prost_types::Timestamp::from(std::time::SystemTime::now()),
@@ -104,6 +156,7 @@ impl AdminService for AdminServiceImpl {
                 } else {
                     let vault_ids: Vec<String> =
                         blocking_vault_ids.iter().map(|id| id.to_string()).collect();
+                    ctx.set_error("PreconditionFailed", "Namespace has active vaults");
                     Err(ServiceError::precondition(format!(
                         "Namespace has active vaults that must be deleted first: [{}]",
                         vault_ids.join(", ")
@@ -111,8 +164,14 @@ impl AdminService for AdminServiceImpl {
                     .into())
                 }
             },
-            LedgerResponse::Error { message } => Err(Status::internal(message)),
-            _ => Err(Status::internal("Unexpected response type")),
+            LedgerResponse::Error { message } => {
+                ctx.set_error("Unspecified", &message);
+                Err(Status::internal(message))
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(Status::internal("Unexpected response type"))
+            },
         }
     }
 
@@ -122,19 +181,37 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<GetNamespaceResponse>, Status> {
         let req = request.into_inner();
 
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "get_namespace");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("get_namespace");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         // Extract namespace from lookup oneof (by ID or name)
         let ns_meta = match req.lookup {
             Some(crate::proto::get_namespace_request::Lookup::NamespaceId(n)) => {
+                ctx.set_namespace_id(n.id);
                 self.applied_state.get_namespace(n.id)
             },
             Some(crate::proto::get_namespace_request::Lookup::Name(name)) => {
+                ctx.set_target_namespace_name(&name);
                 self.applied_state.get_namespace_by_name(&name)
             },
-            None => return Err(ServiceError::invalid_arg("Missing namespace lookup").into()),
+            None => {
+                ctx.set_error("InvalidArgument", "Missing namespace lookup");
+                return Err(ServiceError::invalid_arg("Missing namespace lookup").into());
+            },
         };
 
         match ns_meta {
             Some(ns) => {
+                ctx.set_namespace_id(ns.namespace_id);
+                ctx.set_success();
                 // Map internal NamespaceStatus to proto NamespaceStatus
                 let status = match ns.status {
                     NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
@@ -153,7 +230,10 @@ impl AdminService for AdminServiceImpl {
                     created_at: None,
                 }))
             },
-            None => Err(ServiceError::not_found("Namespace", "unknown").into()),
+            None => {
+                ctx.set_error("NotFound", "Namespace not found");
+                Err(ServiceError::not_found("Namespace", "unknown").into())
+            },
         }
     }
 
@@ -161,6 +241,17 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<ListNamespacesRequest>,
     ) -> Result<Response<ListNamespacesResponse>, Status> {
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "list_namespaces");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("list_namespaces");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         let namespaces = self
             .applied_state
             .list_namespaces()
@@ -184,7 +275,11 @@ impl AdminService for AdminServiceImpl {
                     created_at: None,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        // Set count in context for observability
+        ctx.set_keys_count(namespaces.len());
+        ctx.set_success();
 
         Ok(Response::new(ListNamespacesResponse { namespaces, next_page_token: None }))
     }
@@ -195,18 +290,36 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<CreateVaultResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "create_vault");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("create_vault");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing namespace_id");
+            Status::invalid_argument("Missing namespace_id")
+        })?;
+
+        ctx.set_namespace_id(namespace_id);
 
         // Convert proto retention policy to internal type
         let retention_policy = req.retention_policy.map(|proto_policy| {
             use crate::proto::BlockRetentionMode as ProtoMode;
             let mode = match proto_policy.mode() {
-                ProtoMode::Unspecified | ProtoMode::Full => BlockRetentionMode::Full,
-                ProtoMode::Compacted => BlockRetentionMode::Compacted,
+                ProtoMode::Unspecified | ProtoMode::Full => {
+                    ctx.set_retention_mode("full");
+                    BlockRetentionMode::Full
+                },
+                ProtoMode::Compacted => {
+                    ctx.set_retention_mode("compacted");
+                    BlockRetentionMode::Compacted
+                },
             };
             BlockRetentionPolicy {
                 mode,
@@ -225,17 +338,23 @@ impl AdminService for AdminServiceImpl {
             retention_policy,
         };
 
-        let result = self
-            .raft
-            .client_write(ledger_request)
-            .await
-            .map_err(|e| Status::internal(format!("Raft error: {}", e)))?;
+        ctx.start_raft_timer();
+        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
+            ctx.end_raft_timer();
+            ctx.set_error("RaftError", &e.to_string());
+            Status::internal(format!("Raft error: {}", e))
+        })?;
+        ctx.end_raft_timer();
 
         match result.data {
             LedgerResponse::VaultCreated { vault_id } => {
+                ctx.set_vault_id(vault_id);
+                ctx.set_success();
+
                 // Get Raft metrics for leader_id and term
                 let metrics = self.raft.metrics().borrow().clone();
                 let leader_id = metrics.current_leader.unwrap_or(metrics.id);
+                ctx.set_raft_term(metrics.current_term);
 
                 // Compute empty state root for genesis block
                 let state = &*self.state;
@@ -265,8 +384,14 @@ impl AdminService for AdminServiceImpl {
                     genesis: Some(genesis),
                 }))
             },
-            LedgerResponse::Error { message } => Err(Status::internal(message)),
-            _ => Err(Status::internal("Unexpected response type")),
+            LedgerResponse::Error { message } => {
+                ctx.set_error("Unspecified", &message);
+                Err(Status::internal(message))
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(Status::internal("Unexpected response type"))
+            },
         }
     }
 
@@ -276,41 +401,62 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<DeleteVaultResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "delete_vault");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("delete_vault");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
 
-        let vault_id = req
-            .vault_id
-            .as_ref()
-            .map(|v| v.id)
-            .ok_or_else(|| Status::invalid_argument("Missing vault_id"))?;
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing namespace_id");
+            Status::invalid_argument("Missing namespace_id")
+        })?;
+
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing vault_id");
+            Status::invalid_argument("Missing vault_id")
+        })?;
+
+        ctx.set_target(namespace_id, vault_id);
 
         // Submit delete vault through Raft
         let ledger_request = LedgerRequest::DeleteVault { namespace_id, vault_id };
 
-        let result = self
-            .raft
-            .client_write(ledger_request)
-            .await
-            .map_err(|e| Status::internal(format!("Raft error: {}", e)))?;
+        ctx.start_raft_timer();
+        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
+            ctx.end_raft_timer();
+            ctx.set_error("RaftError", &e.to_string());
+            Status::internal(format!("Raft error: {}", e))
+        })?;
+        ctx.end_raft_timer();
 
         match result.data {
             LedgerResponse::VaultDeleted { success } => {
                 if success {
+                    ctx.set_success();
                     Ok(Response::new(DeleteVaultResponse {
                         deleted_at: Some(
                             prost_types::Timestamp::from(std::time::SystemTime::now()),
                         ),
                     }))
                 } else {
+                    ctx.set_error("DeleteFailed", "Failed to delete vault");
                     Err(Status::internal("Failed to delete vault"))
                 }
             },
-            LedgerResponse::Error { message } => Err(Status::internal(message)),
-            _ => Err(Status::internal("Unexpected response type")),
+            LedgerResponse::Error { message } => {
+                ctx.set_error("Unspecified", &message);
+                Err(Status::internal(message))
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(Status::internal("Unexpected response type"))
+            },
         }
     }
 
@@ -320,34 +466,52 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<GetVaultResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "get_vault");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("get_vault");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
 
-        let vault_id = req
-            .vault_id
-            .as_ref()
-            .map(|v| v.id)
-            .ok_or_else(|| Status::invalid_argument("Missing vault_id"))?;
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing namespace_id");
+            Status::invalid_argument("Missing namespace_id")
+        })?;
+
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing vault_id");
+            Status::invalid_argument("Missing vault_id")
+        })?;
+
+        ctx.set_target(namespace_id, vault_id);
 
         // Get vault metadata and height
         let vault_meta = self.applied_state.get_vault(namespace_id, vault_id);
         let height = self.applied_state.vault_height(namespace_id, vault_id);
 
         match vault_meta {
-            Some(_vault) => Ok(Response::new(GetVaultResponse {
-                namespace_id: Some(NamespaceId { id: namespace_id }),
-                vault_id: Some(VaultId { id: vault_id }),
-                height,
-                state_root: None,
-                nodes: vec![],
-                leader: None,
-                status: crate::proto::VaultStatus::Active.into(),
-                retention_policy: None,
-            })),
-            None => Err(Status::not_found("Vault not found")),
+            Some(_vault) => {
+                ctx.set_block_height(height);
+                ctx.set_success();
+                Ok(Response::new(GetVaultResponse {
+                    namespace_id: Some(NamespaceId { id: namespace_id }),
+                    vault_id: Some(VaultId { id: vault_id }),
+                    height,
+                    state_root: None,
+                    nodes: vec![],
+                    leader: None,
+                    status: crate::proto::VaultStatus::Active.into(),
+                    retention_policy: None,
+                }))
+            },
+            None => {
+                ctx.set_error("NotFound", "Vault not found");
+                Err(Status::not_found("Vault not found"))
+            },
         }
     }
 
@@ -355,6 +519,17 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<ListVaultsRequest>,
     ) -> Result<Response<ListVaultsResponse>, Status> {
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "list_vaults");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("list_vaults");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         // List all vaults across all namespaces
         let vaults = self
             .applied_state
@@ -375,7 +550,11 @@ impl AdminService for AdminServiceImpl {
                     }
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        // Set count in context for observability
+        ctx.set_keys_count(vaults.len());
+        ctx.set_success();
 
         Ok(Response::new(ListVaultsResponse { vaults }))
     }
@@ -386,16 +565,30 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         let _req = request.into_inner();
 
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "create_snapshot");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("create_snapshot");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         // Trigger Raft snapshot
-        let _ = self
-            .raft
-            .trigger()
-            .snapshot()
-            .await
-            .map_err(|e| Status::internal(format!("Snapshot error: {}", e)))?;
+        ctx.start_raft_timer();
+        let _ = self.raft.trigger().snapshot().await.map_err(|e| {
+            ctx.end_raft_timer();
+            ctx.set_error("SnapshotError", &e.to_string());
+            Status::internal(format!("Snapshot error: {}", e))
+        })?;
+        ctx.end_raft_timer();
 
         // Get actual shard height from applied state
         let block_height = self.applied_state.shard_height();
+        ctx.set_block_height(block_height);
+        ctx.set_success();
 
         Ok(Response::new(CreateSnapshotResponse {
             block_height,
@@ -411,8 +604,26 @@ impl AdminService for AdminServiceImpl {
         let req = request.into_inner();
         let mut issues = Vec::new();
 
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "check_integrity");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("check_integrity");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id);
         let vault_id = req.vault_id.as_ref().map(|v| v.id);
+
+        if let Some(ns_id) = namespace_id {
+            ctx.set_namespace_id(ns_id);
+        }
+        if let Some(v_id) = vault_id {
+            ctx.set_vault_id(v_id);
+        }
 
         // Get all vault heights to check
         let vault_heights: Vec<(i64, i64, u64)> =
@@ -430,6 +641,7 @@ impl AdminService for AdminServiceImpl {
             };
 
         if vault_heights.is_empty() {
+            ctx.set_success();
             return Ok(Response::new(CheckIntegrityResponse { healthy: true, issues: vec![] }));
         }
 
@@ -438,6 +650,7 @@ impl AdminService for AdminServiceImpl {
             let archive = match &self.block_archive {
                 Some(a) => a,
                 None => {
+                    ctx.set_error("Unavailable", "Block archive not configured");
                     return Err(Status::unavailable(
                         "Block archive not configured for full integrity check",
                     ));
@@ -627,6 +840,13 @@ impl AdminService for AdminServiceImpl {
             }
         }
 
+        // Set outcome based on issues found
+        if issues.is_empty() {
+            ctx.set_success();
+        } else {
+            ctx.set_error("IntegrityIssues", &format!("{} issues found", issues.len()));
+        }
+
         Ok(Response::new(CheckIntegrityResponse { healthy: issues.is_empty(), issues }))
     }
 
@@ -640,9 +860,22 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<JoinClusterResponse>, Status> {
         let req = request.into_inner();
 
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "join_cluster");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("join_cluster");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         // Get current metrics to check if we're the leader
         let metrics = self.raft.metrics().borrow().clone();
         let current_leader = metrics.current_leader;
+        ctx.set_raft_term(metrics.current_term);
+        ctx.set_is_leader(current_leader == Some(metrics.id));
 
         // If we're not the leader, return the leader info for redirect
         if current_leader != Some(metrics.id) {
@@ -658,6 +891,7 @@ impl AdminService for AdminServiceImpl {
                 })
                 .unwrap_or_default();
 
+            ctx.set_error("NotLeader", "Not the leader, redirect to leader");
             return Ok(Response::new(JoinClusterResponse {
                 success: false,
                 message: "Not the leader, redirect to leader".to_string(),
@@ -676,6 +910,7 @@ impl AdminService for AdminServiceImpl {
 
         if already_voter {
             // Already a voter, nothing to do
+            ctx.set_success();
             return Ok(Response::new(JoinClusterResponse {
                 success: true,
                 message: "Node is already a voter in the cluster".to_string(),
@@ -688,28 +923,25 @@ impl AdminService for AdminServiceImpl {
         // Use blocking=false so we don't wait for replication - the new node
         // might not be ready yet. We'll wait for the config change to commit below.
         // Retry with backoff if there's a pending config change.
+        ctx.start_raft_timer();
         if !already_in_membership {
             let mut add_success = false;
             for attempt in 0..10 {
                 match self.raft.add_learner(req.node_id, node.clone(), false).await {
                     Ok(_) => {
-                        tracing::info!(node_id = req.node_id, "Initiated add_learner");
                         add_success = true;
                         break;
                     },
                     Err(e) => {
                         let err_str = format!("{}", e);
                         if err_str.contains("already undergoing a configuration change") {
-                            tracing::info!(
-                                node_id = req.node_id,
-                                attempt,
-                                "Config change in progress, retrying"
-                            );
                             tokio::time::sleep(std::time::Duration::from_millis(
                                 100 * (attempt + 1) as u64,
                             ))
                             .await;
                         } else {
+                            ctx.end_raft_timer();
+                            ctx.set_error("AddLearnerFailed", &e.to_string());
                             return Ok(Response::new(JoinClusterResponse {
                                 success: false,
                                 message: format!("Failed to add learner: {}", e),
@@ -721,6 +953,8 @@ impl AdminService for AdminServiceImpl {
                 }
             }
             if !add_success {
+                ctx.end_raft_timer();
+                ctx.set_error("Timeout", "Cluster membership changes not completing");
                 return Ok(Response::new(JoinClusterResponse {
                     success: false,
                     message: "Timeout: cluster membership changes not completing".to_string(),
@@ -728,8 +962,6 @@ impl AdminService for AdminServiceImpl {
                     leader_address: String::new(),
                 }));
             }
-        } else {
-            tracing::info!(node_id = req.node_id, "Node already in membership as learner");
         }
 
         // Step 2: Wait for the learner membership change to commit
@@ -750,6 +982,8 @@ impl AdminService for AdminServiceImpl {
             }
 
             if start.elapsed() > timeout {
+                ctx.end_raft_timer();
+                ctx.set_error("Timeout", "Waiting for learner membership to commit");
                 return Ok(Response::new(JoinClusterResponse {
                     success: false,
                     message: "Timeout waiting for learner membership to commit".to_string(),
@@ -771,7 +1005,8 @@ impl AdminService for AdminServiceImpl {
 
             match self.raft.change_membership(new_voters, false).await {
                 Ok(_) => {
-                    tracing::info!(node_id = req.node_id, "Promoted node to voter");
+                    ctx.end_raft_timer();
+                    ctx.set_success();
                     return Ok(Response::new(JoinClusterResponse {
                         success: true,
                         message: "Node joined cluster successfully".to_string(),
@@ -782,16 +1017,13 @@ impl AdminService for AdminServiceImpl {
                 Err(e) => {
                     let err_str = format!("{}", e);
                     if err_str.contains("already undergoing a configuration change") {
-                        tracing::info!(
-                            node_id = req.node_id,
-                            attempt,
-                            "Config change in progress for promotion, retrying"
-                        );
                         tokio::time::sleep(std::time::Duration::from_millis(
                             100 * (attempt + 1) as u64,
                         ))
                         .await;
                     } else {
+                        ctx.end_raft_timer();
+                        ctx.set_error("PromotionFailed", &e.to_string());
                         return Ok(Response::new(JoinClusterResponse {
                             success: false,
                             message: format!("Failed to promote to voter: {}", e),
@@ -803,6 +1035,8 @@ impl AdminService for AdminServiceImpl {
             }
         }
 
+        ctx.end_raft_timer();
+        ctx.set_error("Timeout", "Could not complete voter promotion");
         Ok(Response::new(JoinClusterResponse {
             success: false,
             message: "Timeout: could not complete voter promotion".to_string(),
@@ -817,12 +1051,26 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<LeaveClusterResponse>, Status> {
         let req = request.into_inner();
 
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "leave_cluster");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("leave_cluster");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         // Get current metrics
         let metrics = self.raft.metrics().borrow().clone();
         let current_leader = metrics.current_leader;
+        ctx.set_raft_term(metrics.current_term);
+        ctx.set_is_leader(current_leader == Some(metrics.id));
 
         // Only the leader can change membership
         if current_leader != Some(metrics.id) {
+            ctx.set_error("NotLeader", "Cannot process leave request");
             return Ok(Response::new(LeaveClusterResponse {
                 success: false,
                 message: "Not the leader, cannot process leave request".to_string(),
@@ -836,24 +1084,31 @@ impl AdminService for AdminServiceImpl {
 
         // Prevent removing the last voter
         if new_voters.is_empty() {
+            ctx.set_error("InvalidOperation", "Cannot remove the last voter");
             return Ok(Response::new(LeaveClusterResponse {
                 success: false,
                 message: "Cannot remove the last voter from cluster".to_string(),
             }));
         }
 
+        ctx.start_raft_timer();
         match self.raft.change_membership(new_voters, false).await {
             Ok(_) => {
-                tracing::info!(node_id = req.node_id, "Removed node from cluster");
+                ctx.end_raft_timer();
+                ctx.set_success();
                 Ok(Response::new(LeaveClusterResponse {
                     success: true,
                     message: "Node left cluster successfully".to_string(),
                 }))
             },
-            Err(e) => Ok(Response::new(LeaveClusterResponse {
-                success: false,
-                message: format!("Failed to remove node: {}", e),
-            })),
+            Err(e) => {
+                ctx.end_raft_timer();
+                ctx.set_error("MembershipChangeFailed", &e.to_string());
+                Ok(Response::new(LeaveClusterResponse {
+                    success: false,
+                    message: format!("Failed to remove node: {}", e),
+                }))
+            },
         }
     }
 
@@ -861,9 +1116,23 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<GetClusterInfoRequest>,
     ) -> Result<Response<GetClusterInfoResponse>, Status> {
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "get_cluster_info");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("get_cluster_info");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         let metrics = self.raft.metrics().borrow().clone();
         let membership = metrics.membership_config.membership();
         let current_leader = metrics.current_leader;
+
+        ctx.set_raft_term(metrics.vote.leader_id().term);
+        ctx.set_is_leader(current_leader == Some(metrics.id));
 
         // Build member list from membership config
         let mut members = Vec::new();
@@ -882,6 +1151,9 @@ impl AdminService for AdminServiceImpl {
                 is_leader: current_leader == Some(*node_id),
             });
         }
+
+        ctx.set_keys_count(members.len());
+        ctx.set_success();
 
         Ok(Response::new(GetClusterInfoResponse {
             members,
@@ -927,12 +1199,28 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<GetNodeInfoRequest>,
     ) -> Result<Response<GetNodeInfoResponse>, Status> {
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "get_node_info");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("get_node_info");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         let metrics = self.raft.metrics().borrow().clone();
+
+        ctx.set_raft_term(metrics.current_term);
+        ctx.set_is_leader(metrics.current_leader == Some(metrics.id));
 
         // Node is a cluster member if it has a leader or is in membership
         // (has at least one voter including itself)
         let is_cluster_member = metrics.current_leader.is_some()
             || metrics.membership_config.membership().voter_ids().count() > 0;
+
+        ctx.set_success();
 
         Ok(Response::new(GetNodeInfoResponse {
             node_id: metrics.id,
@@ -952,16 +1240,28 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<RecoverVaultResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("namespace_id required"))?;
-        let vault_id = req
-            .vault_id
-            .as_ref()
-            .map(|v| v.id)
-            .ok_or_else(|| Status::invalid_argument("vault_id required"))?;
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "recover_vault");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("recover_vault");
+        ctx.set_recovery_force(req.force);
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "namespace_id required");
+            Status::invalid_argument("namespace_id required")
+        })?;
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "vault_id required");
+            Status::invalid_argument("vault_id required")
+        })?;
+
+        ctx.set_target(namespace_id, vault_id);
 
         // Check current vault health
         let current_health = self.applied_state.vault_health(namespace_id, vault_id);
@@ -970,6 +1270,7 @@ impl AdminService for AdminServiceImpl {
         if !req.force {
             match &current_health {
                 VaultHealthStatus::Healthy => {
+                    ctx.set_error("AlreadyHealthy", "Vault is already healthy");
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: "Vault is already healthy. Use force=true to recover anyway."
@@ -989,6 +1290,7 @@ impl AdminService for AdminServiceImpl {
         let archive = match &self.block_archive {
             Some(a) => a,
             None => {
+                ctx.set_error("Unavailable", "Block archive not configured");
                 return Err(Status::unavailable(
                     "Block archive not configured, cannot recover vault",
                 ));
@@ -998,6 +1300,7 @@ impl AdminService for AdminServiceImpl {
         // Get expected height from applied state
         let expected_height = self.applied_state.vault_height(namespace_id, vault_id);
         if expected_height == 0 {
+            ctx.set_error("NoBlocks", "Vault has no blocks to recover");
             return Ok(Response::new(RecoverVaultResponse {
                 success: false,
                 message: "Vault has no blocks to recover".to_string(),
@@ -1007,12 +1310,11 @@ impl AdminService for AdminServiceImpl {
             }));
         }
 
-        tracing::info!(namespace_id, vault_id, expected_height, "Starting vault recovery");
-
         // Step 1: Clear vault state
         {
             let state = &*self.state;
             if let Err(e) = state.clear_vault(vault_id) {
+                ctx.set_error("ClearFailed", &format!("{:?}", e));
                 return Ok(Response::new(RecoverVaultResponse {
                     success: false,
                     message: format!("Failed to clear vault state: {:?}", e),
@@ -1024,6 +1326,7 @@ impl AdminService for AdminServiceImpl {
         }
 
         // Step 2: Replay blocks from archive
+        ctx.start_storage_timer();
         let mut last_vault_hash: Option<[u8; 32]> = None;
         let mut divergence_detected = false;
         let mut final_state_root = ZERO_HASH;
@@ -1033,6 +1336,8 @@ impl AdminService for AdminServiceImpl {
             let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => {
+                    ctx.end_storage_timer();
+                    ctx.set_error("MissingBlock", &format!("Block not found at height {}", height));
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: format!(
@@ -1045,6 +1350,8 @@ impl AdminService for AdminServiceImpl {
                     }));
                 },
                 Err(e) => {
+                    ctx.end_storage_timer();
+                    ctx.set_error("IndexLookupFailed", &format!("{:?}", e));
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: format!("Index lookup failed at height {}: {:?}", height, e),
@@ -1059,6 +1366,8 @@ impl AdminService for AdminServiceImpl {
             let shard_block = match archive.read_block(shard_height) {
                 Ok(b) => b,
                 Err(e) => {
+                    ctx.end_storage_timer();
+                    ctx.set_error("BlockReadFailed", &format!("{:?}", e));
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: format!("Block read failed at height {}: {:?}", height, e),
@@ -1075,6 +1384,8 @@ impl AdminService for AdminServiceImpl {
             }) {
                 Some(e) => e,
                 None => {
+                    ctx.end_storage_timer();
+                    ctx.set_error("MissingEntry", "Vault entry not found in shard block");
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: format!(
@@ -1105,6 +1416,8 @@ impl AdminService for AdminServiceImpl {
                 let state = &*self.state;
                 for tx in &entry.transactions {
                     if let Err(e) = state.apply_operations(vault_id, &tx.operations, height) {
+                        ctx.end_storage_timer();
+                        ctx.set_error("ApplyFailed", &format!("{:?}", e));
                         return Ok(Response::new(RecoverVaultResponse {
                             success: false,
                             message: format!(
@@ -1134,6 +1447,8 @@ impl AdminService for AdminServiceImpl {
                         final_state_root = computed_root;
                     },
                     Err(e) => {
+                        ctx.end_storage_timer();
+                        ctx.set_error("StateRootFailed", &format!("{:?}", e));
                         return Ok(Response::new(RecoverVaultResponse {
                             success: false,
                             message: format!(
@@ -1151,8 +1466,10 @@ impl AdminService for AdminServiceImpl {
             // Track hash for next iteration
             last_vault_hash = Some(compute_vault_block_hash(entry));
         }
+        ctx.end_storage_timer();
 
         // Step 3: Update vault health based on recovery result via Raft
+        ctx.start_raft_timer();
         if divergence_detected {
             tracing::error!(
                 namespace_id,
@@ -1177,7 +1494,10 @@ impl AdminService for AdminServiceImpl {
                 // Continue with response - the local state will be inconsistent but
                 // the next recovery attempt can retry
             }
+            ctx.end_raft_timer();
 
+            ctx.set_block_height(expected_height);
+            ctx.set_error("DivergenceReproduced", "Recovery reproduced divergence");
             Ok(Response::new(RecoverVaultResponse {
                 success: false,
                 message: "Recovery reproduced divergence - possible determinism bug. Manual investigation required.".to_string(),
@@ -1188,8 +1508,6 @@ impl AdminService for AdminServiceImpl {
                 }),
             }))
         } else {
-            tracing::info!(namespace_id, vault_id, expected_height, "Vault recovery successful");
-
             // Update vault health to Healthy via Raft for cluster-wide consistency
             let health_request = LedgerRequest::UpdateVaultHealth {
                 namespace_id,
@@ -1206,7 +1524,10 @@ impl AdminService for AdminServiceImpl {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // The vault was successfully recovered locally - log error but return success
             }
+            ctx.end_raft_timer();
 
+            ctx.set_block_height(expected_height);
+            ctx.set_success();
             Ok(Response::new(RecoverVaultResponse {
                 success: true,
                 message: "Vault recovered successfully".to_string(),
@@ -1228,17 +1549,28 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<crate::proto::SimulateDivergenceResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "simulate_divergence");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("simulate_divergence");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
 
-        let vault_id = req
-            .vault_id
-            .as_ref()
-            .map(|v| v.id)
-            .ok_or_else(|| Status::invalid_argument("Missing vault_id"))?;
+        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing namespace_id");
+            Status::invalid_argument("Missing namespace_id")
+        })?;
+
+        let vault_id = req.vault_id.as_ref().map(|v| v.id).ok_or_else(|| {
+            ctx.set_error("InvalidArgument", "Missing vault_id");
+            Status::invalid_argument("Missing vault_id")
+        })?;
+
+        ctx.set_target(namespace_id, vault_id);
 
         // Extract fake state roots for the simulated divergence
         let expected_root: [u8; 32] = req
@@ -1260,6 +1592,8 @@ impl AdminService for AdminServiceImpl {
             self.applied_state.vault_height(namespace_id, vault_id).max(1)
         };
 
+        ctx.set_block_height(at_height);
+
         tracing::warn!(
             namespace_id,
             vault_id,
@@ -1279,9 +1613,11 @@ impl AdminService for AdminServiceImpl {
             recovery_started_at: None,
         };
 
+        ctx.start_raft_timer();
         match self.raft.client_write(health_request).await {
             Ok(_) => {
-                tracing::info!(namespace_id, vault_id, "Vault marked as diverged for testing");
+                ctx.end_raft_timer();
+                ctx.set_success();
 
                 Ok(Response::new(crate::proto::SimulateDivergenceResponse {
                     success: true,
@@ -1293,6 +1629,8 @@ impl AdminService for AdminServiceImpl {
                 }))
             },
             Err(e) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
                 tracing::error!(
                     namespace_id,
                     vault_id,
@@ -1311,10 +1649,25 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<crate::proto::ForceGcResponse>, Status> {
         let req = request.into_inner();
 
+        // Create wide event context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "force_gc");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.set_admin_action("force_gc");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         // Check if this node is the leader
         let metrics = self.raft.metrics().borrow().clone();
         let node_id = metrics.id;
+        ctx.set_raft_term(metrics.current_term);
+        ctx.set_is_leader(metrics.current_leader == Some(node_id));
+
         if metrics.current_leader != Some(node_id) {
+            ctx.set_error("NotLeader", "Only the leader can run garbage collection");
             return Err(Status::failed_precondition("Only the leader can run garbage collection"));
         }
 
@@ -1329,6 +1682,7 @@ impl AdminService for AdminServiceImpl {
         // Determine which vaults to scan
         let vault_heights: Vec<((i64, i64), u64)> =
             if let (Some(ns), Some(v)) = (req.namespace_id, req.vault_id) {
+                ctx.set_target(ns.id, v.id);
                 // Single vault
                 let height = self.applied_state.vault_height(ns.id, v.id);
                 vec![((ns.id, v.id), height)]
@@ -1337,6 +1691,7 @@ impl AdminService for AdminServiceImpl {
                 self.applied_state.all_vault_heights().into_iter().collect()
             };
 
+        ctx.start_raft_timer();
         for ((namespace_id, vault_id), _height) in vault_heights {
             vaults_scanned += 1;
 
@@ -1389,18 +1744,18 @@ impl AdminService for AdminServiceImpl {
             match self.raft.client_write(gc_request).await {
                 Ok(_) => {
                     total_expired += count as u64;
-                    tracing::info!(
-                        namespace_id,
-                        vault_id,
-                        count,
-                        "GC expired entities via ForceGc"
-                    );
                 },
                 Err(e) => {
                     tracing::warn!(namespace_id, vault_id, error = %e, "GC write failed");
                 },
             }
         }
+        ctx.end_raft_timer();
+
+        // Set success with counts
+        ctx.set_keys_count(vaults_scanned as usize);
+        ctx.set_operations_count(total_expired as usize);
+        ctx.set_success();
 
         Ok(Response::new(crate::proto::ForceGcResponse {
             success: true,

@@ -48,6 +48,7 @@ pub mod services;
 mod shard_router;
 mod ttl_gc;
 mod types;
+pub mod wide_events;
 
 /// Generated protobuf types and service traits.
 pub mod proto {
