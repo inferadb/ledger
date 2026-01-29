@@ -68,7 +68,6 @@ metrics.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
-tracing-opentelemetry.workspace = true
 
 # Streaming
 tokio-stream = { version = "0.1", features = ["sync"] }

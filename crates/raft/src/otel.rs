@@ -163,7 +163,7 @@ pub fn init_otel(config: &OtelConfig) -> Result<(), OtelInitError> {
         return Err(OtelInitError::AlreadyInitialized);
     }
 
-    // Register as global provider for tracing-opentelemetry integration
+    // Register as global provider for get_tracer() access
     global::set_tracer_provider(provider);
 
     tracing::info!(
