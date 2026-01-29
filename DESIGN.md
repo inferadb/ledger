@@ -225,7 +225,7 @@ Client Request
 [3] Leader validates + assigns sequence number
     │
     ▼
-[4] Batcher aggregates (up to 100 txs or 5ms timeout)
+[4] Batcher aggregates (up to 100 txs or 10ms timeout)
     │
     ▼
 [5] Batch becomes Raft proposal
@@ -375,7 +375,7 @@ Batching amortizes Raft consensus overhead:
 Default batch configuration:
 
 - Maximum batch size: 100 transactions
-- Maximum batch delay: 5ms
+- Maximum batch delay: 10ms
 
 ### Fault Tolerance & Recovery
 
@@ -835,12 +835,14 @@ Ledger assumes a **trusted operator model**: the organization running the cluste
 
 ### Performance Targets
 
-| Metric              | Target          | Measurement Condition       |
-| ------------------- | --------------- | --------------------------- |
-| Read latency (p99)  | < 2 ms          | Single key lookup           |
-| Write latency (p99) | < 50 ms         | Batch committed             |
-| Write throughput    | 5,000 tx/sec    | 3-node cluster              |
-| Read throughput     | 100,000 req/sec | Eventually consistent reads |
+| Metric              | Target          | Measured        | Measurement Condition       |
+| ------------------- | --------------- | --------------- | --------------------------- |
+| Read latency (p99)  | < 2 ms          | **2.8 µs**      | Single key lookup           |
+| Write latency (p99) | < 50 ms         | **8.1 ms**      | Batch committed             |
+| Write throughput    | 5,000 tx/sec    | **11K tx/sec**  | 3-node cluster              |
+| Read throughput     | 100,000 req/sec | **952K req/sec**| Eventually consistent reads |
+
+Benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. See [WHITEPAPER.md](WHITEPAPER.md#6-performance-characteristics) for full methodology and latency distributions.
 
 ### Correctness Invariants
 
