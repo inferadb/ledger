@@ -172,16 +172,17 @@ tokio = { version = "1", features = ["full"] }
 Basic usage:
 
 ```rust
-use inferadb_ledger_sdk::{Client, ClientConfig};
+use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect to Ledger
-    let client = Client::connect(
-        ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
-            .build()
-    ).await?;
+    let config = ClientConfig::builder()
+        .endpoints(vec!["http://localhost:50051".into()])
+        .client_id("quickstart")
+        .build()?;
+
+    let client = LedgerClient::new(config).await?;
 
     // Create namespace
     let ns = client.create_namespace("my_app").await?;
@@ -192,18 +193,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Created vault: {}", vault.id);
 
     // Write entity
-    client.write(ns.id, None)
-        .set_entity("user:alice", b"Alice")
-        .send()
-        .await?;
+    let ops = vec![Operation::set_entity("user:alice", b"Alice".to_vec())];
+    client.write(ns.id, None, ops).await?;
 
     // Read it back
-    let entity = client.read(ns.id, "user:alice").await?;
+    let entity = client.read(ns.id, None, "user:alice").await?;
     println!("Read: {:?}", entity);
 
     Ok(())
 }
 ```
+
+See the [SDK Guide](client/sdk.md) for comprehensive documentation including TLS, retries, streaming, and distributed tracing.
 
 ## Next Steps
 

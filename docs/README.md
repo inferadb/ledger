@@ -10,7 +10,9 @@ Blockchain database for cryptographically verifiable authorization.
 
 ## Client API
 
+- [Rust SDK](client/sdk.md) - Comprehensive SDK guide with TLS, retries, streaming, tracing
 - [API Overview](client/api.md) - Read/write operations, pagination, verification
+- [Idempotency](client/idempotency.md) - Sequence tracking and retry semantics
 - [AdminService](client/admin.md) - Namespace, vault, and cluster management
 - [HealthService](client/health.md) - Liveness and readiness checks
 - [SystemDiscoveryService](client/discovery.md) - Peer discovery and bootstrap
@@ -29,6 +31,8 @@ Blockchain database for cryptographically verifiable authorization.
 
 ### Monitoring
 
+- [Logging](operations/logging.md) - Request-level JSON logging with 50+ fields
+- [Dashboard Templates](operations/dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
 - [Metrics Reference](operations/metrics-reference.md) - All Prometheus metrics
 - [Alerting Guide](operations/alerting.md) - Prometheus alerting rules
 - [Capacity Planning](operations/capacity-planning.md) - Sizing and scaling
@@ -54,6 +58,7 @@ Implementation details for contributors and advanced operators.
 - [Architecture](development/architecture.md) - Crate structure and code organization
 - [Testing Guide](development/testing.md) - Test categories and commands
 - [Debugging Guide](development/debugging.md) - Logging, profiling, common issues
+- [Logging](development/logging.md) - Adding wide events logging to new services
 - [Release Process](development/release.md) - Versioning and publishing
 - [Contributing](CONTRIBUTING.md) - Development workflow
 

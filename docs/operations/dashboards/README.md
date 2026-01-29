@@ -613,6 +613,25 @@ Check your Ledger version:
 inferadb-ledger --version
 ```
 
+### Compatibility Matrix
+
+| Dashboard Schema | Min Ledger Version | Changes                           |
+| ---------------- | ------------------ | --------------------------------- |
+| 1                | 0.5.0              | Initial wide events release       |
+
+**Future breaking changes will increment the schema version.**
+
+Operators can run dashboards with `schema_version` higher than their ledger version (queries for new fields return empty, but dashboards remain functional).
+
+### Field Evolution Policy
+
+| Change Type        | Compatibility                    | Dashboard Action |
+| ------------------ | -------------------------------- | ---------------- |
+| New field added    | Backward compatible              | No update needed |
+| Field renamed      | Breaking (increments schema)     | Update queries   |
+| Field type changed | Breaking (increments schema)     | Update queries   |
+| Field removed      | Breaking (increments schema)     | Remove from queries |
+
 ## Upgrading Dashboards
 
 When upgrading to a new schema version:

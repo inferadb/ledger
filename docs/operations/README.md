@@ -12,12 +12,14 @@ Operational documentation for running InferaDB Ledger in production.
 
 ## Day-to-Day Operations
 
-| Document                                  | Description                        |
-| ----------------------------------------- | ---------------------------------- |
-| [Alerting](alerting.md)                   | Prometheus alerting rules and SLOs |
-| [Metrics Reference](metrics-reference.md) | All Prometheus metrics             |
-| [Troubleshooting](troubleshooting.md)     | Common issues and solutions        |
-| [Capacity Planning](capacity-planning.md) | Sizing and scaling guidelines      |
+| Document                                  | Description                                   |
+| ----------------------------------------- | --------------------------------------------- |
+| [Logging](logging.md)                     | Request-level JSON logging and queries        |
+| [Dashboard Templates](dashboards/)        | Pre-built Grafana, Kibana, Datadog dashboards |
+| [Alerting](alerting.md)                   | Prometheus alerting rules and SLOs            |
+| [Metrics Reference](metrics-reference.md) | All Prometheus metrics                        |
+| [Troubleshooting](troubleshooting.md)     | Common issues and solutions                   |
+| [Capacity Planning](capacity-planning.md) | Sizing and scaling guidelines                 |
 
 ## Architecture & Security
 
