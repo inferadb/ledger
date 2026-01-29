@@ -312,7 +312,7 @@ fn truncate_hash(hash: &str) -> String {
 ///
 /// This function provides safe access to the request context from anywhere
 /// in the call stack within the same tokio task. The context is set when
-/// a [`RequestContextGuard`] is created with [`RequestContextGuard::new`]
+/// a [`RequestContextGuard`] is used with [`RequestContextGuard::run_with`]
 /// and accessed via the [`with_current_context`] or [`try_with_current_context`]
 /// functions.
 ///
