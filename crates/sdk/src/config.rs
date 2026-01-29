@@ -11,7 +11,10 @@ use std::time::Duration;
 use bon::bon;
 use snafu::ensure;
 
-use crate::error::{ConfigSnafu, InvalidUrlSnafu, Result};
+use crate::{
+    error::{ConfigSnafu, InvalidUrlSnafu, Result},
+    tracing::TraceConfig,
+};
 
 /// Default request timeout (30 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -42,6 +45,9 @@ pub struct ClientConfig {
 
     /// TLS configuration for secure connections.
     pub(crate) tls: Option<TlsConfig>,
+
+    /// Distributed tracing configuration.
+    pub(crate) trace: TraceConfig,
 }
 
 #[bon]
@@ -91,6 +97,7 @@ impl ClientConfig {
         #[builder(default)] retry_policy: RetryPolicy,
         #[builder(default)] compression: bool,
         tls: Option<TlsConfig>,
+        #[builder(default)] trace: TraceConfig,
     ) -> Result<Self> {
         ensure!(
             !endpoints.is_empty(),
@@ -108,7 +115,16 @@ impl ClientConfig {
             ConfigSnafu { message: "connect_timeout cannot be zero" }
         );
 
-        Ok(Self { endpoints, client_id, timeout, connect_timeout, retry_policy, compression, tls })
+        Ok(Self {
+            endpoints,
+            client_id,
+            timeout,
+            connect_timeout,
+            retry_policy,
+            compression,
+            tls,
+            trace,
+        })
     }
 }
 
@@ -153,6 +169,12 @@ impl ClientConfig {
     #[must_use]
     pub fn tls(&self) -> Option<&TlsConfig> {
         self.tls.as_ref()
+    }
+
+    /// Returns the trace configuration.
+    #[must_use]
+    pub fn trace(&self) -> &TraceConfig {
+        &self.trace
     }
 }
 

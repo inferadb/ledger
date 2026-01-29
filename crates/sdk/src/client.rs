@@ -4,6 +4,7 @@
 //! orchestrating connection pool, sequence tracker, and retry logic.
 
 use inferadb_ledger_raft::proto;
+use tonic::service::interceptor::InterceptedService;
 
 use crate::{
     config::ClientConfig,
@@ -12,6 +13,7 @@ use crate::{
     idempotency::SequenceTracker,
     retry::with_retry,
     streaming::{HeightTracker, ReconnectingStream},
+    tracing::TraceContextInterceptor,
 };
 
 /// Read consistency level for read operations.
@@ -1362,6 +1364,12 @@ impl LedgerClient {
         Ok(())
     }
 
+    /// Creates a trace context interceptor based on the client's configuration.
+    #[inline]
+    fn trace_interceptor(&self) -> TraceContextInterceptor {
+        TraceContextInterceptor::new(self.pool.config().trace())
+    }
+
     /// Creates a discovery service that shares this client's connection pool.
     ///
     /// The discovery service can be used to dynamically update the client's
@@ -1585,7 +1593,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(channel, pool.compression_enabled());
+            let mut client = Self::create_read_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::ReadRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -1616,7 +1628,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(channel, pool.compression_enabled());
+            let mut client = Self::create_read_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::BatchReadRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -1635,12 +1651,16 @@ impl LedgerClient {
         .await
     }
 
-    /// Creates a ReadServiceClient with compression settings applied.
+    /// Creates a ReadServiceClient with compression and tracing settings applied.
     fn create_read_client(
         channel: tonic::transport::Channel,
         compression_enabled: bool,
-    ) -> proto::read_service_client::ReadServiceClient<tonic::transport::Channel> {
-        let client = proto::read_service_client::ReadServiceClient::new(channel);
+        interceptor: TraceContextInterceptor,
+    ) -> proto::read_service_client::ReadServiceClient<
+        InterceptedService<tonic::transport::Channel, TraceContextInterceptor>,
+    > {
+        let client =
+            proto::read_service_client::ReadServiceClient::with_interceptor(channel, interceptor);
         if compression_enabled {
             client
                 .send_compressed(tonic::codec::CompressionEncoding::Gzip)
@@ -1761,8 +1781,11 @@ impl LedgerClient {
             let cid = client_id.clone();
             async move {
                 let channel = pool.get_channel().await?;
-                let mut write_client =
-                    Self::create_write_client(channel, pool.compression_enabled());
+                let mut write_client = Self::create_write_client(
+                    channel,
+                    pool.compression_enabled(),
+                    TraceContextInterceptor::new(pool.config().trace()),
+                );
 
                 let request = proto::WriteRequest {
                     namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -1838,12 +1861,16 @@ impl LedgerClient {
             .unwrap_or_default()
     }
 
-    /// Creates a WriteServiceClient with compression settings applied.
+    /// Creates a WriteServiceClient with compression and tracing settings applied.
     fn create_write_client(
         channel: tonic::transport::Channel,
         compression_enabled: bool,
-    ) -> proto::write_service_client::WriteServiceClient<tonic::transport::Channel> {
-        let client = proto::write_service_client::WriteServiceClient::new(channel);
+        interceptor: TraceContextInterceptor,
+    ) -> proto::write_service_client::WriteServiceClient<
+        InterceptedService<tonic::transport::Channel, TraceContextInterceptor>,
+    > {
+        let client =
+            proto::write_service_client::WriteServiceClient::with_interceptor(channel, interceptor);
         if compression_enabled {
             client
                 .send_compressed(tonic::codec::CompressionEncoding::Gzip)
@@ -1985,8 +2012,11 @@ impl LedgerClient {
             let cid = client_id.clone();
             async move {
                 let channel = pool.get_channel().await?;
-                let mut write_client =
-                    Self::create_write_client(channel, pool.compression_enabled());
+                let mut write_client = Self::create_write_client(
+                    channel,
+                    pool.compression_enabled(),
+                    TraceContextInterceptor::new(pool.config().trace()),
+                );
 
                 let request = proto::BatchWriteRequest {
                     namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2166,7 +2196,11 @@ impl LedgerClient {
         start_height: u64,
     ) -> Result<tonic::Streaming<proto::BlockAnnouncement>> {
         let channel = self.pool.get_channel().await?;
-        let mut client = Self::create_read_client(channel, self.pool.compression_enabled());
+        let mut client = Self::create_read_client(
+            channel,
+            self.pool.compression_enabled(),
+            self.trace_interceptor(),
+        );
 
         let request = proto::WatchBlocksRequest {
             namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2222,7 +2256,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(channel, pool.compression_enabled());
+            let mut client = Self::create_admin_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::CreateNamespaceRequest {
                 name: name.clone(),
@@ -2273,7 +2311,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(channel, pool.compression_enabled());
+            let mut client = Self::create_admin_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::GetNamespaceRequest {
                 lookup: Some(proto::get_namespace_request::Lookup::NamespaceId(
@@ -2322,7 +2364,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(channel, pool.compression_enabled());
+            let mut client = Self::create_admin_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::ListNamespacesRequest {
                 page_token: None,
@@ -2375,7 +2421,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(channel, pool.compression_enabled());
+            let mut client = Self::create_admin_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::CreateVaultRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2438,7 +2488,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(channel, pool.compression_enabled());
+            let mut client = Self::create_admin_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::GetVaultRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2485,7 +2539,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(channel, pool.compression_enabled());
+            let mut client = Self::create_admin_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::ListVaultsRequest {};
 
@@ -2575,7 +2633,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_health_client(channel, pool.compression_enabled());
+            let mut client = Self::create_health_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::HealthCheckRequest { namespace_id: None, vault_id: None };
 
@@ -2630,7 +2692,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_health_client(channel, pool.compression_enabled());
+            let mut client = Self::create_health_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::HealthCheckRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2696,7 +2762,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(channel, pool.compression_enabled());
+            let mut client = Self::create_read_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::VerifiedReadRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2768,7 +2838,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(channel, pool.compression_enabled());
+            let mut client = Self::create_read_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::ListEntitiesRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2839,7 +2913,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(channel, pool.compression_enabled());
+            let mut client = Self::create_read_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::ListRelationshipsRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2913,7 +2991,11 @@ impl LedgerClient {
 
         with_retry(&retry_policy, || async {
             let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(channel, pool.compression_enabled());
+            let mut client = Self::create_read_client(
+                channel,
+                pool.compression_enabled(),
+                TraceContextInterceptor::new(pool.config().trace()),
+            );
 
             let request = proto::ListResourcesRequest {
                 namespace_id: Some(proto::NamespaceId { id: namespace_id }),
@@ -2942,12 +3024,16 @@ impl LedgerClient {
         .await
     }
 
-    /// Create an AdminService client with compression settings.
+    /// Create an AdminService client with compression and tracing settings.
     fn create_admin_client(
         channel: tonic::transport::Channel,
         compression_enabled: bool,
-    ) -> proto::admin_service_client::AdminServiceClient<tonic::transport::Channel> {
-        let client = proto::admin_service_client::AdminServiceClient::new(channel);
+        interceptor: TraceContextInterceptor,
+    ) -> proto::admin_service_client::AdminServiceClient<
+        InterceptedService<tonic::transport::Channel, TraceContextInterceptor>,
+    > {
+        let client =
+            proto::admin_service_client::AdminServiceClient::with_interceptor(channel, interceptor);
         if compression_enabled {
             client
                 .send_compressed(tonic::codec::CompressionEncoding::Gzip)
@@ -2957,12 +3043,18 @@ impl LedgerClient {
         }
     }
 
-    /// Create a HealthService client with compression settings.
+    /// Create a HealthService client with compression and tracing settings.
     fn create_health_client(
         channel: tonic::transport::Channel,
         compression_enabled: bool,
-    ) -> proto::health_service_client::HealthServiceClient<tonic::transport::Channel> {
-        let client = proto::health_service_client::HealthServiceClient::new(channel);
+        interceptor: TraceContextInterceptor,
+    ) -> proto::health_service_client::HealthServiceClient<
+        InterceptedService<tonic::transport::Channel, TraceContextInterceptor>,
+    > {
+        let client = proto::health_service_client::HealthServiceClient::with_interceptor(
+            channel,
+            interceptor,
+        );
         if compression_enabled {
             client
                 .send_compressed(tonic::codec::CompressionEncoding::Gzip)

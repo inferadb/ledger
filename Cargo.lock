@@ -1581,6 +1581,7 @@ dependencies = [
  "inferadb-ledger-test-utils",
  "inferadb-ledger-types",
  "openraft",
+ "opentelemetry",
  "parking_lot",
  "proptest",
  "prost 0.14.3",
@@ -1599,6 +1600,7 @@ dependencies = [
  "tonic 0.14.2",
  "tower 0.5.3",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]

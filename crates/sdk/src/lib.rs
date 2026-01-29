@@ -70,6 +70,7 @@ mod idempotency;
 pub mod mock;
 mod retry;
 mod streaming;
+mod tracing;
 
 // Public API exports
 pub use client::{
@@ -92,3 +93,4 @@ pub use idempotency::{
 pub use inferadb_ledger_types::{NamespaceId, VaultId};
 pub use retry::with_retry;
 pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};
+pub use tracing::TraceConfig;

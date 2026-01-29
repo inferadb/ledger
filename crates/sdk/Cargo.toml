@@ -41,6 +41,8 @@ bon = { workspace = true }
 
 # Utilities
 tracing = { workspace = true }
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
