@@ -66,11 +66,7 @@ fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
 }
 
 /// Pre-populate a vault with entities for read benchmarks.
-fn populate_vault(
-    state: &StateLayer<FileBackend>,
-    vault_id: i64,
-    count: usize,
-) {
+fn populate_vault(state: &StateLayer<FileBackend>, vault_id: i64, count: usize) {
     // Use batched writes for faster population
     const BATCH_SIZE: usize = 1000;
     let mut sequence = 0u64;
@@ -86,9 +82,7 @@ fn populate_vault(
             })
             .collect();
 
-        state
-            .apply_operations(vault_id, &operations, sequence)
-            .expect("populate");
+        state.apply_operations(vault_id, &operations, sequence).expect("populate");
         sequence += 1;
     }
 }
@@ -100,9 +94,7 @@ struct LatencyCollector {
 
 impl LatencyCollector {
     fn new(capacity: usize) -> Self {
-        Self {
-            samples: Vec::with_capacity(capacity),
-        }
+        Self { samples: Vec::with_capacity(capacity) }
     }
 
     fn record(&mut self, duration: Duration) {
@@ -523,7 +515,10 @@ fn bench_latency_percentiles(c: &mut Criterion) {
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 eprintln!("  p50:  {:>8.2} µs", p50.as_nanos() as f64 / 1000.0);
                 eprintln!("  p95:  {:>8.2} µs", p95.as_nanos() as f64 / 1000.0);
-                eprintln!("  p99:  {:>8.2} µs  (target: <2,000 µs)", p99.as_nanos() as f64 / 1000.0);
+                eprintln!(
+                    "  p99:  {:>8.2} µs  (target: <2,000 µs)",
+                    p99.as_nanos() as f64 / 1000.0
+                );
                 eprintln!("  p999: {:>8.2} µs", p999.as_nanos() as f64 / 1000.0);
                 eprintln!("  mean: {:>8.2} µs", mean.as_nanos() as f64 / 1000.0);
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
