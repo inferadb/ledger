@@ -90,8 +90,8 @@ just test
 
 ## Documentation
 
-- [WHITEPAPER.md](WHITEPAPER.md) — Architecture overview, performance characteristics, comparison with alternatives
-- [DESIGN.md](DESIGN.md) — Problem statement, goals/non-goals, trade-off analysis, architectural decisions, success criteria
+- [Technical White Paper](WHITEPAPER.md) — Start here to understand how Ledger works, see benchmark results, and evaluate whether it fits your use case
+- [Technical Design Document](DESIGN.md) — Authoritative specification for contributors; explains the reasoning behind architectural decisions
 
 ## Community
 
