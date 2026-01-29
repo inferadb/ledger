@@ -28,6 +28,7 @@ use crate::{
         WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
     },
     rate_limit::NamespaceRateLimiter,
+    trace_context,
     types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
 };
@@ -433,6 +434,8 @@ impl WriteService for WriteServiceImpl {
         &self,
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this request
@@ -444,6 +447,14 @@ impl WriteService for WriteServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Extract client ID and sequence for idempotency
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
@@ -649,6 +660,8 @@ impl WriteService for WriteServiceImpl {
         &self,
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this request
@@ -660,6 +673,14 @@ impl WriteService for WriteServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Extract client ID and sequence for idempotency
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();

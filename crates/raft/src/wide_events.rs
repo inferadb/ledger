@@ -480,6 +480,9 @@ pub struct RequestContext {
     raft_term: Option<u64>,
     shard_id: Option<u32>,
 
+    // VIP status (for wide event field)
+    is_vip: Option<bool>,
+
     // Operation-specific (write)
     operations_count: Option<usize>,
     operation_types: Option<Vec<&'static str>>,
@@ -552,6 +555,7 @@ impl RequestContext {
             is_leader: None,
             raft_term: None,
             shard_id: None,
+            is_vip: None,
             operations_count: None,
             operation_types: None,
             include_tx_proof: None,
@@ -689,6 +693,14 @@ impl RequestContext {
     /// Sets the shard ID.
     pub fn set_shard_id(&mut self, shard_id: u32) {
         self.shard_id = Some(shard_id);
+    }
+
+    /// Sets the VIP status for this request's namespace.
+    ///
+    /// This field indicates whether the namespace received elevated
+    /// sampling rates due to VIP status.
+    pub fn set_is_vip(&mut self, is_vip: bool) {
+        self.is_vip = Some(is_vip);
     }
 
     // =========================================================================
@@ -911,14 +923,14 @@ impl RequestContext {
     /// * `flags` - W3C trace flags (sampled bit)
     pub fn set_trace_context(
         &mut self,
-        trace_id: String,
-        span_id: String,
-        parent_span_id: Option<String>,
+        trace_id: &str,
+        span_id: &str,
+        parent_span_id: Option<&str>,
         flags: u8,
     ) {
-        self.trace_id = Some(trace_id);
-        self.span_id = Some(span_id);
-        self.parent_span_id = parent_span_id;
+        self.trace_id = Some(trace_id.to_string());
+        self.span_id = Some(span_id.to_string());
+        self.parent_span_id = parent_span_id.map(String::from);
         self.trace_flags = Some(flags);
     }
 
@@ -1042,6 +1054,7 @@ impl RequestContext {
             is_leader = self.is_leader,
             raft_term = self.raft_term,
             shard_id = self.shard_id,
+            is_vip = self.is_vip,
             operations_count = self.operations_count,
             operation_types = ?self.operation_types,
             include_tx_proof = self.include_tx_proof,
@@ -1078,6 +1091,56 @@ impl RequestContext {
             storage_latency_ms = self.timing.storage_latency_ms,
             "wide_event"
         );
+
+        // Export span to OTEL if enabled
+        if crate::otel::is_otel_enabled() {
+            let attrs = crate::otel::SpanAttributes {
+                request_id: Some(self.request_id.to_string()),
+                client_id: self.client_id.clone(),
+                sequence: self.sequence,
+                namespace_id: self.namespace_id,
+                vault_id: self.vault_id,
+                service: Some(self.service),
+                method: Some(self.method),
+                actor: self.actor.clone(),
+                node_id: self.node_id,
+                is_leader: self.is_leader,
+                raft_term: self.raft_term,
+                shard_id: self.shard_id,
+                is_vip: self.is_vip,
+                operations_count: self.operations_count,
+                idempotency_hit: self.idempotency_hit,
+                batch_coalesced: self.batch_coalesced,
+                batch_size: self.batch_size,
+                key: self.key.clone(),
+                keys_count: self.keys_count,
+                found_count: self.found_count,
+                consistency: self.consistency.clone(),
+                at_height: self.at_height,
+                include_proof: self.include_proof,
+                found: self.found,
+                value_size_bytes: self.value_size_bytes,
+                admin_action: self.admin_action.map(String::from),
+                outcome: Some(outcome_str.to_string()),
+                error_code: error_code.map(String::from),
+                error_message: error_message.map(String::from),
+                block_height: self.block_height,
+                block_hash: self.block_hash.clone(),
+                state_root: self.state_root.clone(),
+                duration_ms: Some(duration_ms),
+                raft_latency_ms: self.timing.raft_latency_ms,
+                storage_latency_ms: self.timing.storage_latency_ms,
+            };
+
+            crate::otel::export_span(
+                self.service,
+                self.method,
+                attrs,
+                self.trace_id.as_deref(),
+                self.span_id.as_deref(),
+                self.parent_span_id.as_deref(),
+            );
+        }
     }
 }
 
@@ -2267,6 +2330,43 @@ mod tests {
         ctx.suppress_emission();
     }
 
+    // === VIP Status Tests ===
+
+    #[test]
+    fn test_set_is_vip_true() {
+        let mut ctx = RequestContext::new("WriteService", "write");
+        ctx.set_is_vip(true);
+
+        assert_eq!(ctx.is_vip, Some(true));
+
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn test_set_is_vip_false() {
+        let mut ctx = RequestContext::new("WriteService", "write");
+        ctx.set_is_vip(false);
+
+        assert_eq!(ctx.is_vip, Some(false));
+
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn test_is_vip_in_json_output() {
+        let (_, events) = with_json_capturing_subscriber(|| {
+            let mut ctx = RequestContext::new("WriteService", "write");
+            ctx.set_namespace_id(42);
+            ctx.set_is_vip(true);
+            ctx.set_success();
+        });
+
+        assert!(!events.is_empty(), "Expected at least one event");
+        let json: serde_json::Value = serde_json::from_str(&events[0]).unwrap_or_default();
+        assert_eq!(json["is_vip"], serde_json::Value::Bool(true));
+        assert_eq!(json["namespace_id"], serde_json::Value::Number(42.into()));
+    }
+
     // === Trace Context Tests ===
 
     #[test]
@@ -2313,9 +2413,9 @@ mod tests {
     fn test_set_trace_context() {
         let mut ctx = RequestContext::new("WriteService", "write");
         ctx.set_trace_context(
-            "00112233445566778899aabbccddeeff".to_string(),
-            "0011223344556677".to_string(),
-            Some("aabbccddeeff0011".to_string()),
+            "00112233445566778899aabbccddeeff",
+            "0011223344556677",
+            Some("aabbccddeeff0011"),
             0x01,
         );
 
@@ -2330,12 +2430,7 @@ mod tests {
     #[test]
     fn test_set_trace_context_without_parent() {
         let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_trace_context(
-            "00112233445566778899aabbccddeeff".to_string(),
-            "0011223344556677".to_string(),
-            None,
-            0x00,
-        );
+        ctx.set_trace_context("00112233445566778899aabbccddeeff", "0011223344556677", None, 0x00);
 
         assert_eq!(ctx.trace_id, Some("00112233445566778899aabbccddeeff".to_string()));
         assert_eq!(ctx.span_id, Some("0011223344556677".to_string()));
@@ -2350,9 +2445,9 @@ mod tests {
         let (_, events) = with_json_capturing_subscriber(|| {
             let mut ctx = RequestContext::new("WriteService", "write");
             ctx.set_trace_context(
-                "00112233445566778899aabbccddeeff".to_string(),
-                "0011223344556677".to_string(),
-                Some("aabbccddeeff0011".to_string()),
+                "00112233445566778899aabbccddeeff",
+                "0011223344556677",
+                Some("aabbccddeeff0011"),
                 0x01,
             );
             ctx.set_success();

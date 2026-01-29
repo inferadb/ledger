@@ -38,6 +38,7 @@ use crate::{
         read_service_server::ReadService,
     },
     proto_convert::vault_entry_to_proto_block,
+    trace_context,
     types::{LedgerNodeId, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
 };
@@ -397,6 +398,8 @@ impl ReadServiceImpl {
 #[tonic::async_trait]
 impl ReadService for ReadServiceImpl {
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context
@@ -408,6 +411,14 @@ impl ReadService for ReadServiceImpl {
         if let Some(node_id) = &self.node_id {
             ctx.set_node_id(*node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Set read operation fields
         ctx.set_key(&req.key);
@@ -483,6 +494,8 @@ impl ReadService for ReadServiceImpl {
     ) -> Result<Response<crate::proto::BatchReadResponse>, Status> {
         use crate::proto::{BatchReadResponse, BatchReadResult};
 
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context
@@ -494,6 +507,14 @@ impl ReadService for ReadServiceImpl {
         if let Some(node_id) = &self.node_id {
             ctx.set_node_id(*node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Set read operation fields
         ctx.set_keys_count(req.keys.len());
@@ -588,6 +609,8 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<VerifiedReadRequest>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context
@@ -599,6 +622,14 @@ impl ReadService for ReadServiceImpl {
         if let Some(node_id) = &self.node_id {
             ctx.set_node_id(*node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Set read operation fields
         ctx.set_key(&req.key);
@@ -699,6 +730,8 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<HistoricalReadRequest>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context
@@ -710,6 +743,14 @@ impl ReadService for ReadServiceImpl {
         if let Some(node_id) = &self.node_id {
             ctx.set_node_id(*node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Set read operation fields
         ctx.set_key(&req.key);

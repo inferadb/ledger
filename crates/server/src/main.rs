@@ -27,7 +27,8 @@ mod shutdown;
 
 use std::{io::IsTerminal, net::SocketAddr};
 
-use config::{Config, LogFormat};
+use config::{Config, LogFormat, OtelTransport};
+use inferadb_ledger_raft::otel::{self, OtelConfig};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -56,6 +57,9 @@ async fn main() -> Result<(), ServerError> {
 
     // Initialize logging based on config
     init_logging(&config);
+
+    // Initialize OpenTelemetry if configured
+    init_otel(&config)?;
 
     // Resolve data directory (creates ephemeral temp directory if not configured)
     let data_dir = config.resolve_data_dir().map_err(|e| {
@@ -108,6 +112,9 @@ async fn main() -> Result<(), ServerError> {
     let server_result = node.server.serve().await;
     let _ = shutdown_handle.await;
 
+    // Shutdown OTEL tracer provider gracefully
+    otel::shutdown_otel();
+
     server_result.map_err(ServerError::Server)?;
 
     tracing::info!("Server shutdown complete");
@@ -139,6 +146,35 @@ fn init_logging(config: &Config) {
         // Human-readable text format for development
         tracing_subscriber::registry().with(env_filter).with(fmt::layer()).init();
     }
+}
+
+/// Initialize OpenTelemetry/OTLP export if configured.
+///
+/// Creates a tracer provider with batch span processor for exporting traces
+/// to observability backends like Jaeger, Tempo, or Honeycomb.
+fn init_otel(config: &Config) -> Result<(), ServerError> {
+    let otel_config = &config.wide_events.otel;
+
+    if !otel_config.enabled {
+        return Ok(());
+    }
+
+    // Convert server config to raft crate's OtelConfig
+    let raft_otel_config = OtelConfig {
+        enabled: otel_config.enabled,
+        endpoint: otel_config.endpoint.clone().unwrap_or_default(),
+        use_grpc: matches!(otel_config.transport, OtelTransport::Grpc),
+        timeout_ms: otel_config.timeout_ms,
+        shutdown_timeout_ms: otel_config.shutdown_timeout_ms,
+        trace_raft_rpcs: otel_config.trace_raft_rpcs,
+    };
+
+    otel::init_otel(&raft_otel_config).map_err(|e| {
+        ServerError::Server(Box::new(std::io::Error::other(format!(
+            "Failed to initialize OTEL: {}",
+            e
+        ))))
+    })
 }
 
 /// Initialize the Prometheus metrics exporter.

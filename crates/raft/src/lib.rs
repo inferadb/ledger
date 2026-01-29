@@ -35,6 +35,7 @@ pub mod metrics;
 mod multi_raft;
 mod multi_shard_server;
 mod orphan_cleanup;
+pub mod otel;
 pub mod pagination;
 pub mod peer_maintenance;
 pub mod peer_tracker;
@@ -46,8 +47,10 @@ mod saga_orchestrator;
 mod server;
 pub mod services;
 mod shard_router;
+pub mod trace_context;
 mod ttl_gc;
 mod types;
+pub mod vip_cache;
 pub mod wide_events;
 
 /// Generated protobuf types and service traits.

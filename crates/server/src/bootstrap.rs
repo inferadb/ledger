@@ -153,7 +153,8 @@ pub async fn bootstrap_node(
     // Get accessor before log_store is consumed by Adaptor
     let applied_state_accessor = log_store.accessor();
 
-    let network = GrpcRaftNetworkFactory::new();
+    let network =
+        GrpcRaftNetworkFactory::with_trace_config(config.wide_events.otel.trace_raft_rpcs);
     let raft_config = openraft::Config {
         cluster_name: "ledger".to_string(),
         heartbeat_interval: 150,

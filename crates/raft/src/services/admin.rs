@@ -27,6 +27,7 @@ use crate::{
         NamespaceId, NodeId, RecoverVaultRequest, RecoverVaultResponse, ShardId, VaultHealthProto,
         VaultId, admin_service_server::AdminService,
     },
+    trace_context,
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
     },
@@ -62,6 +63,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CreateNamespaceRequest>,
     ) -> Result<Response<CreateNamespaceResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -75,6 +78,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Submit create namespace through Raft
         // Map proto ShardId to inferadb_ledger_types::ShardId (i32)
@@ -113,6 +124,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DeleteNamespaceRequest>,
     ) -> Result<Response<DeleteNamespaceResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -125,6 +138,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
             ctx.set_error("InvalidArgument", "Missing namespace_id");
@@ -179,6 +200,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GetNamespaceRequest>,
     ) -> Result<Response<GetNamespaceResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -191,6 +214,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Extract namespace from lookup oneof (by ID or name)
         let ns_meta = match req.lookup {
@@ -288,6 +319,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CreateVaultRequest>,
     ) -> Result<Response<CreateVaultResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -297,6 +330,15 @@ impl AdminService for AdminServiceImpl {
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
@@ -399,6 +441,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DeleteVaultRequest>,
     ) -> Result<Response<DeleteVaultResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -411,6 +455,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
             ctx.set_error("InvalidArgument", "Missing namespace_id");
@@ -464,6 +516,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GetVaultRequest>,
     ) -> Result<Response<GetVaultResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -476,6 +530,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
             ctx.set_error("InvalidArgument", "Missing namespace_id");
@@ -563,6 +625,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CreateSnapshotRequest>,
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let _req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -575,6 +639,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Trigger Raft snapshot
         ctx.start_raft_timer();
@@ -601,6 +673,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CheckIntegrityRequest>,
     ) -> Result<Response<CheckIntegrityResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
         let mut issues = Vec::new();
 
@@ -614,6 +688,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id);
         let vault_id = req.vault_id.as_ref().map(|v| v.id);
@@ -858,6 +940,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<JoinClusterRequest>,
     ) -> Result<Response<JoinClusterResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -867,6 +951,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
@@ -1049,6 +1141,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<LeaveClusterRequest>,
     ) -> Result<Response<LeaveClusterResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -1061,6 +1155,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Get current metrics
         let metrics = self.raft.metrics().borrow().clone();
@@ -1238,6 +1340,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<RecoverVaultRequest>,
     ) -> Result<Response<RecoverVaultResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -1251,6 +1355,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
             ctx.set_error("InvalidArgument", "namespace_id required");
@@ -1547,6 +1659,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<crate::proto::SimulateDivergenceRequest>,
     ) -> Result<Response<crate::proto::SimulateDivergenceResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -1559,6 +1673,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         let namespace_id = req.namespace_id.as_ref().map(|n| n.id).ok_or_else(|| {
             ctx.set_error("InvalidArgument", "Missing namespace_id");
@@ -1647,6 +1769,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<crate::proto::ForceGcRequest>,
     ) -> Result<Response<crate::proto::ForceGcResponse>, Status> {
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
@@ -1659,6 +1783,14 @@ impl AdminService for AdminServiceImpl {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
 
         // Check if this node is the leader
         let metrics = self.raft.metrics().borrow().clone();

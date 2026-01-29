@@ -220,6 +220,17 @@ pub struct OtelConfig {
     #[serde(default = "default_otel_shutdown_timeout_ms")]
     #[builder(default = default_otel_shutdown_timeout_ms())]
     pub shutdown_timeout_ms: u64,
+
+    /// Whether to propagate trace context in Raft RPCs. Default: true.
+    ///
+    /// When enabled, trace context is injected into AppendEntries, Vote, and
+    /// InstallSnapshot RPCs, enabling end-to-end distributed tracing across
+    /// the Raft cluster. Disable for performance-critical deployments where
+    /// the ~100 bytes overhead per RPC is unacceptable.
+    #[serde(default = "default_trace_raft_rpcs")]
+    #[builder(default = default_trace_raft_rpcs())]
+    #[allow(dead_code)] // used in Raft network for trace context injection
+    pub trace_raft_rpcs: bool,
 }
 
 impl Default for OtelConfig {
@@ -232,6 +243,7 @@ impl Default for OtelConfig {
             batch_interval_ms: default_otel_batch_interval_ms(),
             timeout_ms: default_otel_timeout_ms(),
             shutdown_timeout_ms: default_otel_shutdown_timeout_ms(),
+            trace_raft_rpcs: default_trace_raft_rpcs(),
         }
     }
 }
@@ -291,6 +303,96 @@ fn default_otel_shutdown_timeout_ms() -> u64 {
     15000
 }
 
+fn default_trace_raft_rpcs() -> bool {
+    true
+}
+
+/// Configuration for dynamic VIP namespace discovery.
+///
+/// VIP namespaces receive elevated sampling rates. VIP status can be configured
+/// statically via `vip_namespaces` list or dynamically discovered from the
+/// `_system` namespace metadata.
+///
+/// # Environment Variables
+///
+/// ```bash
+/// INFERADB__LEDGER__WIDE_EVENTS__VIP__DISCOVERY_ENABLED=true
+/// INFERADB__LEDGER__WIDE_EVENTS__VIP__CACHE_TTL_SECS=60
+/// INFERADB__LEDGER__WIDE_EVENTS__VIP__TAG_NAME=vip
+/// ```
+#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[builder(derive(Debug))]
+pub struct VipConfig {
+    /// Whether dynamic VIP discovery from `_system` is enabled. Default: true.
+    ///
+    /// When enabled, the system queries `_system` namespace for entities with
+    /// keys matching `vip:namespace:{namespace_id}` to determine VIP status.
+    #[serde(default = "default_vip_discovery_enabled")]
+    #[builder(default = default_vip_discovery_enabled())]
+    #[allow(dead_code)] // used by VipCache for dynamic discovery
+    pub discovery_enabled: bool,
+
+    /// Cache TTL for VIP status lookups, in seconds. Default: 60.
+    ///
+    /// VIP status is cached locally to avoid querying `_system` on every request.
+    /// The cache is refreshed asynchronously after TTL expires.
+    #[serde(default = "default_vip_cache_ttl_secs")]
+    #[builder(default = default_vip_cache_ttl_secs())]
+    pub cache_ttl_secs: u64,
+
+    /// Name of the metadata tag used to mark VIP namespaces. Default: "vip".
+    ///
+    /// VIP tags are stored as entities in `_system` with key format
+    /// `{tag_name}:namespace:{namespace_id}`.
+    #[serde(default = "default_vip_tag_name")]
+    #[builder(default = default_vip_tag_name())]
+    pub tag_name: String,
+}
+
+impl Default for VipConfig {
+    fn default() -> Self {
+        Self {
+            discovery_enabled: default_vip_discovery_enabled(),
+            cache_ttl_secs: default_vip_cache_ttl_secs(),
+            tag_name: default_vip_tag_name(),
+        }
+    }
+}
+
+impl VipConfig {
+    /// Create a config for testing with discovery disabled.
+    pub fn for_test() -> Self {
+        Self { discovery_enabled: false, cache_ttl_secs: 60, tag_name: "vip".to_string() }
+    }
+
+    /// Validate VIP configuration.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.cache_ttl_secs == 0 {
+            return Err(ConfigError::Validation {
+                message: "wide_events.vip.cache_ttl_secs must be positive".to_string(),
+            });
+        }
+
+        if self.tag_name.is_empty() {
+            return Err(ConfigError::Validation {
+                message: "wide_events.vip.tag_name cannot be empty".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn default_vip_discovery_enabled() -> bool {
+    true
+}
+fn default_vip_cache_ttl_secs() -> u64 {
+    60
+}
+fn default_vip_tag_name() -> String {
+    "vip".to_string()
+}
+
 /// Configuration for wide events logging.
 ///
 /// Wide events provide comprehensive request-level logging with 50+ contextual
@@ -320,10 +422,16 @@ pub struct WideEventsConfig {
     pub sampling: WideEventsSamplingConfig,
 
     /// List of VIP namespace IDs with elevated sampling rates.
+    /// These are static overrides that always receive VIP treatment.
     #[serde(default)]
     #[builder(default)]
-    #[allow(dead_code)] // reserved for Phase 4 dynamic VIP namespace discovery
+    #[allow(dead_code)] // used by VipCache for static VIP override
     pub vip_namespaces: Vec<i64>,
+
+    /// Dynamic VIP namespace discovery configuration.
+    #[serde(default)]
+    #[builder(default)]
+    pub vip: VipConfig,
 
     /// OpenTelemetry/OTLP export configuration.
     #[serde(default)]
@@ -337,6 +445,7 @@ impl Default for WideEventsConfig {
             enabled: default_wide_events_enabled(),
             sampling: WideEventsSamplingConfig::default(),
             vip_namespaces: Vec::new(),
+            vip: VipConfig::default(),
             otel: OtelConfig::default(),
         }
     }
@@ -349,6 +458,7 @@ impl WideEventsConfig {
             enabled: true,
             sampling: WideEventsSamplingConfig::for_test(),
             vip_namespaces: Vec::new(),
+            vip: VipConfig::for_test(),
             otel: OtelConfig::for_test(),
         }
     }
@@ -356,6 +466,7 @@ impl WideEventsConfig {
     /// Validate wide events configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.sampling.validate()?;
+        self.vip.validate()?;
         self.otel.validate()
     }
 }
@@ -1300,6 +1411,7 @@ mod tests {
         assert_eq!(config.batch_interval_ms, 5000);
         assert_eq!(config.timeout_ms, 10000);
         assert_eq!(config.shutdown_timeout_ms, 15000);
+        assert!(config.trace_raft_rpcs); // default is true
     }
 
     #[test]
@@ -1376,6 +1488,7 @@ mod tests {
             .batch_interval_ms(2500)
             .timeout_ms(5000)
             .shutdown_timeout_ms(7500)
+            .trace_raft_rpcs(false)
             .build();
 
         assert!(config.enabled);
@@ -1385,6 +1498,7 @@ mod tests {
         assert_eq!(config.batch_interval_ms, 2500);
         assert_eq!(config.timeout_ms, 5000);
         assert_eq!(config.shutdown_timeout_ms, 7500);
+        assert!(!config.trace_raft_rpcs);
     }
 
     #[test]
@@ -1408,5 +1522,68 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("endpoint"));
+    }
+
+    // === VIP Config Tests ===
+
+    #[test]
+    fn test_vip_config_defaults() {
+        let config = VipConfig::default();
+        assert!(config.discovery_enabled);
+        assert_eq!(config.cache_ttl_secs, 60);
+        assert_eq!(config.tag_name, "vip");
+    }
+
+    #[test]
+    fn test_vip_config_for_test() {
+        let config = VipConfig::for_test();
+        assert!(!config.discovery_enabled);
+        assert_eq!(config.cache_ttl_secs, 60);
+        assert_eq!(config.tag_name, "vip");
+    }
+
+    #[test]
+    fn test_vip_config_validate_cache_ttl() {
+        let config = VipConfig { cache_ttl_secs: 0, ..VipConfig::default() };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("cache_ttl_secs"));
+    }
+
+    #[test]
+    fn test_vip_config_validate_tag_name() {
+        let config = VipConfig { tag_name: String::new(), ..VipConfig::default() };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("tag_name"));
+    }
+
+    #[test]
+    fn test_vip_config_builder() {
+        let config = VipConfig::builder()
+            .discovery_enabled(false)
+            .cache_ttl_secs(120)
+            .tag_name("priority".to_string())
+            .build();
+
+        assert!(!config.discovery_enabled);
+        assert_eq!(config.cache_ttl_secs, 120);
+        assert_eq!(config.tag_name, "priority");
+    }
+
+    #[test]
+    fn test_wide_events_config_includes_vip() {
+        let config = WideEventsConfig::default();
+        assert!(config.vip.discovery_enabled);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_wide_events_config_validate_includes_vip() {
+        // Invalid VIP config should fail validation
+        let config = WideEventsConfig {
+            vip: VipConfig { cache_ttl_secs: 0, ..VipConfig::default() },
+            ..WideEventsConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("cache_ttl_secs"));
     }
 }

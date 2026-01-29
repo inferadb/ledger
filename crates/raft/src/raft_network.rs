@@ -16,10 +16,11 @@ use openraft::{
     },
 };
 use parking_lot::RwLock;
-use tonic::transport::Channel;
+use tonic::{Request, transport::Channel};
 
 use crate::{
     proto::raft_service_client::RaftServiceClient,
+    trace_context::{self, TraceContext},
     types::{LedgerNodeId, LedgerTypeConfig},
 };
 
@@ -83,12 +84,19 @@ impl Default for GrpcRaftNetwork {
 /// Factory for creating network connections to Raft peers.
 pub struct GrpcRaftNetworkFactory {
     network: GrpcRaftNetwork,
+    /// Whether to inject trace context into outgoing RPCs.
+    trace_raft_rpcs: bool,
 }
 
 impl GrpcRaftNetworkFactory {
     /// Create a new network factory.
     pub fn new() -> Self {
-        Self { network: GrpcRaftNetwork::new() }
+        Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs: true }
+    }
+
+    /// Create a new network factory with trace context injection configured.
+    pub fn with_trace_config(trace_raft_rpcs: bool) -> Self {
+        Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs }
     }
 }
 
@@ -102,7 +110,12 @@ impl RaftNetworkFactory<LedgerTypeConfig> for GrpcRaftNetworkFactory {
     type Network = GrpcRaftNetworkConnection;
 
     async fn new_client(&mut self, target: LedgerNodeId, node: &BasicNode) -> Self::Network {
-        GrpcRaftNetworkConnection { target, node: node.clone(), network: self.network.clone() }
+        GrpcRaftNetworkConnection {
+            target,
+            node: node.clone(),
+            network: self.network.clone(),
+            trace_raft_rpcs: self.trace_raft_rpcs,
+        }
     }
 }
 
@@ -111,6 +124,20 @@ pub struct GrpcRaftNetworkConnection {
     target: LedgerNodeId,
     node: BasicNode,
     network: GrpcRaftNetwork,
+    /// Whether to inject trace context into outgoing RPCs.
+    trace_raft_rpcs: bool,
+}
+
+impl GrpcRaftNetworkConnection {
+    /// Create a gRPC request with optional trace context injection.
+    fn make_request<T>(&self, message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        if self.trace_raft_rpcs {
+            let trace_ctx = TraceContext::new();
+            trace_context::inject_into_metadata(request.metadata_mut(), &trace_ctx);
+        }
+        request
+    }
 }
 
 impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
@@ -128,7 +155,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-        let request = crate::proto::RaftVoteRequest {
+        let proto_request = crate::proto::RaftVoteRequest {
             vote: Some((&rpc.vote).into()),
             last_log_id: rpc
                 .last_log_id
@@ -137,7 +164,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         };
 
         let response = client
-            .vote(request)
+            .vote(self.make_request(proto_request))
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&NetworkError(e.to_string()))))?
             .into_inner();
@@ -174,7 +201,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         let entries: Vec<Vec<u8>> =
             rpc.entries.iter().map(|e| encode(e).unwrap_or_default()).collect();
 
-        let request = crate::proto::RaftAppendEntriesRequest {
+        let proto_request = crate::proto::RaftAppendEntriesRequest {
             vote: Some((&rpc.vote).into()),
             prev_log_id: rpc
                 .prev_log_id
@@ -187,7 +214,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         };
 
         let response = client
-            .append_entries(request)
+            .append_entries(self.make_request(proto_request))
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&NetworkError(e.to_string()))))?
             .into_inner();
@@ -222,7 +249,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-        let request = crate::proto::RaftInstallSnapshotRequest {
+        let proto_request = crate::proto::RaftInstallSnapshotRequest {
             vote: Some((&rpc.vote).into()),
             meta: Some(crate::proto::RaftSnapshotMeta {
                 last_log_id: rpc
@@ -249,7 +276,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         };
 
         let response = client
-            .install_snapshot(request)
+            .install_snapshot(self.make_request(proto_request))
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&NetworkError(e.to_string()))))?
             .into_inner();

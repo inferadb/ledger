@@ -129,6 +129,9 @@ pub struct MultiRaftConfig {
     /// Maximum election timeout in milliseconds.
     #[builder(default = 600)]
     pub election_timeout_max_ms: u64,
+    /// Whether to inject trace context into Raft RPCs.
+    #[builder(default = true)]
+    pub trace_raft_rpcs: bool,
 }
 
 impl MultiRaftConfig {
@@ -140,6 +143,7 @@ impl MultiRaftConfig {
             heartbeat_interval_ms: 150,
             election_timeout_min_ms: 300,
             election_timeout_max_ms: 600,
+            trace_raft_rpcs: true,
         }
     }
 
@@ -441,7 +445,7 @@ impl MultiRaftManager {
         // Get accessor before log_store is consumed
         let applied_state = log_store.accessor();
 
-        let network = GrpcRaftNetworkFactory::new();
+        let network = GrpcRaftNetworkFactory::with_trace_config(self.config.trace_raft_rpcs);
 
         // Build Raft config
         let raft_config = openraft::Config {
