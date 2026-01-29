@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Result};
+use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Result, ServerSource};
 use tokio::time::timeout;
 
 #[tokio::main]
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     // 1. Create the client
     // -------------------------------------------------------------------------
     let config = ClientConfig::builder()
-        .endpoints(vec![endpoint.into()])
+        .servers(ServerSource::from_static([endpoint]))
         .client_id("streaming-example")
         .build()?;
 

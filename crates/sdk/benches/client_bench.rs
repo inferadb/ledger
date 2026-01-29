@@ -28,7 +28,8 @@ use std::{hint::black_box, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use inferadb_ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker, mock::MockLedgerServer,
+    ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker, ServerSource,
+    mock::MockLedgerServer,
 };
 use tokio::runtime::Runtime;
 
@@ -43,7 +44,7 @@ fn create_runtime() -> Runtime {
 /// Create a client connected to the mock server.
 async fn create_client_for_mock(endpoint: &str) -> LedgerClient {
     let config = ClientConfig::builder()
-        .endpoints(vec![endpoint.into()])
+        .servers(ServerSource::from_static([endpoint]))
         .client_id("bench-client")
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(2))

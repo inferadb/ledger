@@ -15,12 +15,12 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation};
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation, ServerSource};
 //!
 //! #[tokio::main]
 //! async fn main() -> inferadb_ledger_sdk::Result<()> {
 //!     let config = ClientConfig::builder()
-//!         .endpoints(vec!["http://localhost:50051".into()])
+//!         .servers(ServerSource::from_static(["http://localhost:50051"]))
 //!         .client_id("my-app-001")
 //!         .build()?;
 //!
@@ -69,6 +69,7 @@ mod error;
 mod idempotency;
 pub mod mock;
 mod retry;
+pub mod server;
 mod streaming;
 mod tracing;
 
@@ -92,5 +93,9 @@ pub use idempotency::{
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{NamespaceId, VaultId};
 pub use retry::with_retry;
+pub use server::{
+    DnsConfig, FileConfig, ResolvedServer, SelectorStats, ServerResolver, ServerSelector,
+    ServerSource,
+};
 pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};
 pub use tracing::TraceConfig;

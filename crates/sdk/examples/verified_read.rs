@@ -11,7 +11,9 @@
 // Examples are allowed to use expect/unwrap for brevity
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 
-use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Result, VerifyOpts};
+use inferadb_ledger_sdk::{
+    ClientConfig, LedgerClient, Operation, Result, ServerSource, VerifyOpts,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -30,7 +32,7 @@ async fn main() -> Result<()> {
     // 1. Create the client
     // -------------------------------------------------------------------------
     let config = ClientConfig::builder()
-        .endpoints(vec![endpoint.into()])
+        .servers(ServerSource::from_static([endpoint]))
         .client_id("verified-read-example")
         .build()?;
 

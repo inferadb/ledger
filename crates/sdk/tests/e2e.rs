@@ -26,7 +26,7 @@ use inferadb_ledger_raft::{
 };
 use inferadb_ledger_sdk::{
     ClientConfig, FileSequenceStorage, LedgerClient, Operation, PersistentSequenceTracker,
-    RetryPolicy,
+    RetryPolicy, ServerSource,
 };
 use inferadb_ledger_test_utils::TestDir;
 use openraft::Raft;
@@ -332,7 +332,7 @@ impl TestCluster {
 /// Create a LedgerClient connected to the given cluster node.
 async fn create_sdk_client(addr: SocketAddr, client_id: &str) -> LedgerClient {
     let config = ClientConfig::builder()
-        .endpoints(vec![format!("http://{}", addr)])
+        .servers(ServerSource::from_static([format!("http://{}", addr)]))
         .client_id(client_id)
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))

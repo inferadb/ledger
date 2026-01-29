@@ -12,11 +12,11 @@
 //! # Example
 //!
 //! ```no_run
-//! use inferadb_ledger_sdk::{ClientConfig, LedgerClient, TraceConfig};
+//! use inferadb_ledger_sdk::{ClientConfig, LedgerClient, TraceConfig, ServerSource};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = ClientConfig::builder()
-//!     .endpoints(vec!["http://localhost:50051".into()])
+//!     .servers(ServerSource::from_static(["http://localhost:50051"]))
 //!     .client_id("my-service")
 //!     .trace(TraceConfig::enabled())
 //!     .build()?;

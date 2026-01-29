@@ -61,6 +61,7 @@ snafu = { version = "0.8", features = ["backtrace"] }
 # Concurrency
 parking_lot = "0.12"
 arc-swap = "1.7"
+dashmap = "6.1"
 
 # Caching
 moka = { version = "0.12", features = ["sync"] }

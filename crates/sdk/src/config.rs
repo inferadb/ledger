@@ -1,7 +1,7 @@
 //! Client configuration with builder pattern.
 //!
 //! Provides type-safe configuration for SDK clients including:
-//! - Endpoint URLs
+//! - Server discovery (static, DNS, or file-based)
 //! - Timeouts and connection settings
 //! - Retry policies
 //! - Compression options
@@ -13,6 +13,7 @@ use snafu::ensure;
 
 use crate::{
     error::{ConfigSnafu, InvalidUrlSnafu, Result},
+    server::ServerSource,
     tracing::TraceConfig,
 };
 
@@ -25,8 +26,8 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Configuration for the Ledger SDK client.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Server endpoint URLs (e.g., `http://localhost:50051`).
-    pub(crate) endpoints: Vec<String>,
+    /// Server source for discovering cluster servers.
+    pub(crate) servers: ServerSource,
 
     /// Unique client identifier for idempotency tracking.
     pub(crate) client_id: String,
@@ -56,7 +57,7 @@ impl ClientConfig {
     ///
     /// # Arguments
     ///
-    /// * `endpoints` - Server endpoint URLs (at least one required). URLs must be valid HTTP(S).
+    /// * `servers` - Server source for discovering cluster servers.
     /// * `client_id` - Unique client identifier for idempotency tracking.
     /// * `timeout` - Request timeout. Default: 30 seconds.
     /// * `connect_timeout` - Connection establishment timeout. Default: 5 seconds.
@@ -68,8 +69,7 @@ impl ClientConfig {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - No endpoints provided
-    /// - Any endpoint URL is invalid
+    /// - Static endpoints are empty or invalid
     /// - Timeout is zero
     /// - Connect timeout is zero
     /// - Client ID is empty
@@ -78,19 +78,26 @@ impl ClientConfig {
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{ClientConfig, TlsConfig};
+    /// # use inferadb_ledger_sdk::{ClientConfig, TlsConfig, ServerSource};
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Static endpoints
     /// let config = ClientConfig::builder()
-    ///     .endpoints(vec!["https://secure.example.com:443".into()])
+    ///     .servers(ServerSource::from_static(["http://localhost:50051"]))
     ///     .client_id("my-client")
-    ///     .tls(TlsConfig::with_native_roots()?)
+    ///     .build()?;
+    ///
+    /// // DNS discovery
+    /// use inferadb_ledger_sdk::DnsConfig;
+    /// let config = ClientConfig::builder()
+    ///     .servers(ServerSource::dns(DnsConfig::builder().domain("ledger.default.svc").build()))
+    ///     .client_id("my-client")
     ///     .build()?;
     /// # Ok(())
     /// # }
     /// ```
     #[builder]
     pub fn new(
-        endpoints: Vec<String>,
+        servers: ServerSource,
         #[builder(into)] client_id: String,
         #[builder(default = DEFAULT_TIMEOUT)] timeout: Duration,
         #[builder(default = DEFAULT_CONNECT_TIMEOUT)] connect_timeout: Duration,
@@ -99,13 +106,18 @@ impl ClientConfig {
         tls: Option<TlsConfig>,
         #[builder(default)] trace: TraceConfig,
     ) -> Result<Self> {
-        ensure!(
-            !endpoints.is_empty(),
-            ConfigSnafu { message: "at least one endpoint is required" }
-        );
+        // Validate static endpoints
+        if let ServerSource::Static(ref endpoints) = servers {
+            ensure!(
+                !endpoints.is_empty(),
+                ConfigSnafu {
+                    message: "at least one endpoint is required for static server source"
+                }
+            );
 
-        for endpoint in &endpoints {
-            validate_url(endpoint)?;
+            for endpoint in endpoints {
+                validate_url(endpoint)?;
+            }
         }
 
         ensure!(!client_id.is_empty(), ConfigSnafu { message: "client_id cannot be empty" });
@@ -116,7 +128,7 @@ impl ClientConfig {
         );
 
         Ok(Self {
-            endpoints,
+            servers,
             client_id,
             timeout,
             connect_timeout,
@@ -129,10 +141,10 @@ impl ClientConfig {
 }
 
 impl ClientConfig {
-    /// Returns the configured endpoints.
+    /// Returns the server source configuration.
     #[must_use]
-    pub fn endpoints(&self) -> &[String] {
-        &self.endpoints
+    pub fn servers(&self) -> &ServerSource {
+        &self.servers
     }
 
     /// Returns the client identifier.
@@ -567,13 +579,13 @@ mod tests {
     #[test]
     fn test_valid_config() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .build();
 
         assert!(config.is_ok());
         let config = config.unwrap();
-        assert_eq!(config.endpoints(), &["http://localhost:50051"]);
+        assert!(matches!(config.servers(), ServerSource::Static(_)));
         assert_eq!(config.client_id(), "test-client");
         assert_eq!(config.timeout(), DEFAULT_TIMEOUT);
         assert_eq!(config.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
@@ -582,21 +594,27 @@ mod tests {
     #[test]
     fn test_config_with_multiple_endpoints() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://node1:50051".into(), "http://node2:50051".into()])
+            .servers(ServerSource::from_static(["http://node1:50051", "http://node2:50051"]))
             .client_id("test-client")
             .build();
 
         assert!(config.is_ok());
         let config = config.unwrap();
-        assert_eq!(config.endpoints().len(), 2);
+        match config.servers() {
+            ServerSource::Static(endpoints) => assert_eq!(endpoints.len(), 2),
+            _ => panic!("Expected Static variant"),
+        }
     }
 
     #[test]
     fn test_missing_endpoints() {
-        // Note: With bon builders, missing required fields (endpoints) are now
+        // Note: With bon builders, missing required fields are now
         // enforced at compile-time, not runtime. This test verifies that an
         // *empty* endpoints vector fails at runtime validation.
-        let result = ClientConfig::builder().endpoints(vec![]).client_id("test-client").build();
+        let result = ClientConfig::builder()
+            .servers(ServerSource::Static(vec![]))
+            .client_id("test-client")
+            .build();
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -609,7 +627,7 @@ mod tests {
         // enforced at compile-time, not runtime. This test verifies that an
         // *empty* client_id fails at runtime validation.
         let result = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("")
             .build();
 
@@ -621,7 +639,7 @@ mod tests {
     #[test]
     fn test_empty_client_id() {
         let result = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("")
             .build();
 
@@ -631,7 +649,7 @@ mod tests {
     #[test]
     fn test_invalid_url_no_scheme() {
         let result = ClientConfig::builder()
-            .endpoints(vec!["localhost:50051".into()])
+            .servers(ServerSource::from_static(["localhost:50051"]))
             .client_id("test-client")
             .build();
 
@@ -643,7 +661,7 @@ mod tests {
     #[test]
     fn test_invalid_url_empty_host() {
         let result = ClientConfig::builder()
-            .endpoints(vec!["http://".into()])
+            .servers(ServerSource::from_static(["http://"]))
             .client_id("test-client")
             .build();
 
@@ -653,7 +671,7 @@ mod tests {
     #[test]
     fn test_invalid_url_whitespace() {
         let result = ClientConfig::builder()
-            .endpoints(vec!["http://local host:50051".into()])
+            .servers(ServerSource::from_static(["http://local host:50051"]))
             .client_id("test-client")
             .build();
 
@@ -663,7 +681,7 @@ mod tests {
     #[test]
     fn test_zero_timeout() {
         let result = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .timeout(Duration::ZERO)
             .build();
@@ -676,7 +694,7 @@ mod tests {
     #[test]
     fn test_zero_connect_timeout() {
         let result = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .connect_timeout(Duration::ZERO)
             .build();
@@ -687,7 +705,7 @@ mod tests {
     #[test]
     fn test_custom_timeouts() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .timeout(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(10))
@@ -701,7 +719,7 @@ mod tests {
     #[test]
     fn test_compression_setting() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .compression(true)
             .build()
@@ -791,7 +809,7 @@ mod tests {
     #[test]
     fn test_https_url_valid() {
         let result = ClientConfig::builder()
-            .endpoints(vec!["https://secure.example.com:443".into()])
+            .servers(ServerSource::from_static(["https://secure.example.com:443"]))
             .client_id("test-client")
             .build();
 
@@ -985,7 +1003,7 @@ mod tests {
         let tls = TlsConfig::with_native_roots().expect("valid TLS config");
 
         let config = ClientConfig::builder()
-            .endpoints(vec!["https://secure.example.com:443".into()])
+            .servers(ServerSource::from_static(["https://secure.example.com:443"]))
             .client_id("test-client")
             .tls(tls)
             .build();

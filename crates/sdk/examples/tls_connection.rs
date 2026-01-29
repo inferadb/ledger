@@ -29,7 +29,9 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_sdk::{CertificateData, ClientConfig, LedgerClient, Result, TlsConfig};
+use inferadb_ledger_sdk::{
+    CertificateData, ClientConfig, LedgerClient, Result, ServerSource, TlsConfig,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -71,7 +73,7 @@ async fn main() -> Result<()> {
         let tls = TlsConfig::with_native_roots()?;
 
         let config = ClientConfig::builder()
-            .endpoints(vec![endpoint.into()])
+            .servers(ServerSource::from_static([endpoint]))
             .client_id("tls-native-roots-example")
             .timeout(Duration::from_secs(10))
             .tls(tls)
@@ -136,7 +138,7 @@ async fn main() -> Result<()> {
         };
 
         let config = ClientConfig::builder()
-            .endpoints(vec![endpoint.into()])
+            .servers(ServerSource::from_static([endpoint]))
             .client_id("tls-custom-ca-example")
             .timeout(Duration::from_secs(10))
             .tls(tls)

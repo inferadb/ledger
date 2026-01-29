@@ -18,12 +18,12 @@
 //! # Example
 //!
 //! ```ignore
-//! use inferadb_ledger_sdk::{DiscoveryConfig, ClientConfig};
+//! use inferadb_ledger_sdk::{DiscoveryConfig, ClientConfig, ServerSource};
 //! use inferadb_ledger_sdk::discovery::DiscoveryService;
 //! use inferadb_ledger_sdk::connection::ConnectionPool;
 //!
 //! let config = ClientConfig::builder()
-//!     .endpoints(vec!["http://localhost:50051".into()])
+//!     .servers(ServerSource::from_static(["http://localhost:50051"]))
 //!     .client_id("my-client")
 //!     .build()?;
 //!
@@ -385,11 +385,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::ClientConfig;
+    use crate::{config::ClientConfig, server::ServerSource};
 
     fn test_config() -> ClientConfig {
         ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .connect_timeout(Duration::from_millis(100))
             .build()
@@ -402,7 +402,7 @@ mod tests {
         ClientConfig::builder()
             // 192.0.2.x is the TEST-NET-1 range, reserved for documentation/testing
             // and guaranteed to be non-routable on any real network
-            .endpoints(vec!["http://192.0.2.1:50051".into()])
+            .servers(ServerSource::from_static(["http://192.0.2.1:50051"]))
             .client_id("test-client")
             .connect_timeout(Duration::from_millis(100))
             .build()

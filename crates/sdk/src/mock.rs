@@ -14,7 +14,7 @@
 //!
 //! ```no_run
 //! use inferadb_ledger_sdk::mock::MockLedgerServer;
-//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource};
 //!
 //! #[tokio::test]
 //! async fn test_read() {
@@ -26,7 +26,7 @@
 //!
 //!     // Create client connected to mock server
 //!     let config = ClientConfig::builder()
-//!         .endpoints(vec![server.endpoint().to_string()])
+//!         .servers(ServerSource::from_static([server.endpoint().to_string()]))
 //!         .client_id("test-client")
 //!         .build()
 //!         .unwrap();
@@ -1794,12 +1794,12 @@ mod tests {
         use std::time::Duration;
 
         use super::*;
-        use crate::{ClientConfig, LedgerClient, Operation, RetryPolicy};
+        use crate::{ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource};
 
         /// Helper to create a client connected to a mock server.
         async fn create_client_for_mock(server: &MockLedgerServer) -> LedgerClient {
             let config = ClientConfig::builder()
-                .endpoints(vec![server.endpoint().to_string()])
+                .servers(ServerSource::from_static([server.endpoint().to_string()]))
                 .client_id("test-client")
                 .timeout(Duration::from_secs(5))
                 .connect_timeout(Duration::from_secs(2))
@@ -1823,7 +1823,7 @@ mod tests {
                 .build();
 
             let config = ClientConfig::builder()
-                .endpoints(vec![server.endpoint().to_string()])
+                .servers(ServerSource::from_static([server.endpoint().to_string()]))
                 .client_id(client_id)
                 .timeout(Duration::from_secs(5))
                 .connect_timeout(Duration::from_secs(2))

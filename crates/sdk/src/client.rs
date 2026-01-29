@@ -3,6 +3,8 @@
 //! Provides the high-level API for interacting with the Ledger service,
 //! orchestrating connection pool, sequence tracker, and retry logic.
 
+use std::sync::Arc;
+
 use inferadb_ledger_raft::proto;
 use tonic::service::interceptor::InterceptedService;
 
@@ -12,6 +14,7 @@ use crate::{
     error::{self, Result},
     idempotency::SequenceTracker,
     retry::with_retry,
+    server::{ServerResolver, ServerSource},
     streaming::{HeightTracker, ReconnectingStream},
     tracing::TraceContextInterceptor,
 };
@@ -70,11 +73,11 @@ pub struct WriteSuccess {
 /// # Example
 ///
 /// ```no_run
-/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource};
 /// # use futures::StreamExt;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = LedgerClient::new(ClientConfig::builder()
-/// #     .endpoints(vec!["http://localhost:50051".into()])
+/// #     .servers(ServerSource::from_static(["http://localhost:50051"]))
 /// #     .client_id("example")
 /// #     .build()?).await?;
 /// # let (namespace_id, vault_id, start_height) = (1i64, 1i64, 1u64);
@@ -873,10 +876,10 @@ impl ListResourcesOpts {
 /// # Example
 ///
 /// ```no_run
-/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, VerifyOpts};
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, VerifyOpts, ServerSource};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = LedgerClient::new(ClientConfig::builder()
-/// #     .endpoints(vec!["http://localhost:50051".into()])
+/// #     .servers(ServerSource::from_static(["http://localhost:50051"]))
 /// #     .client_id("example")
 /// #     .build()?).await?;
 /// # let (ns_id, vault_id) = (1i64, 1i64);
@@ -1138,23 +1141,35 @@ impl SetCondition {
 /// - Connection pool for efficient channel management
 /// - Sequence tracker for client-side idempotency
 /// - Retry logic for transient failure recovery
+/// - Server discovery (DNS, file, or static endpoints)
 /// - Graceful shutdown with request cancellation
+///
+/// # Server Discovery
+///
+/// The client supports three server discovery modes:
+/// - **Static**: Fixed list of endpoint URLs
+/// - **DNS**: Resolve A records from a domain (for Kubernetes headless services)
+/// - **File**: Load servers from a JSON manifest file
+///
+/// For DNS and file sources, the client performs initial resolution during
+/// construction and starts a background refresh task.
 ///
 /// # Shutdown Behavior
 ///
 /// When [`shutdown()`](Self::shutdown) is called:
 /// 1. All pending requests are cancelled with `SdkError::Shutdown`
 /// 2. New requests immediately fail with `SdkError::Shutdown`
-/// 3. Sequence tracker state is flushed to disk (if using persistence)
-/// 4. Connections are closed
+/// 3. Server resolver refresh task is stopped
+/// 4. Sequence tracker state is flushed to disk (if using persistence)
+/// 5. Connections are closed
 ///
 /// # Example
 ///
 /// ```no_run
-/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = ClientConfig::builder()
-///     .endpoints(vec!["http://localhost:50051".into()])
+///     .servers(ServerSource::from_static(["http://localhost:50051"]))
 ///     .client_id("my-app-001")
 ///     .build()?;
 ///
@@ -1171,6 +1186,8 @@ impl SetCondition {
 pub struct LedgerClient {
     pool: ConnectionPool,
     sequences: SequenceTracker,
+    /// Server resolver for DNS/file discovery.
+    resolver: Option<Arc<ServerResolver>>,
     /// Cancellation token for coordinated shutdown.
     cancellation: tokio_util::sync::CancellationToken,
 }
@@ -1178,34 +1195,77 @@ pub struct LedgerClient {
 impl LedgerClient {
     /// Creates a new `LedgerClient` with the given configuration.
     ///
-    /// This constructor validates the configuration but does not establish
-    /// a connection immediately. Connections are established lazily on first use.
+    /// This constructor validates the configuration and performs initial server
+    /// resolution for DNS/file sources. Connections are established lazily on
+    /// first use.
+    ///
+    /// For DNS and file server sources, a background refresh task is started
+    /// to periodically re-resolve servers.
     ///
     /// # Errors
     ///
-    /// Returns an error if the configuration is invalid.
+    /// Returns an error if:
+    /// - The configuration is invalid
+    /// - DNS resolution fails (for DNS sources)
+    /// - File read/parse fails (for file sources)
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig};
+    /// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Static endpoints
     /// let config = ClientConfig::builder()
-    ///     .endpoints(vec!["http://localhost:50051".into()])
+    ///     .servers(ServerSource::from_static(["http://localhost:50051"]))
     ///     .client_id("my-service")
     ///     .build()?;
+    /// let client = LedgerClient::new(config).await?;
     ///
+    /// // DNS discovery (Kubernetes)
+    /// use inferadb_ledger_sdk::DnsConfig;
+    /// let config = ClientConfig::builder()
+    ///     .servers(ServerSource::dns(DnsConfig::builder().domain("ledger.default.svc").build()))
+    ///     .client_id("my-service")
+    ///     .build()?;
     /// let client = LedgerClient::new(config).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn new(config: ClientConfig) -> Result<Self> {
         let client_id = config.client_id().to_string();
-        let pool = ConnectionPool::new(config);
-        let sequences = SequenceTracker::new(client_id);
         let cancellation = tokio_util::sync::CancellationToken::new();
 
-        Ok(Self { pool, sequences, cancellation })
+        // Create resolver for DNS/file sources
+        let (resolver, initial_endpoints) = match config.servers() {
+            ServerSource::Static(_) => (None, None),
+            source @ (ServerSource::Dns(_) | ServerSource::File(_)) => {
+                let resolver = Arc::new(ServerResolver::new(source.clone()));
+
+                // Perform initial resolution
+                let servers = resolver.resolve().await.map_err(|e| {
+                    error::ConfigSnafu { message: format!("Server discovery failed: {e}") }.build()
+                })?;
+
+                // Convert to endpoint URLs
+                let endpoints: Vec<String> = servers.iter().map(|s| s.url()).collect();
+
+                // Start background refresh task
+                resolver.start_refresh_task();
+
+                (Some(resolver), Some(endpoints))
+            },
+        };
+
+        let pool = ConnectionPool::new(config);
+
+        // Set initial endpoints for DNS/file sources
+        if let Some(endpoints) = initial_endpoints {
+            pool.update_endpoints(endpoints);
+        }
+
+        let sequences = SequenceTracker::new(client_id);
+
+        Ok(Self { pool, sequences, resolver, cancellation })
     }
 
     /// Convenience constructor for connecting to a single endpoint.
@@ -1232,7 +1292,7 @@ impl LedgerClient {
         client_id: impl Into<String>,
     ) -> Result<Self> {
         let config = ClientConfig::builder()
-            .endpoints(vec![endpoint.into()])
+            .servers(ServerSource::from_static([endpoint.into()]))
             .client_id(client_id)
             .build()?;
 
@@ -1293,8 +1353,9 @@ impl LedgerClient {
     /// This method:
     /// 1. Cancels all pending requests (they will return `SdkError::Shutdown`)
     /// 2. Prevents new requests from being accepted
-    /// 3. Flushes sequence tracker state (best-effort, non-blocking)
-    /// 4. Resets the connection pool
+    /// 3. Stops the server resolver refresh task (if using DNS/file discovery)
+    /// 4. Flushes sequence tracker state (best-effort, non-blocking)
+    /// 5. Resets the connection pool
     ///
     /// After calling `shutdown()`, all operations will immediately return
     /// `SdkError::Shutdown`. The client can be cloned, but all clones share
@@ -1320,6 +1381,11 @@ impl LedgerClient {
     pub async fn shutdown(&self) {
         // Cancel all pending and future operations
         self.cancellation.cancel();
+
+        // Stop server resolver refresh task
+        if let Some(ref resolver) = self.resolver {
+            resolver.shutdown();
+        }
 
         // Best-effort sequence flush - don't block on errors
         // The PersistentSequenceTracker (if used) will handle this
@@ -3076,7 +3142,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_with_valid_config() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .build()
             .expect("valid config");
@@ -3084,7 +3150,7 @@ mod tests {
         let client = LedgerClient::new(config).await.expect("client creation");
 
         assert_eq!(client.client_id(), "test-client");
-        assert_eq!(client.config().endpoints(), &["http://localhost:50051"]);
+        assert!(matches!(client.config().servers(), ServerSource::Static(_)));
     }
 
     #[tokio::test]
@@ -3094,7 +3160,7 @@ mod tests {
             .expect("client creation");
 
         assert_eq!(client.client_id(), "quick-client");
-        assert_eq!(client.config().endpoints(), &["http://localhost:50051"]);
+        assert!(matches!(client.config().servers(), ServerSource::Static(_)));
     }
 
     #[tokio::test]
@@ -3107,7 +3173,7 @@ mod tests {
     #[tokio::test]
     async fn test_config_accessor_returns_full_config() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("accessor-test")
             .timeout(Duration::from_secs(30))
             .compression(true)
@@ -3136,7 +3202,7 @@ mod tests {
     #[tokio::test]
     async fn test_pool_accessor_returns_pool() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("pool-test")
             .compression(true)
             .build()
@@ -3152,7 +3218,7 @@ mod tests {
         use crate::config::DiscoveryConfig;
 
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("discovery-test")
             .build()
             .expect("valid config");
@@ -3171,7 +3237,7 @@ mod tests {
             .build();
 
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("retry-test")
             .retry_policy(retry_policy)
             .build()
@@ -3214,7 +3280,7 @@ mod tests {
     async fn test_read_returns_error_on_connection_failure() {
         // Configure minimal retry to make test fast
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3235,7 +3301,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_consistent_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59998".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59998"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3256,7 +3322,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_read_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59997".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59997"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3277,7 +3343,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_read_consistent_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59996".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59996"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3299,7 +3365,7 @@ mod tests {
     async fn test_read_with_none_vault_id() {
         // Test that read works with None vault_id (namespace-level reads)
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59995".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59995"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3518,7 +3584,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59994".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59994"]))
             .client_id("write-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3591,7 +3657,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_with_multiple_operations() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59990".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59990"]))
             .client_id("multi-op-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3626,7 +3692,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_write_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59989".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59989"]))
             .client_id("batch-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3725,7 +3791,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_write_with_multiple_operation_groups() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59984".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59984"]))
             .client_id("batch-groups-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3868,7 +3934,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59982".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59982"]))
             .client_id("watch-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3890,7 +3956,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_different_vaults() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59981".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59981"]))
             .client_id("multi-vault-watch")
             .retry_policy(
                 RetryPolicy::builder()
@@ -3915,7 +3981,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_start_height_parameter() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59980".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59980"]))
             .client_id("height-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4140,7 +4206,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_namespace_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59970".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59970"]))
             .client_id("admin-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4161,7 +4227,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_namespace_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59971".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59971"]))
             .client_id("admin-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4182,7 +4248,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_namespaces_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59972".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59972"]))
             .client_id("admin-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4203,7 +4269,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_vault_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59973".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59973"]))
             .client_id("admin-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4224,7 +4290,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_vault_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59974".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59974"]))
             .client_id("admin-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4245,7 +4311,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_vaults_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59975".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59975"]))
             .client_id("admin-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4369,7 +4435,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59976".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59976"]))
             .client_id("health-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4390,7 +4456,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_detailed_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59977".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59977"]))
             .client_id("health-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4411,7 +4477,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_vault_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59978".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59978"]))
             .client_id("health-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -4920,7 +4986,7 @@ mod tests {
     #[tokio::test]
     async fn test_verified_read_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
             .client_id("verified-read-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5308,7 +5374,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_entities_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
             .client_id("list-entities-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5329,7 +5395,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_relationships_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
             .client_id("list-rels-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5350,7 +5416,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_resources_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
             .client_id("list-resources-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5371,7 +5437,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_entities_with_different_options() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
             .client_id("list-entities-opts-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5400,7 +5466,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_relationships_with_filters() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:59999".into()])
+            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
             .client_id("list-rels-filter-test")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5482,7 +5548,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5507,7 +5573,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5531,7 +5597,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_write_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5556,7 +5622,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_read_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5580,7 +5646,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_blocks_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5603,7 +5669,7 @@ mod tests {
     #[tokio::test]
     async fn test_admin_operations_return_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5634,7 +5700,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5664,7 +5730,7 @@ mod tests {
     #[tokio::test]
     async fn test_verified_read_returns_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()
@@ -5689,7 +5755,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_operations_return_shutdown_error_after_shutdown() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .retry_policy(
                 RetryPolicy::builder()

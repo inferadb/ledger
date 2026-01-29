@@ -39,6 +39,12 @@ parking_lot = { workspace = true }
 # Builder pattern
 bon = { workspace = true }
 
+# DNS resolution
+hickory-resolver = { workspace = true }
+
+# Concurrent data structures
+dashmap = { workspace = true }
+
 # Utilities
 tracing = { workspace = true }
 opentelemetry = { workspace = true }

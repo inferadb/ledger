@@ -13,11 +13,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use inferadb_ledger_sdk::ClientConfig;
+//! use inferadb_ledger_sdk::{ClientConfig, ServerSource};
 //! use inferadb_ledger_sdk::connection::ConnectionPool;
 //!
 //! let config = ClientConfig::builder()
-//!     .endpoints(vec!["http://localhost:50051".into()])
+//!     .servers(ServerSource::from_static(["http://localhost:50051"]))
 //!     .client_id("my-client")
 //!     .build()?;
 //!
@@ -34,6 +34,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use crate::{
     config::ClientConfig,
     error::{ConnectionSnafu, InvalidUrlSnafu, Result, TransportSnafu},
+    server::{ServerSelector, ServerSource},
 };
 
 /// HTTP/2 keep-alive interval for idle connections.
@@ -62,6 +63,9 @@ pub struct ConnectionPool {
     /// Dynamic endpoints override. When set, these are used instead of
     /// the endpoints from the config. Updated by discovery service.
     dynamic_endpoints: Arc<RwLock<Option<Vec<String>>>>,
+
+    /// Server selector for latency-based ordering.
+    selector: ServerSelector,
 }
 
 impl ConnectionPool {
@@ -75,6 +79,20 @@ impl ConnectionPool {
             channel: Arc::new(RwLock::new(None)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
+            selector: ServerSelector::new(),
+        }
+    }
+
+    /// Creates a new connection pool with a custom server selector.
+    ///
+    /// Use this when you want to share a selector across multiple pools.
+    #[must_use]
+    pub fn with_selector(config: ClientConfig, selector: ServerSelector) -> Self {
+        Self {
+            channel: Arc::new(RwLock::new(None)),
+            config,
+            dynamic_endpoints: Arc::new(RwLock::new(None)),
+            selector,
         }
     }
 
@@ -117,18 +135,30 @@ impl ConnectionPool {
 
     /// Creates a new channel with all configured settings applied.
     async fn create_channel(&self) -> Result<Channel> {
-        // Use dynamic endpoints if available, otherwise fall back to config
+        // Use dynamic endpoints if available, otherwise derive from config's server source
         let endpoint_url = {
             let dynamic = self.dynamic_endpoints.read();
             if let Some(ref endpoints) = *dynamic {
                 endpoints.first().cloned()
             } else {
-                self.config.endpoints.first().cloned()
+                // Get endpoint from server source
+                match self.config.servers() {
+                    ServerSource::Static(endpoints) => endpoints.first().cloned(),
+                    ServerSource::Dns(_) | ServerSource::File(_) => {
+                        // For DNS/File sources, dynamic endpoints should be set by the resolver
+                        None
+                    },
+                }
             }
         };
 
         let endpoint_url = endpoint_url.ok_or_else(|| {
-            ConnectionSnafu { message: "No endpoints configured".to_string() }.build()
+            ConnectionSnafu {
+                message:
+                    "No endpoints available. For DNS/File sources, ensure the resolver has run."
+                        .to_string(),
+            }
+            .build()
         })?;
 
         // Parse the endpoint URL
@@ -251,15 +281,28 @@ impl ConnectionPool {
     /// Returns the current active endpoints.
     ///
     /// If dynamic endpoints have been set via discovery, returns those.
-    /// Otherwise returns the endpoints from the original configuration.
+    /// Otherwise returns the endpoints from the original configuration
+    /// (only for static server sources).
     #[must_use]
     pub fn active_endpoints(&self) -> Vec<String> {
         let dynamic = self.dynamic_endpoints.read();
         if let Some(ref endpoints) = *dynamic {
             endpoints.clone()
         } else {
-            self.config.endpoints.clone()
+            match self.config.servers() {
+                ServerSource::Static(endpoints) => endpoints.clone(),
+                ServerSource::Dns(_) | ServerSource::File(_) => Vec::new(),
+            }
         }
+    }
+
+    /// Returns a reference to the server selector.
+    ///
+    /// Use this to record latencies after successful requests or to
+    /// mark servers as unhealthy.
+    #[must_use]
+    pub fn selector(&self) -> &ServerSelector {
+        &self.selector
     }
 
     /// Clears dynamic endpoints, reverting to the original configuration.
@@ -278,7 +321,7 @@ mod tests {
 
     fn test_config() -> ClientConfig {
         ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .build()
             .expect("valid test config")
@@ -286,7 +329,7 @@ mod tests {
 
     fn test_config_with_compression() -> ClientConfig {
         ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .compression(true)
             .build()
@@ -295,7 +338,7 @@ mod tests {
 
     fn test_config_with_custom_timeouts() -> ClientConfig {
         ClientConfig::builder()
-            .endpoints(vec!["http://localhost:50051".into()])
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
@@ -319,7 +362,6 @@ mod tests {
         let pool = ConnectionPool::new(config.clone());
 
         assert_eq!(pool.config().client_id(), config.client_id());
-        assert_eq!(pool.config().endpoints(), config.endpoints());
     }
 
     #[test]
@@ -358,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn get_channel_fails_with_unreachable_endpoint() {
         let config = ClientConfig::builder()
-            .endpoints(vec!["http://127.0.0.1:1".into()]) // Port 1 is unlikely to have a service
+            .servers(ServerSource::from_static(["http://127.0.0.1:1"])) // Port 1 is unlikely to have a service
             .client_id("test-client")
             .connect_timeout(Duration::from_millis(100)) // Short timeout
             .build()
@@ -406,10 +448,10 @@ mod tests {
     #[test]
     fn active_endpoints_returns_dynamic_when_set() {
         let config = test_config();
-        let pool = ConnectionPool::new(config.clone());
+        let pool = ConnectionPool::new(config);
 
-        // Initially returns config endpoints
-        assert_eq!(pool.active_endpoints(), config.endpoints().to_vec());
+        // Initially returns config endpoints (static source)
+        assert_eq!(pool.active_endpoints(), vec!["http://localhost:50051".to_string()]);
 
         // After update, returns dynamic endpoints
         let new_endpoints = vec!["http://10.0.0.1:5000".to_string()];
@@ -420,15 +462,15 @@ mod tests {
     #[test]
     fn clear_dynamic_endpoints_reverts_to_config() {
         let config = test_config();
-        let pool = ConnectionPool::new(config.clone());
+        let pool = ConnectionPool::new(config);
 
         // Set dynamic endpoints
         pool.update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
-        assert_ne!(pool.active_endpoints(), config.endpoints().to_vec());
+        assert_ne!(pool.active_endpoints(), vec!["http://localhost:50051".to_string()]);
 
         // Clear dynamic endpoints
         pool.clear_dynamic_endpoints();
-        assert_eq!(pool.active_endpoints(), config.endpoints().to_vec());
+        assert_eq!(pool.active_endpoints(), vec!["http://localhost:50051".to_string()]);
     }
 
     #[test]
@@ -440,5 +482,29 @@ mod tests {
         pool.update_endpoints(vec!["http://10.0.0.2:5000".to_string()]);
 
         assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.2:5000".to_string()]);
+    }
+
+    #[test]
+    fn selector_accessor_returns_selector() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+
+        // Should be able to use the selector
+        pool.selector().record_latency("10.0.0.1:50051", Duration::from_millis(50));
+        assert!(pool.selector().latency_ms("10.0.0.1:50051").is_some());
+    }
+
+    #[test]
+    fn with_selector_uses_provided_selector() {
+        let config = test_config();
+        let selector = ServerSelector::new();
+
+        // Record latency before creating pool
+        selector.record_latency("10.0.0.1:50051", Duration::from_millis(100));
+
+        let pool = ConnectionPool::with_selector(config, selector);
+
+        // Pool should use the pre-configured selector
+        assert!(pool.selector().latency_ms("10.0.0.1:50051").is_some());
     }
 }
