@@ -296,3 +296,5 @@ grpcurl -plaintext \
 ```
 
 The idempotency cache ensures the operation is only applied once.
+
+> **Note**: The idempotency cache is in-memory and does not survive leader failover. After a failover, a retried request may execute twice if the original response was not received. For operations requiring exactly-once semantics across failovers, use application-level idempotency keys stored in the vault itself.

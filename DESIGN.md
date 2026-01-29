@@ -375,7 +375,7 @@ Batching amortizes Raft consensus overhead:
 Default batch configuration:
 
 - Maximum batch size: 100 transactions
-- Maximum batch delay: 10ms
+- Maximum batch delay: 5ms
 
 ### Fault Tolerance & Recovery
 

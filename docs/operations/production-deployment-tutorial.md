@@ -26,8 +26,8 @@ kubectl config set-context --current --namespace=inferadb
 helm install ledger ./deploy/helm/inferadb-ledger \
   --set replicaCount=3 \
   --set persistence.size=50Gi \
-  --set resources.requests.memory=1Gi \
-  --set resources.requests.cpu=500m
+  --set resources.requests.memory=8Gi \
+  --set resources.requests.cpu=4
 ```
 
 **Note**: `replicaCount` must be odd (1, 3, 5, 7) for Raft quorum. See `values.yaml` for all available options.
@@ -51,7 +51,7 @@ data:
   INFERADB__LEDGER__CLUSTER: "3"
   INFERADB__LEDGER__PEERS: "ledger-headless.inferadb.svc.cluster.local"
   INFERADB__LEDGER__BATCH_SIZE: "100"
-  INFERADB__LEDGER__BATCH_DELAY: "0.01"
+  INFERADB__LEDGER__BATCH_DELAY: "0.005"
 ```
 
 **Headless Service:**
@@ -134,11 +134,11 @@ spec:
               mountPath: /data
           resources:
             requests:
-              memory: "1Gi"
-              cpu: "500m"
+              memory: "8Gi"
+              cpu: "4"
             limits:
-              memory: "2Gi"
-              cpu: "2"
+              memory: "16Gi"
+              cpu: "8"
           livenessProbe:
             grpc:
               port: 50051

@@ -140,9 +140,9 @@ On restart:
 
 ### Cluster Restart (All Nodes)
 
-Stop nodes in any order. Restart in any order—Raft leader election handles coordination.
+> **Warning**: Never stop a majority of nodes simultaneously. A 3-node cluster requires 2 nodes running to maintain quorum. Losing quorum makes the cluster read-only until quorum is restored.
 
-For a 3-node cluster, maintain quorum (2 nodes) during rolling restarts:
+For a full cluster restart, use rolling restart to maintain availability:
 
 1. Stop node 1, wait for it to be removed from Raft
 2. Restart node 1, wait for it to rejoin
@@ -328,7 +328,7 @@ These defaults work well for most deployments. See [consensus internals](../inte
 | `--peers-timeout`| `INFERADB__LEDGER__PEERS_TIMEOUT`  | `60`    | How long to wait for other nodes (secs) |
 | `--peers-poll`             | `INFERADB__LEDGER__PEERS_POLL`     | `2`     | How often to check for other nodes      |
 | `--batch-size`       | `INFERADB__LEDGER__BATCH_SIZE`          | `100`   | Writes to group before committing       |
-| `--batch-delay`      | `INFERADB__LEDGER__BATCH_DELAY`      | `0.01`  | Max wait before committing a batch (secs) |
+| `--batch-delay`      | `INFERADB__LEDGER__BATCH_DELAY`      | `0.005` | Max wait before committing a batch (secs) |
 | `--concurrent`       | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
 | `--timeout`          | `INFERADB__LEDGER__TIMEOUT`   | `30`    | Max time for a request to complete      |
 

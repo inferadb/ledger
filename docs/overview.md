@@ -178,6 +178,33 @@ _meta:seq:email_verify → next TokenId
 
 **Atomicity requirement**: Entities and their indexes must be created/deleted atomically in the same transaction.
 
+## Consistency Model
+
+Ledger offers two read consistency levels:
+
+| Read Type             | Guarantee                      | Latency Impact |
+| --------------------- | ------------------------------ | -------------- |
+| Eventually consistent | May return stale data (by ms)  | Fastest        |
+| Linearizable          | Reads own writes, total order  | +1 RTT         |
+
+**Eventually consistent** (default): Any node can serve the read immediately. During Raft replication (typically milliseconds), reads may return slightly stale data. Use for high-throughput scenarios where millisecond staleness is acceptable.
+
+**Linearizable**: The node confirms it has applied all committed entries before responding. Guarantees you see your own writes and all writes that completed before your read. Use when correctness requires the latest state.
+
+```bash
+# Eventually consistent read (default)
+grpcurl -plaintext \
+  -d '{"namespace_id": {"id": "1"}, "key": "user:alice"}' \
+  localhost:50051 ledger.v1.ReadService/Read
+
+# Linearizable read
+grpcurl -plaintext \
+  -d '{"namespace_id": {"id": "1"}, "key": "user:alice", "linearizable": true}' \
+  localhost:50051 ledger.v1.ReadService/Read
+```
+
+**Authorization recommendation**: For permission checks, eventual consistency is usually safe—the replication window is milliseconds. Use linearizable reads only when you need absolute certainty about the current state (e.g., immediately after granting access).
+
 ## Network Protocol
 
 Ledger uses **gRPC/HTTP/2** for both client-facing APIs and inter-node Raft consensus.
