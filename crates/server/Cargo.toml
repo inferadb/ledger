@@ -89,5 +89,9 @@ harness = false
 name = "read_bench"
 harness = false
 
+[[bench]]
+name = "whitepaper_bench"
+harness = false
+
 [lints]
 workspace = true
