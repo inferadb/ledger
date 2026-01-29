@@ -51,9 +51,6 @@ const OPTIMAL_BATCH_SIZE: usize = 100;
 /// Number of entities for scale testing (matches whitepaper "10 million keys" scenario).
 const SCALE_ENTITY_COUNT: usize = 100_000; // Reduced for CI; full test uses 10M
 
-/// Warm-up iterations before measurement.
-const WARMUP_ITERATIONS: usize = 1000;
-
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -69,9 +66,8 @@ fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
 fn populate_vault(state: &StateLayer<FileBackend>, vault_id: i64, count: usize) {
     // Use batched writes for faster population
     const BATCH_SIZE: usize = 1000;
-    let mut sequence = 0u64;
 
-    for batch_start in (0..count).step_by(BATCH_SIZE) {
+    for (sequence, batch_start) in (0..count).step_by(BATCH_SIZE).enumerate() {
         let batch_end = (batch_start + BATCH_SIZE).min(count);
         let operations: Vec<Operation> = (batch_start..batch_end)
             .map(|i| Operation::SetEntity {
@@ -82,8 +78,7 @@ fn populate_vault(state: &StateLayer<FileBackend>, vault_id: i64, count: usize) 
             })
             .collect();
 
-        state.apply_operations(vault_id, &operations, sequence).expect("populate");
-        sequence += 1;
+        state.apply_operations(vault_id, &operations, sequence as u64).expect("populate");
     }
 }
 
@@ -111,12 +106,6 @@ impl LatencyCollector {
     fn mean(&self) -> Duration {
         let total: Duration = self.samples.iter().sum();
         total / self.samples.len() as u32
-    }
-
-    fn throughput_per_second(&self, ops_per_sample: usize) -> f64 {
-        let total_time: Duration = self.samples.iter().sum();
-        let total_ops = self.samples.len() * ops_per_sample;
-        total_ops as f64 / total_time.as_secs_f64()
     }
 }
 
