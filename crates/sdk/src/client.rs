@@ -113,8 +113,8 @@ impl BlockAnnouncement {
         });
 
         Self {
-            namespace_id: proto.namespace_id.map(|n| n.id).unwrap_or(0),
-            vault_id: proto.vault_id.map(|v| v.id).unwrap_or(0),
+            namespace_id: proto.namespace_id.map_or(0, |n| n.id),
+            vault_id: proto.vault_id.map_or(0, |v| v.id),
             height: proto.height,
             block_hash: proto.block_hash.map(|h| h.value).unwrap_or_default(),
             state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
@@ -200,9 +200,9 @@ impl NamespaceInfo {
     /// Create from proto response.
     fn from_proto(proto: proto::GetNamespaceResponse) -> Self {
         Self {
-            namespace_id: proto.namespace_id.map(|n| n.id).unwrap_or(0),
+            namespace_id: proto.namespace_id.map_or(0, |n| n.id),
             name: proto.name,
-            shard_id: proto.shard_id.map(|s| s.id).unwrap_or(0),
+            shard_id: proto.shard_id.map_or(0, |s| s.id),
             member_nodes: proto.member_nodes.into_iter().map(|n| n.id).collect(),
             config_version: proto.config_version,
             status: NamespaceStatus::from_proto(proto.status),
@@ -236,8 +236,8 @@ impl VaultInfo {
     /// Create from proto response.
     fn from_proto(proto: proto::GetVaultResponse) -> Self {
         Self {
-            namespace_id: proto.namespace_id.map(|n| n.id).unwrap_or(0),
-            vault_id: proto.vault_id.map(|v| v.id).unwrap_or(0),
+            namespace_id: proto.namespace_id.map_or(0, |n| n.id),
+            vault_id: proto.vault_id.map_or(0, |v| v.id),
             height: proto.height,
             state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
             nodes: proto.nodes.into_iter().map(|n| n.id).collect(),
@@ -463,8 +463,8 @@ impl BlockHeader {
 
         Self {
             height: proto.height,
-            namespace_id: proto.namespace_id.map(|n| n.id).unwrap_or(0),
-            vault_id: proto.vault_id.map(|v| v.id).unwrap_or(0),
+            namespace_id: proto.namespace_id.map_or(0, |n| n.id),
+            vault_id: proto.vault_id.map_or(0, |v| v.id),
             previous_hash: proto.previous_hash.map(|h| h.value).unwrap_or_default(),
             tx_merkle_root: proto.tx_merkle_root.map(|h| h.value).unwrap_or_default(),
             state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
@@ -2336,7 +2336,7 @@ impl LedgerClient {
             let response =
                 client.create_namespace(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(response.namespace_id.map(|n| n.id).unwrap_or(0))
+            Ok(response.namespace_id.map_or(0, |n| n.id))
         })
         .await
     }
@@ -2506,7 +2506,7 @@ impl LedgerClient {
             // Note: CreateVaultResponse has limited fields compared to GetVaultResponse
             Ok(VaultInfo {
                 namespace_id,
-                vault_id: response.vault_id.map(|v| v.id).unwrap_or(0),
+                vault_id: response.vault_id.map_or(0, |v| v.id),
                 height: 0,          // Genesis block
                 state_root: vec![], // Empty at genesis
                 nodes: vec![],      // Not returned in create response

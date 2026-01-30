@@ -152,14 +152,14 @@ impl ConnectionPool {
             }
         };
 
-        let endpoint_url = endpoint_url.ok_or_else(|| {
-            ConnectionSnafu {
+        let Some(endpoint_url) = endpoint_url else {
+            return ConnectionSnafu {
                 message:
                     "No endpoints available. For DNS/File sources, ensure the resolver has run."
                         .to_string(),
             }
-            .build()
-        })?;
+            .fail();
+        };
 
         // Parse the endpoint URL
         let endpoint = Endpoint::try_from(endpoint_url.clone()).map_err(|_| {

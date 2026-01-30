@@ -165,6 +165,17 @@ impl MockState {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
     }
+
+    /// Apply configured delay and check for injected errors.
+    ///
+    /// Combines `maybe_delay()` and `should_inject_unavailable()` into a single call.
+    async fn check_injection(&self) -> Result<(), Status> {
+        self.maybe_delay().await;
+        if self.should_inject_unavailable() {
+            return Err(Status::unavailable("Injected error"));
+        }
+        Ok(())
+    }
 }
 
 /// Mock implementation of Ledger gRPC services.
@@ -430,16 +441,13 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::ReadRequest>,
     ) -> Result<Response<proto::ReadResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
         let key = (namespace_id, vault_id, req.key);
@@ -456,16 +464,13 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::BatchReadRequest>,
     ) -> Result<Response<proto::BatchReadResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
         let results: Vec<proto::BatchReadResult> = req
@@ -494,16 +499,13 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::VerifiedReadRequest>,
     ) -> Result<Response<proto::VerifiedReadResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
         let key = (namespace_id, vault_id, req.key);
@@ -545,16 +547,13 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::HistoricalReadRequest>,
     ) -> Result<Response<proto::HistoricalReadResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
         let key = (namespace_id, vault_id, req.key);
@@ -575,10 +574,7 @@ impl ReadService for MockReadService {
         &self,
         _request: Request<proto::WatchBlocksRequest>,
     ) -> Result<Response<Self::WatchBlocksStream>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         // Return a pending stream for now - integration tests will need a more sophisticated mock
         Ok(Response::new(futures::stream::pending()))
@@ -588,14 +584,11 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::GetBlockRequest>,
     ) -> Result<Response<proto::GetBlockResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let block = proto::Block {
             header: Some(proto::BlockHeader {
@@ -620,14 +613,11 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::GetBlockRangeRequest>,
     ) -> Result<Response<proto::GetBlockRangeResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let blocks: Vec<proto::Block> = (req.start_height..=req.end_height)
             .map(|height| proto::Block {
@@ -657,10 +647,7 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::GetTipRequest>,
     ) -> Result<Response<proto::GetTipResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let _req = request.into_inner();
         let height = self.state.block_height.load(Ordering::SeqCst);
@@ -676,14 +663,11 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::GetClientStateRequest>,
     ) -> Result<Response<proto::GetClientStateResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
 
         let sequences = self.state.client_sequences.read();
@@ -696,16 +680,13 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::ListRelationshipsRequest>,
     ) -> Result<Response<proto::ListRelationshipsResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let relationships = self.state.relationships.read();
         let rels = relationships.get(&(namespace_id, vault_id)).cloned().unwrap_or_default();
@@ -730,16 +711,13 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::ListResourcesRequest>,
     ) -> Result<Response<proto::ListResourcesResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let relationships = self.state.relationships.read();
         let resources: Vec<String> = relationships
@@ -766,15 +744,12 @@ impl ReadService for MockReadService {
         &self,
         request: Request<proto::ListEntitiesRequest>,
     ) -> Result<Response<proto::ListEntitiesResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
 
         let entities = self.state.entities.read();
         let matching: Vec<proto::Entity> = entities
@@ -828,16 +803,13 @@ impl WriteService for MockWriteService {
         &self,
         request: Request<proto::WriteRequest>,
     ) -> Result<Response<proto::WriteResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.write_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let sequence = req.sequence;
 
@@ -961,16 +933,13 @@ impl WriteService for MockWriteService {
         &self,
         request: Request<proto::BatchWriteRequest>,
     ) -> Result<Response<proto::BatchWriteResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         self.state.write_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let sequence = req.sequence;
 
@@ -1116,10 +1085,7 @@ impl AdminService for MockAdminService {
         &self,
         request: Request<proto::CreateNamespaceRequest>,
     ) -> Result<Response<proto::CreateNamespaceResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
         let namespace_id = self.state.next_namespace_id.fetch_add(1, Ordering::SeqCst) as i64;
@@ -1130,7 +1096,7 @@ impl AdminService for MockAdminService {
                 namespace_id,
                 NamespaceData {
                     name: req.name,
-                    shard_id: req.shard_id.map(|s| s.id).unwrap_or(1),
+                    shard_id: req.shard_id.map_or(1, |s| s.id),
                     status: proto::NamespaceStatus::Active as i32,
                 },
             );
@@ -1146,10 +1112,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::DeleteNamespaceRequest>,
     ) -> Result<Response<proto::DeleteNamespaceResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::DeleteNamespaceResponse { deleted_at: None }))
     }
@@ -1158,10 +1121,7 @@ impl AdminService for MockAdminService {
         &self,
         request: Request<proto::GetNamespaceRequest>,
     ) -> Result<Response<proto::GetNamespaceResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
         let namespace_id = match req.lookup {
@@ -1197,10 +1157,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::ListNamespacesRequest>,
     ) -> Result<Response<proto::ListNamespacesResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let namespaces = self.state.namespaces.read();
         let responses: Vec<proto::GetNamespaceResponse> = namespaces
@@ -1226,13 +1183,10 @@ impl AdminService for MockAdminService {
         &self,
         request: Request<proto::CreateVaultRequest>,
     ) -> Result<Response<proto::CreateVaultResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
         let vault_id = self.state.next_vault_id.fetch_add(1, Ordering::SeqCst) as i64;
 
         {
@@ -1268,10 +1222,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::DeleteVaultRequest>,
     ) -> Result<Response<proto::DeleteVaultResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::DeleteVaultResponse { deleted_at: None }))
     }
@@ -1280,14 +1231,11 @@ impl AdminService for MockAdminService {
         &self,
         request: Request<proto::GetVaultRequest>,
     ) -> Result<Response<proto::GetVaultResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let vaults = self.state.vaults.read();
         let data = vaults
@@ -1310,10 +1258,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::ListVaultsRequest>,
     ) -> Result<Response<proto::ListVaultsResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let vaults = self.state.vaults.read();
         let responses: Vec<proto::GetVaultResponse> = vaults
@@ -1337,10 +1282,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::JoinClusterRequest>,
     ) -> Result<Response<proto::JoinClusterResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::JoinClusterResponse {
             success: true,
@@ -1354,10 +1296,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::LeaveClusterRequest>,
     ) -> Result<Response<proto::LeaveClusterResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::LeaveClusterResponse {
             success: true,
@@ -1369,10 +1308,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::GetClusterInfoRequest>,
     ) -> Result<Response<proto::GetClusterInfoResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::GetClusterInfoResponse {
             members: vec![proto::ClusterMember {
@@ -1390,10 +1326,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::GetNodeInfoRequest>,
     ) -> Result<Response<proto::GetNodeInfoResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::GetNodeInfoResponse {
             node_id: 1,
@@ -1407,10 +1340,7 @@ impl AdminService for MockAdminService {
         &self,
         request: Request<proto::CreateSnapshotRequest>,
     ) -> Result<Response<proto::CreateSnapshotResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let _req = request.into_inner();
         Ok(Response::new(proto::CreateSnapshotResponse {
@@ -1424,10 +1354,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::CheckIntegrityRequest>,
     ) -> Result<Response<proto::CheckIntegrityResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::CheckIntegrityResponse { healthy: true, issues: vec![] }))
     }
@@ -1436,10 +1363,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::RecoverVaultRequest>,
     ) -> Result<Response<proto::RecoverVaultResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::RecoverVaultResponse {
             success: true,
@@ -1454,10 +1378,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::SimulateDivergenceRequest>,
     ) -> Result<Response<proto::SimulateDivergenceResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::SimulateDivergenceResponse {
             success: true,
@@ -1470,10 +1391,7 @@ impl AdminService for MockAdminService {
         &self,
         _request: Request<proto::ForceGcRequest>,
     ) -> Result<Response<proto::ForceGcResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::ForceGcResponse {
             success: true,
@@ -1504,10 +1422,7 @@ impl HealthService for MockHealthService {
         &self,
         _request: Request<proto::HealthCheckRequest>,
     ) -> Result<Response<proto::HealthCheckResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::HealthCheckResponse {
             status: proto::HealthStatus::Healthy as i32,
@@ -1537,10 +1452,7 @@ impl SystemDiscoveryService for MockDiscoveryService {
         &self,
         _request: Request<proto::GetPeersRequest>,
     ) -> Result<Response<proto::GetPeersResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let peers = self.state.peers.read();
         Ok(Response::new(proto::GetPeersResponse { peers: peers.clone(), system_version: 1 }))
@@ -1550,10 +1462,7 @@ impl SystemDiscoveryService for MockDiscoveryService {
         &self,
         request: Request<proto::AnnouncePeerRequest>,
     ) -> Result<Response<proto::AnnouncePeerResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         let req = request.into_inner();
         if let Some(peer) = req.peer {
@@ -1568,10 +1477,7 @@ impl SystemDiscoveryService for MockDiscoveryService {
         &self,
         _request: Request<proto::GetSystemStateRequest>,
     ) -> Result<Response<proto::GetSystemStateResponse>, Status> {
-        self.state.maybe_delay().await;
-        if self.state.should_inject_unavailable() {
-            return Err(Status::unavailable("Injected error"));
-        }
+        self.state.check_injection().await?;
 
         Ok(Response::new(proto::GetSystemStateResponse {
             version: 1,
