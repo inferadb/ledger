@@ -1004,8 +1004,7 @@ impl ReadService for ReadServiceImpl {
                                 return None;
                             }
                             // Filter by vault
-                            if announcement.vault_id.as_ref().map_or(0, |v| v.id) != vault_id
-                            {
+                            if announcement.vault_id.as_ref().map_or(0, |v| v.id) != vault_id {
                                 return None;
                             }
                             // Skip blocks we already sent from history

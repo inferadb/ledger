@@ -1396,8 +1396,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             attempts += 1;
             if attempts >= MAX_ATTEMPTS {
                 // Give up and return error - something is seriously wrong
-                let last_idx =
-                    self.get_last_entry().ok().flatten().map_or(0, |e| e.log_id.index);
+                let last_idx = self.get_last_entry().ok().flatten().map_or(0, |e| e.log_id.index);
                 return Err(StorageError::IO {
                     source: openraft::StorageIOError::read_logs(openraft::AnyError::error(
                         format!(

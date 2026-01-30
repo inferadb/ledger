@@ -287,9 +287,7 @@ impl MultiShardReadService {
                 match result {
                     Ok(announcement) => {
                         // Filter by namespace
-                        if announcement.namespace_id.as_ref().map_or(0, |n| n.id)
-                            != namespace_id
-                        {
+                        if announcement.namespace_id.as_ref().map_or(0, |n| n.id) != namespace_id {
                             return None;
                         }
                         // Filter by vault
