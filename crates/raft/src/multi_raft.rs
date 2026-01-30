@@ -259,26 +259,31 @@ impl ShardGroup {
     }
 
     /// Get the Raft instance.
+    #[must_use]
     pub fn raft(&self) -> &Arc<Raft<LedgerTypeConfig>> {
         &self.raft
     }
 
     /// Get the state layer.
+    #[must_use]
     pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
     }
 
     /// Get the block archive.
+    #[must_use]
     pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
         &self.block_archive
     }
 
     /// Get the applied state accessor.
+    #[must_use]
     pub fn applied_state(&self) -> &AppliedStateAccessor {
         &self.applied_state
     }
 
     /// Get the block announcements broadcast channel.
+    #[must_use]
     pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
         &self.block_announcements
     }
@@ -319,6 +324,7 @@ impl MultiRaftManager {
     }
 
     /// Get the configuration.
+    #[must_use]
     pub fn config(&self) -> &MultiRaftConfig {
         &self.config
     }

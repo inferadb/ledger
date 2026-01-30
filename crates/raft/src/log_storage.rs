@@ -1378,7 +1378,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
 
             // Empty result - check if purged
             let last_purged = *self.last_purged_cache.read();
-            let purged_idx = last_purged.map(|l| l.index).unwrap_or(0);
+            let purged_idx = last_purged.map_or(0, |l| l.index);
 
             // If entries were purged, return error (need snapshot replication)
             if start <= purged_idx {
@@ -1397,7 +1397,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
             if attempts >= MAX_ATTEMPTS {
                 // Give up and return error - something is seriously wrong
                 let last_idx =
-                    self.get_last_entry().ok().flatten().map(|e| e.log_id.index).unwrap_or(0);
+                    self.get_last_entry().ok().flatten().map_or(0, |e| e.log_id.index);
                 return Err(StorageError::IO {
                     source: openraft::StorageIOError::read_logs(openraft::AnyError::error(
                         format!(
@@ -1436,7 +1436,7 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
-            self.state.last_applied.as_ref().map(|l| l.index).unwrap_or(0),
+            self.state.last_applied.as_ref().map_or(0, |l| l.index),
             chrono::Utc::now().timestamp()
         );
 
@@ -1637,7 +1637,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let mut state = self.applied_state.write();
 
         // Get the committed_index from the last entry (for ShardBlock metadata)
-        let committed_index = entries.last().map(|e| e.log_id.index).unwrap_or(0);
+        let committed_index = entries.last().map_or(0, |e| e.log_id.index);
         // Term is stored in the leader_id
         let term = entries.last().map(|e| e.log_id.leader_id.get_term()).unwrap_or(0);
 
@@ -1863,7 +1863,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
-            state.last_applied.as_ref().map(|l| l.index).unwrap_or(0),
+            state.last_applied.as_ref().map_or(0, |l| l.index),
             chrono::Utc::now().timestamp()
         );
 

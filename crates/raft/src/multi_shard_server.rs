@@ -147,11 +147,13 @@ impl MultiShardLedgerServer {
     }
 
     /// Get the multi-raft manager.
+    #[must_use]
     pub fn manager(&self) -> &Arc<MultiRaftManager> {
         &self.manager
     }
 
     /// Get the idempotency cache.
+    #[must_use]
     pub fn idempotency(&self) -> &Arc<IdempotencyCache> {
         &self.idempotency
     }

@@ -152,7 +152,7 @@ impl IdempotencyCache {
     /// have been cached (either never written or cache expired).
     pub fn get_last_sequence(&self, namespace_id: i64, vault_id: i64, client_id: &str) -> u64 {
         let key = IdempotencyKey::new(namespace_id, vault_id, client_id.to_string());
-        self.cache.get(&key).map(|entry| entry.sequence).unwrap_or(0)
+        self.cache.get(&key).map_or(0, |entry| entry.sequence)
     }
 
     /// Force synchronous eviction of expired entries.

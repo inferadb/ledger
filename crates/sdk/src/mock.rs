@@ -253,6 +253,7 @@ impl MockLedgerServer {
     }
 
     /// Get the endpoint URL for connecting to this server.
+    #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }

@@ -238,7 +238,7 @@ impl WriteService for MultiShardWriteService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         // Actor is set by upstream Engine/Control services - Ledger uses "system" internally
         let actor = "system".to_string();
 
@@ -356,7 +356,7 @@ impl WriteService for MultiShardWriteService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         // Flatten all operations from all groups
         let all_operations: Vec<crate::proto::Operation> =

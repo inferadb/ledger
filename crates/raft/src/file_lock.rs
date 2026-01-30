@@ -147,11 +147,13 @@ impl DataDirLock {
     }
 
     /// Get the path to the lock file.
+    #[must_use]
     pub fn lock_path(&self) -> &Path {
         &self.path
     }
 
     /// Get the data directory path (parent of lock file).
+    #[must_use]
     pub fn data_dir(&self) -> &Path {
         self.path.parent().unwrap_or(Path::new("."))
     }

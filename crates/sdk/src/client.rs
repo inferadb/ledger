@@ -1304,6 +1304,7 @@ impl LedgerClient {
     /// The client ID is included in all write requests and is used by the server
     /// to deduplicate requests and track sequence state.
     #[inline]
+    #[must_use]
     pub fn client_id(&self) -> &str {
         self.sequences.client_id()
     }
@@ -1313,6 +1314,7 @@ impl LedgerClient {
     /// Useful for inspecting configuration values like endpoints, timeouts,
     /// and retry policy.
     #[inline]
+    #[must_use]
     pub fn config(&self) -> &ClientConfig {
         self.pool.config()
     }
@@ -1330,6 +1332,7 @@ impl LedgerClient {
     /// - Manual sequence recovery after errors
     /// - Custom idempotency workflows
     #[inline]
+    #[must_use]
     pub fn sequences(&self) -> &SequenceTracker {
         &self.sequences
     }
@@ -1340,6 +1343,7 @@ impl LedgerClient {
     /// - Checking if compression is enabled
     /// - Resetting connections after network changes
     #[inline]
+    #[must_use]
     pub fn pool(&self) -> &ConnectionPool {
         &self.pool
     }

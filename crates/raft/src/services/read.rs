@@ -438,8 +438,8 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id as u64);
         ctx.set_target(namespace_id, vault_id as i64);
 
         // Check vault health - diverged vaults cannot be read
@@ -542,8 +542,8 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id as u64).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id as u64);
         ctx.set_target(namespace_id, vault_id as i64);
 
         // Check vault health - diverged vaults cannot be read
@@ -637,8 +637,8 @@ impl ReadService for ReadServiceImpl {
         ctx.set_consistency("linearizable"); // verified reads are always linearizable
 
         // Extract IDs
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         ctx.set_target(namespace_id, vault_id);
 
         // Check vault health - diverged vaults cannot be read
@@ -711,7 +711,7 @@ impl ReadService for ReadServiceImpl {
 
         // Calculate proof size (merkle proof + optional chain proof)
         let proof_size = std::mem::size_of_val(&merkle_proof)
-            + chain_proof.as_ref().map(std::mem::size_of_val).unwrap_or(0);
+            + chain_proof.as_ref().map_or(0, std::mem::size_of_val);
         ctx.set_proof_size_bytes(proof_size);
 
         metrics::record_verified_read(true, ctx.elapsed_secs());
@@ -765,8 +765,8 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         ctx.set_target(namespace_id, vault_id);
 
         // Get block archive - required for historical reads
@@ -913,7 +913,7 @@ impl ReadService for ReadServiceImpl {
 
         // Calculate proof size if proofs were included
         if req.include_proof {
-            let proof_size = chain_proof.as_ref().map(std::mem::size_of_val).unwrap_or(0);
+            let proof_size = chain_proof.as_ref().map_or(0, std::mem::size_of_val);
             ctx.set_proof_size_bytes(proof_size);
         }
 
@@ -944,8 +944,8 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Extract identifiers
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let start_height = req.start_height;
 
         // Validate start_height >= 1 (per DESIGN.md)
@@ -998,13 +998,13 @@ impl ReadService for ReadServiceImpl {
                     match result {
                         Ok(announcement) => {
                             // Filter by namespace
-                            if announcement.namespace_id.as_ref().map(|n| n.id).unwrap_or(0)
+                            if announcement.namespace_id.as_ref().map_or(0, |n| n.id)
                                 != namespace_id
                             {
                                 return None;
                             }
                             // Filter by vault
-                            if announcement.vault_id.as_ref().map(|v| v.id).unwrap_or(0) != vault_id
+                            if announcement.vault_id.as_ref().map_or(0, |v| v.id) != vault_id
                             {
                                 return None;
                             }
@@ -1037,8 +1037,8 @@ impl ReadService for ReadServiceImpl {
             None => return Ok(Response::new(GetBlockResponse { block: None })),
         };
 
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let height = req.height;
 
         // Find the shard height containing this vault block
@@ -1080,8 +1080,8 @@ impl ReadService for ReadServiceImpl {
             },
         };
 
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let start_height = req.start_height;
         let end_height = req.end_height;
 
@@ -1128,8 +1128,8 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Get the vault specified in the request, or return the global max height
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         let height = if vault_id != 0 {
             // Specific vault requested
@@ -1166,8 +1166,8 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Extract IDs
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
         // Query the idempotency cache first (hot path)
@@ -1198,8 +1198,8 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from all filter parameters for token validation
@@ -1320,8 +1320,8 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from filter parameters for token validation
@@ -1398,7 +1398,7 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let namespace_id = req.namespace_id.as_ref().map(|n| n.id).unwrap_or(0);
+        let namespace_id = req.namespace_id.as_ref().map_or(0, |n| n.id);
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 

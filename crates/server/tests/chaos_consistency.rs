@@ -150,7 +150,7 @@ impl RaftService for SplitBrainDetectionService {
         request: Request<RaftVoteRequest>,
     ) -> Result<Response<RaftVoteResponse>, Status> {
         let req = request.into_inner();
-        let request_term = req.vote.as_ref().map(|v| v.term).unwrap_or(0);
+        let request_term = req.vote.as_ref().map_or(0, |v| v.term);
 
         let current_term = self.state.current_term.load(Ordering::SeqCst);
 

@@ -50,7 +50,7 @@ impl HealthService for HealthServiceImpl {
         if let Some(vault_id_proto) = req.vault_id {
             let vault_id = vault_id_proto.id;
             // Get namespace_id from request, default to 0 if not provided
-            let namespace_id = req.namespace_id.map(|n| n.id).unwrap_or(0);
+            let namespace_id = req.namespace_id.map_or(0, |n| n.id);
 
             let mut details = std::collections::HashMap::new();
 

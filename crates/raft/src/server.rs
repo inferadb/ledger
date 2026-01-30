@@ -173,21 +173,25 @@ impl LedgerServer {
     }
 
     /// Get the Raft instance.
+    #[must_use]
     pub fn raft(&self) -> &Arc<Raft<LedgerTypeConfig>> {
         &self.raft
     }
 
     /// Get the state layer.
+    #[must_use]
     pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
     }
 
     /// Get the idempotency cache.
+    #[must_use]
     pub fn idempotency(&self) -> &Arc<IdempotencyCache> {
         &self.idempotency
     }
 
     /// Get the block announcements sender (for broadcasting new blocks).
+    #[must_use]
     pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
         &self.block_announcements
     }

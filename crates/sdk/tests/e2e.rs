@@ -65,7 +65,7 @@ impl TestNode {
 
     /// Get the last applied log index.
     fn last_applied(&self) -> u64 {
-        self.raft.metrics().borrow().last_applied.map(|id| id.index).unwrap_or(0)
+        self.raft.metrics().borrow().last_applied.map_or(0, |id| id.index)
     }
 }
 

@@ -467,7 +467,7 @@ impl WriteService for WriteServiceImpl {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, sequence, None);
@@ -693,7 +693,7 @@ impl WriteService for WriteServiceImpl {
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
 
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, sequence, None);

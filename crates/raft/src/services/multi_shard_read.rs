@@ -287,13 +287,13 @@ impl MultiShardReadService {
                 match result {
                     Ok(announcement) => {
                         // Filter by namespace
-                        if announcement.namespace_id.as_ref().map(|n| n.id).unwrap_or(0)
+                        if announcement.namespace_id.as_ref().map_or(0, |n| n.id)
                             != namespace_id
                         {
                             return None;
                         }
                         // Filter by vault
-                        if announcement.vault_id.as_ref().map(|v| v.id).unwrap_or(0) != vault_id {
+                        if announcement.vault_id.as_ref().map_or(0, |v| v.id) != vault_id {
                             return None;
                         }
                         // Skip blocks we already sent from history
@@ -390,7 +390,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         // Record span fields
         tracing::Span::current().record("namespace_id", namespace_id);
@@ -448,7 +448,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         // Limit batch size
         const MAX_BATCH_SIZE: usize = 1000;
@@ -527,7 +527,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -585,7 +585,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -615,7 +615,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         tracing::Span::current().record("namespace_id", namespace_id);
@@ -749,7 +749,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         tracing::Span::current().record("namespace_id", namespace_id);
@@ -801,7 +801,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or_default();
 
         tracing::Span::current().record("namespace_id", namespace_id);
@@ -855,7 +855,7 @@ impl ReadService for MultiShardReadService {
 
         // Resolve shard to get current tip
         let ctx = self.resolver.resolve(namespace_id)?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let current_tip = ctx.applied_state.vault_height(namespace_id, vault_id);
 
         warn!(namespace_id, "get_block_range: not yet optimized for multi-shard");
@@ -878,7 +878,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
@@ -931,7 +931,7 @@ impl ReadService for MultiShardReadService {
             .as_ref()
             .map(|n| n.id)
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map(|v| v.id).unwrap_or(0);
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);

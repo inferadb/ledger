@@ -106,7 +106,7 @@ impl NamespaceRateLimiter {
     #[allow(dead_code)] // public API: utility for rate limit inspection
     pub fn current_count(&self, namespace_id: NamespaceId) -> u64 {
         let counters = self.counters.lock();
-        counters.get(&namespace_id).map(|c| c.count).unwrap_or(0)
+        counters.get(&namespace_id).map_or(0, |c| c.count)
     }
 
     /// Remove stale entries that haven't been accessed recently.
