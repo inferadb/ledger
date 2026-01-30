@@ -316,6 +316,161 @@ mod tests {
     }
 
     #[test]
+    fn test_get_relationship() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+        let vault_id = 1;
+
+        // Get non-existent relationship
+        {
+            let txn = db.read().expect("begin read");
+            let result = RelationshipStore::get(&txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("get");
+            assert!(result.is_none());
+        }
+
+        // Create relationship
+        {
+            let mut txn = db.write().expect("begin write");
+            RelationshipStore::create(&mut txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("create");
+            txn.commit().expect("commit");
+        }
+
+        // Get existing relationship
+        {
+            let txn = db.read().expect("begin read");
+            let rel = RelationshipStore::get(&txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("get")
+                .expect("relationship should exist");
+            assert_eq!(rel.resource, "doc:123");
+            assert_eq!(rel.relation, "viewer");
+            assert_eq!(rel.subject, "user:alice");
+        }
+    }
+
+    #[test]
+    fn test_list_for_resource() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+        let vault_id = 1;
+
+        // Create relationships for different resources
+        {
+            let mut txn = db.write().expect("begin write");
+
+            // doc:123 has multiple viewers and an editor
+            RelationshipStore::create(&mut txn, vault_id, "doc:123", "viewer", "user:alice")
+                .expect("create");
+            RelationshipStore::create(&mut txn, vault_id, "doc:123", "viewer", "user:bob")
+                .expect("create");
+            RelationshipStore::create(&mut txn, vault_id, "doc:123", "editor", "user:charlie")
+                .expect("create");
+
+            // doc:456 has different relationships
+            RelationshipStore::create(&mut txn, vault_id, "doc:456", "viewer", "user:dave")
+                .expect("create");
+            RelationshipStore::create(&mut txn, vault_id, "doc:456", "owner", "user:eve")
+                .expect("create");
+
+            txn.commit().expect("commit");
+        }
+
+        // List relationships for doc:123
+        {
+            let txn = db.read().expect("begin read");
+            let rels =
+                RelationshipStore::list_for_resource(&txn, vault_id, "doc:123", 10).expect("list");
+            assert_eq!(rels.len(), 3);
+            for rel in &rels {
+                assert_eq!(rel.resource, "doc:123");
+            }
+        }
+
+        // List relationships for doc:456
+        {
+            let txn = db.read().expect("begin read");
+            let rels =
+                RelationshipStore::list_for_resource(&txn, vault_id, "doc:456", 10).expect("list");
+            assert_eq!(rels.len(), 2);
+        }
+
+        // List with limit
+        {
+            let txn = db.read().expect("begin read");
+            let rels =
+                RelationshipStore::list_for_resource(&txn, vault_id, "doc:123", 2).expect("list");
+            assert_eq!(rels.len(), 2);
+        }
+
+        // List for non-existent resource
+        {
+            let txn = db.read().expect("begin read");
+            let rels =
+                RelationshipStore::list_for_resource(&txn, vault_id, "doc:999", 10).expect("list");
+            assert!(rels.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_list_in_vault_pagination() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+        let vault_id = 1;
+
+        // Create 10 relationships
+        {
+            let mut txn = db.write().expect("begin write");
+            for i in 0..10 {
+                RelationshipStore::create(
+                    &mut txn,
+                    vault_id,
+                    &format!("doc:{}", i),
+                    "viewer",
+                    "user:alice",
+                )
+                .expect("create");
+            }
+            txn.commit().expect("commit");
+        }
+
+        // Test pagination
+        {
+            let txn = db.read().expect("begin read");
+
+            // First page
+            let page1 = RelationshipStore::list_in_vault(&txn, vault_id, 3, 0).expect("list");
+            assert_eq!(page1.len(), 3);
+
+            // Second page
+            let page2 = RelationshipStore::list_in_vault(&txn, vault_id, 3, 3).expect("list");
+            assert_eq!(page2.len(), 3);
+
+            // Third page
+            let page3 = RelationshipStore::list_in_vault(&txn, vault_id, 3, 6).expect("list");
+            assert_eq!(page3.len(), 3);
+
+            // Fourth page (only 1 remaining)
+            let page4 = RelationshipStore::list_in_vault(&txn, vault_id, 3, 9).expect("list");
+            assert_eq!(page4.len(), 1);
+
+            // Beyond end
+            let page5 = RelationshipStore::list_in_vault(&txn, vault_id, 3, 10).expect("list");
+            assert!(page5.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_count_empty_vault() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+
+        let txn = db.read().expect("begin read");
+        let count = RelationshipStore::count_in_vault(&txn, 999).expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn test_vault_isolation() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();

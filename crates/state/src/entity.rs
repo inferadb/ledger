@@ -347,6 +347,232 @@ mod tests {
     // Error conversion chain tests (Task 2: Consolidate Error Types)
     // =========================================================================
 
+    #[test]
+    fn test_entity_exists() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+        let vault_id = 1;
+
+        // Entity doesn't exist initially
+        {
+            let txn = db.read().expect("begin read");
+            assert!(!EntityStore::exists(&txn, vault_id, b"missing_key").expect("exists check"));
+        }
+
+        // Create entity
+        {
+            let mut txn = db.write().expect("begin write");
+            let entity = Entity {
+                key: b"exists_key".to_vec(),
+                value: b"value".to_vec(),
+                expires_at: 0,
+                version: 1,
+            };
+            EntityStore::set(&mut txn, vault_id, &entity).expect("set entity");
+            txn.commit().expect("commit");
+        }
+
+        // Entity exists now
+        {
+            let txn = db.read().expect("begin read");
+            assert!(EntityStore::exists(&txn, vault_id, b"exists_key").expect("exists check"));
+            // Still doesn't exist in different vault
+            assert!(!EntityStore::exists(&txn, 999, b"exists_key").expect("exists check"));
+        }
+    }
+
+    #[test]
+    fn test_scan_prefix() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+        let vault_id = 1;
+
+        // Create entities with different prefixes
+        {
+            let mut txn = db.write().expect("begin write");
+
+            let entities = vec![
+                Entity {
+                    key: b"user:1".to_vec(),
+                    value: b"alice".to_vec(),
+                    expires_at: 0,
+                    version: 1,
+                },
+                Entity {
+                    key: b"user:2".to_vec(),
+                    value: b"bob".to_vec(),
+                    expires_at: 0,
+                    version: 1,
+                },
+                Entity {
+                    key: b"team:1".to_vec(),
+                    value: b"engineering".to_vec(),
+                    expires_at: 0,
+                    version: 1,
+                },
+                Entity {
+                    key: b"user:3".to_vec(),
+                    value: b"charlie".to_vec(),
+                    expires_at: 0,
+                    version: 1,
+                },
+                Entity {
+                    key: b"team:2".to_vec(),
+                    value: b"design".to_vec(),
+                    expires_at: 0,
+                    version: 1,
+                },
+            ];
+
+            for entity in entities {
+                EntityStore::set(&mut txn, vault_id, &entity).expect("set entity");
+            }
+            txn.commit().expect("commit");
+        }
+
+        // Scan for "user:" prefix
+        {
+            let txn = db.read().expect("begin read");
+            let users = EntityStore::scan_prefix(&txn, vault_id, b"user:", 10).expect("scan");
+            assert_eq!(users.len(), 3);
+            for user in &users {
+                assert!(user.key.starts_with(b"user:"));
+            }
+        }
+
+        // Scan for "team:" prefix
+        {
+            let txn = db.read().expect("begin read");
+            let teams = EntityStore::scan_prefix(&txn, vault_id, b"team:", 10).expect("scan");
+            assert_eq!(teams.len(), 2);
+        }
+
+        // Scan with limit
+        {
+            let txn = db.read().expect("begin read");
+            let users = EntityStore::scan_prefix(&txn, vault_id, b"user:", 2).expect("scan");
+            assert_eq!(users.len(), 2);
+        }
+
+        // Scan non-existent prefix
+        {
+            let txn = db.read().expect("begin read");
+            let none = EntityStore::scan_prefix(&txn, vault_id, b"missing:", 10).expect("scan");
+            assert!(none.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_list_in_bucket() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+        let vault_id = 1;
+
+        // Create several entities
+        {
+            let mut txn = db.write().expect("begin write");
+
+            for i in 0..10 {
+                let entity = Entity {
+                    key: format!("bucket_test_{}", i).into_bytes(),
+                    value: format!("value_{}", i).into_bytes(),
+                    expires_at: 0,
+                    version: 1,
+                };
+                EntityStore::set(&mut txn, vault_id, &entity).expect("set entity");
+            }
+            txn.commit().expect("commit");
+        }
+
+        // List entities in bucket 0 (the first bucket based on key hashing)
+        // Note: Actual bucket assignment depends on key hashing
+        {
+            let txn = db.read().expect("begin read");
+            // Try a few buckets to find where our entities landed
+            let mut found_any = false;
+            for bucket_id in 0..=255u8 {
+                let entities =
+                    EntityStore::list_in_bucket(&txn, vault_id, bucket_id).expect("list bucket");
+                if !entities.is_empty() {
+                    found_any = true;
+                }
+            }
+            assert!(found_any, "Should find entities in at least one bucket");
+        }
+    }
+
+    #[test]
+    fn test_count_in_vault_multiple_vaults() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+
+        // Create entities in multiple vaults
+        {
+            let mut txn = db.write().expect("begin write");
+
+            // Vault 1: 3 entities
+            for i in 0..3 {
+                let entity = Entity {
+                    key: format!("v1_key_{}", i).into_bytes(),
+                    value: b"value".to_vec(),
+                    expires_at: 0,
+                    version: 1,
+                };
+                EntityStore::set(&mut txn, 1, &entity).expect("set entity");
+            }
+
+            // Vault 2: 5 entities
+            for i in 0..5 {
+                let entity = Entity {
+                    key: format!("v2_key_{}", i).into_bytes(),
+                    value: b"value".to_vec(),
+                    expires_at: 0,
+                    version: 1,
+                };
+                EntityStore::set(&mut txn, 2, &entity).expect("set entity");
+            }
+
+            txn.commit().expect("commit");
+        }
+
+        // Verify counts
+        {
+            let txn = db.read().expect("begin read");
+
+            assert_eq!(EntityStore::count_in_vault(&txn, 1).expect("count"), 3);
+            assert_eq!(EntityStore::count_in_vault(&txn, 2).expect("count"), 5);
+            assert_eq!(EntityStore::count_in_vault(&txn, 999).expect("count"), 0);
+        }
+    }
+
+    #[test]
+    fn test_delete_nonexistent() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+        let vault_id = 1;
+
+        // Delete non-existent entity should return false
+        {
+            let mut txn = db.write().expect("begin write");
+            let deleted = EntityStore::delete(&mut txn, vault_id, b"nonexistent").expect("delete");
+            assert!(!deleted);
+            txn.commit().expect("commit");
+        }
+    }
+
+    #[test]
+    fn test_list_in_vault_empty() {
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let db = engine.db();
+
+        // List from empty vault
+        {
+            let txn = db.read().expect("begin read");
+            let entities = EntityStore::list_in_vault(&txn, 1, 10, 0).expect("list");
+            assert!(entities.is_empty());
+        }
+    }
+
     // Test EntityError Display implementations
     #[test]
     fn test_entity_error_display() {
