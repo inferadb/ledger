@@ -1,10 +1,4 @@
 //! Client configuration with builder pattern.
-//!
-//! Provides type-safe configuration for SDK clients including:
-//! - Server discovery (static, DNS, or file-based)
-//! - Timeouts and connection settings
-//! - Retry policies
-//! - Compression options
 
 use std::time::Duration;
 
