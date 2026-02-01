@@ -95,10 +95,12 @@ jobs:
           else
             NEXT_VERSION="0.1.0"
           fi
-          
+
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          CANARY_VERSION="${NEXT_VERSION}-canary.${{ github.run_number }}+${SHORT_SHA}"
-          
+          DATE=$(date -u +%Y%m%d)
+          # Use dev.YYYYMMDD.N format for chronological semver sorting
+          CANARY_VERSION="${NEXT_VERSION}-dev.${DATE}.${{ github.run_number }}+${SHORT_SHA}"
+
           echo "version=${CANARY_VERSION}" >> $GITHUB_OUTPUT
           echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
           echo "Canary version: ${CANARY_VERSION}"
@@ -450,8 +452,8 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           # Update workspace version (strip build metadata for crates.io)
-          # Canary versions are like 0.1.0-canary.123+abc1234, but crates.io
-          # doesn't support build metadata, so we use 0.1.0-canary.123
+          # Dev versions are like 0.1.0-dev.20260201.123+abc1234, but crates.io
+          # doesn't support build metadata, so we use 0.1.0-dev.20260201.123
           CRATE_VERSION="${VERSION%+*}"
           sed -i "s/^version = \".*\"/version = \"${CRATE_VERSION}\"/" Cargo.toml
 

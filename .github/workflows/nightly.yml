@@ -177,7 +177,8 @@ jobs:
           fi
 
           DATE=$(date -u +%Y%m%d)
-          NIGHTLY_VERSION="${NEXT_VERSION}-nightly.${DATE}"
+          # Use dev.YYYYMMDD format for chronological semver sorting
+          NIGHTLY_VERSION="${NEXT_VERSION}-dev.${DATE}"
 
           echo "version=${NIGHTLY_VERSION}" >> $GITHUB_OUTPUT
           echo "date=${DATE}" >> $GITHUB_OUTPUT

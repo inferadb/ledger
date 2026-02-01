@@ -71,6 +71,9 @@ check: fmt-check clippy test
 # Quick check (format + clippy only) - faster pre-commit validation
 check-quick: fmt-check clippy
 
+# Pre-PR validation: regenerate protos, autoformat, lint, and test
+ready: proto fmt clippy test
+
 # ============================================================================
 # Documentation
 # ============================================================================
