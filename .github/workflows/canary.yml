@@ -455,6 +455,12 @@ jobs:
           CRATE_VERSION="${VERSION%+*}"
           sed -i "s/^version = \".*\"/version = \"${CRATE_VERSION}\"/" Cargo.toml
 
+          # Update inter-crate dependency versions to use exact prerelease version
+          # (semver ranges like ^0.1.0 don't match prereleases)
+          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-raft inferadb-ledger-sdk; do
+            sed -i "s/\(${crate} = { version = \)\"[^\"]*\"/\1\"=${CRATE_VERSION}\"/" Cargo.toml
+          done
+
       - name: Cache Rust dependencies
         uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
 
@@ -468,7 +474,7 @@ jobs:
         run: |
           for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-raft inferadb-ledger-sdk; do
             echo "Publishing ${crate}..."
-            cargo publish -p "${crate}" --token "$CARGO_REGISTRY_TOKEN" --allow-dirty || echo "${crate} may already be published"
+            cargo publish -p "${crate}" --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
             echo "Waiting for crates.io to index..."
             sleep 45
           done

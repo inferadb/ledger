@@ -474,7 +474,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          cargo publish -p inferadb-ledger-types --token "$CARGO_REGISTRY_TOKEN" --allow-dirty || echo "inferadb-ledger-types may already be published"
+          cargo publish -p inferadb-ledger-types --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
           echo "Waiting for crates.io to index..."
           sleep 45
 
@@ -482,7 +482,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          cargo publish -p inferadb-ledger-store --token "$CARGO_REGISTRY_TOKEN" --allow-dirty || echo "inferadb-ledger-store may already be published"
+          cargo publish -p inferadb-ledger-store --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
           echo "Waiting for crates.io to index..."
           sleep 45
 
@@ -490,7 +490,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          cargo publish -p inferadb-ledger-state --token "$CARGO_REGISTRY_TOKEN" --allow-dirty || echo "inferadb-ledger-state may already be published"
+          cargo publish -p inferadb-ledger-state --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
           echo "Waiting for crates.io to index..."
           sleep 45
 
@@ -498,7 +498,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          cargo publish -p inferadb-ledger-raft --token "$CARGO_REGISTRY_TOKEN" --allow-dirty || echo "inferadb-ledger-raft may already be published"
+          cargo publish -p inferadb-ledger-raft --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
           echo "Waiting for crates.io to index..."
           sleep 45
 
