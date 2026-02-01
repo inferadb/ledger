@@ -2,17 +2,6 @@
 //!
 //! Configuration is loaded from command-line arguments or environment variables.
 //! CLI arguments take precedence over environment variables.
-//!
-//! # Bootstrap Modes
-//!
-//! Use one of `--single`, `--join`, or `--cluster N` to control cluster formation:
-//!
-//! - `--single`: Bootstrap as a single-node cluster (no coordination)
-//! - `--join`: Wait to be added to an existing cluster via AdminService
-//! - `--cluster N`: Coordinated bootstrap with N nodes (default: 3)
-//!
-//! Environment variable `INFERADB__LEDGER__CLUSTER` sets the numeric value directly:
-//! `0` = join, `1` = single, `N` = cluster with N nodes.
 
 use std::{net::SocketAddr, path::PathBuf};
 
