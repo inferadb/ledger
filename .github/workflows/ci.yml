@@ -121,7 +121,7 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
         with:
           shared-key: clippy
 
@@ -156,12 +156,12 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Install cargo-udeps
-        uses: taiki-e/install-action@710817a1645ef40daad5bcde7431ceccf6cc3528 # v2.67.13
+        uses: taiki-e/install-action@650c5ca14212efbbf3e580844b04bdccf68dac31 # v2.67.18
         with:
           tool: cargo-udeps
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
         with:
           shared-key: udeps
 
@@ -198,7 +198,7 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
         with:
           shared-key: msrv
 
@@ -249,12 +249,12 @@ jobs:
           brew install protobuf
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@710817a1645ef40daad5bcde7431ceccf6cc3528 # v2.67.13
+        uses: taiki-e/install-action@650c5ca14212efbbf3e580844b04bdccf68dac31 # v2.67.18
         with:
           tool: cargo-nextest
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
         with:
           shared-key: test-${{ matrix.runner }}
 
@@ -299,12 +299,12 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@710817a1645ef40daad5bcde7431ceccf6cc3528 # v2.67.13
+        uses: taiki-e/install-action@650c5ca14212efbbf3e580844b04bdccf68dac31 # v2.67.18
         with:
           tool: cargo-llvm-cov
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
         with:
           shared-key: coverage
 
@@ -350,7 +350,7 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
         with:
           shared-key: docs
 

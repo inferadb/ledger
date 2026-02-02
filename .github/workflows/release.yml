@@ -185,7 +185,7 @@ jobs:
           fi
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
         with:
           shared-key: release-${{ matrix.os }}-${{ matrix.target }}
 
@@ -245,7 +245,7 @@ jobs:
           egress-policy: audit
 
       - name: Download all artifacts
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: /tmp/artifacts
 
@@ -267,7 +267,7 @@ jobs:
       actions: read
       id-token: write
       contents: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: "${{ needs.aggregate-hashes.outputs.hashes }}"
       upload-assets: true
@@ -423,7 +423,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@62ad5284b8ced813296287a0b63906cb364b73ee # v0.22.0
+        uses: anchore/sbom-action@deef08a0db64bfad603422135db61477b16cef56 # v0.22.1
         with:
           image: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:latest
           artifact-name: docker-sbom.spdx.json
@@ -462,7 +462,7 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@f8fba7098297c8c53a7c9a30575ec2ad4ad85056 # v2.8.2
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
 
       # Use OIDC-based trusted publishing
       - name: Authenticate with crates.io
