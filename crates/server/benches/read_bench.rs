@@ -112,8 +112,9 @@ fn bench_random_reads(c: &mut Criterion) {
 
     // Pre-generate random indices
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let random_indices: Vec<usize> = (0..10000).map(|_| rng.gen_range(0..entity_count)).collect();
+    let mut rng = rand::rng();
+    let random_indices: Vec<usize> =
+        (0..10000).map(|_| rng.random_range(0..entity_count)).collect();
 
     group.bench_function("100_random_keys", |b| {
         let mut batch = 0usize;

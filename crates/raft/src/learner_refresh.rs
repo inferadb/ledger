@@ -210,7 +210,7 @@ impl LearnerRefreshJob {
         // Shuffle voters for random selection
         let mut voters = voters;
         use rand::seq::SliceRandom;
-        voters.shuffle(&mut rand::thread_rng());
+        voters.shuffle(&mut rand::rng());
 
         // Try each voter until one succeeds
         let mut last_error = None;
