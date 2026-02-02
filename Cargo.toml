@@ -85,7 +85,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false, feat
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"] }
-tracing-opentelemetry = "0.28"
+tracing-opentelemetry = "0.32"
 
 # Configuration
 clap = { version = "4", features = ["derive", "env"] }
