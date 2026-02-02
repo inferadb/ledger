@@ -110,13 +110,13 @@ fn apply_jitter(dur: Duration, factor: f64) -> Duration {
     }
 
     let factor = factor.clamp(0.0, 1.0);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let base_nanos = dur.as_nanos() as f64;
     let min_nanos = base_nanos * (1.0 - factor);
     let max_nanos = base_nanos * (1.0 + factor);
 
-    let jittered_nanos = rng.gen_range(min_nanos..=max_nanos);
+    let jittered_nanos = rng.random_range(min_nanos..=max_nanos);
     Duration::from_nanos(jittered_nanos as u64)
 }
 

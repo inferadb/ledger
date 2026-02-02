@@ -25,8 +25,8 @@
 //! - **Timestamp portion (42 bits)**: Predictable to within milliseconds. An attacker who knows
 //!   when a node will start can estimate the timestamp portion.
 //!
-//! - **Random portion (22 bits)**: Uses `rand::thread_rng()` (OS-provided CSPRNG on most platforms)
-//!   for 4.2 million possible values per millisecond. This makes exact ID prediction impractical
+//! - **Random portion (22 bits)**: Uses `rand::rng()` (OS-provided CSPRNG on most platforms) for
+//!   4.2 million possible values per millisecond. This makes exact ID prediction impractical
 //!   without the following considerations:
 //!
 //! - **Threat: Malicious ID Manipulation**: An attacker could generate an ID with an artificially
@@ -133,7 +133,7 @@ pub fn generate_snowflake_id() -> Result<u64, NodeIdError> {
         .as_millis() as u64;
 
     let timestamp = now_ms.saturating_sub(EPOCH_MS);
-    let random: u64 = rand::thread_rng().r#gen::<u64>() & RANDOM_MASK;
+    let random: u64 = rand::rng().random::<u64>() & RANDOM_MASK;
 
     Ok((timestamp << RANDOM_BITS) | random)
 }

@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! The OTEL integration uses a `TracerProvider` with `BatchSpanProcessor` for
+//! The OTEL integration uses a `SdkTracerProvider` with `BatchSpanProcessor` for
 //! efficient, non-blocking span export. The provider is initialized once at
 //! server startup and accessed via a global singleton for span creation.
 //!
@@ -34,10 +34,10 @@ use opentelemetry::{
     trace::{SpanKind, TraceContextExt, Tracer, TracerProvider as _},
 };
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
-use opentelemetry_sdk::{Resource, runtime::Tokio, trace::TracerProvider};
+use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 
 /// Global tracer provider, initialized once at server startup.
-static TRACER_PROVIDER: OnceLock<TracerProvider> = OnceLock::new();
+static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 /// Configuration for OpenTelemetry/OTLP export.
 ///
@@ -94,7 +94,7 @@ impl std::error::Error for OtelInitError {}
 /// Initialize the OpenTelemetry tracer provider.
 ///
 /// This function should be called once at server startup. It creates a
-/// `TracerProvider` with `BatchSpanProcessor` for efficient span export.
+/// `SdkTracerProvider` with `BatchSpanProcessor` for efficient span export.
 ///
 /// # Arguments
 ///
@@ -146,17 +146,19 @@ pub fn init_otel(config: &OtelConfig) -> Result<(), OtelInitError> {
         .map_err(|e| OtelInitError::ExporterBuild(e.to_string()))?;
 
     // Create resource with service information
-    let resource = Resource::new([
-        KeyValue::new("service.name", "inferadb-ledger"),
-        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-        KeyValue::new("host.name", hostname()),
-    ]);
+    let resource = Resource::builder_empty()
+        .with_attributes([
+            KeyValue::new("service.name", "inferadb-ledger"),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            KeyValue::new("host.name", hostname()),
+        ])
+        .build();
 
     // Build the tracer provider with batch processing
-    let provider = TracerProvider::builder()
-        .with_resource(resource)
-        .with_batch_exporter(exporter, Tokio)
-        .build();
+    // Note: As of opentelemetry_sdk 0.28+, batch processors create their own background thread,
+    // so no runtime parameter is needed.
+    let provider =
+        SdkTracerProvider::builder().with_resource(resource).with_batch_exporter(exporter).build();
 
     // Store globally for span creation
     if TRACER_PROVIDER.set(provider.clone()).is_err() {
@@ -190,10 +192,8 @@ pub fn shutdown_otel() {
         tracing::info!("Shutting down OTEL tracer provider");
 
         // Force flush pending spans
-        for result in provider.force_flush() {
-            if let Err(e) = result {
-                tracing::warn!(error = %e, "Failed to flush OTEL spans during shutdown");
-            }
+        if let Err(e) = provider.force_flush() {
+            tracing::warn!(error = %e, "Failed to flush OTEL spans during shutdown");
         }
 
         // Shutdown the provider

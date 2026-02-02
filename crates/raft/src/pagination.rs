@@ -71,7 +71,7 @@ impl PageTokenCodec {
     pub fn with_random_key() -> Self {
         use rand::RngCore;
         let mut key = [0u8; HMAC_KEY_LENGTH];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         Self { key }
     }
 
