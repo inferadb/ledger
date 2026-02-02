@@ -16,7 +16,7 @@ updates:
     labels:
       - "area/deps"
     commit-message:
-      prefix: "deps"
+      prefix: "chore"
       include: "scope"
     groups:
       rust-minor-patch:
