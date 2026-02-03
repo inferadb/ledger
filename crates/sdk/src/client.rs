@@ -682,6 +682,8 @@ pub struct ListEntitiesOpts {
     /// Read consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
+    /// Vault ID for vault-scoped entities (None = namespace-level, uses vault_id=0).
+    pub vault_id: Option<i64>,
 }
 
 impl ListEntitiesOpts {
@@ -723,6 +725,12 @@ impl ListEntitiesOpts {
     /// Use linearizable (strong) consistency.
     pub fn linearizable(mut self) -> Self {
         self.consistency = ReadConsistency::Linearizable;
+        self
+    }
+
+    /// Scope to a specific vault (for vault-level entities).
+    pub fn vault(mut self, vault_id: i64) -> Self {
+        self.vault_id = Some(vault_id);
         self
     }
 }
@@ -2922,6 +2930,7 @@ impl LedgerClient {
                 limit: opts.limit,
                 page_token: opts.page_token.clone().unwrap_or_default(),
                 consistency: opts.consistency.to_proto() as i32,
+                vault_id: opts.vault_id.map(|id| proto::VaultId { id }),
             };
 
             let response = client.list_entities(tonic::Request::new(request)).await?.into_inner();

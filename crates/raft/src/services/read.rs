@@ -81,12 +81,12 @@ impl ReadServiceImpl {
     ///
     /// Returns false if Raft is not configured.
     fn is_leader(&self) -> bool {
-        match (&self.raft, &self.node_id) {
-            (Some(raft), Some(node_id)) => {
+        match &self.raft {
+            Some(raft) => {
                 let metrics = raft.metrics().borrow().clone();
-                metrics.current_leader == Some(*node_id)
+                metrics.current_leader == Some(metrics.id)
             },
-            _ => false,
+            None => false,
         }
     }
 
@@ -469,6 +469,13 @@ impl ReadService for ReadServiceImpl {
 
         ctx.end_storage_timer();
 
+        // Filter out expired entities (expires_at == 0 means never expires)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let entity = entity.filter(|e| e.expires_at == 0 || e.expires_at > now);
+
         let found = entity.is_some();
         let value_size = entity.as_ref().map(|e| e.value.len()).unwrap_or(0);
         ctx.set_found(found);
@@ -558,6 +565,12 @@ impl ReadService for ReadServiceImpl {
         // Start storage timer
         ctx.start_storage_timer();
 
+        // Get current time for TTL filtering
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
         // Read all keys from state layer
         let state = &*self.state;
         let mut results = Vec::with_capacity(req.keys.len());
@@ -573,6 +586,9 @@ impl ReadService for ReadServiceImpl {
                     return Err(Status::internal(msg));
                 },
             };
+
+            // Filter out expired entities (expires_at == 0 means never expires)
+            let entity = entity.filter(|e| e.expires_at == 0 || e.expires_at > now);
 
             let found = entity.is_some();
             if found {
@@ -1401,24 +1417,31 @@ impl ReadService for ReadServiceImpl {
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
-        // Entities are namespace-level (stored in vault_id=0 by convention)
-        let vault_id = 0i64;
+        // Use vault_id from request, defaulting to 0 for namespace-level entities
+        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
         // Compute query hash from filter parameters for token validation
         // This prevents clients from changing filters mid-pagination
-        let query_params =
-            format!("prefix:{},include_expired:{}", req.key_prefix, req.include_expired);
+        let query_params = format!(
+            "prefix:{},include_expired:{},vault:{}",
+            req.key_prefix, req.include_expired, vault_id
+        );
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
-        let block_height = self
-            .applied_state
-            .all_vault_heights()
-            .iter()
-            .filter(|((ns, _), _)| *ns == namespace_id)
-            .map(|(_, h)| *h)
-            .max()
-            .unwrap_or(0);
+        let block_height = if vault_id != 0 {
+            // Specific vault requested - use its height
+            self.applied_state.vault_height(namespace_id, vault_id)
+        } else {
+            // Namespace-level entities - use max height across all vaults in namespace
+            self.applied_state
+                .all_vault_heights()
+                .iter()
+                .filter(|((ns, _), _)| *ns == namespace_id)
+                .map(|(_, h)| *h)
+                .max()
+                .unwrap_or(0)
+        };
 
         // Decode and validate page token if provided
         let (resume_key, at_height) = if req.page_token.is_empty() {

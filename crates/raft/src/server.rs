@@ -104,6 +104,7 @@ impl LedgerServer {
             .block_archive(self.block_archive.clone())
             .block_announcements(self.block_announcements.clone())
             .idempotency(Some(self.idempotency.clone()))
+            .raft(Some(self.raft.clone()))
             .build();
         // Create write service with batching enabled for high throughput.
         // Per DESIGN.md §6.3: Server-level batching coalesces individual Write RPCs

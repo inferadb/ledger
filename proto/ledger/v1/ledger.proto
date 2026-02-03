@@ -528,6 +528,7 @@ message ListEntitiesRequest {
   // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
   string page_token = 6;
   ReadConsistency consistency = 7; // Default: EVENTUAL (any replica)
+  optional VaultId vault_id = 8; // Omit for namespace-level entities (vault_id=0)
 }
 
 message ListEntitiesResponse {
