@@ -26,17 +26,6 @@
 //! - TTL-based: entries expire after `cache_ttl` (default 60s)
 //! - Version-based: `config_version` changes trigger invalidation
 //! - Leader redirect: stale leader hints are updated on redirect
-//!
-//! ## Integration Roadmap
-//!
-//! **Phase 1 (current)**: ShardRouter module with routing cache and connection
-//! management. Provides the building blocks for multi-shard support.
-//!
-//! **Phase 2 (future)**: Multi-Raft Manager that spawns independent Raft groups
-//! per shard. Services will use ShardRouter to forward cross-shard requests.
-//!
-//! **Phase 3 (future)**: Shard lifecycle management - creating new shards,
-//! migrating namespaces between shards, rebalancing.
 
 use std::{
     collections::HashMap,

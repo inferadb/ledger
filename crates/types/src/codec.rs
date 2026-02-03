@@ -210,9 +210,7 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
-    // =========================================================================
-    // Error conversion chain tests (Task 2: Consolidate Error Types)
-    // =========================================================================
+    // Error conversion chain tests
 
     // Test that CodecError::Encode has correct Display output
     #[test]

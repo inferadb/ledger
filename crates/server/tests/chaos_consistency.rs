@@ -1,7 +1,7 @@
 //! Chaos testing with consistency verification.
 //!
 //! This module provides Jepsen-style consistency checking after chaos events.
-//! Per DESIGN.md Phase 3, we verify:
+//! We verify:
 //! - No split-brain (minority cannot elect leader)
 //! - Linearizability (every read returns the last committed write)
 //! - No lost writes (all committed writes are durable)
@@ -634,10 +634,7 @@ fn test_consistency_after_partition_heals() {
     assert!(result.is_ok(), "History should be linearizable");
 }
 
-// ============================================================================
-// Additional Chaos Tests (DESIGN.md Phase 3)
-// ============================================================================
-
+// Additional Chaos Tests
 use inferadb_ledger_types::{EMPTY_HASH, Entity, Hash, sha256_concat};
 
 /// Simulated storage layer for testing state root verification.

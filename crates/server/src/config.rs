@@ -402,7 +402,7 @@ pub struct WideEventsConfig {
     /// Whether wide events logging is enabled. Default: true.
     #[serde(default = "default_wide_events_enabled")]
     #[builder(default = default_wide_events_enabled())]
-    #[allow(dead_code)] // reserved for Phase 4 when wide events can be disabled
+    #[allow(dead_code)] // reserved for when wide events can be disabled
     pub enabled: bool,
 
     /// Sampling configuration for wide events.

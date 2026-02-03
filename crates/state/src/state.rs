@@ -1209,9 +1209,7 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Error conversion chain tests (Task 2: Consolidate Error Types)
-    // =========================================================================
+    // Error conversion chain tests
 
     // Test StateError Display implementations for all variants
     #[test]

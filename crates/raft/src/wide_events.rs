@@ -22,9 +22,9 @@
 //!     let mut ctx = RequestContext::new("WriteService", "write");
 //!     ctx.set_client_info("client_123", 42, Some("user@example.com".into()));
 //!     ctx.set_target(1, 2);
-//!     
+//!
 //!     // ... process request ...
-//!     
+//!
 //!     ctx.set_outcome(Outcome::Success);
 //!     // Event emitted automatically on drop
 //! }
@@ -383,10 +383,10 @@ where
 ///         with_current_context(|ctx| {
 ///             ctx.set_client_info("client_123", 42, None);
 ///         });
-///         
+///
 ///         // Simulate async work
 ///         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-///         
+///
 ///         // Still accessible after await
 ///         with_current_context(|ctx| {
 ///             ctx.set_success();
@@ -1460,9 +1460,7 @@ mod tests {
         assert_eq!(sanitize_string("hello\nworld\ttab\rcarriage"), "hello\nworld\ttab\rcarriage");
     }
 
-    // =========================================================================
-    // JSON Structured Logging Tests (Task 3)
-    // =========================================================================
+    // JSON Structured Logging Tests
 
     /// Test layer that captures events as JSON strings for verification.
     struct JsonCapturingLayer {
@@ -1653,9 +1651,7 @@ mod tests {
         assert_eq!(outcome, Some("success"), "outcome should be lowercase 'success'");
     }
 
-    // =======================================================================
-    // Task-Local Context Tests (Task 4)
-    // =======================================================================
+    // Task-Local Context Tests
 
     #[test]
     fn test_with_current_context_returns_none_when_no_guard() {
@@ -1872,9 +1868,7 @@ mod tests {
         assert_eq!(client_id, Some("second_value"), "Last write should win");
     }
 
-    // =========================================================================
-    // Sampling Tests (Task 5)
-    // =========================================================================
+    // Sampling Tests
 
     #[test]
     fn test_sampling_config_default_values() {

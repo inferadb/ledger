@@ -3816,10 +3816,6 @@ mod tests {
         assert_eq!(meta.status, NamespaceStatus::Deleted);
     }
 
-    // ========================================================================
-    // Determinism Tests (Phase 3.7)
-    // ========================================================================
-    //
     // These tests verify that the state machine is deterministic - a critical
     // requirement for Raft consensus. All nodes must produce identical state
     // when applying the same log entries.
