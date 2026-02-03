@@ -59,6 +59,10 @@ updates:
     commit-message:
       prefix: "docker"
       include: "scope"
+    ignore:
+      # Rust version is pinned to match rust-toolchain.toml (1.92)
+      # Update manually when upgrading the project's Rust version
+      - dependency-name: "rust"
     groups:
       docker-images:
         patterns:
