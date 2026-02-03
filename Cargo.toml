@@ -20,17 +20,17 @@ authors = ["InferaDB Contributors"]
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 
 # gRPC
 # tls-ring: use ring crypto instead of slow-to-compile aws-lc
 # tls-native-roots: load system CA certificates (needed by SDK)
-tonic = { version = "0.14.3", features = ["gzip", "zstd", "tls-ring", "tls-native-roots"] }
-tonic-build = "0.14.3"
-tonic-prost = "0.14.3"
-tonic-prost-build = "0.14.3"
+tonic = { version = "0.14", features = ["gzip", "zstd", "tls-ring", "tls-native-roots"] }
+tonic-build = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout"] }
@@ -41,38 +41,38 @@ validit = "0.2"
 
 # Crypto
 sha2 = "0.10"
-seahash = "4.1"
+seahash = "4"
 hmac = "0.12"
-rs_merkle = "1.4"
-subtle = "2.6"
+rs_merkle = "1"
+subtle = "2"
 base64 = "0.22"
 
 # Compression
 zstd = "0.13"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-postcard = { version = "1.0", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
 
 # Error handling
 snafu = { version = "0.8", features = ["backtrace"] }
 
 # Concurrency
 parking_lot = "0.12"
-arc-swap = "1.8.1"
-dashmap = "6.1"
+arc-swap = "1"
+dashmap = "6"
 
 # Caching
 moka = { version = "0.12", features = ["sync"] }
 
 # Builder pattern
-bon = "3.8"
+bon = "3"
 
 # Utilities
-bytes = "1.9"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.20", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
@@ -88,17 +88,17 @@ opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
 tracing-opentelemetry = "0.32"
 
 # Configuration
-clap = { version = "4.5.56", features = ["derive", "env"] }
-humantime = "2.1"
+clap = { version = "4", features = ["derive", "env"] }
+humantime = "2"
 
 # File locking
 fs2 = "0.4"
 
 # Testing
-tempfile = "3.14"
+tempfile = "3"
 rand = "0.9"
 futures = "0.3"
-proptest = "1.4"
+proptest = "1"
 
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -112,9 +112,9 @@ object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
 async-trait = "0.1"
 
 # Network simulation testing
-turmoil = "0.7.1"
+turmoil = "0.7"
 hyper = "1"
-hyper-util = { version = "0.1.20", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 async-stream = "0.3"
 
 # Internal crates (version + path for crates.io publishing)
@@ -128,7 +128,7 @@ inferadb-ledger-test-utils = { path = "crates/test-utils" }
 
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
-byteorder = "1.5"
+byteorder = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
