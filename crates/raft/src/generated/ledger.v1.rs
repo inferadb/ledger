@@ -737,6 +737,9 @@ pub struct ListEntitiesRequest {
     /// Default: EVENTUAL (any replica)
     #[prost(enumeration = "ReadConsistency", tag = "7")]
     pub consistency: i32,
+    /// Omit for namespace-level entities (vault_id=0)
+    #[prost(message, optional, tag = "8")]
+    pub vault_id: ::core::option::Option<VaultId>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListEntitiesResponse {
