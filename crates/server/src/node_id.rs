@@ -7,11 +7,11 @@
 //! # ID Structure
 //!
 //! ```text
-//! | 42 bits: timestamp (ms since epoch) | 22 bits: random |
+//! | 42 bits: timestamp (ms since epoch) | 22 bits: sequence |
 //! ```
 //!
 //! - Timestamp: milliseconds since 2024-01-01 00:00:00 UTC (~139 years range)
-//! - Random: ~4 million unique IDs per millisecond (collision-resistant)
+//! - Sequence: counter that increments within each millisecond (4.2M IDs/ms guaranteed unique)
 //!
 //! # Persistence
 //!
@@ -25,9 +25,8 @@
 //! - **Timestamp portion (42 bits)**: Predictable to within milliseconds. An attacker who knows
 //!   when a node will start can estimate the timestamp portion.
 //!
-//! - **Random portion (22 bits)**: Uses `rand::rng()` (OS-provided CSPRNG on most platforms) for
-//!   4.2 million possible values per millisecond. This makes exact ID prediction impractical
-//!   without the following considerations:
+//! - **Sequence portion (22 bits)**: Deterministic counter within each millisecond. IDs are
+//!   predictable if the generation time and sequence position are known.
 //!
 //! - **Threat: Malicious ID Manipulation**: An attacker could generate an ID with an artificially
 //!   low timestamp to win leader election. Mitigations:
@@ -36,9 +35,10 @@
 //!   - Network-level access controls limit cluster participation
 //!   - Production deployments should use authenticated discovery
 //!
-//! - **Threat: ID Collision**: With 22 bits of randomness, birthday paradox gives ~1.2% collision
-//!   probability at 10,000 IDs per millisecond. In practice, cluster formation involves at most
-//!   tens of nodes, making collisions extremely unlikely.
+//! - **Uniqueness Guarantee**: Unlike random-based approaches, the sequence counter guarantees no
+//!   collisions within the same process. Cross-process collisions are still possible if multiple
+//!   processes generate IDs at the exact same millisecond, but this is extremely rare in practice
+//!   since node ID generation happens once at startup.
 //!
 //! For environments requiring stronger guarantees, consider using hardware security
 //! modules (HSMs) or centralized ID assignment from a trusted coordinator.
@@ -48,17 +48,29 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rand::Rng;
+use parking_lot::Mutex;
 use snafu::{ResultExt, Snafu};
 
 /// Custom epoch: 2024-01-01 00:00:00 UTC (milliseconds since Unix epoch).
 const EPOCH_MS: u64 = 1704067200000;
 
-/// Number of bits used for the random portion.
-const RANDOM_BITS: u32 = 22;
+/// Number of bits used for the sequence portion.
+const SEQUENCE_BITS: u32 = 22;
 
-/// Mask for extracting the random portion (22 bits).
-const RANDOM_MASK: u64 = (1 << RANDOM_BITS) - 1;
+/// Mask for extracting the sequence portion (22 bits).
+const SEQUENCE_MASK: u64 = (1 << SEQUENCE_BITS) - 1;
+
+/// State for sequence-based ID generation.
+struct SnowflakeState {
+    /// Last timestamp used for ID generation.
+    last_timestamp: u64,
+    /// Sequence counter within the current millisecond.
+    sequence: u64,
+}
+
+/// Global state for thread-safe ID generation.
+static SNOWFLAKE_STATE: Mutex<SnowflakeState> =
+    Mutex::new(SnowflakeState { last_timestamp: 0, sequence: 0 });
 
 /// Error type for node ID operations.
 #[derive(Debug, Snafu)]
@@ -106,8 +118,9 @@ pub enum NodeIdError {
 
 /// Generate a new Snowflake ID.
 ///
-/// The ID combines a timestamp (milliseconds since 2024-01-01) with random bits
-/// to produce a globally unique, time-ordered identifier.
+/// The ID combines a timestamp (milliseconds since 2024-01-01) with a sequence counter
+/// to produce a globally unique, time-ordered identifier. The sequence counter guarantees
+/// uniqueness for up to 4.2 million IDs per millisecond.
 ///
 /// # Errors
 ///
@@ -123,7 +136,7 @@ pub enum NodeIdError {
 /// std::thread::sleep(std::time::Duration::from_millis(1));
 /// let id2 = generate_snowflake_id().unwrap();
 ///
-/// // IDs generated later have higher values (with very high probability)
+/// // IDs generated later have higher values (guaranteed)
 /// assert!(id2 > id1);
 /// ```
 pub fn generate_snowflake_id() -> Result<u64, NodeIdError> {
@@ -133,9 +146,37 @@ pub fn generate_snowflake_id() -> Result<u64, NodeIdError> {
         .as_millis() as u64;
 
     let timestamp = now_ms.saturating_sub(EPOCH_MS);
-    let random: u64 = rand::rng().random::<u64>() & RANDOM_MASK;
 
-    Ok((timestamp << RANDOM_BITS) | random)
+    let mut state = SNOWFLAKE_STATE.lock();
+
+    let sequence = if timestamp > state.last_timestamp {
+        // New millisecond - reset sequence
+        state.last_timestamp = timestamp;
+        state.sequence = 0;
+        0
+    } else if timestamp == state.last_timestamp {
+        // Same millisecond - increment sequence
+        state.sequence += 1;
+        if state.sequence > SEQUENCE_MASK {
+            // Sequence overflow - wait for next millisecond
+            // This is extremely rare (>4.2M IDs in 1ms) but we handle it safely
+            drop(state); // Release lock while waiting
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            return generate_snowflake_id(); // Recurse with new timestamp
+        }
+        state.sequence
+    } else {
+        // Clock went backwards - use last timestamp to maintain monotonicity
+        state.sequence += 1;
+        if state.sequence > SEQUENCE_MASK {
+            drop(state);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            return generate_snowflake_id();
+        }
+        state.sequence
+    };
+
+    Ok((state.last_timestamp << SEQUENCE_BITS) | sequence)
 }
 
 /// Extract the timestamp portion from a Snowflake ID.
@@ -144,14 +185,14 @@ pub fn generate_snowflake_id() -> Result<u64, NodeIdError> {
 #[must_use]
 #[cfg(test)]
 pub fn extract_timestamp(id: u64) -> u64 {
-    id >> RANDOM_BITS
+    id >> SEQUENCE_BITS
 }
 
-/// Extract the random portion from a Snowflake ID.
+/// Extract the sequence portion from a Snowflake ID.
 #[must_use]
 #[cfg(test)]
-pub fn extract_random(id: u64) -> u64 {
-    id & RANDOM_MASK
+pub fn extract_sequence(id: u64) -> u64 {
+    id & SEQUENCE_MASK
 }
 
 /// Load existing node ID or generate and persist a new one.
@@ -263,28 +304,27 @@ mod tests {
         let id = generate_snowflake_id().unwrap();
 
         let timestamp = extract_timestamp(id);
-        let random = extract_random(id);
+        let sequence = extract_sequence(id);
 
         // Verify reconstruction
-        let reconstructed = (timestamp << RANDOM_BITS) | random;
+        let reconstructed = (timestamp << SEQUENCE_BITS) | sequence;
         assert_eq!(id, reconstructed, "ID should reconstruct from parts");
 
         // Timestamp should be reasonable (after epoch, not too far in future)
         assert!(timestamp > 0, "timestamp should be positive");
         assert!(timestamp < (1u64 << TIMESTAMP_BITS), "timestamp should fit in 42 bits");
 
-        // Random should fit in 22 bits
-        assert!(random <= RANDOM_MASK, "random portion should fit in 22 bits");
+        // Sequence should fit in 22 bits
+        assert!(sequence <= SEQUENCE_MASK, "sequence portion should fit in 22 bits");
     }
 
     #[test]
     fn test_snowflake_ids_are_unique() {
         // Generate IDs quickly and verify uniqueness.
-        // With 22 bits of randomness (~4.2M possibilities), collision probability
-        // for n IDs is ~n²/(2*4.2M). For 100 IDs: ~0.0001%, very safe.
-        // We reduced from 1000 to 100 to avoid rare CI flakiness.
+        // With a sequence counter, uniqueness is guaranteed within the same process.
+        // Test with 1000 IDs to verify the sequence counter works correctly.
         let mut ids = HashSet::new();
-        for _ in 0..100 {
+        for _ in 0..1000 {
             let id = generate_snowflake_id().unwrap();
             assert!(ids.insert(id), "Snowflake IDs should be unique, got duplicate: {id}");
         }
@@ -377,10 +417,32 @@ mod tests {
     #[test]
     fn test_bit_allocation() {
         // Verify bit allocation: 42 + 22 = 64
-        assert_eq!(TIMESTAMP_BITS + RANDOM_BITS, 64);
+        assert_eq!(TIMESTAMP_BITS + SEQUENCE_BITS, 64);
 
         // Verify mask covers exactly 22 bits
-        assert_eq!(RANDOM_MASK, 0x3FFFFF);
-        assert_eq!(RANDOM_MASK.count_ones(), 22);
+        assert_eq!(SEQUENCE_MASK, 0x3FFFFF);
+        assert_eq!(SEQUENCE_MASK.count_ones(), 22);
+    }
+
+    #[test]
+    fn test_sequence_increments_within_same_millisecond() {
+        // Generate multiple IDs rapidly - sequence should increment
+        let id1 = generate_snowflake_id().unwrap();
+        let id2 = generate_snowflake_id().unwrap();
+        let id3 = generate_snowflake_id().unwrap();
+
+        // All IDs should be unique and increasing
+        assert!(id2 > id1, "IDs should be monotonically increasing");
+        assert!(id3 > id2, "IDs should be monotonically increasing");
+
+        // If they're in the same millisecond, sequence should increment
+        let ts1 = extract_timestamp(id1);
+        let ts2 = extract_timestamp(id2);
+
+        if ts1 == ts2 {
+            let seq1 = extract_sequence(id1);
+            let seq2 = extract_sequence(id2);
+            assert_eq!(seq2, seq1 + 1, "sequence should increment within same millisecond");
+        }
     }
 }
