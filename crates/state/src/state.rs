@@ -594,17 +594,22 @@ impl<B: StorageBackend> StateLayer<B> {
         start_after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Relationship>> {
+        use crate::keys::vault_prefix;
+
         let txn = self.db.read().context(InkwellSnafu)?;
 
         let mut relationships = Vec::with_capacity(limit.min(1000));
 
-        // Build the range start key
+        // Build the range start key.
+        // Note: Keys are ordered by (vault_id, bucket_id, local_key). For full
+        // vault scans without start_after, we use the 8-byte vault prefix to
+        // iterate from the very first key in the vault (bucket 0).
         let start_key = if let Some(after) = start_after {
             let mut k = encode_storage_key(vault_id, after.as_bytes());
             k.push(0);
             k
         } else {
-            encode_storage_key(vault_id, &[])
+            vault_prefix(vault_id).to_vec()
         };
 
         for (key_bytes, value) in txn.iter::<tables::Relationships>().context(InkwellSnafu)? {
@@ -791,6 +796,89 @@ mod tests {
         assert_eq!(statuses, vec![WriteStatus::Deleted]);
 
         assert!(!state.relationship_exists(vault_id, "doc:123", "viewer", "user:alice").unwrap());
+    }
+
+    /// Regression test for list_relationships bug where using encode_storage_key
+    /// with an empty key caused iteration to start at bucket 185, skipping ~72%
+    /// of relationships in buckets 0-184.
+    ///
+    /// This test creates relationships with keys that hash to various buckets
+    /// (including low-numbered buckets) and verifies list_relationships returns
+    /// all of them when starting from scratch (no start_after).
+    #[test]
+    fn test_list_relationships_returns_all_buckets() {
+        use inferadb_ledger_types::bucket_id;
+
+        let state = create_test_state();
+        let vault_id = 1;
+
+        // Create relationships with resource names chosen to land in different buckets.
+        // We want at least some in buckets < 185 to catch the regression.
+        let test_cases = vec![
+            ("doc:alpha", "viewer", "user:a"),
+            ("doc:beta", "viewer", "user:b"),
+            ("doc:gamma", "viewer", "user:c"),
+            ("doc:delta", "viewer", "user:d"),
+            ("doc:epsilon", "viewer", "user:e"),
+            ("doc:zeta", "viewer", "user:f"),
+            ("doc:eta", "viewer", "user:g"),
+            ("doc:theta", "viewer", "user:h"),
+        ];
+
+        // Verify we have relationships in different bucket ranges
+        let mut has_low_bucket = false;
+        let mut has_high_bucket = false;
+        for (resource, relation, subject) in &test_cases {
+            let rel_key = format!("rel:{}#{}@{}", resource, relation, subject);
+            let bucket = bucket_id(rel_key.as_bytes());
+            if bucket < 128 {
+                has_low_bucket = true;
+            } else {
+                has_high_bucket = true;
+            }
+        }
+        assert!(
+            has_low_bucket && has_high_bucket,
+            "Test data should span both low and high buckets for meaningful coverage"
+        );
+
+        // Create all relationships
+        let ops: Vec<Operation> = test_cases
+            .iter()
+            .map(|(resource, relation, subject)| Operation::CreateRelationship {
+                resource: resource.to_string(),
+                relation: relation.to_string(),
+                subject: subject.to_string(),
+            })
+            .collect();
+
+        let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
+        assert!(statuses.iter().all(|s| *s == WriteStatus::Created));
+
+        // List all relationships without start_after - this is the bug scenario
+        let listed = state.list_relationships(vault_id, None, 100).unwrap();
+
+        // Must return all relationships, not just those in buckets >= 185
+        assert_eq!(
+            listed.len(),
+            test_cases.len(),
+            "list_relationships should return all {} relationships, got {}. \
+             This may indicate the start key bug (starting at bucket 185 instead of 0).",
+            test_cases.len(),
+            listed.len()
+        );
+
+        // Verify all specific relationships are present
+        for (resource, relation, subject) in &test_cases {
+            let found = listed.iter().any(|r| {
+                r.resource == *resource && r.relation == *relation && r.subject == *subject
+            });
+            assert!(
+                found,
+                "Relationship {}#{}@{} not found in list_relationships output",
+                resource, relation, subject
+            );
+        }
     }
 
     #[test]
