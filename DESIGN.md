@@ -185,7 +185,7 @@ struct VaultBlock {
 struct Transaction {
     id: TxId,
     client_id: ClientId,
-    sequence: u64,                 // Monotonic per-client (idempotency)
+    sequence: u64,                 // Server-assigned, monotonic per-client-vault
     actor: String,                 // Audit logging
     operations: Vec<Operation>,
     timestamp: DateTime<Utc>,
@@ -213,7 +213,7 @@ enum SetCondition {
 ### Write Path
 
 ```
-Client Request
+Client Request (with idempotency_key)
     │
     ▼
 [1] Any node receives request
@@ -222,7 +222,7 @@ Client Request
 [2] Forward to Raft leader (if not already leader)
     │
     ▼
-[3] Leader validates + assigns sequence number
+[3] Leader checks idempotency cache (return cached result on hit)
     │
     ▼
 [4] Batcher aggregates (up to 100 txs or 10ms timeout)
@@ -237,10 +237,10 @@ Client Request
 [7] Majority acknowledgment commits
     │
     ▼
-[8] State layer applies transactions + computes state_root
+[8] State layer assigns sequence + applies transactions + computes state_root
     │
     ▼
-[9] Response to client with state_root hash
+[9] Response to client with assigned_sequence + state_root hash
 ```
 
 **Target latency**: <50ms at p99 under normal load.
@@ -582,27 +582,34 @@ Background GC removes expired entities, emitting `ExpireEntity` operations for a
 
 ## Client Idempotency & Retry Semantics
 
-Clients include `(client_id, sequence)` with each request:
+Clients include `(client_id, idempotency_key)` with each request:
 
 ```rust
 struct WriteRequest {
-    client_id: String,      // Identifies client
-    sequence: u64,          // Monotonic per-client
+    client_id: String,          // Identifies client
+    idempotency_key: [u8; 16],  // UUIDv4, unique per write attempt
     operations: Vec<Operation>,
 }
 ```
 
-**Idempotency guarantee**: Same `(client_id, sequence)` returns cached response, no re-execution.
+The server assigns a monotonically increasing `sequence` per `(client_id, vault)` at Raft apply time and returns it as `assigned_sequence` in the response. This eliminates race conditions from concurrent client writes — the server determines ordering.
 
-**Sequence tracking**: Per-vault in persistent state. Survives leader failover.
+**Idempotency guarantee**: Same `(client_id, idempotency_key)` returns cached response with the original `assigned_sequence`, no re-execution.
+
+**Idempotency key reuse**: Reusing an `idempotency_key` with a different payload (different operations) returns `IDEMPOTENCY_KEY_REUSED` error.
+
+**Cache TTL**: Idempotency cache entries expire after 24 hours. Retries beyond this window are treated as new requests.
+
+**Sequence tracking**: Per-client-vault in persistent state. Survives leader failover.
 
 **Retry behavior**:
 
-| Scenario                    | Client sees   | Correct action           |
-| --------------------------- | ------------- | ------------------------ |
-| `CREATE` → `ALREADY_EXISTS` | Goal achieved | No retry needed          |
-| `DELETE` → `NOT_FOUND`      | Goal achieved | No retry needed          |
-| Network timeout             | Unknown       | Retry with same sequence |
+| Scenario                    | Client sees   | Correct action                    |
+| --------------------------- | ------------- | --------------------------------- |
+| `CREATE` → `ALREADY_EXISTS` | Goal achieved | No retry needed                   |
+| `DELETE` → `NOT_FOUND`      | Goal achieved | No retry needed                   |
+| Network timeout             | Unknown       | Retry with same `idempotency_key` |
+| `IDEMPOTENCY_KEY_REUSED`    | Client bug    | Generate new key, fix payload     |
 
 ---
 
@@ -888,9 +895,9 @@ Benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. See [WHITEPAPER.md](WHI
 
 ### Idempotency Invariants
 
-14. **Sequence monotonicity**: Per-client sequences are strictly increasing
-15. **Duplicate rejection**: Sequence ≤ last_committed_seq never creates new transaction
-16. **Sequence persistence**: last_committed_seq survives leader failover
+14. **Sequence monotonicity**: Server-assigned per-client-vault sequences are strictly increasing
+15. **Idempotency deduplication**: Same `(client_id, idempotency_key)` returns cached result, never re-executes
+16. **Sequence persistence**: Server-assigned sequences survive leader failover (stored in `AppliedState`)
 
 ---
 
@@ -927,7 +934,7 @@ tx_hash = SHA-256(
     tx_id               || # 16 bytes (UUID)
     client_id_len       || # u32, little-endian
     client_id           || # UTF-8 bytes
-    sequence            || # u64, big-endian
+    sequence            || # u64, big-endian (server-assigned)
     actor_len           || # u32, little-endian
     actor               || # UTF-8 bytes
     op_count            || # u32, little-endian
