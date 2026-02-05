@@ -1,7 +1,7 @@
 //! Performance benchmarks for the Ledger SDK.
 //!
 //! These benchmarks measure:
-//! - SDK overhead (serialization, sequence tracking)
+//! - SDK overhead (serialization, idempotency key generation)
 //! - Throughput (ops/sec for writes, reads)
 //! - Latency (single operation timing)
 //! - Batch amortization (1 vs 10 vs 100 keys)
@@ -14,13 +14,11 @@
 //!
 //! | Benchmark                    | Baseline     | Notes                          |
 //! |------------------------------|--------------|--------------------------------|
-//! | sequence_next                | ~25 ns       | In-memory atomic increment     |
-//! | sequence_concurrent_10       | ~150 ns      | 10 threads contending          |
 //! | read_single_key              | ~500 µs      | Full roundtrip to mock server  |
 //! | read_batch_1                 | ~500 µs      | Same as single (baseline)      |
 //! | read_batch_10                | ~600 µs      | 10x keys, ~1.2x latency        |
 //! | read_batch_100               | ~1.2 ms      | 100x keys, ~2.4x latency       |
-//! | write_single_operation       | ~600 µs      | Includes sequence tracking     |
+//! | write_single_operation       | ~600 µs      | Includes idempotency key gen   |
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
@@ -28,8 +26,7 @@ use std::{hint::black_box, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use inferadb_ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, RetryPolicy, SequenceTracker, ServerSource,
-    mock::MockLedgerServer,
+    ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource, mock::MockLedgerServer,
 };
 use tokio::runtime::Runtime;
 
@@ -57,68 +54,6 @@ async fn create_client_for_mock(endpoint: &str) -> LedgerClient {
         .expect("Failed to build config");
 
     LedgerClient::new(config).await.expect("Failed to create client")
-}
-
-// ============================================================================
-// Sequence Tracker Benchmarks
-// ============================================================================
-
-/// Benchmark sequence tracking overhead - single thread.
-///
-/// This measures the pure overhead of the sequence tracker without network I/O.
-/// The sequence tracker is called before every write operation.
-fn bench_sequence_next(c: &mut Criterion) {
-    let tracker = SequenceTracker::new("bench-client");
-
-    c.bench_function("sequence_next", |b| b.iter(|| black_box(tracker.next_sequence(1, 0))));
-}
-
-/// Benchmark sequence tracking with multiple vaults.
-///
-/// Tests performance when tracking sequences across many independent vaults.
-fn bench_sequence_multi_vault(c: &mut Criterion) {
-    let tracker = SequenceTracker::new("bench-client");
-
-    c.bench_function("sequence_multi_vault_100", |b| {
-        let mut vault_id = 0i64;
-        b.iter(|| {
-            vault_id = (vault_id + 1) % 100;
-            black_box(tracker.next_sequence(1, vault_id))
-        })
-    });
-}
-
-/// Benchmark sequence tracking under contention.
-///
-/// Measures performance when multiple threads increment sequences concurrently.
-fn bench_sequence_concurrent(c: &mut Criterion) {
-    use std::{sync::Arc, thread};
-
-    let mut group = c.benchmark_group("sequence_concurrent");
-
-    for num_threads in [2, 4, 10] {
-        group.bench_with_input(BenchmarkId::from_parameter(num_threads), &num_threads, |b, &n| {
-            let tracker = Arc::new(SequenceTracker::new("bench-client"));
-
-            b.iter(|| {
-                let handles: Vec<_> = (0..n)
-                    .map(|i| {
-                        let t = tracker.clone();
-                        thread::spawn(move || {
-                            for _ in 0..100 {
-                                black_box(t.next_sequence(1, i as i64));
-                            }
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().expect("Thread panicked");
-                }
-            })
-        });
-    }
-    group.finish();
 }
 
 // ============================================================================
@@ -188,7 +123,7 @@ fn bench_read_batch(c: &mut Criterion) {
 
 /// Benchmark single write operation latency.
 ///
-/// Measures full roundtrip time for a single write including sequence tracking.
+/// Measures full roundtrip time for a single write including idempotency key generation.
 fn bench_write_single(c: &mut Criterion) {
     let rt = create_runtime();
 
@@ -348,12 +283,6 @@ fn bench_mixed_read_heavy(c: &mut Criterion) {
 // ============================================================================
 
 criterion_group!(
-    name = sequence_benches;
-    config = Criterion::default().sample_size(1000);
-    targets = bench_sequence_next, bench_sequence_multi_vault, bench_sequence_concurrent
-);
-
-criterion_group!(
     name = read_benches;
     config = Criterion::default().sample_size(100);
     targets = bench_read_single, bench_read_batch
@@ -371,4 +300,4 @@ criterion_group!(
     targets = bench_mixed_read_heavy
 );
 
-criterion_main!(sequence_benches, read_benches, write_benches, mixed_benches);
+criterion_main!(read_benches, write_benches, mixed_benches);

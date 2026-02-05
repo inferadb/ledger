@@ -24,7 +24,6 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 
 use crate::{
-    IdempotencyCache,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     metrics,
     pagination::{PageToken, PageTokenCodec},
@@ -59,9 +58,6 @@ pub struct ReadServiceImpl {
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// Block announcement broadcast channel.
     block_announcements: broadcast::Sender<BlockAnnouncement>,
-    /// Idempotency cache for client state tracking.
-    #[builder(default)]
-    idempotency: Option<Arc<IdempotencyCache>>,
     /// Raft instance for consistency checks (linearizable reads).
     #[builder(default)]
     raft: Option<Arc<Raft<LedgerTypeConfig>>>,
@@ -1185,21 +1181,11 @@ impl ReadService for ReadServiceImpl {
         let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
-        // Query the idempotency cache first (hot path)
-        // Key is (namespace_id, vault_id, client_id) per DESIGN.md §5.3
-        let cached_sequence = self
-            .idempotency
-            .as_ref()
-            .map(|cache| cache.get_last_sequence(namespace_id, vault_id, client_id))
-            .unwrap_or(0);
-
-        // If cache has data, use it; otherwise fall back to persistent state
-        let last_committed_sequence = if cached_sequence > 0 {
-            cached_sequence
-        } else {
-            // Fall back to persistent AppliedState (survives restarts)
-            self.applied_state.client_sequence(namespace_id, vault_id, client_id)
-        };
+        // Server-assigned sequences: Query the persistent AppliedState directly
+        // The idempotency cache no longer tracks sequence numbers by sequence;
+        // it uses idempotency keys instead.
+        let last_committed_sequence =
+            self.applied_state.client_sequence(namespace_id, vault_id, client_id);
 
         Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }

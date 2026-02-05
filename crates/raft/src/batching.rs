@@ -360,7 +360,7 @@ mod tests {
     }
 
     fn make_response(block_height: u64) -> LedgerResponse {
-        LedgerResponse::Write { block_height, block_hash: [0u8; 32] }
+        LedgerResponse::Write { block_height, block_hash: [0u8; 32], assigned_sequence: 1 }
     }
 
     #[tokio::test]

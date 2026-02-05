@@ -53,46 +53,50 @@ impl MultiShardWriteService {
         Ok(())
     }
 
-    /// Check for sequence gaps before submitting to Raft.
-    fn check_sequence_gap(
-        &self,
-        namespace_id: i64,
-        vault_id: i64,
-        client_id: &str,
-        sequence: u64,
-    ) -> Result<(), WriteError> {
-        // Sequence 0 is a special case (no sequence tracking)
-        if sequence == 0 || client_id.is_empty() {
-            return Ok(());
+    /// Compute a hash of operations for idempotency payload comparison.
+    fn hash_operations(operations: &[Operation]) -> Vec<u8> {
+        use crate::proto::operation::Op;
+
+        let mut bytes = Vec::new();
+        for op in operations {
+            if let Some(inner) = &op.op {
+                match inner {
+                    Op::CreateRelationship(cr) => {
+                        bytes.extend_from_slice(b"CR");
+                        bytes.extend_from_slice(cr.resource.as_bytes());
+                        bytes.extend_from_slice(cr.relation.as_bytes());
+                        bytes.extend_from_slice(cr.subject.as_bytes());
+                    },
+                    Op::DeleteRelationship(dr) => {
+                        bytes.extend_from_slice(b"DR");
+                        bytes.extend_from_slice(dr.resource.as_bytes());
+                        bytes.extend_from_slice(dr.relation.as_bytes());
+                        bytes.extend_from_slice(dr.subject.as_bytes());
+                    },
+                    Op::SetEntity(se) => {
+                        bytes.extend_from_slice(b"SE");
+                        bytes.extend_from_slice(se.key.as_bytes());
+                        bytes.extend_from_slice(&se.value);
+                        if let Some(cond) = &se.condition {
+                            bytes.extend_from_slice(&format!("{:?}", cond).into_bytes());
+                        }
+                        if let Some(exp) = se.expires_at {
+                            bytes.extend_from_slice(&exp.to_le_bytes());
+                        }
+                    },
+                    Op::DeleteEntity(de) => {
+                        bytes.extend_from_slice(b"DE");
+                        bytes.extend_from_slice(de.key.as_bytes());
+                    },
+                    Op::ExpireEntity(ee) => {
+                        bytes.extend_from_slice(b"EE");
+                        bytes.extend_from_slice(ee.key.as_bytes());
+                        bytes.extend_from_slice(&ee.expired_at.to_le_bytes());
+                    },
+                }
+            }
         }
-
-        // Resolve the shard to get applied_state
-        let ctx = match self.resolver.resolve(namespace_id) {
-            Ok(ctx) => ctx,
-            Err(_) => return Ok(()), // Skip check if shard unavailable
-        };
-
-        let last_committed = ctx.applied_state.client_sequence(namespace_id, vault_id, client_id);
-
-        if sequence > last_committed + 1 {
-            return Err(WriteError {
-                code: WriteErrorCode::SequenceGap.into(),
-                key: String::new(),
-                current_version: None,
-                current_value: None,
-                message: format!(
-                    "Sequence gap detected: received {}, expected {} (last committed: {})",
-                    sequence,
-                    last_committed + 1,
-                    last_committed
-                ),
-                committed_tx_id: None,
-                committed_block_height: None,
-                last_committed_sequence: Some(last_committed),
-            });
-        }
-
-        Ok(())
+        bytes
     }
 
     /// Generate inclusion proof for a write.
@@ -191,13 +195,15 @@ impl MultiShardWriteService {
     }
 
     /// Build a ledger request from operations.
+    ///
+    /// Server-assigned sequences: The transaction's sequence is set to 0 here;
+    /// the actual sequence will be assigned by the Raft state machine at apply time.
     fn build_request(
         &self,
         operations: &[Operation],
         namespace_id: i64,
         vault_id: i64,
         client_id: &str,
-        sequence: u64,
         actor: &str,
     ) -> Result<LedgerRequest, Status> {
         let internal_ops: Vec<inferadb_ledger_types::Operation> =
@@ -207,10 +213,12 @@ impl MultiShardWriteService {
             return Err(Status::invalid_argument("No operations provided"));
         }
 
+        // Server-assigned sequences: sequence=0 is a placeholder; actual sequence
+        // is assigned at Raft apply time for deterministic replay.
         let transaction = inferadb_ledger_types::Transaction {
             id: *Uuid::new_v4().as_bytes(),
             client_id: client_id.to_string(),
-            sequence,
+            sequence: 0, // Server-assigned at apply time
             operations: internal_ops,
             timestamp: chrono::Utc::now(),
             actor: actor.to_string(),
@@ -222,7 +230,7 @@ impl MultiShardWriteService {
 
 #[tonic::async_trait]
 impl WriteService for MultiShardWriteService {
-    #[instrument(skip(self, request), fields(client_id, sequence, namespace_id, vault_id))]
+    #[instrument(skip(self, request), fields(client_id, namespace_id, vault_id))]
     async fn write(
         &self,
         request: Request<WriteRequest>,
@@ -232,7 +240,6 @@ impl WriteService for MultiShardWriteService {
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let sequence = req.sequence;
         let namespace_id = req
             .namespace_id
             .as_ref()
@@ -242,49 +249,70 @@ impl WriteService for MultiShardWriteService {
         // Actor is set by upstream Engine/Control services - Ledger uses "system" internally
         let actor = "system".to_string();
 
+        // Parse idempotency key (must be exactly 16 bytes for UUID)
+        let idempotency_key: [u8; 16] =
+            req.idempotency_key.as_slice().try_into().map_err(|_| {
+                Status::invalid_argument("idempotency_key must be exactly 16 bytes")
+            })?;
+
+        // Compute request hash for payload comparison
+        let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
+
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
-        tracing::Span::current().record("sequence", sequence);
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
 
         // Check idempotency cache
-        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
-            debug!("Returning cached result for duplicate request");
-            metrics::record_idempotency_hit();
-            metrics::record_write(true, start.elapsed().as_secs_f64());
-            return Ok(Response::new(WriteResponse {
-                result: Some(crate::proto::write_response::Result::Success(cached)),
-            }));
+        use crate::idempotency::IdempotencyCheckResult;
+        match self.idempotency.check(
+            namespace_id,
+            vault_id,
+            &client_id,
+            idempotency_key,
+            request_hash,
+        ) {
+            IdempotencyCheckResult::Duplicate(cached) => {
+                debug!("Returning cached result for duplicate request");
+                metrics::record_idempotency_hit();
+                metrics::record_write(true, start.elapsed().as_secs_f64());
+                return Ok(Response::new(WriteResponse {
+                    result: Some(crate::proto::write_response::Result::Success(cached)),
+                }));
+            },
+            IdempotencyCheckResult::KeyReused => {
+                metrics::record_write(false, start.elapsed().as_secs_f64());
+                return Ok(Response::new(WriteResponse {
+                    result: Some(crate::proto::write_response::Result::Error(WriteError {
+                        code: WriteErrorCode::IdempotencyKeyReused.into(),
+                        key: String::new(),
+                        current_version: None,
+                        current_value: None,
+                        message:
+                            "Idempotency key was already used with a different request payload"
+                                .to_string(),
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        assigned_sequence: None,
+                    })),
+                }));
+            },
+            IdempotencyCheckResult::NewRequest => {
+                metrics::record_idempotency_miss();
+            },
         }
-        metrics::record_idempotency_miss();
 
         // Check rate limit
         self.check_rate_limit(namespace_id)?;
 
-        // Check sequence gaps
-        if let Err(gap_error) =
-            self.check_sequence_gap(namespace_id, vault_id, &client_id, sequence)
-        {
-            warn!(client_id = %client_id, sequence, "Sequence gap detected");
-            metrics::record_write(false, start.elapsed().as_secs_f64());
-            return Ok(Response::new(WriteResponse {
-                result: Some(crate::proto::write_response::Result::Error(gap_error)),
-            }));
-        }
+        // Server-assigned sequences: no gap check needed
 
         // Resolve shard for this namespace
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Build request
-        let ledger_request = self.build_request(
-            &req.operations,
-            namespace_id,
-            vault_id,
-            &client_id,
-            sequence,
-            &actor,
-        )?;
+        let ledger_request =
+            self.build_request(&req.operations, namespace_id, vault_id, &client_id, &actor)?;
 
         // Submit to the resolved shard's Raft
         metrics::record_raft_proposal();
@@ -298,7 +326,7 @@ impl WriteService for MultiShardWriteService {
         let latency = start.elapsed().as_secs_f64();
 
         match response {
-            LedgerResponse::Write { block_height, block_hash: _ } => {
+            LedgerResponse::Write { block_height, block_hash: _, assigned_sequence } => {
                 // Generate proof if requested
                 let (block_header, tx_proof) = if req.include_tx_proof {
                     self.generate_write_proof(namespace_id, vault_id, block_height)
@@ -311,6 +339,7 @@ impl WriteService for MultiShardWriteService {
                     block_height,
                     block_header,
                     tx_proof,
+                    assigned_sequence,
                 };
 
                 // Cache the successful result
@@ -318,12 +347,18 @@ impl WriteService for MultiShardWriteService {
                     namespace_id,
                     vault_id,
                     client_id.clone(),
-                    sequence,
+                    idempotency_key,
+                    request_hash,
                     success.clone(),
                 );
 
                 metrics::record_write(true, latency);
-                info!(block_height, latency_ms = latency * 1000.0, "Write committed");
+                info!(
+                    block_height,
+                    assigned_sequence,
+                    latency_ms = latency * 1000.0,
+                    "Write committed"
+                );
 
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Success(success)),
@@ -350,7 +385,6 @@ impl WriteService for MultiShardWriteService {
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let sequence = req.sequence;
         let namespace_id = req
             .namespace_id
             .as_ref()
@@ -358,45 +392,83 @@ impl WriteService for MultiShardWriteService {
             .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
         let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
+        // Parse idempotency key (must be exactly 16 bytes for UUID)
+        let idempotency_key: [u8; 16] =
+            req.idempotency_key.as_slice().try_into().map_err(|_| {
+                Status::invalid_argument("idempotency_key must be exactly 16 bytes")
+            })?;
+
         // Flatten all operations from all groups
         let all_operations: Vec<crate::proto::Operation> =
             req.operations.iter().flat_map(|group| group.operations.clone()).collect();
 
         let batch_size = all_operations.len();
 
+        // Compute request hash for payload comparison
+        let request_hash = seahash::hash(&Self::hash_operations(&all_operations));
+
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
-        tracing::Span::current().record("sequence", sequence);
         tracing::Span::current().record("namespace_id", namespace_id);
         tracing::Span::current().record("vault_id", vault_id);
         tracing::Span::current().record("batch_size", batch_size);
 
+        // Check idempotency cache
+        use crate::idempotency::IdempotencyCheckResult;
+        match self.idempotency.check(
+            namespace_id,
+            vault_id,
+            &client_id,
+            idempotency_key,
+            request_hash,
+        ) {
+            IdempotencyCheckResult::Duplicate(cached) => {
+                debug!("Returning cached result for duplicate batch request");
+                metrics::record_idempotency_hit();
+                metrics::record_batch_write(true, 0, start.elapsed().as_secs_f64());
+                return Ok(Response::new(BatchWriteResponse {
+                    result: Some(crate::proto::batch_write_response::Result::Success(
+                        BatchWriteSuccess {
+                            tx_id: cached.tx_id,
+                            block_height: cached.block_height,
+                            block_header: cached.block_header,
+                            tx_proof: cached.tx_proof,
+                            assigned_sequence: cached.assigned_sequence,
+                        },
+                    )),
+                }));
+            },
+            IdempotencyCheckResult::KeyReused => {
+                metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
+                return Ok(Response::new(BatchWriteResponse {
+                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
+                        code: WriteErrorCode::IdempotencyKeyReused.into(),
+                        key: String::new(),
+                        current_version: None,
+                        current_value: None,
+                        message:
+                            "Idempotency key was already used with a different request payload"
+                                .to_string(),
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        assigned_sequence: None,
+                    })),
+                }));
+            },
+            IdempotencyCheckResult::NewRequest => {
+                metrics::record_idempotency_miss();
+            },
+        }
+
         // Check rate limit
         self.check_rate_limit(namespace_id)?;
-
-        // Check sequence gaps
-        if let Err(gap_error) =
-            self.check_sequence_gap(namespace_id, vault_id, &client_id, sequence)
-        {
-            warn!(client_id = %client_id, sequence, "Sequence gap detected");
-            metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
-            return Ok(Response::new(BatchWriteResponse {
-                result: Some(crate::proto::batch_write_response::Result::Error(gap_error)),
-            }));
-        }
 
         // Resolve shard
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Build request with flattened operations
-        let ledger_request = self.build_request(
-            &all_operations,
-            namespace_id,
-            vault_id,
-            &client_id,
-            sequence,
-            "system",
-        )?;
+        let ledger_request =
+            self.build_request(&all_operations, namespace_id, vault_id, &client_id, "system")?;
 
         // Submit to Raft
         metrics::record_raft_proposal();
@@ -410,7 +482,7 @@ impl WriteService for MultiShardWriteService {
         let latency = start.elapsed().as_secs_f64();
 
         match response {
-            LedgerResponse::Write { block_height, block_hash: _ } => {
+            LedgerResponse::Write { block_height, block_hash: _, assigned_sequence } => {
                 // Generate proof if requested
                 let (block_header, tx_proof) = if req.include_tx_proofs {
                     self.generate_write_proof(namespace_id, vault_id, block_height)
@@ -418,16 +490,37 @@ impl WriteService for MultiShardWriteService {
                     (None, None)
                 };
 
+                // Create WriteSuccess for idempotency cache
+                let write_success = WriteSuccess {
+                    tx_id: Some(TxId { id: Uuid::new_v4().as_bytes().to_vec() }),
+                    block_height,
+                    block_header: block_header.clone(),
+                    tx_proof: tx_proof.clone(),
+                    assigned_sequence,
+                };
+
+                // Cache the successful result
+                self.idempotency.insert(
+                    namespace_id,
+                    vault_id,
+                    client_id.clone(),
+                    idempotency_key,
+                    request_hash,
+                    write_success,
+                );
+
                 let success = BatchWriteSuccess {
                     tx_id: Some(TxId { id: Uuid::new_v4().as_bytes().to_vec() }),
                     block_height,
                     block_header,
                     tx_proof,
+                    assigned_sequence,
                 };
 
                 metrics::record_batch_write(true, batch_size, latency);
                 info!(
                     block_height,
+                    assigned_sequence,
                     batch_size,
                     latency_ms = latency * 1000.0,
                     "Batch write committed"

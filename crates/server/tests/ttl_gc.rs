@@ -67,7 +67,6 @@ async fn write_entity_with_ttl(
     value: &[u8],
     expires_at: Option<u64>,
     client_id: &str,
-    sequence: u64,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
@@ -75,7 +74,7 @@ async fn write_entity_with_ttl(
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
-        sequence,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
                 inferadb_ledger_raft::proto::SetEntity {
@@ -173,7 +172,6 @@ async fn test_force_gc_removes_expired_entities() {
         b"expired-value",
         Some(expired_at),
         "gc-test-client",
-        1,
     )
     .await
     .expect("write expired entity");
@@ -187,7 +185,6 @@ async fn test_force_gc_removes_expired_entities() {
         b"permanent-value",
         None,
         "gc-test-client",
-        2,
     )
     .await
     .expect("write permanent entity");
@@ -202,7 +199,6 @@ async fn test_force_gc_removes_expired_entities() {
         b"future-value",
         Some(future_expires),
         "gc-test-client",
-        3,
     )
     .await
     .expect("write future entity");
@@ -288,13 +284,10 @@ async fn test_force_gc_all_vaults() {
         b"value-1",
         Some(expired_at),
         "gc-multi-client",
-        1,
     )
     .await
     .expect("write to vault 1");
 
-    // Use sequence 1 for vault 2 as well - sequences are tracked
-    // independently per (namespace_id, vault_id, client_id) per DESIGN.md §5.3
     write_entity_with_ttl(
         leader.addr,
         ns_id,
@@ -303,7 +296,6 @@ async fn test_force_gc_all_vaults() {
         b"value-2",
         Some(expired_at),
         "gc-multi-client",
-        1, // Independent sequence for vault 2
     )
     .await
     .expect("write to vault 2");

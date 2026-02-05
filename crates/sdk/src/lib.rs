@@ -2,12 +2,12 @@
 //!
 //! This SDK provides a high-level, ergonomic API for Rust applications to interact
 //! with Ledger's blockchain database. It wraps the gRPC services with automatic
-//! idempotency tracking, resilient connectivity, and streaming support.
+//! idempotency, resilient connectivity, and streaming support.
 //!
 //! # Features
 //!
 //! - **Type-safe API**: Strong typing for all Ledger operations
-//! - **Automatic idempotency**: Client-side sequence tracking per vault
+//! - **Automatic idempotency**: Server-assigned sequences with UUID-based deduplication
 //! - **Resilient connectivity**: Exponential backoff retry and failover
 //! - **Streaming support**: WatchBlocks with automatic reconnection
 //! - **Zero-cost abstractions**: Efficient serialization and connection pooling
@@ -32,6 +32,7 @@
 //!     // Write operations with automatic idempotency
 //!     let operations = vec![Operation::set_entity("user:123", b"data".to_vec())];
 //!     let result = client.write(1, None, operations).await?;
+//!     println!("Committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
 //!
 //!     Ok(())
 //! }
@@ -44,8 +45,8 @@
 //! │                    LedgerClient (Public API)                │
 //! │  .read() │ .write() │ .watch_blocks() │ .admin()           │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │                   SequenceTracker Layer                     │
-//! │   Per-vault sequence tracking │ Crash recovery │ Dedup     │
+//! │                   Idempotency Layer                         │
+//! │   UUID generation │ Retry key preservation │ Dedup         │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │                   Resilience Layer (backon)                 │
 //! │   Retry middleware │ Exponential backoff │ Timeout         │
@@ -87,9 +88,6 @@ pub use config::{
 pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
-pub use idempotency::{
-    FileSequenceStorage, PersistentSequenceTracker, SequenceStorage, SequenceTracker, VaultKey,
-};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{NamespaceId, VaultId};
 pub use retry::with_retry;

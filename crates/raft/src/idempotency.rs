@@ -2,10 +2,14 @@
 //!
 //! This module implements a bounded, TTL-based cache that stores the results
 //! of recently committed transactions. When a client retries a request with
-//! the same (namespace_id, vault_id, client_id, sequence) tuple, we return the
+//! the same `(namespace_id, vault_id, client_id, idempotency_key)` tuple, we return the
 //! cached result instead of reprocessing.
 //!
-//! Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id).
+//! Per ADR server-assigned-sequences:
+//! - Clients send a 16-byte UUID idempotency key per write
+//! - Server assigns sequences at Raft commit time
+//! - Cache hit with same payload returns cached result (idempotent retry)
+//! - Cache hit with different payload returns `IDEMPOTENCY_KEY_REUSED` error
 //!
 //! Uses moka's TinyLFU admission policy for superior hit rates (~85% vs ~60% for LRU)
 //! and built-in TTL eviction.
@@ -17,16 +21,15 @@ use moka::sync::Cache;
 use crate::proto::WriteSuccess;
 
 /// Maximum number of entries in the cache.
-const MAX_CACHE_SIZE: u64 = 10_000;
+const MAX_CACHE_SIZE: u64 = 100_000;
 
-/// Time-to-live for cache entries.
-const ENTRY_TTL: Duration = Duration::from_secs(300); // 5 minutes
+/// Time-to-live for cache entries (24 hours per ADR).
+const ENTRY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Composite key for idempotency cache.
 ///
-/// Per DESIGN.md: Sequence tracking is per (namespace_id, vault_id, client_id).
-/// Using this as the cache key ensures writes to different vaults aren't
-/// incorrectly treated as duplicates.
+/// Per ADR: Cache key is `(namespace_id, vault_id, client_id, idempotency_key)`.
+/// The idempotency_key is a 16-byte UUID provided by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey {
     /// Namespace ID.
@@ -35,31 +38,74 @@ pub struct IdempotencyKey {
     pub vault_id: i64,
     /// Client identifier.
     pub client_id: String,
+    /// Client-provided idempotency key (16-byte UUID).
+    pub idempotency_key: [u8; 16],
 }
 
 impl IdempotencyKey {
     /// Create a new idempotency key.
-    pub fn new(namespace_id: i64, vault_id: i64, client_id: String) -> Self {
-        Self { namespace_id, vault_id, client_id }
+    pub fn new(
+        namespace_id: i64,
+        vault_id: i64,
+        client_id: String,
+        idempotency_key: [u8; 16],
+    ) -> Self {
+        Self { namespace_id, vault_id, client_id, idempotency_key }
     }
+
+    /// Create a new idempotency key from a byte slice.
+    ///
+    /// Returns `None` if the slice is not exactly 16 bytes.
+    #[allow(dead_code)]
+    pub fn from_bytes(
+        namespace_id: i64,
+        vault_id: i64,
+        client_id: String,
+        idempotency_key_bytes: &[u8],
+    ) -> Option<Self> {
+        if idempotency_key_bytes.len() != 16 {
+            return None;
+        }
+        let mut key = [0u8; 16];
+        key.copy_from_slice(idempotency_key_bytes);
+        Some(Self::new(namespace_id, vault_id, client_id, key))
+    }
+}
+
+/// Result of checking the idempotency cache.
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum IdempotencyCheckResult {
+    /// Request is new, not in cache.
+    NewRequest,
+    /// Request is a duplicate with same payload - return cached result.
+    Duplicate(WriteSuccess),
+    /// Idempotency key was reused with different payload - error.
+    KeyReused,
 }
 
 /// Cached write result.
 ///
+/// Stores the write result and a hash of the request payload for detecting
+/// idempotency key reuse with different payloads.
+///
 /// Note: TTL is handled by moka internally, so we don't need an `inserted_at` field.
 #[derive(Debug, Clone)]
 pub struct CachedResult {
-    /// The sequence number that was committed.
-    pub sequence: u64,
-    /// The result of the write operation.
+    /// Hash of the request payload (for detecting key reuse with different payload).
+    pub request_hash: u64,
+    /// The result of the write operation (includes assigned_sequence).
     pub result: WriteSuccess,
 }
 
 /// Thread-safe idempotency cache with bounded size and TTL eviction.
 ///
-/// The cache maps `(namespace_id, vault_id, client_id) -> (last_sequence, result)`.
-/// When a duplicate request is detected (same key with sequence <= cached),
-/// the cached result is returned.
+/// The cache maps `(namespace_id, vault_id, client_id, idempotency_key) -> CachedResult`.
+///
+/// Behavior:
+/// - New key: Process write, cache result
+/// - Same key + same payload hash: Return cached result (idempotent retry)
+/// - Same key + different payload hash: Return `KeyReused` error
 ///
 /// Uses moka's TinyLFU admission policy which considers both recency and frequency,
 /// achieving significantly better hit rates than traditional LRU.
@@ -77,23 +123,32 @@ impl IdempotencyCache {
         Self { cache }
     }
 
-    /// Check if a request is a duplicate and return the cached result if so.
+    /// Check if a request is a duplicate.
     ///
-    /// Returns `Some(result)` if this is a duplicate (sequence <= cached sequence).
-    /// Returns `None` if this is a new request. TTL expiration is handled
-    /// automatically by moka.
+    /// Returns:
+    /// - `NewRequest` if the idempotency key is not in the cache
+    /// - `Duplicate(result)` if the key exists with the same payload hash
+    /// - `KeyReused` if the key exists but the payload hash differs
     pub fn check(
         &self,
         namespace_id: i64,
         vault_id: i64,
         client_id: &str,
-        sequence: u64,
-    ) -> Option<WriteSuccess> {
-        let key = IdempotencyKey::new(namespace_id, vault_id, client_id.to_string());
-        self.cache.get(&key).and_then(|entry| {
-            // Check if sequence is a duplicate (same or lower than cached)
-            if entry.sequence >= sequence { Some(entry.result.clone()) } else { None }
-        })
+        idempotency_key: [u8; 16],
+        request_hash: u64,
+    ) -> IdempotencyCheckResult {
+        let key =
+            IdempotencyKey::new(namespace_id, vault_id, client_id.to_string(), idempotency_key);
+        match self.cache.get(&key) {
+            Some(entry) => {
+                if entry.request_hash == request_hash {
+                    IdempotencyCheckResult::Duplicate(entry.result.clone())
+                } else {
+                    IdempotencyCheckResult::KeyReused
+                }
+            },
+            None => IdempotencyCheckResult::NewRequest,
+        }
     }
 
     /// Insert a new result into the cache.
@@ -104,33 +159,46 @@ impl IdempotencyCache {
         namespace_id: i64,
         vault_id: i64,
         client_id: String,
-        sequence: u64,
+        idempotency_key: [u8; 16],
+        request_hash: u64,
         result: WriteSuccess,
     ) {
-        let key = IdempotencyKey::new(namespace_id, vault_id, client_id);
-        self.cache.insert(key, CachedResult { sequence, result });
+        let key = IdempotencyKey::new(namespace_id, vault_id, client_id, idempotency_key);
+        self.cache.insert(key, CachedResult { request_hash, result });
     }
 
     /// Check and insert in one operation.
     ///
-    /// Returns `Some(result)` if this is a duplicate, `None` otherwise.
-    /// If not a duplicate, the new result is inserted.
+    /// Returns:
+    /// - `NewRequest` if the key was not in cache (and the result has been inserted)
+    /// - `Duplicate(result)` if the key exists with the same payload hash
+    /// - `KeyReused` if the key exists but the payload hash differs
     pub fn check_and_insert(
         &self,
         namespace_id: i64,
         vault_id: i64,
         client_id: &str,
-        sequence: u64,
+        idempotency_key: [u8; 16],
+        request_hash: u64,
         result: WriteSuccess,
-    ) -> Option<WriteSuccess> {
+    ) -> IdempotencyCheckResult {
         // First check for existing entry
-        if let Some(cached) = self.check(namespace_id, vault_id, client_id, sequence) {
-            return Some(cached);
+        let check_result =
+            self.check(namespace_id, vault_id, client_id, idempotency_key, request_hash);
+
+        if matches!(check_result, IdempotencyCheckResult::NewRequest) {
+            // Not in cache, insert the new result
+            self.insert(
+                namespace_id,
+                vault_id,
+                client_id.to_string(),
+                idempotency_key,
+                request_hash,
+                result,
+            );
         }
 
-        // Not a duplicate, insert the new result
-        self.insert(namespace_id, vault_id, client_id.to_string(), sequence, result);
-        None
+        check_result
     }
 
     /// Get the current number of entries in the cache.
@@ -143,16 +211,6 @@ impl IdempotencyCache {
     /// Check if the cache is empty.
     pub fn is_empty(&self) -> bool {
         self.cache.entry_count() == 0
-    }
-
-    /// Get the last committed sequence for a client in a specific vault.
-    ///
-    /// Returns the highest sequence number that has been committed for this
-    /// (namespace_id, vault_id, client_id) combination, or 0 if no commits
-    /// have been cached (either never written or cache expired).
-    pub fn get_last_sequence(&self, namespace_id: i64, vault_id: i64, client_id: &str) -> u64 {
-        let key = IdempotencyKey::new(namespace_id, vault_id, client_id.to_string());
-        self.cache.get(&key).map_or(0, |entry| entry.sequence)
     }
 
     /// Force synchronous eviction of expired entries.
@@ -170,28 +228,37 @@ impl Default for IdempotencyCache {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::proto::TxId;
 
-    fn make_result(block_height: u64) -> WriteSuccess {
+    fn make_result(block_height: u64, assigned_sequence: u64) -> WriteSuccess {
         WriteSuccess {
             tx_id: Some(TxId { id: vec![0u8; 16] }),
             block_height,
+            assigned_sequence,
             block_header: None,
             tx_proof: None,
         }
     }
 
+    fn make_key(n: u8) -> [u8; 16] {
+        let mut key = [0u8; 16];
+        key[0] = n;
+        key
+    }
+
     #[test]
     fn test_check_and_insert_new_request() {
         let cache = IdempotencyCache::new();
-        let result = make_result(100);
+        let result = make_result(100, 1);
+        let idem_key = make_key(1);
+        let request_hash = 12345u64;
 
         // First request should not be a duplicate
-        let cached = cache.check_and_insert(1, 1, "client-1", 1, result.clone());
-        assert!(cached.is_none());
+        let check = cache.check_and_insert(1, 1, "client-1", idem_key, request_hash, result);
+        assert!(matches!(check, IdempotencyCheckResult::NewRequest));
 
         // Force sync to ensure entry is visible
         cache.run_pending_tasks();
@@ -203,119 +270,198 @@ mod tests {
     #[test]
     fn test_check_and_insert_duplicate() {
         let cache = IdempotencyCache::new();
-        let result = make_result(100);
+        let result = make_result(100, 1);
+        let idem_key = make_key(1);
+        let request_hash = 12345u64;
 
         // Insert first request
-        cache.insert(1, 1, "client-1".to_string(), 1, result.clone());
+        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
 
-        // Retry with same sequence should return cached result
-        let cached = cache.check(1, 1, "client-1", 1);
-        assert!(cached.is_some());
-        assert_eq!(cached.as_ref().map(|r| r.block_height), Some(100));
-
-        // Retry with lower sequence should also return cached
-        let cached = cache.check(1, 1, "client-1", 0);
-        assert!(cached.is_some());
+        // Retry with same key and hash should return cached result
+        let check = cache.check(1, 1, "client-1", idem_key, request_hash);
+        match check {
+            IdempotencyCheckResult::Duplicate(cached) => {
+                assert_eq!(cached.block_height, 100);
+                assert_eq!(cached.assigned_sequence, 1);
+            },
+            _ => panic!("expected Duplicate"),
+        }
     }
 
     #[test]
-    fn test_higher_sequence_not_duplicate() {
+    fn test_key_reused_with_different_payload() {
         let cache = IdempotencyCache::new();
-        let result = make_result(100);
+        let result = make_result(100, 1);
+        let idem_key = make_key(1);
+        let request_hash_1 = 12345u64;
+        let request_hash_2 = 99999u64; // Different payload
 
-        // Insert sequence 1
-        cache.insert(1, 1, "client-1".to_string(), 1, result);
+        // Insert first request
+        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash_1, result);
 
-        // Sequence 2 should not be a duplicate
-        let cached = cache.check(1, 1, "client-1", 2);
-        assert!(cached.is_none());
+        // Retry with same key but different hash should return KeyReused
+        let check = cache.check(1, 1, "client-1", idem_key, request_hash_2);
+        assert!(matches!(check, IdempotencyCheckResult::KeyReused));
+    }
+
+    #[test]
+    fn test_different_idempotency_key_not_duplicate() {
+        let cache = IdempotencyCache::new();
+        let result = make_result(100, 1);
+        let idem_key_1 = make_key(1);
+        let idem_key_2 = make_key(2);
+        let request_hash = 12345u64;
+
+        // Insert with key 1
+        cache.insert(1, 1, "client-1".to_string(), idem_key_1, request_hash, result);
+
+        // Check with key 2 should be new request
+        let check = cache.check(1, 1, "client-1", idem_key_2, request_hash);
+        assert!(matches!(check, IdempotencyCheckResult::NewRequest));
     }
 
     #[test]
     fn test_different_client_not_duplicate() {
         let cache = IdempotencyCache::new();
-        let result = make_result(100);
+        let result = make_result(100, 1);
+        let idem_key = make_key(1);
+        let request_hash = 12345u64;
 
         // Insert for client-1
-        cache.insert(1, 1, "client-1".to_string(), 1, result);
+        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
 
-        // Same sequence for different client should not be a duplicate
-        let cached = cache.check(1, 1, "client-2", 1);
-        assert!(cached.is_none());
+        // Same key for different client should be new request
+        let check = cache.check(1, 1, "client-2", idem_key, request_hash);
+        assert!(matches!(check, IdempotencyCheckResult::NewRequest));
     }
 
     /// Test that different vaults are tracked independently.
-    /// Per DESIGN.md: Sequence tracking is per (namespace_id, vault_id, client_id).
     #[test]
     fn test_different_vault_not_duplicate() {
         let cache = IdempotencyCache::new();
-        let result = make_result(100);
+        let result = make_result(100, 1);
+        let idem_key = make_key(1);
+        let request_hash = 12345u64;
 
         // Insert for vault 1
-        cache.insert(1, 1, "client-1".to_string(), 1, result.clone());
+        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result.clone());
 
-        // Same client, same sequence, but different vault should NOT be duplicate
-        let cached = cache.check(1, 2, "client-1", 1);
-        assert!(cached.is_none(), "different vault should not be a duplicate");
+        // Same client, same key, but different vault should be new request
+        let check = cache.check(1, 2, "client-1", idem_key, request_hash);
+        assert!(
+            matches!(check, IdempotencyCheckResult::NewRequest),
+            "different vault should be new request"
+        );
 
         // Now insert for vault 2
-        cache.insert(1, 2, "client-1".to_string(), 1, result);
+        cache.insert(1, 2, "client-1".to_string(), idem_key, request_hash, result);
         cache.run_pending_tasks();
         assert_eq!(cache.len(), 2, "should have entries for both vaults");
 
-        // Both should now be cached
-        assert!(cache.check(1, 1, "client-1", 1).is_some());
-        assert!(cache.check(1, 2, "client-1", 1).is_some());
+        // Both should now return duplicate
+        assert!(matches!(
+            cache.check(1, 1, "client-1", idem_key, request_hash),
+            IdempotencyCheckResult::Duplicate(_)
+        ));
+        assert!(matches!(
+            cache.check(1, 2, "client-1", idem_key, request_hash),
+            IdempotencyCheckResult::Duplicate(_)
+        ));
     }
 
     /// Test that different namespaces are tracked independently.
     #[test]
     fn test_different_namespace_not_duplicate() {
         let cache = IdempotencyCache::new();
-        let result = make_result(100);
+        let result = make_result(100, 1);
+        let idem_key = make_key(1);
+        let request_hash = 12345u64;
 
         // Insert for namespace 1
-        cache.insert(1, 1, "client-1".to_string(), 1, result.clone());
+        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
 
-        // Same client, same vault, same sequence, but different namespace should NOT be duplicate
-        let cached = cache.check(2, 1, "client-1", 1);
-        assert!(cached.is_none(), "different namespace should not be a duplicate");
+        // Same client, same vault, same key, but different namespace should be new request
+        let check = cache.check(2, 1, "client-1", idem_key, request_hash);
+        assert!(
+            matches!(check, IdempotencyCheckResult::NewRequest),
+            "different namespace should be new request"
+        );
     }
 
-    /// DESIGN.md compliance test: sequence numbers must be monotonically increasing.
-    /// Per Invariant 9: "Sequence numbers must be monotonically increasing per client."
+    /// Test IdempotencyKey::from_bytes validation.
     #[test]
-    fn test_sequence_monotonicity() {
+    fn test_idempotency_key_from_bytes() {
+        // Valid 16-byte key
+        let bytes = [1u8; 16];
+        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &bytes);
+        assert!(key.is_some());
+        assert_eq!(key.unwrap().idempotency_key, bytes);
+
+        // Invalid: too short
+        let short_bytes = [1u8; 15];
+        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &short_bytes);
+        assert!(key.is_none());
+
+        // Invalid: too long
+        let long_bytes = [1u8; 17];
+        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &long_bytes);
+        assert!(key.is_none());
+
+        // Invalid: empty
+        let empty_bytes: [u8; 0] = [];
+        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &empty_bytes);
+        assert!(key.is_none());
+    }
+
+    /// Test that assigned_sequence is properly stored and retrieved.
+    #[test]
+    fn test_assigned_sequence_preserved() {
         let cache = IdempotencyCache::new();
+        let idem_key = make_key(1);
+        let request_hash = 12345u64;
 
-        // Insert sequence 5
-        let result5 = make_result(100);
-        cache.insert(1, 1, "client-1".to_string(), 5, result5);
+        // Insert with assigned_sequence = 42
+        let result = make_result(100, 42);
+        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
 
-        // Sequence 5 (same) should be duplicate
-        assert!(cache.check(1, 1, "client-1", 5).is_some());
+        // Retrieve should have same assigned_sequence
+        let check = cache.check(1, 1, "client-1", idem_key, request_hash);
+        match check {
+            IdempotencyCheckResult::Duplicate(cached) => {
+                assert_eq!(cached.assigned_sequence, 42);
+            },
+            _ => panic!("expected Duplicate"),
+        }
+    }
 
-        // Sequence 4 (lower) should be duplicate (per idempotency semantics)
-        assert!(cache.check(1, 1, "client-1", 4).is_some());
+    /// Test concurrent writes with unique idempotency keys all succeed independently.
+    #[test]
+    fn test_concurrent_writes_with_unique_keys() {
+        let cache = IdempotencyCache::new();
+        let request_hash = 12345u64;
 
-        // Sequence 3 (even lower) should still be duplicate
-        assert!(cache.check(1, 1, "client-1", 3).is_some());
+        // Simulate 5 concurrent writes with unique keys
+        for i in 0..5 {
+            let idem_key = make_key(i);
+            let result = make_result(100 + i as u64, i as u64 + 1);
 
-        // Sequence 6 (higher) should NOT be duplicate - new request
-        assert!(cache.check(1, 1, "client-1", 6).is_none());
-
-        // Insert sequence 10
-        let result10 = make_result(200);
-        cache.insert(1, 1, "client-1".to_string(), 10, result10.clone());
-
-        // Now sequence 5, 6, 7, 8, 9, 10 should all return the result for 10
-        for seq in 5..=10 {
-            let cached = cache.check(1, 1, "client-1", seq);
-            assert!(cached.is_some(), "sequence {} should be cached", seq);
-            assert_eq!(cached.unwrap().block_height, 200);
+            let check = cache.check_and_insert(1, 1, "client-1", idem_key, request_hash, result);
+            assert!(matches!(check, IdempotencyCheckResult::NewRequest));
         }
 
-        // Sequence 11 should NOT be cached
-        assert!(cache.check(1, 1, "client-1", 11).is_none());
+        cache.run_pending_tasks();
+        assert_eq!(cache.len(), 5, "all 5 writes should be cached");
+
+        // Each should be retrievable with its assigned sequence
+        for i in 0..5 {
+            let idem_key = make_key(i);
+            let check = cache.check(1, 1, "client-1", idem_key, request_hash);
+            match check {
+                IdempotencyCheckResult::Duplicate(cached) => {
+                    assert_eq!(cached.assigned_sequence, i as u64 + 1);
+                },
+                _ => panic!("expected Duplicate for key {}", i),
+            }
+        }
     }
 }

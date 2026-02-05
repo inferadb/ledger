@@ -6,7 +6,7 @@
 //! # Features
 //!
 //! - **Entity storage**: Store and retrieve entities for read tests
-//! - **Client state tracking**: Manage client sequences for idempotency tests
+//! - **Client state tracking**: Manage server-assigned sequences for idempotency tests
 //! - **Failure injection**: Inject UNAVAILABLE errors or delays for resilience tests
 //! - **Request counting**: Track number of requests for verification
 //!
@@ -66,6 +66,12 @@ type ClientKey = (i64, i64, String);
 /// Key for entity storage: (namespace_id, vault_id, key)
 type EntityKey = (i64, i64, String);
 
+/// Key for idempotency cache: (namespace_id, vault_id, client_id, idempotency_key)
+type IdempotencyKey = (i64, i64, String, Vec<u8>);
+
+/// Value for idempotency cache: (tx_id, block_height, assigned_sequence)
+type IdempotencyCacheEntry = (Vec<u8>, u64, u64);
+
 /// Entity data stored in mock server.
 type EntityData = (Vec<u8>, u64, Option<u64>);
 
@@ -80,6 +86,9 @@ struct MockState {
 
     /// Client sequences: client_key -> last_committed_sequence
     client_sequences: RwLock<HashMap<ClientKey, u64>>,
+
+    /// Idempotency cache for deduplicating writes.
+    idempotency_cache: RwLock<HashMap<IdempotencyKey, IdempotencyCacheEntry>>,
 
     /// Number of UNAVAILABLE errors to inject for next requests
     unavailable_count: AtomicUsize,
@@ -395,6 +404,7 @@ impl MockLedgerServer {
     pub fn reset(&self) {
         self.state.entities.write().clear();
         self.state.client_sequences.write().clear();
+        self.state.idempotency_cache.write().clear();
         self.state.relationships.write().clear();
         self.state.namespaces.write().clear();
         self.state.vaults.write().clear();
@@ -812,60 +822,24 @@ impl WriteService for MockWriteService {
         let namespace_id = req.namespace_id.map_or(0, |n| n.id);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
-        let sequence = req.sequence;
+        let idempotency_key = req.idempotency_key;
 
-        // Check idempotency
-        let client_key = (namespace_id, vault_id, client_id.clone());
+        // Check idempotency cache
+        let cache_key = (namespace_id, vault_id, client_id.clone(), idempotency_key.clone());
         {
-            let sequences = self.state.client_sequences.read();
-            if let Some(&last_seq) = sequences.get(&client_key) {
-                if sequence <= last_seq {
-                    // Already committed
-                    return Ok(Response::new(proto::WriteResponse {
-                        result: Some(proto::write_response::Result::Error(proto::WriteError {
-                            code: proto::WriteErrorCode::AlreadyCommitted as i32,
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message: "Already committed".to_string(),
-                            committed_tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
-                            committed_block_height: Some(
-                                self.state.block_height.load(Ordering::SeqCst),
-                            ),
-                            last_committed_sequence: Some(last_seq),
-                        })),
-                    }));
-                } else if sequence > last_seq + 1 {
-                    // Sequence gap
-                    return Ok(Response::new(proto::WriteResponse {
-                        result: Some(proto::write_response::Result::Error(proto::WriteError {
-                            code: proto::WriteErrorCode::SequenceGap as i32,
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message: format!(
-                                "Sequence gap: expected {}, got {}",
-                                last_seq + 1,
-                                sequence
-                            ),
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            last_committed_sequence: Some(last_seq),
-                        })),
-                    }));
-                }
-            } else if sequence != 1 {
-                // First write must be sequence 1
+            let cache = self.state.idempotency_cache.read();
+            if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
+                // Already committed - return cached result
                 return Ok(Response::new(proto::WriteResponse {
                     result: Some(proto::write_response::Result::Error(proto::WriteError {
-                        code: proto::WriteErrorCode::SequenceGap as i32,
+                        code: proto::WriteErrorCode::AlreadyCommitted as i32,
                         key: String::new(),
                         current_version: None,
                         current_value: None,
-                        message: format!("First sequence must be 1, got {}", sequence),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        last_committed_sequence: Some(0),
+                        message: "Already committed".to_string(),
+                        committed_tx_id: Some(proto::TxId { id: tx_id.clone() }),
+                        committed_block_height: Some(*block_height),
+                        assigned_sequence: Some(*assigned_sequence),
                     })),
                 }));
             }
@@ -914,18 +888,29 @@ impl WriteService for MockWriteService {
             }
         }
 
-        // Update client sequence
-        {
+        // Assign server sequence and update client state
+        let client_key = (namespace_id, vault_id, client_id);
+        let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
-            sequences.insert(client_key, sequence);
+            let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
+            sequences.insert(client_key, next_seq);
+            next_seq
+        };
+
+        // Cache the result for idempotency
+        let tx_id = Self::generate_tx_id();
+        {
+            let mut cache = self.state.idempotency_cache.write();
+            cache.insert(cache_key, (tx_id.clone(), block_height, assigned_sequence));
         }
 
         Ok(Response::new(proto::WriteResponse {
             result: Some(proto::write_response::Result::Success(proto::WriteSuccess {
-                tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
+                tx_id: Some(proto::TxId { id: tx_id }),
                 block_height,
                 block_header: None,
                 tx_proof: None,
+                assigned_sequence,
             })),
         }))
     }
@@ -942,61 +927,24 @@ impl WriteService for MockWriteService {
         let namespace_id = req.namespace_id.map_or(0, |n| n.id);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
-        let sequence = req.sequence;
+        let idempotency_key = req.idempotency_key;
 
-        // Check idempotency (same as single write)
-        let client_key = (namespace_id, vault_id, client_id.clone());
+        // Check idempotency cache
+        let cache_key = (namespace_id, vault_id, client_id.clone(), idempotency_key.clone());
         {
-            let sequences = self.state.client_sequences.read();
-            if let Some(&last_seq) = sequences.get(&client_key) {
-                if sequence <= last_seq {
-                    return Ok(Response::new(proto::BatchWriteResponse {
-                        result: Some(proto::batch_write_response::Result::Error(
-                            proto::WriteError {
-                                code: proto::WriteErrorCode::AlreadyCommitted as i32,
-                                key: String::new(),
-                                current_version: None,
-                                current_value: None,
-                                message: "Already committed".to_string(),
-                                committed_tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
-                                committed_block_height: Some(
-                                    self.state.block_height.load(Ordering::SeqCst),
-                                ),
-                                last_committed_sequence: Some(last_seq),
-                            },
-                        )),
-                    }));
-                } else if sequence > last_seq + 1 {
-                    return Ok(Response::new(proto::BatchWriteResponse {
-                        result: Some(proto::batch_write_response::Result::Error(
-                            proto::WriteError {
-                                code: proto::WriteErrorCode::SequenceGap as i32,
-                                key: String::new(),
-                                current_version: None,
-                                current_value: None,
-                                message: format!(
-                                    "Sequence gap: expected {}, got {}",
-                                    last_seq + 1,
-                                    sequence
-                                ),
-                                committed_tx_id: None,
-                                committed_block_height: None,
-                                last_committed_sequence: Some(last_seq),
-                            },
-                        )),
-                    }));
-                }
-            } else if sequence != 1 {
+            let cache = self.state.idempotency_cache.read();
+            if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
+                // Already committed - return cached result
                 return Ok(Response::new(proto::BatchWriteResponse {
                     result: Some(proto::batch_write_response::Result::Error(proto::WriteError {
-                        code: proto::WriteErrorCode::SequenceGap as i32,
+                        code: proto::WriteErrorCode::AlreadyCommitted as i32,
                         key: String::new(),
                         current_version: None,
                         current_value: None,
-                        message: format!("First sequence must be 1, got {}", sequence),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        last_committed_sequence: Some(0),
+                        message: "Already committed".to_string(),
+                        committed_tx_id: Some(proto::TxId { id: tx_id.clone() }),
+                        committed_block_height: Some(*block_height),
+                        assigned_sequence: Some(*assigned_sequence),
                     })),
                 }));
             }
@@ -1049,18 +997,29 @@ impl WriteService for MockWriteService {
             }
         }
 
-        // Update client sequence
-        {
+        // Assign server sequence and update client state
+        let client_key = (namespace_id, vault_id, client_id);
+        let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
-            sequences.insert(client_key, sequence);
+            let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
+            sequences.insert(client_key, next_seq);
+            next_seq
+        };
+
+        // Cache the result for idempotency
+        let tx_id = Self::generate_tx_id();
+        {
+            let mut cache = self.state.idempotency_cache.write();
+            cache.insert(cache_key, (tx_id.clone(), block_height, assigned_sequence));
         }
 
         Ok(Response::new(proto::BatchWriteResponse {
             result: Some(proto::batch_write_response::Result::Success(proto::BatchWriteSuccess {
-                tx_id: Some(proto::TxId { id: Self::generate_tx_id() }),
+                tx_id: Some(proto::TxId { id: tx_id }),
                 block_height,
                 block_header: None,
                 tx_proof: None,
+                assigned_sequence,
             })),
         }))
     }
@@ -1923,97 +1882,45 @@ mod tests {
         // ==================== Idempotency ====================
 
         #[tokio::test]
-        async fn test_duplicate_write_returns_already_committed() {
+        async fn test_write_returns_assigned_sequence() {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            // First write succeeds
-            let ops1 = vec![Operation::set_entity("key1", b"first".to_vec())];
-            let result1 = client.write(1, Some(0), ops1).await.unwrap();
-
-            // Reset the client's local sequence to force duplicate
-            client.sequences().set_sequence(1, 0, 0);
-
-            // Second write with same sequence returns ALREADY_COMMITTED
-            // which is handled as success (idempotent retry)
-            let ops2 = vec![Operation::set_entity("key2", b"second".to_vec())];
-            let result2 = client.write(1, Some(0), ops2).await.unwrap();
-
-            // Both should return valid results
-            assert!(!result1.tx_id.is_empty());
-            assert!(!result2.tx_id.is_empty());
-
-            // Server received 2 write requests (second returned ALREADY_COMMITTED)
-            // The write_count tracks requests, not mutations
-            assert_eq!(server.write_count(), 2);
-        }
-
-        #[tokio::test]
-        async fn test_already_committed_returns_cached_result() {
-            // Tests scenario: server has advanced past client's sequence (crash recovery)
-            // Client sends sequence 1, but server already has sequence 5 committed.
-            // This triggers ALREADY_COMMITTED, which client treats as idempotent success.
-            let server = MockLedgerServer::start().await.unwrap();
-            let client = create_client_for_mock(&server).await;
-
-            // Simulate server having processed sequence 1 already
-            server.set_client_state(1, 0, "test-client", 1);
-
-            // Client starts at 0, so next_sequence returns 1
-            // Since 1 <= 1, server returns ALREADY_COMMITTED
-            // Client treats this as success (the operation was already applied)
-            let ops = vec![Operation::set_entity("key", b"data".to_vec())];
+            let ops = vec![Operation::set_entity("key1", b"data".to_vec())];
             let result = client.write(1, Some(0), ops).await.unwrap();
 
-            // ALREADY_COMMITTED returns a tx_id from the cached result
-            assert!(!result.tx_id.is_empty());
+            assert_eq!(result.assigned_sequence, 1);
 
-            // The next write (sequence 2) should succeed normally
-            let ops2 = vec![Operation::set_entity("newkey", b"newdata".to_vec())];
+            // Second write gets next sequence
+            let ops2 = vec![Operation::set_entity("key2", b"data2".to_vec())];
             let result2 = client.write(1, Some(0), ops2).await.unwrap();
 
-            assert!(!result2.tx_id.is_empty());
-
-            // This write actually stored the data
-            assert_eq!(client.read(1, Some(0), "newkey").await.unwrap(), Some(b"newdata".to_vec()));
+            assert_eq!(result2.assigned_sequence, 2);
         }
 
         #[tokio::test]
-        async fn test_already_committed_for_batch_write() {
+        async fn test_batch_write_returns_assigned_sequence() {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            // First batch write
-            let batches1 = vec![vec![Operation::set_entity("bw:1", b"first".to_vec())]];
-            let result1 = client.batch_write(1, Some(0), batches1).await.unwrap();
+            let batches = vec![vec![Operation::set_entity("bw:1", b"first".to_vec())]];
+            let result = client.batch_write(1, Some(0), batches).await.unwrap();
 
-            // Reset sequence to force duplicate
-            client.sequences().set_sequence(1, 0, 0);
-
-            // Second batch write with same sequence should return ALREADY_COMMITTED
-            let batches2 = vec![vec![Operation::set_entity("bw:2", b"second".to_vec())]];
-            let result2 = client.batch_write(1, Some(0), batches2).await.unwrap();
-
-            assert!(!result1.tx_id.is_empty());
-            assert!(!result2.tx_id.is_empty());
-            // Server received 2 write requests (second returned ALREADY_COMMITTED)
-            assert_eq!(server.write_count(), 2);
+            assert_eq!(result.assigned_sequence, 1);
         }
 
         #[tokio::test]
-        async fn test_sequence_increments_correctly() {
+        async fn test_server_sequences_increment_per_vault() {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            // Each write should increment sequence
+            // Each write to the same vault gets incrementing sequences
             for i in 1..=5 {
                 let ops = vec![Operation::set_entity(format!("seq:{i}"), b"data".to_vec())];
-                client.write(1, Some(0), ops).await.unwrap();
-
-                assert_eq!(client.sequences().current_sequence(1, 0), i);
+                let result = client.write(1, Some(0), ops).await.unwrap();
+                assert_eq!(result.assigned_sequence, i);
             }
 
-            // 5 writes total
             assert_eq!(server.write_count(), 5);
         }
 
@@ -2097,10 +2004,6 @@ mod tests {
 
             handle1.await.unwrap();
             handle2.await.unwrap();
-
-            // Both vaults should have independent sequences
-            assert_eq!(client.sequences().current_sequence(1, 0), 10);
-            assert_eq!(client.sequences().current_sequence(1, 1), 10);
 
             // 20 writes total
             assert_eq!(server.write_count(), 20);
@@ -2456,9 +2359,8 @@ mod tests {
                 client.write(1, Some(0), ops).await.unwrap();
             }
 
-            // Verify sequence state before shutdown
-            let seq_before = client.sequences().current_sequence(1, 0);
-            assert_eq!(seq_before, 5);
+            // Verify writes completed
+            assert_eq!(server.write_count(), 5);
 
             // Shutdown
             client.shutdown().await;
@@ -2468,9 +2370,12 @@ mod tests {
             let result = client.write(1, Some(0), ops).await;
             assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
 
-            // Sequence should not have incremented
-            let seq_after = client.sequences().current_sequence(1, 0);
-            assert_eq!(seq_after, 5, "Sequence should not increment after shutdown");
+            // Write count should not have increased (rejected before reaching server)
+            assert_eq!(
+                server.write_count(),
+                5,
+                "No additional writes should reach server after shutdown"
+            );
         }
 
         #[tokio::test]

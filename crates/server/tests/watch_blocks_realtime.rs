@@ -69,7 +69,6 @@ async fn write_entity(
     key: &str,
     value: &[u8],
     client_id: &str,
-    sequence: u64,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
@@ -77,7 +76,7 @@ async fn write_entity(
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
-        sequence,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
                 inferadb_ledger_raft::proto::SetEntity {
@@ -136,7 +135,7 @@ async fn test_watch_blocks_subscribe_before_writes() {
 
     // Now write data - this should trigger a real-time announcement
     let block_height =
-        write_entity(leader.addr, namespace_id, vault_id, "key1", b"value1", "watch-client", 1)
+        write_entity(leader.addr, namespace_id, vault_id, "key1", b"value1", "watch-client")
             .await
             .expect("write should succeed");
 
@@ -187,7 +186,6 @@ async fn test_watch_blocks_historical_then_realtime() {
             &format!("key{}", i),
             format!("value{}", i).as_bytes(),
             "pre-subscribe-client",
-            i,
         )
         .await
         .expect("pre-write should succeed");
@@ -220,7 +218,6 @@ async fn test_watch_blocks_historical_then_realtime() {
     }
 
     // Now write 2 more blocks after subscribing (real-time push)
-    // Use the same client_id to continue the sequence
     for i in 4..=5 {
         write_entity(
             leader.addr,
@@ -228,8 +225,7 @@ async fn test_watch_blocks_historical_then_realtime() {
             vault_id,
             &format!("key{}", i),
             format!("value{}", i).as_bytes(),
-            "pre-subscribe-client", // Same client_id to continue sequence
-            i,
+            "pre-subscribe-client",
         )
         .await
         .expect("post-write should succeed");
@@ -291,7 +287,6 @@ async fn test_watch_blocks_multiple_subscribers() {
         "shared-key",
         b"shared-value",
         "multi-client",
-        1,
     )
     .await
     .expect("write should succeed");
@@ -347,7 +342,6 @@ async fn test_watch_blocks_vault_isolation() {
         "vault-b-key",
         b"vault-b-value",
         "vault-b-client",
-        1,
     )
     .await
     .expect("write to vault B should succeed");
@@ -360,7 +354,6 @@ async fn test_watch_blocks_vault_isolation() {
         "vault-a-key",
         b"vault-a-value",
         "vault-a-client",
-        1,
     )
     .await
     .expect("write to vault A should succeed");
@@ -427,7 +420,6 @@ async fn test_watch_blocks_lagging_subscriber() {
             &format!("lag-key-{}", i),
             format!("lag-value-{}", i).as_bytes(),
             &format!("lag-client-{}", i),
-            i,
         )
         .await
         .expect("write should succeed");
@@ -510,7 +502,6 @@ async fn test_watch_blocks_reconnection_after_restart() {
             &format!("restart-key-{}", i),
             format!("restart-value-{}", i).as_bytes(),
             "restart-client",
-            i,
         )
         .await
         .expect("initial write should succeed");
@@ -561,7 +552,6 @@ async fn test_watch_blocks_reconnection_after_restart() {
         .into_inner();
 
     // Write new blocks after reconnection
-    // Use the same client_id to continue the sequence
     for i in 4..=5 {
         write_entity(
             leader.addr,
@@ -569,8 +559,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
             vault_id,
             &format!("post-restart-key-{}", i),
             format!("post-restart-value-{}", i).as_bytes(),
-            "restart-client", // Same client_id to continue sequence
-            i,
+            "restart-client",
         )
         .await
         .expect("post-reconnect write should succeed");

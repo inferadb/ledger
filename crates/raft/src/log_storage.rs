@@ -747,23 +747,37 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
                 }
 
-                // Persist client sequences for idempotency recovery.
-                // Track the highest sequence number per client for this vault.
-                for tx in transactions {
-                    let client_key = (*namespace_id, *vault_id, tx.client_id.clone());
-                    let current = state.client_sequences.get(&client_key).copied().unwrap_or(0);
-                    if tx.sequence > current {
-                        state.client_sequences.insert(client_key, tx.sequence);
-                    }
-                }
+                // Server-assigned sequences: assign monotonic sequence to each transaction.
+                // Each write request typically contains a single transaction from a single client.
+                // The assigned_sequence returned is the sequence assigned to the first transaction.
+                let mut assigned_sequence = 0u64;
+                let transactions_with_sequences: Vec<_> = transactions
+                    .iter()
+                    .map(|tx| {
+                        let client_key = (*namespace_id, *vault_id, tx.client_id.clone());
+                        let current = state.client_sequences.get(&client_key).copied().unwrap_or(0);
+                        let new_sequence = current + 1;
+                        state.client_sequences.insert(client_key, new_sequence);
 
-                // Build VaultEntry for ShardBlock
+                        // Record the first transaction's assigned sequence for the response
+                        if assigned_sequence == 0 {
+                            assigned_sequence = new_sequence;
+                        }
+
+                        // Clone and update the sequence
+                        let mut tx_with_seq = tx.clone();
+                        tx_with_seq.sequence = new_sequence;
+                        tx_with_seq
+                    })
+                    .collect();
+
+                // Build VaultEntry for ShardBlock with server-assigned sequences
                 let vault_entry = VaultEntry {
                     namespace_id: *namespace_id,
                     vault_id: *vault_id,
                     vault_height: new_height,
                     previous_vault_hash,
-                    transactions: transactions.clone(),
+                    transactions: transactions_with_sequences,
                     tx_merkle_root,
                     state_root,
                 };
@@ -772,7 +786,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // We temporarily build a BlockHeader to compute the hash
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
 
-                (LedgerResponse::Write { block_height: new_height, block_hash }, Some(vault_entry))
+                (
+                    LedgerResponse::Write {
+                        block_height: new_height,
+                        block_hash,
+                        assigned_sequence,
+                    },
+                    Some(vault_entry),
+                )
             },
 
             LedgerRequest::CreateNamespace { name, shard_id } => {

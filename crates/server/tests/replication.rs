@@ -33,7 +33,7 @@ async fn test_ordered_replication() {
             client_id: Some(inferadb_ledger_raft::proto::ClientId {
                 id: "ordered-test".to_string(),
             }),
-            sequence: i + 1,
+            idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
             namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
             vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
             operations: vec![inferadb_ledger_raft::proto::Operation {
@@ -87,7 +87,7 @@ async fn test_follower_state_consistency() {
     // Submit a batch of writes
     let batch_request = inferadb_ledger_raft::proto::BatchWriteRequest {
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "batch-test".to_string() }),
-        sequence: 1,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: (0..10)
@@ -143,7 +143,7 @@ async fn test_replication_after_delay() {
     // Write some data
     let request = inferadb_ledger_raft::proto::WriteRequest {
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "delay-test".to_string() }),
-        sequence: 1,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_raft::proto::Operation {
@@ -167,7 +167,7 @@ async fn test_replication_after_delay() {
     // Write more data
     let request2 = inferadb_ledger_raft::proto::WriteRequest {
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "delay-test".to_string() }),
-        sequence: 2,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_raft::proto::Operation {

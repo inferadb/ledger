@@ -54,6 +54,7 @@ chrono = { workspace = true }
 rand = { workspace = true }
 dirs = "6.0"
 sha2 = { workspace = true }
+uuid = { workspace = true }
 
 # Internal crates
 inferadb-ledger-types = { workspace = true }

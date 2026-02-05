@@ -46,7 +46,6 @@ async fn write_entity(
     key: &str,
     value: &serde_json::Value,
     client_id: &str,
-    sequence: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
@@ -54,7 +53,7 @@ async fn write_entity(
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
-        sequence,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
                 inferadb_ledger_raft::proto::SetEntity {
@@ -162,7 +161,7 @@ async fn test_deleted_user_detection() {
         "deleted_at": "2024-01-15T10:00:00Z",
     });
 
-    write_entity(leader.addr, 0, 0, &deleted_user_key, &deleted_user_value, "orphan-test", 1)
+    write_entity(leader.addr, 0, 0, &deleted_user_key, &deleted_user_value, "orphan-test")
         .await
         .expect("create deleted user");
 
@@ -183,7 +182,6 @@ async fn test_deleted_user_detection() {
         &deleted_status_user_key,
         &deleted_status_user_value,
         "orphan-test",
-        2,
     )
     .await
     .expect("create status-deleted user");
@@ -198,7 +196,7 @@ async fn test_deleted_user_detection() {
         "status": "ACTIVE",
     });
 
-    write_entity(leader.addr, 0, 0, &active_user_key, &active_user_value, "orphan-test", 3)
+    write_entity(leader.addr, 0, 0, &active_user_key, &active_user_value, "orphan-test")
         .await
         .expect("create active user");
 
@@ -250,7 +248,7 @@ async fn test_membership_data_format() {
         "created_at": "2024-01-01T00:00:00Z",
     });
 
-    write_entity(leader.addr, ns_id, 0, &member_key, &member_value, "membership-test", 1)
+    write_entity(leader.addr, ns_id, 0, &member_key, &member_value, "membership-test")
         .await
         .expect("create membership");
 
@@ -283,17 +281,9 @@ async fn test_orphan_cleanup_skips_system_namespace() {
         "note": "This is in _system and should not be cleaned",
     });
 
-    write_entity(
-        leader.addr,
-        0,
-        0,
-        system_member_key,
-        &system_member_value,
-        "system-member-test",
-        1,
-    )
-    .await
-    .expect("create system member");
+    write_entity(leader.addr, 0, 0, system_member_key, &system_member_value, "system-member-test")
+        .await
+        .expect("create system member");
 
     // Give cleanup time to run
     tokio::time::sleep(Duration::from_millis(200)).await;

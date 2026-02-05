@@ -1558,6 +1558,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-opentelemetry",
+ "uuid",
 ]
 
 [[package]]
@@ -1593,6 +1594,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "turmoil",
+ "uuid",
 ]
 
 [[package]]

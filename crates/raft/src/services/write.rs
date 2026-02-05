@@ -166,52 +166,6 @@ impl WriteServiceImpl {
 
     /// Check for sequence gaps before submitting to Raft.
     ///
-    /// Per DESIGN.md §5.3: If `sequence > last_committed + 1`, the client
-    /// has a gap indicating missed writes. Returns SEQUENCE_GAP error
-    /// with the last committed sequence so clients can retry correctly.
-    fn check_sequence_gap(
-        &self,
-        namespace_id: i64,
-        vault_id: i64,
-        client_id: &str,
-        sequence: u64,
-    ) -> Result<(), WriteError> {
-        // Sequence 0 is a special case (no sequence tracking)
-        if sequence == 0 || client_id.is_empty() {
-            return Ok(());
-        }
-
-        let Some(ref applied_state) = self.applied_state else {
-            // No applied state accessor - skip gap detection
-            return Ok(());
-        };
-
-        let last_committed = applied_state.client_sequence(namespace_id, vault_id, client_id);
-
-        // Allow sequence == last_committed + 1 (normal case)
-        // or sequence <= last_committed (idempotency cache handles duplicates)
-        // Only reject if sequence > last_committed + 1 (gap detected)
-        if sequence > last_committed + 1 {
-            return Err(WriteError {
-                code: WriteErrorCode::SequenceGap.into(),
-                key: String::new(),
-                current_version: None,
-                current_value: None,
-                message: format!(
-                    "Sequence gap detected: received {}, expected {} (last committed: {})",
-                    sequence,
-                    last_committed + 1,
-                    last_committed
-                ),
-                committed_tx_id: None,
-                committed_block_height: None,
-                last_committed_sequence: Some(last_committed),
-            });
-        }
-
-        Ok(())
-    }
-
     /// Check rate limit for a namespace. Returns Status::resource_exhausted if limit exceeded.
     fn check_rate_limit(&self, namespace_id: i64) -> Result<(), Status> {
         if let Some(ref limiter) = self.rate_limiter {
@@ -289,6 +243,55 @@ impl WriteServiceImpl {
                 Op::ExpireEntity(_) => "expire_entity",
             })
             .collect()
+    }
+
+    /// Compute a hash of operations for idempotency payload comparison.
+    ///
+    /// Uses a simple concatenation of operation fields to create a deterministic
+    /// byte sequence that can be hashed with seahash.
+    fn hash_operations(operations: &[crate::proto::Operation]) -> Vec<u8> {
+        use crate::proto::operation::Op;
+
+        let mut bytes = Vec::new();
+        for op in operations {
+            if let Some(inner) = &op.op {
+                match inner {
+                    Op::CreateRelationship(cr) => {
+                        bytes.extend_from_slice(b"CR");
+                        bytes.extend_from_slice(cr.resource.as_bytes());
+                        bytes.extend_from_slice(cr.relation.as_bytes());
+                        bytes.extend_from_slice(cr.subject.as_bytes());
+                    },
+                    Op::DeleteRelationship(dr) => {
+                        bytes.extend_from_slice(b"DR");
+                        bytes.extend_from_slice(dr.resource.as_bytes());
+                        bytes.extend_from_slice(dr.relation.as_bytes());
+                        bytes.extend_from_slice(dr.subject.as_bytes());
+                    },
+                    Op::SetEntity(se) => {
+                        bytes.extend_from_slice(b"SE");
+                        bytes.extend_from_slice(se.key.as_bytes());
+                        bytes.extend_from_slice(&se.value);
+                        if let Some(cond) = &se.condition {
+                            bytes.extend_from_slice(&format!("{:?}", cond).into_bytes());
+                        }
+                        if let Some(exp) = se.expires_at {
+                            bytes.extend_from_slice(&exp.to_le_bytes());
+                        }
+                    },
+                    Op::DeleteEntity(de) => {
+                        bytes.extend_from_slice(b"DE");
+                        bytes.extend_from_slice(de.key.as_bytes());
+                    },
+                    Op::ExpireEntity(ee) => {
+                        bytes.extend_from_slice(b"EE");
+                        bytes.extend_from_slice(ee.key.as_bytes());
+                        bytes.extend_from_slice(&ee.expired_at.to_le_bytes());
+                    },
+                }
+            }
+        }
+        bytes
     }
 
     /// Convert a proto SetCondition to internal SetCondition.
@@ -390,13 +393,15 @@ impl WriteServiceImpl {
     }
 
     /// Convert proto operations to LedgerRequest.
+    ///
+    /// Server-assigned sequences: The transaction's sequence is set to 0 here;
+    /// the actual sequence will be assigned by the Raft state machine at apply time.
     fn operations_to_request(
         &self,
         namespace_id: i64,
         vault_id: Option<i64>,
         operations: &[crate::proto::Operation],
         client_id: &str,
-        sequence: u64,
     ) -> Result<LedgerRequest, Status> {
         // Convert proto operations to internal Operations
         // Time the proto → internal type conversion
@@ -411,10 +416,12 @@ impl WriteServiceImpl {
         }
 
         // Create a single transaction with all operations
+        // Server-assigned sequences: sequence=0 is a placeholder; actual sequence
+        // is assigned at Raft apply time for deterministic replay.
         let transaction = inferadb_ledger_types::Transaction {
             id: *Uuid::new_v4().as_bytes(),
             client_id: client_id.to_string(),
-            sequence,
+            sequence: 0, // Server-assigned at apply time
             operations: internal_ops,
             timestamp: chrono::Utc::now(),
             actor: "system".to_string(), // Actor is set by upstream Engine/Control
@@ -456,9 +463,8 @@ impl WriteService for WriteServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        // Extract client ID and sequence for idempotency
+        // Extract client ID and idempotency key
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let sequence = req.sequence;
 
         // Extract namespace and vault IDs (needed for idempotency key)
         let namespace_id = req
@@ -469,33 +475,74 @@ impl WriteService for WriteServiceImpl {
 
         let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
+        // Parse idempotency key (must be exactly 16 bytes for UUID)
+        let idempotency_key: [u8; 16] =
+            req.idempotency_key.as_slice().try_into().map_err(|_| {
+                Status::invalid_argument("idempotency_key must be exactly 16 bytes")
+            })?;
+
+        // Compute request hash for payload comparison (detects key reuse with different payload)
+        let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
+
         // Populate wide event context with request metadata
-        ctx.set_client_info(&client_id, sequence, None);
+        ctx.set_client_info(&client_id, 0, None);
         ctx.set_target(namespace_id, vault_id);
 
         // Populate write operation fields
         let operation_types = Self::extract_operation_types(&req.operations);
         ctx.set_write_operation(req.operations.len(), operation_types, req.include_tx_proof);
 
-        // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
-        // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
-        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
-            ctx.set_idempotency_hit(true);
-            ctx.set_cached();
-            if let Some(ref header) = cached.block_header
-                && let Some(ref state_root) = header.state_root
-            {
-                ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-            }
-            ctx.set_block_height(cached.block_height);
-            metrics::record_idempotency_hit();
-            metrics::record_write(true, ctx.elapsed_secs());
-            return Ok(Response::new(WriteResponse {
-                result: Some(crate::proto::write_response::Result::Success(cached)),
-            }));
+        // Check idempotency cache for duplicate
+        use crate::idempotency::IdempotencyCheckResult;
+        match self.idempotency.check(
+            namespace_id,
+            vault_id,
+            &client_id,
+            idempotency_key,
+            request_hash,
+        ) {
+            IdempotencyCheckResult::Duplicate(cached) => {
+                ctx.set_idempotency_hit(true);
+                ctx.set_cached();
+                if let Some(ref header) = cached.block_header
+                    && let Some(ref state_root) = header.state_root
+                {
+                    ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
+                }
+                ctx.set_block_height(cached.block_height);
+                metrics::record_idempotency_hit();
+                metrics::record_write(true, ctx.elapsed_secs());
+                return Ok(Response::new(WriteResponse {
+                    result: Some(crate::proto::write_response::Result::Success(cached)),
+                }));
+            },
+            IdempotencyCheckResult::KeyReused => {
+                ctx.set_error(
+                    "IdempotencyKeyReused",
+                    "Idempotency key reused with different payload",
+                );
+                metrics::record_write(false, ctx.elapsed_secs());
+                return Ok(Response::new(WriteResponse {
+                    result: Some(crate::proto::write_response::Result::Error(WriteError {
+                        code: WriteErrorCode::IdempotencyKeyReused.into(),
+                        key: String::new(),
+                        current_version: None,
+                        current_value: None,
+                        message:
+                            "Idempotency key was already used with a different request payload"
+                                .to_string(),
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        assigned_sequence: None,
+                    })),
+                }));
+            },
+            IdempotencyCheckResult::NewRequest => {
+                // Proceed with new request
+                ctx.set_idempotency_hit(false);
+                metrics::record_idempotency_miss();
+            },
         }
-        ctx.set_idempotency_hit(false);
-        metrics::record_idempotency_miss();
 
         // Check per-namespace rate limit
         if let Err(status) = self.check_rate_limit(namespace_id) {
@@ -503,25 +550,11 @@ impl WriteService for WriteServiceImpl {
             return Err(status);
         }
 
-        // Check for sequence gaps (per DESIGN.md §5.3)
-        if let Err(gap_error) =
-            self.check_sequence_gap(namespace_id, vault_id, &client_id, sequence)
-        {
-            ctx.set_error("SequenceGap", "Sequence gap detected");
-            metrics::record_write(false, ctx.elapsed_secs());
-            return Ok(Response::new(WriteResponse {
-                result: Some(crate::proto::write_response::Result::Error(gap_error)),
-            }));
-        }
+        // Server-assigned sequences: no gap check needed
 
         // Convert to internal request
-        let ledger_request = self.operations_to_request(
-            namespace_id,
-            Some(vault_id),
-            &req.operations,
-            &client_id,
-            sequence,
-        )?;
+        let ledger_request =
+            self.operations_to_request(namespace_id, Some(vault_id), &req.operations, &client_id)?;
 
         // Submit to Raft via batch writer (if enabled) or direct proposal
         metrics::record_raft_proposal();
@@ -561,7 +594,7 @@ impl WriteService for WriteServiceImpl {
         ctx.end_raft_timer();
 
         match response {
-            LedgerResponse::Write { block_height, block_hash } => {
+            LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proof {
                     self.generate_write_proof(namespace_id, vault_id, block_height)
@@ -574,14 +607,16 @@ impl WriteService for WriteServiceImpl {
                     block_height,
                     block_header: block_header.clone(),
                     tx_proof,
+                    assigned_sequence,
                 };
 
-                // Cache the result for idempotency (keyed by namespace_id, vault_id, client_id)
+                // Cache the result for idempotency
                 self.idempotency.insert(
                     namespace_id,
                     vault_id,
                     client_id.clone(),
-                    sequence,
+                    idempotency_key,
+                    request_hash,
                     success.clone(),
                 );
                 metrics::set_idempotency_cache_size(self.idempotency.len());
@@ -615,7 +650,7 @@ impl WriteService for WriteServiceImpl {
                         message,
                         committed_tx_id: None,
                         committed_block_height: None,
-                        last_committed_sequence: None,
+                        assigned_sequence: None,
                     })),
                 }))
             },
@@ -644,7 +679,7 @@ impl WriteService for WriteServiceImpl {
                         message: "Precondition failed".to_string(),
                         committed_tx_id: None,
                         committed_block_height: None,
-                        last_committed_sequence: None,
+                        assigned_sequence: None,
                     })),
                 }))
             },
@@ -682,9 +717,8 @@ impl WriteService for WriteServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        // Extract client ID and sequence for idempotency
+        // Extract client ID and idempotency key
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let sequence = req.sequence;
 
         // Extract namespace and vault IDs (needed for idempotency key)
         let namespace_id = req
@@ -695,8 +729,14 @@ impl WriteService for WriteServiceImpl {
 
         let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
 
+        // Parse idempotency key (must be exactly 16 bytes for UUID)
+        let idempotency_key: [u8; 16] =
+            req.idempotency_key.as_slice().try_into().map_err(|_| {
+                Status::invalid_argument("idempotency_key must be exactly 16 bytes")
+            })?;
+
         // Populate wide event context with request metadata
-        ctx.set_client_info(&client_id, sequence, None);
+        ctx.set_client_info(&client_id, 0, None);
         ctx.set_target(namespace_id, vault_id);
 
         // Flatten all operations from all groups
@@ -705,37 +745,73 @@ impl WriteService for WriteServiceImpl {
 
         let batch_size = all_operations.len();
 
+        // Compute request hash for payload comparison (detects key reuse with different payload)
+        let request_hash = seahash::hash(&Self::hash_operations(&all_operations));
+
         // Populate write operation fields
         let operation_types = Self::extract_operation_types(&all_operations);
         ctx.set_write_operation(batch_size, operation_types, req.include_tx_proofs);
         ctx.set_batch_info(false, batch_size);
 
-        // Check idempotency cache for duplicate (keyed by namespace_id, vault_id, client_id)
-        // Per DESIGN.md §5.3: Sequence tracking is per (namespace_id, vault_id, client_id)
-        if let Some(cached) = self.idempotency.check(namespace_id, vault_id, &client_id, sequence) {
-            ctx.set_idempotency_hit(true);
-            ctx.set_cached();
-            if let Some(ref header) = cached.block_header
-                && let Some(ref state_root) = header.state_root
-            {
-                ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-            }
-            ctx.set_block_height(cached.block_height);
-            metrics::record_idempotency_hit();
-            metrics::record_batch_write(true, 0, ctx.elapsed_secs());
-            return Ok(Response::new(BatchWriteResponse {
-                result: Some(crate::proto::batch_write_response::Result::Success(
-                    BatchWriteSuccess {
-                        tx_id: cached.tx_id,
-                        block_height: cached.block_height,
-                        block_header: cached.block_header,
-                        tx_proof: cached.tx_proof,
-                    },
-                )),
-            }));
+        // Check idempotency cache for duplicate
+        use crate::idempotency::IdempotencyCheckResult;
+        match self.idempotency.check(
+            namespace_id,
+            vault_id,
+            &client_id,
+            idempotency_key,
+            request_hash,
+        ) {
+            IdempotencyCheckResult::Duplicate(cached) => {
+                ctx.set_idempotency_hit(true);
+                ctx.set_cached();
+                if let Some(ref header) = cached.block_header
+                    && let Some(ref state_root) = header.state_root
+                {
+                    ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
+                }
+                ctx.set_block_height(cached.block_height);
+                metrics::record_idempotency_hit();
+                metrics::record_batch_write(true, 0, ctx.elapsed_secs());
+                return Ok(Response::new(BatchWriteResponse {
+                    result: Some(crate::proto::batch_write_response::Result::Success(
+                        BatchWriteSuccess {
+                            tx_id: cached.tx_id,
+                            block_height: cached.block_height,
+                            block_header: cached.block_header,
+                            tx_proof: cached.tx_proof,
+                            assigned_sequence: cached.assigned_sequence,
+                        },
+                    )),
+                }));
+            },
+            IdempotencyCheckResult::KeyReused => {
+                ctx.set_error(
+                    "IdempotencyKeyReused",
+                    "Idempotency key reused with different payload",
+                );
+                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+                return Ok(Response::new(BatchWriteResponse {
+                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
+                        code: WriteErrorCode::IdempotencyKeyReused.into(),
+                        key: String::new(),
+                        current_version: None,
+                        current_value: None,
+                        message:
+                            "Idempotency key was already used with a different request payload"
+                                .to_string(),
+                        committed_tx_id: None,
+                        committed_block_height: None,
+                        assigned_sequence: None,
+                    })),
+                }));
+            },
+            IdempotencyCheckResult::NewRequest => {
+                // Proceed with new request
+                ctx.set_idempotency_hit(false);
+                metrics::record_idempotency_miss();
+            },
         }
-        ctx.set_idempotency_hit(false);
-        metrics::record_idempotency_miss();
 
         // Check per-namespace rate limit
         if let Err(status) = self.check_rate_limit(namespace_id) {
@@ -743,25 +819,11 @@ impl WriteService for WriteServiceImpl {
             return Err(status);
         }
 
-        // Check for sequence gaps (per DESIGN.md §5.3)
-        if let Err(gap_error) =
-            self.check_sequence_gap(namespace_id, vault_id, &client_id, sequence)
-        {
-            ctx.set_error("SequenceGap", "Sequence gap detected");
-            metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-            return Ok(Response::new(BatchWriteResponse {
-                result: Some(crate::proto::batch_write_response::Result::Error(gap_error)),
-            }));
-        }
+        // Server-assigned sequences: no gap check needed
 
         // Convert to internal request
-        let ledger_request = self.operations_to_request(
-            namespace_id,
-            Some(vault_id),
-            &all_operations,
-            &client_id,
-            sequence,
-        )?;
+        let ledger_request =
+            self.operations_to_request(namespace_id, Some(vault_id), &all_operations, &client_id)?;
 
         // Submit to Raft (serialized to prevent concurrent proposal race condition)
         metrics::record_raft_proposal();
@@ -780,7 +842,7 @@ impl WriteService for WriteServiceImpl {
         let response = result.data;
 
         match response {
-            LedgerResponse::Write { block_height, block_hash } => {
+            LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proofs {
                     self.generate_write_proof(namespace_id, vault_id, block_height)
@@ -793,14 +855,16 @@ impl WriteService for WriteServiceImpl {
                     block_height,
                     block_header: block_header.clone(),
                     tx_proof,
+                    assigned_sequence,
                 };
 
-                // Cache the result for idempotency (keyed by namespace_id, vault_id, client_id)
+                // Cache the result for idempotency
                 self.idempotency.insert(
                     namespace_id,
                     vault_id,
                     client_id.clone(),
-                    sequence,
+                    idempotency_key,
+                    request_hash,
                     success.clone(),
                 );
                 metrics::set_idempotency_cache_size(self.idempotency.len());
@@ -824,6 +888,7 @@ impl WriteService for WriteServiceImpl {
                             block_height: success.block_height,
                             block_header: success.block_header,
                             tx_proof: success.tx_proof,
+                            assigned_sequence: success.assigned_sequence,
                         },
                     )),
                 }))
@@ -841,7 +906,7 @@ impl WriteService for WriteServiceImpl {
                         message,
                         committed_tx_id: None,
                         committed_block_height: None,
-                        last_committed_sequence: None,
+                        assigned_sequence: None,
                     })),
                 }))
             },
@@ -870,7 +935,7 @@ impl WriteService for WriteServiceImpl {
                         message: "Precondition failed".to_string(),
                         committed_tx_id: None,
                         committed_block_height: None,
-                        last_committed_sequence: None,
+                        assigned_sequence: None,
                     })),
                 }))
             },

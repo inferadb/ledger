@@ -65,7 +65,6 @@ async fn write_system_entity(
     key: &str,
     value: &serde_json::Value,
     client_id: &str,
-    sequence: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
@@ -73,7 +72,7 @@ async fn write_system_entity(
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 0 }), // _system
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 0 }),
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
-        sequence,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
                 inferadb_ledger_raft::proto::SetEntity {
@@ -188,7 +187,7 @@ async fn test_create_org_saga_execution() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_system_entity(leader.addr, &saga_key, &saga_value, "saga-test-client", 1)
+    write_system_entity(leader.addr, &saga_key, &saga_value, "saga-test-client")
         .await
         .expect("write saga");
 
@@ -235,7 +234,7 @@ async fn test_delete_user_saga_state_transitions() {
         "status": "ACTIVE",
     });
 
-    write_system_entity(leader.addr, &user_key, &user_value, "delete-test-client", 1)
+    write_system_entity(leader.addr, &user_key, &user_value, "delete-test-client")
         .await
         .expect("create user");
 
@@ -254,7 +253,7 @@ async fn test_delete_user_saga_state_transitions() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_system_entity(leader.addr, &saga_key, &saga_value, "delete-test-client", 2)
+    write_system_entity(leader.addr, &saga_key, &saga_value, "delete-test-client")
         .await
         .expect("write delete saga");
 
@@ -305,7 +304,7 @@ async fn test_completed_saga_not_reexecuted() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_system_entity(leader.addr, &saga_key, &saga_value, "completed-test-client", 1)
+    write_system_entity(leader.addr, &saga_key, &saga_value, "completed-test-client")
         .await
         .expect("write completed saga");
 
@@ -357,7 +356,7 @@ async fn test_saga_serialization_roundtrip() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_system_entity(leader.addr, &saga_key, &saga_value, "roundtrip-client", 1)
+    write_system_entity(leader.addr, &saga_key, &saga_value, "roundtrip-client")
         .await
         .expect("write saga");
 

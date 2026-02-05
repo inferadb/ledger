@@ -73,7 +73,6 @@ async fn write_entity(
     key: &str,
     value: &[u8],
     client_id: &str,
-    sequence: u64,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
@@ -81,7 +80,7 @@ async fn write_entity(
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
-        sequence,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
                 inferadb_ledger_raft::proto::SetEntity {
@@ -152,12 +151,12 @@ async fn test_vault_isolation_same_namespace() {
     assert_ne!(vault_a, vault_b, "Vault IDs should be globally unique");
 
     // Write data to vault A
-    write_entity(leader.addr, ns_id, vault_a, "shared-key", b"value-from-vault-a", "client-a", 1)
+    write_entity(leader.addr, ns_id, vault_a, "shared-key", b"value-from-vault-a", "client-a")
         .await
         .expect("write to vault A");
 
     // Write DIFFERENT data with the SAME key to vault B
-    write_entity(leader.addr, ns_id, vault_b, "shared-key", b"value-from-vault-b", "client-b", 1)
+    write_entity(leader.addr, ns_id, vault_b, "shared-key", b"value-from-vault-b", "client-b")
         .await
         .expect("write to vault B");
 
@@ -192,7 +191,7 @@ async fn test_vault_isolation_key_not_found() {
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write a unique key to vault A only
-    write_entity(leader.addr, ns_id, vault_a, "unique-to-vault-a", b"secret-value", "client-a", 1)
+    write_entity(leader.addr, ns_id, vault_a, "unique-to-vault-a", b"secret-value", "client-a")
         .await
         .expect("write to vault A");
 
@@ -235,7 +234,6 @@ async fn test_multi_vault_isolation() {
             "common-key",
             format!("vault-{}-value", i).as_bytes(),
             &format!("client-{}", i),
-            1,
         )
         .await
         .expect("write to vault");
@@ -282,12 +280,12 @@ async fn test_namespace_isolation() {
     assert_ne!(vault_1, vault_2, "Vault IDs are globally unique across namespaces");
 
     // Write to vault in namespace 1
-    write_entity(leader.addr, ns_1, vault_1, "org-secret", b"alpha-data", "alpha-client", 1)
+    write_entity(leader.addr, ns_1, vault_1, "org-secret", b"alpha-data", "alpha-client")
         .await
         .expect("write to ns1 vault");
 
     // Write to vault in namespace 2
-    write_entity(leader.addr, ns_2, vault_2, "org-secret", b"beta-data", "beta-client", 1)
+    write_entity(leader.addr, ns_2, vault_2, "org-secret", b"beta-data", "beta-client")
         .await
         .expect("write to ns2 vault");
 
@@ -328,7 +326,7 @@ async fn test_vault_id_is_authoritative_identifier() {
     let vault_1 = create_vault(leader.addr, ns_1).await.expect("create vault in ns1");
 
     // Write data to vault_1
-    write_entity(leader.addr, ns_1, vault_1, "test-key", b"vault1-data", "client", 1)
+    write_entity(leader.addr, ns_1, vault_1, "test-key", b"vault1-data", "client")
         .await
         .expect("write to vault");
 
@@ -340,7 +338,7 @@ async fn test_vault_id_is_authoritative_identifier() {
     assert_ne!(vault_1, vault_2, "Vault IDs should be globally unique");
 
     // Even with ns_2 specified, vault_2's data is independent
-    write_entity(leader.addr, ns_2, vault_2, "test-key", b"vault2-data", "client-2", 1)
+    write_entity(leader.addr, ns_2, vault_2, "test-key", b"vault2-data", "client-2")
         .await
         .expect("write to vault 2");
 
@@ -398,7 +396,6 @@ async fn test_concurrent_vault_writes() {
                 &format!("key-{}", i),
                 format!("vault-a-{}", i).as_bytes(),
                 "client-a",
-                i + 1,
             )
             .await
             .expect("write to vault A");
@@ -416,7 +413,6 @@ async fn test_concurrent_vault_writes() {
                 &format!("key-{}", i),
                 format!("vault-b-{}", i).as_bytes(),
                 "client-b",
-                i + 1,
             )
             .await
             .expect("write to vault B");
@@ -521,11 +517,11 @@ async fn test_isolation_across_replicas() {
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write to each vault via leader
-    write_entity(leader.addr, ns_id, vault_a, "test-key", b"value-a", "client-a", 1)
+    write_entity(leader.addr, ns_id, vault_a, "test-key", b"value-a", "client-a")
         .await
         .expect("write to vault A");
 
-    write_entity(leader.addr, ns_id, vault_b, "test-key", b"value-b", "client-b", 1)
+    write_entity(leader.addr, ns_id, vault_b, "test-key", b"value-b", "client-b")
         .await
         .expect("write to vault B");
 
@@ -569,7 +565,7 @@ async fn test_empty_vault_isolation() {
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write to vault A only
-    write_entity(leader.addr, ns_id, vault_a, "data", b"exists", "client", 1)
+    write_entity(leader.addr, ns_id, vault_a, "data", b"exists", "client")
         .await
         .expect("write to vault A");
 
@@ -596,11 +592,11 @@ async fn test_deletion_isolation() {
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
     // Write same key to both vaults
-    write_entity(leader.addr, ns_id, vault_a, "to-delete", b"value-a", "client-a", 1)
+    write_entity(leader.addr, ns_id, vault_a, "to-delete", b"value-a", "client-a")
         .await
         .expect("write to vault A");
 
-    write_entity(leader.addr, ns_id, vault_b, "to-delete", b"value-b", "client-b", 1)
+    write_entity(leader.addr, ns_id, vault_b, "to-delete", b"value-b", "client-b")
         .await
         .expect("write to vault B");
 
@@ -611,7 +607,7 @@ async fn test_deletion_isolation() {
             namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: ns_id }),
             vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_a }),
             client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "client-a".to_string() }),
-            sequence: 2,
+            idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
             operations: vec![inferadb_ledger_raft::proto::Operation {
                 op: Some(inferadb_ledger_raft::proto::operation::Op::DeleteEntity(
                     inferadb_ledger_raft::proto::DeleteEntity { key: "to-delete".to_string() },

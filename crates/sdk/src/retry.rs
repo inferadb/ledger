@@ -28,7 +28,7 @@ use crate::{
 /// # Non-Retryable Errors
 ///
 /// If the operation fails with a non-retryable error (e.g., `INVALID_ARGUMENT`,
-/// `PERMISSION_DENIED`, `SequenceGap`), the error is returned immediately without
+/// `PERMISSION_DENIED`, `IdempotencyKeyReused`), the error is returned immediately without
 /// retry.
 ///
 /// # Example

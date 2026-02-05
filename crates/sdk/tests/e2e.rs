@@ -12,9 +12,8 @@
 //! ## Test Categories
 //!
 //! - **Write/Read Cycle**: Basic CRUD operations through consensus
-//! - **Idempotency**: Sequence tracking survives failover
+//! - **Idempotency**: Idempotent writes with UUID keys
 //! - **Streaming**: WatchBlocks continues after leader election
-//! - **Recovery**: Sequence recovery after client restart
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -24,10 +23,7 @@ use inferadb_ledger_raft::{
     LedgerTypeConfig,
     proto::{JoinClusterRequest, admin_service_client::AdminServiceClient},
 };
-use inferadb_ledger_sdk::{
-    ClientConfig, FileSequenceStorage, LedgerClient, Operation, PersistentSequenceTracker,
-    RetryPolicy, ServerSource,
-};
+use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource};
 use inferadb_ledger_test_utils::TestDir;
 use openraft::Raft;
 use serial_test::serial;
@@ -626,48 +622,6 @@ async fn test_data_persistence_across_sessions() {
         // Verify the new write is readable
         let read_result = client.read(ns_id, Some(vault_id), key).await.expect("read new write");
         assert_eq!(read_result, Some(value));
-    }
-}
-
-/// Test sequence recovery with persistent tracker.
-#[serial]
-#[tokio::test]
-async fn test_sequence_recovery_with_persistence() {
-    use std::path::PathBuf;
-
-    use tempfile::tempdir;
-
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
-
-    let _leader = cluster.leader().expect("should have leader");
-    let temp_dir = tempdir().expect("create temp dir");
-    let storage_dir: PathBuf = temp_dir.path().to_path_buf();
-
-    // First session with persistent tracker
-    {
-        let storage = FileSequenceStorage::new("persist-client", storage_dir.clone());
-        let tracker =
-            PersistentSequenceTracker::new("persist-client", storage).expect("create tracker");
-
-        // Perform some sequence operations
-        for _ in 0..3 {
-            let _ = tracker.next_sequence(1, 1);
-        }
-
-        // Flush to ensure persistence
-        tracker.flush().expect("flush");
-    }
-
-    // Second session - load persisted state
-    {
-        let storage = FileSequenceStorage::new("persist-client", storage_dir);
-        let tracker =
-            PersistentSequenceTracker::new("persist-client", storage).expect("create tracker");
-
-        // Next sequence should continue from where we left off
-        let next = tracker.next_sequence(1, 1);
-        assert_eq!(next, 4, "sequence should continue from persisted state");
     }
 }
 

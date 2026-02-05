@@ -50,7 +50,7 @@ async fn test_single_node_write_read() {
     // Submit a write request using SetEntity operation
     let request = inferadb_ledger_raft::proto::WriteRequest {
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "test-client".to_string() }),
-        sequence: 1,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_raft::proto::Operation {
@@ -84,7 +84,7 @@ async fn test_single_node_write_read() {
     }
 }
 
-/// Test write idempotency - same client_id + sequence should return cached result.
+/// Test write idempotency - same client_id + idempotency_key should return cached result.
 #[serial]
 #[tokio::test]
 async fn test_write_idempotency() {
@@ -94,12 +94,14 @@ async fn test_write_idempotency() {
     let leader = cluster.leader().expect("should have leader");
     let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
-    // Use sequence 1 to pass sequence gap detection (expects 1 for new client)
+    // Use a fixed idempotency key for both writes to test deduplication
+    let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
+
     let request = inferadb_ledger_raft::proto::WriteRequest {
         client_id: Some(inferadb_ledger_raft::proto::ClientId {
             id: "idempotent-client".to_string(),
         }),
-        sequence: 1,
+        idempotency_key: idempotency_key.clone(),
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_raft::proto::Operation {
@@ -119,7 +121,7 @@ async fn test_write_idempotency() {
     let response1 =
         client.write(request.clone()).await.expect("first write should succeed").into_inner();
 
-    // Second write with same client_id + sequence
+    // Second write with same client_id + idempotency_key
     let response2 = client.write(request).await.expect("second write should succeed").into_inner();
 
     // Both should return the same result
@@ -208,7 +210,7 @@ async fn test_write_creates_retrievable_block() {
     // Submit a write
     let request = inferadb_ledger_raft::proto::WriteRequest {
         client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "block-test".to_string() }),
-        sequence: 1,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_raft::proto::Operation {
@@ -282,7 +284,7 @@ async fn test_three_node_write_replication() {
         client_id: Some(inferadb_ledger_raft::proto::ClientId {
             id: "replication-test".to_string(),
         }),
-        sequence: 1,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
         vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_raft::proto::Operation {

@@ -32,13 +32,12 @@ fn make_write_request(
     key: &str,
     value: &[u8],
     client_id: &str,
-    sequence: u64,
 ) -> WriteRequest {
     WriteRequest {
         namespace_id: Some(NamespaceId { id: namespace_id }),
         vault_id: Some(VaultId { id: vault_id }),
         client_id: Some(ClientId { id: client_id.to_string() }),
-        sequence,
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_raft::proto::Operation {
             op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
                 inferadb_ledger_raft::proto::SetEntity {
@@ -101,7 +100,7 @@ async fn test_committed_write_survives_leader_crash() {
     let mut client = create_write_client(leader_addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
-    let write_req = make_write_request(1, 1, "chaos-key", b"chaos-value", &client_id, 1);
+    let write_req = make_write_request(1, 1, "chaos-key", b"chaos-value", &client_id);
 
     let response = client.write(write_req).await.expect("write should succeed").into_inner();
     let block_height = extract_block_height(response);
@@ -153,7 +152,6 @@ async fn test_read_consistency_after_leader_change() {
             &format!("key-{}", i),
             format!("value-{}", i).as_bytes(),
             &client_id,
-            i + 1,
         );
         client.write(write_req).await.expect("write should succeed");
     }
@@ -191,7 +189,7 @@ async fn test_writes_succeed_with_one_node_down() {
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
-    let write_req = make_write_request(1, 1, "before-failure", b"value1", &client_id, 1);
+    let write_req = make_write_request(1, 1, "before-failure", b"value1", &client_id);
 
     client.write(write_req).await.expect("write should succeed");
 
@@ -203,7 +201,7 @@ async fn test_writes_succeed_with_one_node_down() {
     // the leader and one follower form a majority.
 
     // Write again - should still succeed
-    let write_req = make_write_request(1, 1, "after-check", b"value2", &client_id, 2);
+    let write_req = make_write_request(1, 1, "after-check", b"value2", &client_id);
     client.write(write_req).await.expect("write should succeed");
 
     // Verify both writes are readable
@@ -238,7 +236,6 @@ async fn test_deterministic_block_height_across_nodes() {
             &format!("det-key-{}", i),
             &(i as u32).to_le_bytes(),
             &client_id,
-            i + 1,
         );
         client.write(write_req).await.expect("write should succeed");
     }
@@ -285,8 +282,7 @@ async fn test_concurrent_writes_all_applied() {
             for seq in 0..writes_per_client {
                 let key = format!("concurrent-{}-{}", client_num, seq);
                 let value = format!("value-{}-{}", client_num, seq);
-                let write_req =
-                    make_write_request(1, 1, &key, value.as_bytes(), &client_id, seq + 1);
+                let write_req = make_write_request(1, 1, &key, value.as_bytes(), &client_id);
                 client.write(write_req).await.expect("write should succeed");
             }
         });
@@ -348,7 +344,6 @@ async fn test_rapid_writes_no_data_loss() {
             &format!("rapid-{}", i),
             &(i as u32).to_le_bytes(),
             &client_id,
-            i + 1,
         );
         client.write(write_req).await.expect("write should succeed");
     }
@@ -387,8 +382,7 @@ async fn test_term_agreement_maintained() {
 
     let client_id = format!("term-test-{}", leader_id);
     for i in 0..5u64 {
-        let write_req =
-            make_write_request(1, 1, &format!("term-key-{}", i), b"value", &client_id, i + 1);
+        let write_req = make_write_request(1, 1, &format!("term-key-{}", i), b"value", &client_id);
         client.write(write_req).await.expect("write should succeed");
     }
 
@@ -417,11 +411,11 @@ async fn test_key_overwrite_consistency() {
     let client_id = format!("overwrite-test-{}", leader_id);
 
     // Write initial value
-    let write_req = make_write_request(1, 1, "overwrite-key", b"initial", &client_id, 1);
+    let write_req = make_write_request(1, 1, "overwrite-key", b"initial", &client_id);
     client.write(write_req).await.expect("initial write");
 
     // Overwrite with new value
-    let write_req = make_write_request(1, 1, "overwrite-key", b"updated", &client_id, 2);
+    let write_req = make_write_request(1, 1, "overwrite-key", b"updated", &client_id);
     client.write(write_req).await.expect("overwrite");
 
     // Wait for replication
@@ -451,7 +445,7 @@ async fn test_large_batch_writes() {
     for i in 0..num_keys {
         let key = format!("batch-key-{:04}", i);
         let value = format!("batch-value-{:04}", i);
-        let write_req = make_write_request(1, 1, &key, value.as_bytes(), &client_id, i + 1);
+        let write_req = make_write_request(1, 1, &key, value.as_bytes(), &client_id);
         client.write(write_req).await.expect("batch write");
     }
 

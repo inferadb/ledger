@@ -440,7 +440,7 @@ async fn write_worker(
         };
 
     let client_id = format!("stress-writer-{}", worker_id);
-    let mut sequence = 1u64;
+    let mut batch_counter = 0u64;
     let mut consecutive_errors = 0u32;
 
     // Stagger worker starts to prevent thundering herd
@@ -472,8 +472,9 @@ async fn write_worker(
         let batch_size = config.batch_size;
         let keys_and_values: Vec<(String, Vec<u8>)> = (0..batch_size)
             .map(|i| {
-                let key = format!("stress-key-{}-{}-{}", worker_id, sequence, i);
-                let value = format!("stress-value-{}-{}-{}", worker_id, sequence, i).into_bytes();
+                let key = format!("stress-key-{}-{}-{}", worker_id, batch_counter, i);
+                let value =
+                    format!("stress-value-{}-{}-{}", worker_id, batch_counter, i).into_bytes();
                 (key, value)
             })
             .collect();
@@ -507,7 +508,7 @@ async fn write_worker(
                 }),
                 vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
                 client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
-                sequence,
+                idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 operations,
                 include_tx_proofs: false,
             };
@@ -540,17 +541,12 @@ async fn write_worker(
                             consecutive_errors = 0;
                         },
                         Some(inferadb_ledger_raft::proto::batch_write_response::Result::Error(
-                            e,
+                            _e,
                         )) => {
-                            if !e.message.contains("Sequence gap") {
-                                for _ in 0..batch_size {
-                                    metrics.record_write_error();
-                                }
-                                consecutive_errors += 1;
-                            } else {
-                                sequence += 1;
-                                continue;
+                            for _ in 0..batch_size {
+                                metrics.record_write_error();
                             }
+                            consecutive_errors += 1;
                         },
                         None => {
                             for _ in 0..batch_size {
@@ -605,7 +601,7 @@ async fn write_worker(
             let (key, value) = keys_and_values.into_iter().next().unwrap();
             let request = inferadb_ledger_raft::proto::WriteRequest {
                 client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
-                sequence,
+                idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
@@ -642,14 +638,9 @@ async fn write_worker(
                             }
                             consecutive_errors = 0;
                         },
-                        Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
-                            if !e.message.contains("Sequence gap") {
-                                metrics.record_write_error();
-                                consecutive_errors += 1;
-                            } else {
-                                sequence += 1;
-                                continue;
-                            }
+                        Some(inferadb_ledger_raft::proto::write_response::Result::Error(_e)) => {
+                            metrics.record_write_error();
+                            consecutive_errors += 1;
                         },
                         None => {
                             metrics.record_write_error();
@@ -697,7 +688,7 @@ async fn write_worker(
             }
         }
 
-        sequence += 1;
+        batch_counter += 1;
     }
 }
 

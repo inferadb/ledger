@@ -12,7 +12,6 @@ use crate::{
     config::ClientConfig,
     connection::ConnectionPool,
     error::{self, Result},
-    idempotency::SequenceTracker,
     retry::with_retry,
     server::{ServerResolver, ServerSource},
     streaming::{HeightTracker, ReconnectingStream},
@@ -48,17 +47,24 @@ impl ReadConsistency {
 
 /// Result of a successful write operation.
 ///
-/// Contains the transaction ID and block height where the write was committed.
-/// This information can be used for:
+/// Contains the transaction ID, block height, and server-assigned sequence number
+/// for the committed write. This information can be used for:
 /// - Tracking transaction history
 /// - Waiting for replication to replicas
 /// - Verified reads at a specific block height
+/// - Monitoring client write progress via assigned_sequence
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteSuccess {
     /// Unique transaction ID assigned by the server.
     pub tx_id: String,
     /// Block height where the transaction was committed.
     pub block_height: u64,
+    /// Server-assigned sequence number for this write.
+    ///
+    /// The server assigns monotonically increasing sequence numbers at Raft commit
+    /// time. This provides a total ordering of writes per (namespace, vault, client)
+    /// and can be used for audit trail continuity.
+    pub assigned_sequence: u64,
 }
 
 // =============================================================================
@@ -1193,7 +1199,6 @@ impl SetCondition {
 #[derive(Clone)]
 pub struct LedgerClient {
     pool: ConnectionPool,
-    sequences: SequenceTracker,
     /// Server resolver for DNS/file discovery.
     resolver: Option<Arc<ServerResolver>>,
     /// Cancellation token for coordinated shutdown.
@@ -1240,7 +1245,6 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn new(config: ClientConfig) -> Result<Self> {
-        let client_id = config.client_id().to_string();
         let cancellation = tokio_util::sync::CancellationToken::new();
 
         // Create resolver for DNS/file sources
@@ -1271,9 +1275,7 @@ impl LedgerClient {
             pool.update_endpoints(endpoints);
         }
 
-        let sequences = SequenceTracker::new(client_id);
-
-        Ok(Self { pool, sequences, resolver, cancellation })
+        Ok(Self { pool, resolver, cancellation })
     }
 
     /// Convenience constructor for connecting to a single endpoint.
@@ -1310,11 +1312,11 @@ impl LedgerClient {
     /// Returns the client ID used for idempotency tracking.
     ///
     /// The client ID is included in all write requests and is used by the server
-    /// to deduplicate requests and track sequence state.
+    /// to deduplicate requests and track per-client sequence state.
     #[inline]
     #[must_use]
     pub fn client_id(&self) -> &str {
-        self.sequences.client_id()
+        self.pool.config().client_id()
     }
 
     /// Returns a reference to the client configuration.
@@ -1325,24 +1327,6 @@ impl LedgerClient {
     #[must_use]
     pub fn config(&self) -> &ClientConfig {
         self.pool.config()
-    }
-
-    /// Returns a reference to the sequence tracker.
-    ///
-    /// The sequence tracker maintains per-vault sequence numbers for idempotency.
-    /// Most users won't need direct access to this, as write operations
-    /// automatically manage sequences.
-    ///
-    /// # Advanced Usage
-    ///
-    /// Direct access is useful for:
-    /// - Inspecting current sequence state for debugging
-    /// - Manual sequence recovery after errors
-    /// - Custom idempotency workflows
-    #[inline]
-    #[must_use]
-    pub fn sequences(&self) -> &SequenceTracker {
-        &self.sequences
     }
 
     /// Returns a reference to the connection pool.
@@ -1366,8 +1350,7 @@ impl LedgerClient {
     /// 1. Cancels all pending requests (they will return `SdkError::Shutdown`)
     /// 2. Prevents new requests from being accepted
     /// 3. Stops the server resolver refresh task (if using DNS/file discovery)
-    /// 4. Flushes sequence tracker state (best-effort, non-blocking)
-    /// 5. Resets the connection pool
+    /// 4. Resets the connection pool
     ///
     /// After calling `shutdown()`, all operations will immediately return
     /// `SdkError::Shutdown`. The client can be cloned, but all clones share
@@ -1399,9 +1382,6 @@ impl LedgerClient {
             resolver.shutdown();
         }
 
-        // Best-effort sequence flush - don't block on errors
-        // The PersistentSequenceTracker (if used) will handle this
-        // For now, we just log if there's an issue
         tracing::debug!("Client shutdown initiated");
 
         // Reset connection pool to close connections
@@ -1754,9 +1734,10 @@ impl LedgerClient {
 
     /// Submit a write transaction to the ledger.
     ///
-    /// Writes are automatically idempotent via client-side sequence tracking.
+    /// Writes are automatically idempotent via server-assigned sequence numbers.
+    /// The server assigns monotonically increasing sequences at Raft commit time.
     /// If a write fails with a retryable error, it will be retried with the
-    /// same sequence number. If the server reports the write was already
+    /// same idempotency key. If the server reports the write was already
     /// committed (duplicate), the original result is returned as success.
     ///
     /// # Arguments
@@ -1767,14 +1748,15 @@ impl LedgerClient {
     ///
     /// # Returns
     ///
-    /// Returns [`WriteSuccess`] containing the transaction ID and block height.
+    /// Returns [`WriteSuccess`] containing the transaction ID, block height, and
+    /// server-assigned sequence number.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - Connection fails after retry attempts
     /// - A conditional write (CAS) condition fails
-    /// - A sequence gap is detected (requires recovery)
+    /// - An idempotency key is reused with different payload
     ///
     /// # Example
     ///
@@ -1792,7 +1774,7 @@ impl LedgerClient {
     ///     ],
     /// ).await?;
     ///
-    /// println!("Committed at block {}", result.block_height);
+    /// println!("Committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
     /// # Ok(())
     /// # }
     /// ```
@@ -1804,46 +1786,23 @@ impl LedgerClient {
     ) -> Result<WriteSuccess> {
         self.check_shutdown()?;
 
-        // Get the vault key for sequence tracking
-        let vault_key = (namespace_id, vault_id.unwrap_or(0));
+        // Generate UUID idempotency key once for this request
+        // The same key is reused across all retry attempts
+        let idempotency_key = uuid::Uuid::new_v4();
 
-        // Get next sequence number for this vault
-        let mut sequence = self.sequences.next_sequence(vault_key.0, vault_key.1);
-
-        // Allow one recovery attempt for sequence gap
-        let max_gap_recoveries = 1;
-        let mut gap_recovery_attempts = 0;
-
-        loop {
-            let result = self.execute_write(namespace_id, vault_id, &operations, sequence).await;
-
-            match result {
-                Ok(success) => return Ok(success),
-                Err(crate::error::SdkError::SequenceGap { server_has, .. }) => {
-                    if gap_recovery_attempts >= max_gap_recoveries {
-                        return Err(crate::error::SdkError::SequenceGap {
-                            expected: server_has + 1,
-                            server_has,
-                        });
-                    }
-
-                    // Recover: update local sequence and retry
-                    gap_recovery_attempts += 1;
-                    self.sequences.set_sequence(vault_key.0, vault_key.1, server_has);
-                    sequence = self.sequences.next_sequence(vault_key.0, vault_key.1);
-                },
-                Err(e) => return Err(e),
-            }
-        }
+        self.execute_write(namespace_id, vault_id, &operations, idempotency_key).await
     }
 
     /// Execute a single write attempt with retry for transient errors.
+    ///
+    /// The idempotency key is preserved across retry attempts to ensure
+    /// at-most-once semantics even with network failures.
     async fn execute_write(
         &self,
         namespace_id: i64,
         vault_id: Option<i64>,
         operations: &[Operation],
-        sequence: u64,
+        idempotency_key: uuid::Uuid,
     ) -> Result<WriteSuccess> {
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
@@ -1853,10 +1812,14 @@ impl LedgerClient {
         let proto_operations: Vec<proto::Operation> =
             operations.iter().map(Operation::to_proto).collect();
 
+        // Convert UUID to bytes (16 bytes)
+        let idempotency_key_bytes = idempotency_key.as_bytes().to_vec();
+
         // Execute with retry for transient errors
         with_retry(&retry_policy, || {
             let proto_ops = proto_operations.clone();
             let cid = client_id.clone();
+            let key_bytes = idempotency_key_bytes.clone();
             async move {
                 let channel = pool.get_channel().await?;
                 let mut write_client = Self::create_write_client(
@@ -1869,7 +1832,7 @@ impl LedgerClient {
                     namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                     vault_id: vault_id.map(|id| proto::VaultId { id }),
                     client_id: Some(proto::ClientId { id: cid }),
-                    sequence,
+                    idempotency_key: key_bytes,
                     operations: proto_ops,
                     include_tx_proof: false,
                 };
@@ -1884,12 +1847,11 @@ impl LedgerClient {
 
     /// Process WriteResponse and convert to Result<WriteSuccess>.
     fn process_write_response(response: proto::WriteResponse) -> Result<WriteSuccess> {
-        use crate::error::SequenceGapSnafu;
-
         match response.result {
             Some(proto::write_response::Result::Success(success)) => Ok(WriteSuccess {
                 tx_id: Self::tx_id_to_hex(success.tx_id),
                 block_height: success.block_height,
+                assigned_sequence: success.assigned_sequence,
             }),
             Some(proto::write_response::Result::Error(error)) => {
                 let code = proto::WriteErrorCode::try_from(error.code)
@@ -1897,16 +1859,22 @@ impl LedgerClient {
 
                 match code {
                     proto::WriteErrorCode::AlreadyCommitted => {
-                        // Idempotent retry - return the original success
+                        // Idempotent retry - return the original success with assigned_sequence
                         Ok(WriteSuccess {
                             tx_id: Self::tx_id_to_hex(error.committed_tx_id),
                             block_height: error.committed_block_height.unwrap_or(0),
+                            assigned_sequence: error.assigned_sequence.unwrap_or(0),
                         })
                     },
-                    proto::WriteErrorCode::SequenceGap => {
-                        // Need recovery - return error with context
-                        let server_has = error.last_committed_sequence.unwrap_or(0);
-                        SequenceGapSnafu { expected: server_has + 1, server_has }.fail()
+                    proto::WriteErrorCode::IdempotencyKeyReused => {
+                        // Client reused idempotency key with different payload
+                        crate::error::IdempotencySnafu {
+                            message: format!(
+                                "Idempotency key reused with different payload: {}",
+                                error.message
+                            ),
+                        }
+                        .fail()
                     },
                     _ => {
                         // Other write errors (CAS failures, etc.)
@@ -1968,8 +1936,8 @@ impl LedgerClient {
     /// All operations are committed together in a single block, or none are applied
     /// if any operation fails (e.g., CAS condition failure).
     ///
-    /// The batch uses a single sequence number for idempotency, meaning the entire
-    /// batch is the deduplication unit - retry with the same sequence returns the
+    /// The batch uses a single idempotency key, meaning the entire batch is the
+    /// deduplication unit - retry with the same idempotency key returns the
     /// original result.
     ///
     /// # Arguments
@@ -1981,14 +1949,15 @@ impl LedgerClient {
     ///
     /// # Returns
     ///
-    /// Returns [`WriteSuccess`] containing the transaction ID and block height.
+    /// Returns [`WriteSuccess`] containing the transaction ID, block height, and
+    /// server-assigned sequence number.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - Connection fails after retry attempts
     /// - Any CAS condition fails (entire batch rolled back)
-    /// - A sequence gap is detected (requires recovery)
+    /// - An idempotency key is reused with different payload
     ///
     /// # Atomicity
     ///
@@ -2019,7 +1988,7 @@ impl LedgerClient {
     ///     ],
     /// ).await?;
     ///
-    /// println!("Batch committed at block {}", result.block_height);
+    /// println!("Batch committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
     /// # Ok(())
     /// # }
     /// ```
@@ -2031,46 +2000,23 @@ impl LedgerClient {
     ) -> Result<WriteSuccess> {
         self.check_shutdown()?;
 
-        // Get the vault key for sequence tracking
-        let vault_key = (namespace_id, vault_id.unwrap_or(0));
+        // Generate UUID idempotency key once for this request
+        // The same key is reused across all retry attempts
+        let idempotency_key = uuid::Uuid::new_v4();
 
-        // Get next sequence number for this vault
-        let mut sequence = self.sequences.next_sequence(vault_key.0, vault_key.1);
-
-        // Allow one recovery attempt for sequence gap
-        let max_gap_recoveries = 1;
-        let mut gap_recovery_attempts = 0;
-
-        loop {
-            let result = self.execute_batch_write(namespace_id, vault_id, &batches, sequence).await;
-
-            match result {
-                Ok(success) => return Ok(success),
-                Err(crate::error::SdkError::SequenceGap { server_has, .. }) => {
-                    if gap_recovery_attempts >= max_gap_recoveries {
-                        return Err(crate::error::SdkError::SequenceGap {
-                            expected: server_has + 1,
-                            server_has,
-                        });
-                    }
-
-                    // Recover: update local sequence and retry
-                    gap_recovery_attempts += 1;
-                    self.sequences.set_sequence(vault_key.0, vault_key.1, server_has);
-                    sequence = self.sequences.next_sequence(vault_key.0, vault_key.1);
-                },
-                Err(e) => return Err(e),
-            }
-        }
+        self.execute_batch_write(namespace_id, vault_id, &batches, idempotency_key).await
     }
 
     /// Execute a single batch write attempt with retry for transient errors.
+    ///
+    /// The idempotency key is preserved across retry attempts to ensure
+    /// at-most-once semantics even with network failures.
     async fn execute_batch_write(
         &self,
         namespace_id: i64,
         vault_id: Option<i64>,
         batches: &[Vec<Operation>],
-        sequence: u64,
+        idempotency_key: uuid::Uuid,
     ) -> Result<WriteSuccess> {
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
@@ -2084,10 +2030,14 @@ impl LedgerClient {
             })
             .collect();
 
+        // Convert UUID to bytes (16 bytes)
+        let idempotency_key_bytes = idempotency_key.as_bytes().to_vec();
+
         // Execute with retry for transient errors
         with_retry(&retry_policy, || {
             let batch_ops = proto_batches.clone();
             let cid = client_id.clone();
+            let key_bytes = idempotency_key_bytes.clone();
             async move {
                 let channel = pool.get_channel().await?;
                 let mut write_client = Self::create_write_client(
@@ -2100,7 +2050,7 @@ impl LedgerClient {
                     namespace_id: Some(proto::NamespaceId { id: namespace_id }),
                     vault_id: vault_id.map(|id| proto::VaultId { id }),
                     client_id: Some(proto::ClientId { id: cid }),
-                    sequence,
+                    idempotency_key: key_bytes,
                     operations: batch_ops,
                     include_tx_proofs: false,
                 };
@@ -2116,12 +2066,11 @@ impl LedgerClient {
 
     /// Process BatchWriteResponse and convert to Result<WriteSuccess>.
     fn process_batch_write_response(response: proto::BatchWriteResponse) -> Result<WriteSuccess> {
-        use crate::error::SequenceGapSnafu;
-
         match response.result {
             Some(proto::batch_write_response::Result::Success(success)) => Ok(WriteSuccess {
                 tx_id: Self::tx_id_to_hex(success.tx_id),
                 block_height: success.block_height,
+                assigned_sequence: success.assigned_sequence,
             }),
             Some(proto::batch_write_response::Result::Error(error)) => {
                 let code = proto::WriteErrorCode::try_from(error.code)
@@ -2129,16 +2078,22 @@ impl LedgerClient {
 
                 match code {
                     proto::WriteErrorCode::AlreadyCommitted => {
-                        // Idempotent retry - return the original success
+                        // Idempotent retry - return the original success with assigned_sequence
                         Ok(WriteSuccess {
                             tx_id: Self::tx_id_to_hex(error.committed_tx_id),
                             block_height: error.committed_block_height.unwrap_or(0),
+                            assigned_sequence: error.assigned_sequence.unwrap_or(0),
                         })
                     },
-                    proto::WriteErrorCode::SequenceGap => {
-                        // Need recovery - return error with context
-                        let server_has = error.last_committed_sequence.unwrap_or(0);
-                        SequenceGapSnafu { expected: server_has + 1, server_has }.fail()
+                    proto::WriteErrorCode::IdempotencyKeyReused => {
+                        // Client reused idempotency key with different payload
+                        crate::error::IdempotencySnafu {
+                            message: format!(
+                                "Idempotency key reused with different payload: {}",
+                                error.message
+                            ),
+                        }
+                        .fail()
                     },
                     _ => {
                         // Other write errors (CAS failures, etc.)
@@ -3200,19 +3155,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sequences_accessor_returns_tracker() {
-        let client = LedgerClient::connect("http://localhost:50051", "seq-test")
-            .await
-            .expect("client creation");
-
-        let sequences = client.sequences();
-        assert_eq!(sequences.client_id(), "seq-test");
-
-        // Tracker should start fresh
-        assert_eq!(sequences.vault_count(), 0);
-    }
-
-    #[tokio::test]
     async fn test_pool_accessor_returns_pool() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
@@ -3569,10 +3511,12 @@ mod tests {
 
     #[test]
     fn test_write_success_fields() {
-        let success = WriteSuccess { tx_id: "abc123".to_string(), block_height: 42 };
+        let success =
+            WriteSuccess { tx_id: "abc123".to_string(), block_height: 42, assigned_sequence: 5 };
 
         assert_eq!(success.tx_id, "abc123");
         assert_eq!(success.block_height, 42);
+        assert_eq!(success.assigned_sequence, 5);
     }
 
     #[test]
@@ -3615,56 +3559,6 @@ mod tests {
         let result = client.write(1, Some(0), operations).await;
 
         assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_write_increments_sequence() {
-        let client = LedgerClient::connect("http://127.0.0.1:59993", "seq-write-test")
-            .await
-            .expect("client creation");
-
-        // Check initial sequence state (should be 0 for new vault)
-        let initial_seq = client.sequences().current_sequence(1, 0);
-        assert_eq!(initial_seq, 0);
-
-        // Attempt write - even though it fails, sequence should be consumed
-        let operations = vec![Operation::set_entity("key", b"value".to_vec())];
-        let _ = client.write(1, Some(0), operations).await;
-
-        // Sequence should have been incremented
-        let new_seq = client.sequences().current_sequence(1, 0);
-        assert_eq!(new_seq, 1, "sequence should increment on write attempt");
-    }
-
-    #[tokio::test]
-    async fn test_write_different_vaults_have_independent_sequences() {
-        let client = LedgerClient::connect("http://127.0.0.1:59992", "multi-vault-test")
-            .await
-            .expect("client creation");
-
-        // Write to vault 1
-        let _ = client.write(1, Some(1), vec![Operation::set_entity("k1", b"v1".to_vec())]).await;
-
-        // Write to vault 2
-        let _ = client.write(1, Some(2), vec![Operation::set_entity("k2", b"v2".to_vec())]).await;
-
-        // Each vault should have its own sequence
-        assert_eq!(client.sequences().current_sequence(1, 1), 1);
-        assert_eq!(client.sequences().current_sequence(1, 2), 1);
-    }
-
-    #[tokio::test]
-    async fn test_write_with_none_vault_id_uses_default() {
-        let client = LedgerClient::connect("http://127.0.0.1:59991", "none-vault-test")
-            .await
-            .expect("client creation");
-
-        // Write with None vault_id (namespace-level)
-        let _ =
-            client.write(1, None, vec![Operation::set_entity("entity", b"data".to_vec())]).await;
-
-        // Should use vault_id 0 internally for sequence tracking
-        assert_eq!(client.sequences().current_sequence(1, 0), 1, "None vault_id should map to 0");
     }
 
     #[tokio::test]
@@ -3726,82 +3620,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_batch_write_increments_sequence() {
-        let client = LedgerClient::connect("http://127.0.0.1:59988", "batch-seq-test")
-            .await
-            .expect("client creation");
-
-        // Check initial sequence state
-        let initial_seq = client.sequences().current_sequence(1, 0);
-        assert_eq!(initial_seq, 0);
-
-        // Attempt batch write - even though it fails, sequence should be consumed
-        let batches = vec![vec![Operation::set_entity("key", b"value".to_vec())]];
-        let _ = client.batch_write(1, Some(0), batches).await;
-
-        // Sequence should have been incremented
-        let new_seq = client.sequences().current_sequence(1, 0);
-        assert_eq!(new_seq, 1, "sequence should increment on batch write attempt");
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_uses_single_sequence_for_all_batches() {
-        let client = LedgerClient::connect("http://127.0.0.1:59987", "batch-single-seq")
-            .await
-            .expect("client creation");
-
-        // Multiple batch groups should still use one sequence
-        let batches = vec![
-            vec![Operation::set_entity("k1", b"v1".to_vec())],
-            vec![Operation::set_entity("k2", b"v2".to_vec())],
-            vec![Operation::set_entity("k3", b"v3".to_vec())],
-        ];
-        let _ = client.batch_write(1, Some(0), batches).await;
-
-        // Only one sequence consumed despite multiple batches
-        assert_eq!(
-            client.sequences().current_sequence(1, 0),
-            1,
-            "batch should use single sequence"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_with_none_vault_id() {
-        let client = LedgerClient::connect("http://127.0.0.1:59986", "batch-none-vault")
-            .await
-            .expect("client creation");
-
-        // Batch write with None vault_id (namespace-level)
-        let batches = vec![vec![Operation::set_entity("entity", b"data".to_vec())]];
-        let _ = client.batch_write(1, None, batches).await;
-
-        // Should use vault_id 0 internally for sequence tracking
-        assert_eq!(client.sequences().current_sequence(1, 0), 1, "None vault_id should map to 0");
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_different_vaults_have_independent_sequences() {
-        let client = LedgerClient::connect("http://127.0.0.1:59985", "batch-multi-vault")
-            .await
-            .expect("client creation");
-
-        // Batch write to vault 1
-        let _ = client
-            .batch_write(1, Some(1), vec![vec![Operation::set_entity("k1", b"v1".to_vec())]])
-            .await;
-
-        // Batch write to vault 2
-        let _ = client
-            .batch_write(1, Some(2), vec![vec![Operation::set_entity("k2", b"v2".to_vec())]])
-            .await;
-
-        // Each vault should have its own sequence
-        assert_eq!(client.sequences().current_sequence(1, 1), 1);
-        assert_eq!(client.sequences().current_sequence(1, 2), 1);
-    }
-
-    #[tokio::test]
     async fn test_batch_write_with_multiple_operation_groups() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://127.0.0.1:59984"]))
@@ -3833,24 +3651,6 @@ mod tests {
 
         // Should fail due to connection (not due to batch structure)
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_empty_batches_still_increments_sequence() {
-        let client = LedgerClient::connect("http://127.0.0.1:59983", "batch-empty")
-            .await
-            .expect("client creation");
-
-        // Empty batch write
-        let batches: Vec<Vec<Operation>> = vec![];
-        let _ = client.batch_write(1, Some(0), batches).await;
-
-        // Sequence should still be incremented (server decides if empty batch is valid)
-        assert_eq!(
-            client.sequences().current_sequence(1, 0),
-            1,
-            "empty batch should still increment sequence"
-        );
     }
 
     // =========================================================================

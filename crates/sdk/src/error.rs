@@ -62,19 +62,13 @@ pub enum SdkError {
     },
 
     /// Client-side idempotency error.
+    ///
+    /// Returned when an idempotency key is reused with a different payload.
+    /// This is not retryable - the client must generate a new idempotency key.
     #[snafu(display("Idempotency error: {message}"))]
     Idempotency {
         /// Error description.
         message: String,
-    },
-
-    /// Sequence gap detected - requires recovery.
-    #[snafu(display("Sequence gap: server has {server_has}, client expected to send {expected}"))]
-    SequenceGap {
-        /// Sequence number server expected.
-        expected: u64,
-        /// Last committed sequence on server.
-        server_has: u64,
     },
 
     /// Write was already committed (idempotent retry detected).
@@ -149,7 +143,7 @@ impl SdkError {
     /// - `INVALID_ARGUMENT`: Request is malformed
     /// - `PERMISSION_DENIED`: Authentication/authorization failure
     /// - `UNAUTHENTICATED`: Missing credentials
-    /// - `SequenceGap`: Requires recovery flow, not automatic retry
+    /// - `Idempotency`: Idempotency key reused with different payload
     /// - `AlreadyCommitted`: Operation already succeeded
     #[must_use]
     pub fn is_retryable(&self) -> bool {
@@ -167,7 +161,6 @@ impl SdkError {
             ),
             // Non-retryable
             Self::Config { .. } => false,
-            Self::SequenceGap { .. } => false,
             Self::AlreadyCommitted { .. } => false,
             Self::Idempotency { .. } => false,
             Self::RetryExhausted { .. } => false,
@@ -261,8 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sequence_gap_not_retryable() {
-        let err = SdkError::SequenceGap { expected: 5, server_has: 4 };
+    fn test_idempotency_key_reused_not_retryable() {
+        let err = SdkError::Idempotency { message: "key reused".to_owned() };
         assert!(!err.is_retryable());
     }
 

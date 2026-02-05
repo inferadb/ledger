@@ -257,6 +257,8 @@ pub enum LedgerResponse {
         block_height: u64,
         /// Block hash.
         block_hash: Hash,
+        /// Server-assigned sequence number for this write.
+        assigned_sequence: u64,
     },
 
     /// Namespace created.
@@ -481,7 +483,8 @@ mod tests {
 
     #[test]
     fn test_ledger_response_display() {
-        let response = LedgerResponse::Write { block_height: 42, block_hash: [0u8; 32] };
+        let response =
+            LedgerResponse::Write { block_height: 42, block_hash: [0u8; 32], assigned_sequence: 1 };
         assert_eq!(format!("{}", response), "Write(height=42)");
     }
 
