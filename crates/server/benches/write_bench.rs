@@ -63,6 +63,7 @@ fn bench_single_writes(c: &mut Criterion) {
 /// Benchmark batch writes.
 fn bench_batch_writes(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_writes");
+    group.sample_size(50);
 
     for batch_size in [10, 100, 1000] {
         group.throughput(Throughput::Elements(batch_size as u64));
