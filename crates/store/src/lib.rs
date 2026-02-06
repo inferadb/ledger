@@ -95,5 +95,5 @@ pub use page::{PAGE_HEADER_SIZE, Page, PageAllocator, PageCache};
 pub use tables::{Table, TableEntry, TableId};
 pub use types::{Key, KeyType, Value};
 
-/// Inkwell format version.
+/// Store format version.
 pub const VERSION: u16 = 1;

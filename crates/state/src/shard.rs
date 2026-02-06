@@ -38,7 +38,7 @@ pub enum ShardError {
     Snapshot { source: crate::snapshot::SnapshotError },
 
     #[snafu(display("Storage error: {source}"))]
-    Inkwell { source: inferadb_ledger_store::Error },
+    Store { source: inferadb_ledger_store::Error },
 
     #[snafu(display("Entity store error: {source}"))]
     Entity { source: crate::entity::EntityError },
@@ -286,7 +286,7 @@ impl<B: StorageBackend> ShardManager<B> {
                 self.state.get_bucket_roots(vault_id).unwrap_or([EMPTY_HASH; NUM_BUCKETS]);
 
             // Collect entities (this is expensive but necessary for snapshot)
-            let txn = self.db.read().context(InkwellSnafu)?;
+            let txn = self.db.read().context(StoreSnafu)?;
             let entities =
                 EntityStore::list_in_vault(&txn, vault_id, usize::MAX, 0).context(EntitySnafu)?;
 
@@ -403,7 +403,7 @@ impl<B: StorageBackend> ShardManager<B> {
         }
 
         // Restore entities
-        let mut txn = self.db.write().context(InkwellSnafu)?;
+        let mut txn = self.db.write().context(StoreSnafu)?;
 
         for (&vault_id, entities) in &snapshot.state.vault_entities {
             for entity in entities {
@@ -411,7 +411,7 @@ impl<B: StorageBackend> ShardManager<B> {
             }
         }
 
-        txn.commit().context(InkwellSnafu)?;
+        txn.commit().context(StoreSnafu)?;
 
         // Update shard height
         *self.shard_height.write() = snapshot.header.shard_height;

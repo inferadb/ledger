@@ -1,4 +1,4 @@
-//! B+ tree implementation for Inkwell.
+//! B+ tree implementation for the store engine.
 //!
 //! This module provides the core B+ tree data structure used for all tables.
 //! The implementation is designed for:

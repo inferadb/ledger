@@ -63,7 +63,7 @@ pub enum BlockArchiveError {
 
     /// Storage engine error from inferadb-ledger-store.
     #[snafu(display("Storage error: {source}"))]
-    Inkwell {
+    Store {
         /// The underlying storage error.
         source: inferadb_ledger_store::Error,
     },
@@ -157,8 +157,8 @@ impl<B: StorageBackend> BlockArchive<B> {
     pub fn append_block(&self, block: &ShardBlock) -> Result<()> {
         let encoded = encode(block).context(CodecSnafu)?;
 
-        let mut txn = self.db.write().context(InkwellSnafu)?;
-        txn.insert::<tables::Blocks>(&block.shard_height, &encoded).context(InkwellSnafu)?;
+        let mut txn = self.db.write().context(StoreSnafu)?;
+        txn.insert::<tables::Blocks>(&block.shard_height, &encoded).context(StoreSnafu)?;
 
         for entry in &block.vault_entries {
             let index_key = encode_vault_block_index_key(
@@ -167,10 +167,10 @@ impl<B: StorageBackend> BlockArchive<B> {
                 entry.vault_height,
             );
             txn.insert::<tables::VaultBlockIndex>(&index_key.to_vec(), &block.shard_height)
-                .context(InkwellSnafu)?;
+                .context(StoreSnafu)?;
         }
 
-        txn.commit().context(InkwellSnafu)?;
+        txn.commit().context(StoreSnafu)?;
 
         if self.blocks_dir.is_some() {
             self.append_to_segment(block, &encoded)?;
@@ -221,9 +221,9 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Read a block by shard height.
     pub fn read_block(&self, shard_height: u64) -> Result<ShardBlock> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
-        match txn.get::<tables::Blocks>(&shard_height).context(InkwellSnafu)? {
+        match txn.get::<tables::Blocks>(&shard_height).context(StoreSnafu)? {
             Some(data) => {
                 let block = decode(&data).context(CodecSnafu)?;
                 Ok(block)
@@ -239,11 +239,11 @@ impl<B: StorageBackend> BlockArchive<B> {
         vault_id: VaultId,
         vault_height: u64,
     ) -> Result<Option<u64>> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
         let key = encode_vault_block_index_key(namespace_id, vault_id, vault_height);
 
-        match txn.get::<tables::VaultBlockIndex>(&key.to_vec()).context(InkwellSnafu)? {
+        match txn.get::<tables::VaultBlockIndex>(&key.to_vec()).context(StoreSnafu)? {
             Some(data) => {
                 // The value is a u64 encoded as big-endian bytes (by Value trait)
                 if data.len() == 8 {
@@ -258,9 +258,9 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Get the latest shard height in the archive.
     pub fn latest_height(&self) -> Result<Option<u64>> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
-        match txn.last::<tables::Blocks>().context(InkwellSnafu)? {
+        match txn.last::<tables::Blocks>().context(StoreSnafu)? {
             Some((key_bytes, _)) => {
                 if key_bytes.len() == 8 {
                     Ok(Some(u64::from_be_bytes(key_bytes.try_into().unwrap_or([0; 8]))))
@@ -274,10 +274,10 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Get the range of heights in the archive.
     pub fn height_range(&self) -> Result<Option<(u64, u64)>> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
-        let first = txn.first::<tables::Blocks>().context(InkwellSnafu)?;
-        let last = txn.last::<tables::Blocks>().context(InkwellSnafu)?;
+        let first = txn.first::<tables::Blocks>().context(StoreSnafu)?;
+        let last = txn.last::<tables::Blocks>().context(StoreSnafu)?;
 
         match (first, last) {
             (Some((first_key, _)), Some((last_key, _))) => {
@@ -291,10 +291,10 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Read blocks in a range.
     pub fn read_range(&self, start: u64, end: u64) -> Result<Vec<ShardBlock>> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
         let mut blocks = Vec::new();
 
-        for (key_bytes, value) in txn.iter::<tables::Blocks>().context(InkwellSnafu)? {
+        for (key_bytes, value) in txn.iter::<tables::Blocks>().context(StoreSnafu)? {
             if key_bytes.len() != 8 {
                 continue;
             }
@@ -322,11 +322,11 @@ impl<B: StorageBackend> BlockArchive<B> {
     ///
     /// All blocks with height < watermark have been compacted (transaction bodies removed).
     pub fn compaction_watermark(&self) -> Result<Option<u64>> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
         match txn
             .get::<tables::CompactionMeta>(&COMPACTION_WATERMARK_KEY.to_string())
-            .context(InkwellSnafu)?
+            .context(StoreSnafu)?
         {
             Some(data) => {
                 // Value is u64 encoded as big-endian by Value trait
@@ -367,10 +367,10 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
 
         let mut compacted_count = 0u64;
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
         let mut blocks_to_compact = Vec::new();
 
-        for (key_bytes, value) in txn.iter::<tables::Blocks>().context(InkwellSnafu)? {
+        for (key_bytes, value) in txn.iter::<tables::Blocks>().context(StoreSnafu)? {
             if key_bytes.len() != 8 {
                 continue;
             }
@@ -399,12 +399,12 @@ impl<B: StorageBackend> BlockArchive<B> {
         drop(txn);
 
         if !blocks_to_compact.is_empty() {
-            let mut txn = self.db.write().context(InkwellSnafu)?;
+            let mut txn = self.db.write().context(StoreSnafu)?;
 
             for (height, block) in &blocks_to_compact {
                 let encoded = encode(block).context(CodecSnafu)?;
 
-                txn.insert::<tables::Blocks>(height, &encoded).context(InkwellSnafu)?;
+                txn.insert::<tables::Blocks>(height, &encoded).context(StoreSnafu)?;
             }
 
             compacted_count = blocks_to_compact.len() as u64;
@@ -413,18 +413,18 @@ impl<B: StorageBackend> BlockArchive<B> {
                 &COMPACTION_WATERMARK_KEY.to_string(),
                 &before_height,
             )
-            .context(InkwellSnafu)?;
+            .context(StoreSnafu)?;
 
-            txn.commit().context(InkwellSnafu)?;
+            txn.commit().context(StoreSnafu)?;
         } else {
             // No blocks needed compaction, but still update watermark
-            let mut txn = self.db.write().context(InkwellSnafu)?;
+            let mut txn = self.db.write().context(StoreSnafu)?;
             txn.insert::<tables::CompactionMeta>(
                 &COMPACTION_WATERMARK_KEY.to_string(),
                 &before_height,
             )
-            .context(InkwellSnafu)?;
-            txn.commit().context(InkwellSnafu)?;
+            .context(StoreSnafu)?;
+            txn.commit().context(StoreSnafu)?;
         }
 
         Ok(compacted_count)

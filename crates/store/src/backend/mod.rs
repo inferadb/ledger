@@ -1,11 +1,11 @@
-//! Storage backend abstraction for Inkwell.
+//! Storage backend abstraction for the store engine.
 //!
 //! The backend trait abstracts the underlying storage mechanism,
 //! allowing both file-based (production) and in-memory (testing) implementations.
 //!
 //! # Crash Safety: Dual-Slot Commit
 //!
-//! Inkwell uses a dual-slot commit mechanism for crash safety:
+//! The store uses a dual-slot commit mechanism for crash safety:
 //! - The header contains TWO commit slots (primary and secondary)
 //! - A "god byte" indicates which slot is currently active
 //! - Commits write to the INACTIVE slot, then atomically flip the god byte
@@ -31,8 +31,8 @@ pub const DEFAULT_PAGE_SIZE: usize = 1 << DEFAULT_PAGE_SIZE_POWER;
 /// Layout: 64-byte common header + 2 × 256-byte commit slots + 192-byte reserved.
 pub const HEADER_SIZE: usize = 768;
 
-/// Magic number for Inkwell database files.
-pub const MAGIC: &[u8; 8] = b"INKWELL\0";
+/// Magic number for InferaDB database files.
+pub const MAGIC: &[u8; 8] = b"INFERADB";
 
 /// Current format version (2 = dual-slot commit).
 pub const FORMAT_VERSION: u16 = 2;
@@ -150,7 +150,7 @@ impl CommitSlot {
 /// - Bit 1: Recovery required flag (set on commit, cleared on clean shutdown)
 #[derive(Debug, Clone)]
 pub struct DatabaseHeader {
-    /// Magic number: "INKWELL\0"
+    /// Magic number: "INFERADB"
     pub magic: [u8; 8],
     /// Format version (currently 2 for dual-slot).
     pub version: u16,

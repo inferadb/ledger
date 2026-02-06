@@ -1,6 +1,6 @@
 //! B-tree node structure and operations.
 //!
-//! Node layout for Inkwell's B+ tree:
+//! Node layout for the store's B+ tree:
 //!
 //! ## Leaf Node Layout
 //! ```text

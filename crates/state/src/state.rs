@@ -27,7 +27,7 @@ use crate::{
 pub enum StateError {
     /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
-    Inkwell {
+    Store {
         /// The underlying inferadb-ledger-store storage error.
         source: inferadb_ledger_store::Error,
         /// Location where the error occurred.
@@ -118,7 +118,7 @@ impl<B: StorageBackend> StateLayer<B> {
         operations: &[Operation],
         block_height: u64,
     ) -> Result<Vec<WriteStatus>> {
-        let mut txn = self.db.write().context(InkwellSnafu)?;
+        let mut txn = self.db.write().context(StoreSnafu)?;
         let mut statuses = Vec::with_capacity(operations.len());
 
         // Track which local keys are modified for dirty bucket marking
@@ -131,8 +131,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let storage_key = encode_storage_key(vault_id, local_key);
 
                     // Check condition - get existing entity
-                    let existing =
-                        txn.get::<tables::Entities>(&storage_key).context(InkwellSnafu)?;
+                    let existing = txn.get::<tables::Entities>(&storage_key).context(StoreSnafu)?;
 
                     let is_update = existing.is_some();
                     let entity_data =
@@ -170,7 +169,7 @@ impl<B: StorageBackend> StateLayer<B> {
 
                     let encoded = encode(&entity).context(CodecSnafu)?;
 
-                    txn.insert::<tables::Entities>(&storage_key, &encoded).context(InkwellSnafu)?;
+                    txn.insert::<tables::Entities>(&storage_key, &encoded).context(StoreSnafu)?;
 
                     dirty_keys.push(local_key.to_vec());
 
@@ -182,7 +181,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let storage_key = encode_storage_key(vault_id, local_key);
 
                     let existed =
-                        txn.delete::<tables::Entities>(&storage_key).context(InkwellSnafu)?;
+                        txn.delete::<tables::Entities>(&storage_key).context(StoreSnafu)?;
 
                     if existed {
                         dirty_keys.push(local_key.to_vec());
@@ -197,7 +196,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let storage_key = encode_storage_key(vault_id, local_key);
 
                     let existed =
-                        txn.delete::<tables::Entities>(&storage_key).context(InkwellSnafu)?;
+                        txn.delete::<tables::Entities>(&storage_key).context(StoreSnafu)?;
 
                     if existed {
                         dirty_keys.push(local_key.to_vec());
@@ -216,7 +215,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     // Check existence
                     let already_exists = txn
                         .get::<tables::Relationships>(&storage_key)
-                        .context(InkwellSnafu)?
+                        .context(StoreSnafu)?
                         .is_some();
 
                     if already_exists {
@@ -225,7 +224,7 @@ impl<B: StorageBackend> StateLayer<B> {
                         let encoded = encode(&rel).context(CodecSnafu)?;
 
                         txn.insert::<tables::Relationships>(&storage_key, &encoded)
-                            .context(InkwellSnafu)?;
+                            .context(StoreSnafu)?;
 
                         // Update indexes
                         IndexManager::add_to_obj_index(
@@ -249,7 +248,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let storage_key = encode_storage_key(vault_id, local_key);
 
                     let existed =
-                        txn.delete::<tables::Relationships>(&storage_key).context(InkwellSnafu)?;
+                        txn.delete::<tables::Relationships>(&storage_key).context(StoreSnafu)?;
 
                     if existed {
                         // Update indexes
@@ -273,7 +272,7 @@ impl<B: StorageBackend> StateLayer<B> {
             statuses.push(status);
         }
 
-        txn.commit().context(InkwellSnafu)?;
+        txn.commit().context(StoreSnafu)?;
 
         // Mark dirty buckets
         self.with_commitment(vault_id, |commitment| {
@@ -291,12 +290,12 @@ impl<B: StorageBackend> StateLayer<B> {
     pub fn clear_vault(&self, vault_id: VaultId) -> Result<()> {
         use crate::keys::vault_prefix;
 
-        let mut txn = self.db.write().context(InkwellSnafu)?;
+        let mut txn = self.db.write().context(StoreSnafu)?;
         let prefix = vault_prefix(vault_id);
 
         // Delete all entities for this vault
         let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::Entities>().context(InkwellSnafu)? {
+        for (key_bytes, _) in txn.iter::<tables::Entities>().context(StoreSnafu)? {
             // Check we're still in the same vault
             if key_bytes.len() < 8 {
                 break;
@@ -312,12 +311,12 @@ impl<B: StorageBackend> StateLayer<B> {
         }
 
         for key in keys_to_delete {
-            txn.delete::<tables::Entities>(&key).context(InkwellSnafu)?;
+            txn.delete::<tables::Entities>(&key).context(StoreSnafu)?;
         }
 
         // Delete all relationships for this vault
         let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::Relationships>().context(InkwellSnafu)? {
+        for (key_bytes, _) in txn.iter::<tables::Relationships>().context(StoreSnafu)? {
             if key_bytes.len() < 8 {
                 break;
             }
@@ -332,12 +331,12 @@ impl<B: StorageBackend> StateLayer<B> {
         }
 
         for key in keys_to_delete {
-            txn.delete::<tables::Relationships>(&key).context(InkwellSnafu)?;
+            txn.delete::<tables::Relationships>(&key).context(StoreSnafu)?;
         }
 
         // Clear indexes
         let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::ObjIndex>().context(InkwellSnafu)? {
+        for (key_bytes, _) in txn.iter::<tables::ObjIndex>().context(StoreSnafu)? {
             if key_bytes.len() < 8 {
                 break;
             }
@@ -351,11 +350,11 @@ impl<B: StorageBackend> StateLayer<B> {
         }
 
         for key in keys_to_delete {
-            txn.delete::<tables::ObjIndex>(&key).context(InkwellSnafu)?;
+            txn.delete::<tables::ObjIndex>(&key).context(StoreSnafu)?;
         }
 
         let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::SubjIndex>().context(InkwellSnafu)? {
+        for (key_bytes, _) in txn.iter::<tables::SubjIndex>().context(StoreSnafu)? {
             if key_bytes.len() < 8 {
                 break;
             }
@@ -369,10 +368,10 @@ impl<B: StorageBackend> StateLayer<B> {
         }
 
         for key in keys_to_delete {
-            txn.delete::<tables::SubjIndex>(&key).context(InkwellSnafu)?;
+            txn.delete::<tables::SubjIndex>(&key).context(StoreSnafu)?;
         }
 
-        txn.commit().context(InkwellSnafu)?;
+        txn.commit().context(StoreSnafu)?;
 
         // Reset commitment tracking for this vault
         self.vault_commitments.write().remove(&vault_id);
@@ -383,9 +382,9 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Get an entity by key.
     pub fn get_entity(&self, vault_id: VaultId, key: &[u8]) -> Result<Option<Entity>> {
         let storage_key = encode_storage_key(vault_id, key);
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
-        match txn.get::<tables::Entities>(&storage_key).context(InkwellSnafu)? {
+        match txn.get::<tables::Entities>(&storage_key).context(StoreSnafu)? {
             Some(data) => {
                 let entity = decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))
@@ -406,9 +405,9 @@ impl<B: StorageBackend> StateLayer<B> {
         let local_key = rel.to_key();
         let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
 
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
-        Ok(txn.get::<tables::Relationships>(&storage_key).context(InkwellSnafu)?.is_some())
+        Ok(txn.get::<tables::Relationships>(&storage_key).context(StoreSnafu)?.is_some())
     }
 
     /// Compute state root for a vault, updating dirty bucket roots.
@@ -436,7 +435,7 @@ impl<B: StorageBackend> StateLayer<B> {
         };
 
         // Compute bucket roots outside the commitment lock
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
         let mut bucket_roots: Vec<(u8, Hash)> = Vec::with_capacity(dirty_buckets.len());
 
         for bucket in dirty_buckets {
@@ -444,7 +443,7 @@ impl<B: StorageBackend> StateLayer<B> {
             let mut builder = BucketRootBuilder::new(bucket);
 
             // Scan all entities in this bucket
-            for (key_bytes, value) in txn.iter::<tables::Entities>().context(InkwellSnafu)? {
+            for (key_bytes, value) in txn.iter::<tables::Entities>().context(StoreSnafu)? {
                 // Check we're still in the same vault
                 if key_bytes.len() < 9 {
                     continue;
@@ -503,7 +502,7 @@ impl<B: StorageBackend> StateLayer<B> {
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
         IndexManager::get_subjects(&txn, vault_id, resource, relation).context(IndexSnafu)
     }
 
@@ -513,7 +512,7 @@ impl<B: StorageBackend> StateLayer<B> {
         vault_id: VaultId,
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
         IndexManager::get_resources(&txn, vault_id, subject).context(IndexSnafu)
     }
 
@@ -529,7 +528,7 @@ impl<B: StorageBackend> StateLayer<B> {
     ) -> Result<Vec<Entity>> {
         use crate::keys::vault_prefix;
 
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
         let mut entities = Vec::with_capacity(limit.min(1000));
 
@@ -548,7 +547,7 @@ impl<B: StorageBackend> StateLayer<B> {
             vault_prefix(vault_id).to_vec()
         };
 
-        for (key_bytes, value) in txn.iter::<tables::Entities>().context(InkwellSnafu)? {
+        for (key_bytes, value) in txn.iter::<tables::Entities>().context(StoreSnafu)? {
             if entities.len() >= limit {
                 break;
             }
@@ -596,7 +595,7 @@ impl<B: StorageBackend> StateLayer<B> {
     ) -> Result<Vec<Relationship>> {
         use crate::keys::vault_prefix;
 
-        let txn = self.db.read().context(InkwellSnafu)?;
+        let txn = self.db.read().context(StoreSnafu)?;
 
         let mut relationships = Vec::with_capacity(limit.min(1000));
 
@@ -612,7 +611,7 @@ impl<B: StorageBackend> StateLayer<B> {
             vault_prefix(vault_id).to_vec()
         };
 
-        for (key_bytes, value) in txn.iter::<tables::Relationships>().context(InkwellSnafu)? {
+        for (key_bytes, value) in txn.iter::<tables::Relationships>().context(StoreSnafu)? {
             if relationships.len() >= limit {
                 break;
             }
@@ -888,8 +887,9 @@ mod tests {
     /// and verifies all are returned by list_relationships.
     #[test]
     fn test_list_relationships_after_concurrent_writes() {
-        use inferadb_ledger_types::bucket_id;
         use std::thread;
+
+        use inferadb_ledger_types::bucket_id;
 
         let state = create_test_state();
         let vault_id = 20_000_002_690_000i64; // Same vault ID pattern as integration tests
@@ -904,7 +904,11 @@ mod tests {
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
         // Verify sequential write via direct read
-        assert!(state.relationship_exists(vault_id, "document:seq-test", "viewer", "user:seq-test").unwrap());
+        assert!(
+            state
+                .relationship_exists(vault_id, "document:seq-test", "viewer", "user:seq-test")
+                .unwrap()
+        );
 
         // Now: concurrent writes (mimicking tokio::spawn in integration test)
         // Note: StateLayer is internally thread-safe, so we use threads
@@ -933,19 +937,22 @@ mod tests {
         // Verify all concurrent writes via direct reads
         for i in 0..10 {
             assert!(
-                state_arc.relationship_exists(
-                    vault_id,
-                    &format!("document:concurrent-{}", i),
-                    "viewer",
-                    &format!("user:concurrent-{}", i)
-                ).unwrap(),
-                "Direct read failed for concurrent-{}", i
+                state_arc
+                    .relationship_exists(
+                        vault_id,
+                        &format!("document:concurrent-{}", i),
+                        "viewer",
+                        &format!("user:concurrent-{}", i)
+                    )
+                    .unwrap(),
+                "Direct read failed for concurrent-{}",
+                i
             );
         }
 
         // Debug: print bucket distribution
         eprintln!("=== Bucket distribution ===");
-        let seq_key = format!("rel:document:seq-test#viewer@user:seq-test");
+        let seq_key = "rel:document:seq-test#viewer@user:seq-test".to_string();
         eprintln!("seq-test: bucket {}", bucket_id(seq_key.as_bytes()));
         for i in 0..10 {
             let key = format!("rel:document:concurrent-{}#viewer@user:concurrent-{}", i, i);
@@ -975,8 +982,11 @@ mod tests {
         );
         for i in 0..10 {
             assert!(
-                all_relationships.iter().any(|r| r.resource == format!("document:concurrent-{}", i)),
-                "Concurrent relationship {} not found in list", i
+                all_relationships
+                    .iter()
+                    .any(|r| r.resource == format!("document:concurrent-{}", i)),
+                "Concurrent relationship {} not found in list",
+                i
             );
         }
     }

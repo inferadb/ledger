@@ -1,4 +1,4 @@
-//! Error types for Inkwell storage engine.
+//! Error types for the store engine.
 
 use std::io;
 
@@ -7,10 +7,10 @@ use snafu::Snafu;
 /// Page identifier type.
 pub type PageId = u64;
 
-/// Result type alias for Inkwell operations.
+/// Result type alias for store operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Errors that can occur during Inkwell operations.
+/// Errors that can occur during store operations.
 #[derive(Debug, Snafu)]
 pub enum Error {
     /// I/O error from the underlying storage backend.

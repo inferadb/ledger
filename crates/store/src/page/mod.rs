@@ -1,4 +1,4 @@
-//! Page management for Inkwell.
+//! Page management for the store engine.
 //!
 //! This module handles:
 //! - Page layout and structure

@@ -1,6 +1,6 @@
-//! Key and value type encoding for Inkwell.
+//! Key and value type encoding for the store engine.
 //!
-//! Inkwell supports three key types:
+//! The store supports three key types:
 //! - `u64` / `i64`: 8-byte fixed-width integers (big-endian for lexicographic ordering)
 //! - `&str`: UTF-8 strings with length prefix
 //! - `&[u8]`: Arbitrary byte slices with length prefix
@@ -24,7 +24,7 @@ pub enum KeyType {
     Bytes,
 }
 
-/// Trait for types that can be used as keys in Inkwell tables.
+/// Trait for types that can be used as keys in store tables.
 pub trait Key: Sized {
     /// The key type discriminant.
     const KEY_TYPE: KeyType;
@@ -42,7 +42,7 @@ pub trait Key: Sized {
     fn encoded_size(&self) -> usize;
 }
 
-/// Trait for types that can be used as values in Inkwell tables.
+/// Trait for types that can be used as values in store tables.
 pub trait Value: Sized {
     /// Encode the value into a byte buffer.
     fn encode(&self, buf: &mut Vec<u8>);

@@ -1,4 +1,4 @@
-//! LRU page cache for Inkwell.
+//! LRU page cache for the store engine.
 //!
 //! The cache stores recently accessed pages to reduce I/O.
 //! It uses a simple LRU eviction policy.
