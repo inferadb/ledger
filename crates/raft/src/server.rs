@@ -27,7 +27,7 @@ use crate::{
         system_discovery_service_server::SystemDiscoveryServiceServer,
         write_service_server::WriteServiceServer,
     },
-    rate_limit::NamespaceRateLimiter,
+    rate_limit::RateLimiter,
     services::{
         AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl,
         ReadServiceImpl, WriteServiceImpl,
@@ -38,6 +38,7 @@ use crate::{
 /// The main Ledger gRPC server.
 ///
 /// Combines all services with the Raft consensus layer and state storage.
+/// Supports graceful shutdown via a `shutdown_rx` watch channel.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct LedgerServer {
@@ -70,13 +71,24 @@ pub struct LedgerServer {
     timeout_secs: u64,
     /// Per-namespace rate limiter (optional).
     #[builder(default)]
-    namespace_rate_limiter: Option<Arc<NamespaceRateLimiter>>,
+    namespace_rate_limiter: Option<Arc<RateLimiter>>,
+    /// Hot key detector for identifying frequently accessed keys (optional).
+    #[builder(default)]
+    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    /// Node health state for three-probe health checking.
+    #[builder(default)]
+    health_state: crate::graceful_shutdown::HealthState,
+    /// Shutdown signal receiver. When `true` is sent, the server stops.
+    #[builder(default)]
+    shutdown_rx: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl LedgerServer {
     /// Start the gRPC server.
     ///
-    /// This method blocks until the server is shut down.
+    /// This method blocks until the server is shut down. If a `shutdown_rx`
+    /// was provided via the builder, the server will stop when the signal
+    /// is received. Otherwise, it blocks indefinitely.
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             max_concurrent = self.max_concurrent,
@@ -135,6 +147,11 @@ impl LedgerServer {
             Some(limiter) => write_service.with_rate_limiter(limiter.clone()),
             None => write_service,
         };
+        // Add hot key detection if configured
+        let write_service = match &self.hot_key_detector {
+            Some(detector) => write_service.with_hot_key_detector(detector.clone()),
+            None => write_service,
+        };
         let admin_service = AdminServiceImpl::builder()
             .raft(self.raft.clone())
             .state(self.state.clone())
@@ -146,6 +163,7 @@ impl LedgerServer {
             self.raft.clone(),
             self.state.clone(),
             self.applied_state.clone(),
+            self.health_state,
         );
         let discovery_service = DiscoveryServiceImpl::builder()
             .raft(self.raft.clone())
@@ -158,16 +176,25 @@ impl LedgerServer {
 
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 
-        Server::builder()
+        let router = Server::builder()
             .layer(layer)
             .add_service(ReadServiceServer::new(read_service))
             .add_service(WriteServiceServer::new(write_service))
             .add_service(AdminServiceServer::new(admin_service))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
-            .add_service(RaftServiceServer::new(raft_service))
-            .serve(self.addr)
-            .await?;
+            .add_service(RaftServiceServer::new(raft_service));
+
+        if let Some(mut shutdown_rx) = self.shutdown_rx {
+            router
+                .serve_with_shutdown(self.addr, async move {
+                    let _ = shutdown_rx.wait_for(|v| *v).await;
+                    tracing::info!("Shutdown signal received, stopping gRPC server");
+                })
+                .await?;
+        } else {
+            router.serve(self.addr).await?;
+        }
 
         Ok(())
     }
@@ -194,5 +221,17 @@ impl LedgerServer {
     #[must_use]
     pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
         &self.block_announcements
+    }
+
+    /// Get the applied state accessor.
+    #[must_use]
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        &self.applied_state
+    }
+
+    /// Get the block archive.
+    #[must_use]
+    pub fn block_archive(&self) -> Option<&Arc<BlockArchive<FileBackend>>> {
+        self.block_archive.as_ref()
     }
 }

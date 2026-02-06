@@ -1,12 +1,15 @@
-//! Storage engine for InferaDB Ledger.
+//! State management for InferaDB Ledger.
 //!
-//! This crate provides:
-//! - inferadb-ledger-store B+ tree-based persistent storage
-//! - State layer with bucket-based hashing
+//! This crate sits between the raw B+ tree storage engine (`inferadb-ledger-store`)
+//! and the Raft consensus layer (`inferadb-ledger-raft`), providing:
+//!
+//! - State layer with bucket-based incremental hashing (256 buckets per vault)
+//! - Entity and relationship CRUD with conditional writes
 //! - Snapshot creation and restoration
-//! - Dual indexes for relationship queries
+//! - Dual indexes for relationship queries (object-centric and subject-centric)
 //! - System namespace types and cluster membership
 //! - Time-travel index for historical queries
+//! - Block archive for committed block storage
 
 #![deny(unsafe_code)]
 

@@ -98,9 +98,14 @@ impl TestCluster {
             ..inferadb_ledger_server::config::Config::default()
         };
 
-        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
-            .await
-            .expect("bootstrap node");
+        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
+            &config,
+            &data_dir,
+            inferadb_ledger_raft::HealthState::new(),
+            tokio::sync::watch::channel(false).1,
+        )
+        .await
+        .expect("bootstrap node");
 
         // Get the auto-generated Snowflake ID from Raft metrics
         let node_id = bootstrapped.raft.metrics().borrow().id;
@@ -160,10 +165,14 @@ impl TestCluster {
                 ..inferadb_ledger_server::config::Config::default()
             };
 
-            let bootstrapped =
-                inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
-                    .await
-                    .expect("bootstrap node");
+            let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
+                &config,
+                &data_dir,
+                inferadb_ledger_raft::HealthState::new(),
+                tokio::sync::watch::channel(false).1,
+            )
+            .await
+            .expect("bootstrap node");
 
             // Get the auto-generated Snowflake ID from Raft metrics
             let node_id = bootstrapped.raft.metrics().borrow().id;

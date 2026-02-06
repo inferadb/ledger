@@ -139,8 +139,8 @@ pub fn generate_write_proof(
     // Build block header from vault entry
     let block_header = proto::BlockHeader {
         height: entry.vault_height,
-        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id }),
-        vault_id: Some(proto::VaultId { id: entry.vault_id }),
+        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id.value() }),
+        vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),

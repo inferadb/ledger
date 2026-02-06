@@ -525,6 +525,40 @@ impl<'a> BranchNode<'a> {
         self.page.dirty = true;
     }
 
+    /// Delete the separator key and its left child at the given index.
+    ///
+    /// Shifts subsequent cell pointers down. Cell data becomes dead space.
+    /// The caller is responsible for updating child pointers as needed
+    /// (e.g., when merging sibling leaves, the right sibling's subtree
+    /// is absorbed into the left sibling).
+    pub fn delete(&mut self, index: usize) {
+        let count = self.cell_count() as usize;
+        assert!(index < count);
+
+        // Shift cell pointers down to fill the gap
+        if index < count - 1 {
+            let src_start = BRANCH_CELL_PTRS_OFFSET + (index + 1) * CELL_PTR_SIZE;
+            let src_end = BRANCH_CELL_PTRS_OFFSET + count * CELL_PTR_SIZE;
+            let dst_start = BRANCH_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
+            self.page.data.copy_within(src_start..src_end, dst_start);
+        }
+
+        // Update free space start (one less pointer)
+        let mut free_start = u16::from_le_bytes(
+            self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
+        ) as usize;
+        free_start -= CELL_PTR_SIZE;
+        self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
+            .copy_from_slice(&(free_start as u16).to_le_bytes());
+
+        let new_count = (count - 1) as u16;
+        self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
+            .copy_from_slice(&new_count.to_le_bytes());
+
+        // Cell data becomes dead space (page-level compaction would reclaim)
+        self.page.dirty = true;
+    }
+
     /// Get the underlying page.
     pub fn page(&self) -> &Page {
         self.page

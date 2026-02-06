@@ -289,8 +289,8 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = LedgerError::VaultDiverged { vault_id: 42, height: 100 };
-        assert_eq!(err.to_string(), "Vault 42 diverged at height 100");
+        let err = LedgerError::VaultDiverged { vault_id: VaultId::new(42), height: 100 };
+        assert_eq!(err.to_string(), "Vault vault:42 diverged at height 100");
     }
 
     #[test]

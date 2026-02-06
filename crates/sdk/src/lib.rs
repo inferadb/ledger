@@ -10,6 +10,7 @@
 //! - **Automatic idempotency**: Server-assigned sequences with UUID-based deduplication
 //! - **Resilient connectivity**: Exponential backoff retry and failover
 //! - **Streaming support**: WatchBlocks with automatic reconnection
+//! - **Cancellation support**: Per-request and client-level cancellation via `CancellationToken`
 //! - **Zero-cost abstractions**: Efficient serialization and connection pooling
 //!
 //! # Quick Start
@@ -90,7 +91,7 @@ pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{NamespaceId, VaultId};
-pub use retry::with_retry;
+pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{
     DnsConfig, FileConfig, ResolvedServer, SelectorStats, ServerResolver, ServerSelector,
     ServerSource,

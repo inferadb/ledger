@@ -41,6 +41,10 @@ test:
 test-full:
     cargo +{{rust}} test --workspace -- --include-ignored
 
+# Run property tests with high iteration count (default: 10000)
+test-proptest cases="10000":
+    PROPTEST_CASES={{cases}} cargo +{{rust}} test --workspace --lib -- proptest
+
 # Run tests for a specific crate
 test-crate crate:
     cargo +{{rust}} test -p {{crate}}
@@ -48,6 +52,25 @@ test-crate crate:
 # Run a specific test with output
 test-one name:
     cargo +{{rust}} test {{name}} -- --nocapture
+
+# ============================================================================
+# Benchmarks
+# ============================================================================
+
+# Run all benchmarks locally
+bench:
+    cargo +{{rust}} bench --workspace
+
+# Run a specific benchmark suite
+bench-suite suite:
+    cargo +{{rust}} bench --workspace --bench {{suite}}
+
+# Run benchmarks with bencher output for CI (machine-readable)
+bench-ci:
+    cargo +{{rust}} bench -p inferadb-ledger-store --bench btree_bench -- --output-format bencher
+    cargo +{{rust}} bench -p inferadb-ledger-server --bench read_bench -- --output-format bencher
+    cargo +{{rust}} bench -p inferadb-ledger-server --bench write_bench -- --output-format bencher
+    cargo +{{rust}} bench -p inferadb-ledger-raft --bench wide_events_bench -- --output-format bencher
 
 # ============================================================================
 # Code Quality
@@ -70,6 +93,11 @@ check: fmt-check clippy test
 
 # Quick check (format + clippy only) - faster pre-commit validation
 check-quick: fmt-check clippy
+
+# CI validation: format + clippy + tests (excludes e2e tests that require a running cluster)
+ci: fmt-check clippy
+    cargo +{{rust}} test --workspace --exclude inferadb-ledger-sdk
+    cargo +{{rust}} test -p inferadb-ledger-sdk --lib
 
 # Pre-PR validation: regenerate protos, autoformat, lint, and test
 ready: proto fmt clippy test

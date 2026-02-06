@@ -240,7 +240,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
             if let Some(entry) = cache.get(&namespace_id)
                 && !entry.is_stale(self.config.cache_ttl)
             {
-                debug!(namespace_id, shard_id = entry.shard_id, "Cache hit");
+                debug!(
+                    namespace_id = namespace_id.value(),
+                    shard_id = entry.shard_id.value(),
+                    "Cache hit"
+                );
                 return Ok(entry.clone());
             }
         }
@@ -280,8 +284,8 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         info!(
-            namespace_id,
-            shard_id = registry.shard_id,
+            namespace_id = namespace_id.value(),
+            shard_id = registry.shard_id.value(),
             config_version = registry.config_version,
             "Refreshed routing cache"
         );
@@ -348,7 +352,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
                     return Ok(conn);
                 },
                 Err(e) => {
-                    warn!(shard_id, node_id, error = %e, "Failed to connect to node");
+                    warn!(shard_id = shard_id.value(), node_id, error = %e, "Failed to connect to node");
                     last_error = Some(e);
                 },
             }
@@ -377,7 +381,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
                 message: format!("Connection to {} failed: {}", endpoint, e),
             })?;
 
-        debug!(shard_id, node_id, address = %address, "Connected to shard node");
+        debug!(shard_id = shard_id.value(), node_id, address = %address, "Connected to shard node");
 
         Ok(ShardConnection {
             shard_id,
@@ -397,7 +401,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         // Try parsing as host:port
         if node_id.contains(':') {
             return node_id.parse().map_err(|_| RoutingError::ConnectionFailed {
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 message: format!("Invalid address: {}", node_id),
             });
         }
@@ -405,7 +409,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         // Assume it's just a hostname, append default port
         let addr_str = format!("{}:{}", node_id, self.config.grpc_port);
         addr_str.parse().map_err(|_| RoutingError::ConnectionFailed {
-            shard_id: 0,
+            shard_id: ShardId::new(0),
             message: format!("Invalid hostname: {}", node_id),
         })
     }
@@ -416,7 +420,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     pub fn invalidate(&self, namespace_id: NamespaceId) {
         let mut cache = self.cache.write();
         if cache.remove(&namespace_id).is_some() {
-            debug!(namespace_id, "Invalidated routing cache");
+            debug!(namespace_id = namespace_id.value(), "Invalidated routing cache");
         }
     }
 
@@ -426,7 +430,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     pub fn invalidate_shard(&self, shard_id: ShardId) {
         let mut connections = self.connections.write();
         if connections.remove(&shard_id).is_some() {
-            debug!(shard_id, "Invalidated shard connection");
+            debug!(shard_id = shard_id.value(), "Invalidated shard connection");
         }
     }
 
@@ -439,7 +443,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
             && entry.leader_hint.as_deref() != Some(leader_node)
         {
             entry.leader_hint = Some(leader_node.to_string());
-            debug!(namespace_id, leader_node, "Updated leader hint");
+            debug!(namespace_id = namespace_id.value(), leader_node, "Updated leader hint");
         }
     }
 
@@ -555,7 +559,7 @@ mod tests {
     #[test]
     fn test_cache_entry_staleness() {
         let entry = CacheEntry {
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             member_nodes: vec!["node-1".to_string()],
             leader_hint: Some("node-1".to_string()),
             config_version: 1,
@@ -589,8 +593,10 @@ mod tests {
     fn test_namespace_not_found() {
         let (router, _, _temp) = create_test_router();
 
-        let result = router.get_routing(999);
-        assert!(matches!(result, Err(RoutingError::NamespaceNotFound { namespace_id: 999 })));
+        let result = router.get_routing(NamespaceId::new(999));
+        assert!(
+            matches!(result, Err(RoutingError::NamespaceNotFound { namespace_id }) if namespace_id == NamespaceId::new(999))
+        );
     }
 
     #[test]
@@ -601,9 +607,9 @@ mod tests {
         {
             let mut cache = router.cache.write();
             cache.insert(
-                1,
+                NamespaceId::new(1),
                 CacheEntry {
-                    shard_id: 1,
+                    shard_id: ShardId::new(1),
                     member_nodes: vec!["node-1".to_string()],
                     leader_hint: None,
                     config_version: 1,
@@ -614,7 +620,7 @@ mod tests {
 
         assert_eq!(router.stats().cached_namespaces, 1);
 
-        router.invalidate(1);
+        router.invalidate(NamespaceId::new(1));
 
         assert_eq!(router.stats().cached_namespaces, 0);
     }
@@ -637,9 +643,9 @@ mod tests {
         {
             let mut cache = router.cache.write();
             cache.insert(
-                1,
+                NamespaceId::new(1),
                 CacheEntry {
-                    shard_id: 1,
+                    shard_id: ShardId::new(1),
                     member_nodes: vec![],
                     leader_hint: None,
                     config_version: 1,

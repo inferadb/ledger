@@ -21,7 +21,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, Transaction};
+use inferadb_ledger_types::{NamespaceId, Operation, Transaction, VaultId};
 use openraft::Raft;
 use snafu::GenerateImplicitData;
 use tokio::time::interval;
@@ -43,7 +43,7 @@ const MAX_BATCH_SIZE: usize = 1000;
 const CLEANUP_ACTOR: &str = "system:orphan_cleanup";
 
 /// System namespace ID.
-const SYSTEM_NAMESPACE_ID: i64 = 0;
+const SYSTEM_NAMESPACE_ID: NamespaceId = NamespaceId::new(0);
 
 /// Orphan cleanup job for cross-namespace consistency.
 ///
@@ -81,7 +81,12 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
         // List all user entities in _system (vault_id = 0)
-        let entities = match self.state.list_entities(0, Some("user:"), None, MAX_BATCH_SIZE * 10) {
+        let entities = match self.state.list_entities(
+            VaultId::new(0),
+            Some("user:"),
+            None,
+            MAX_BATCH_SIZE * 10,
+        ) {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "Failed to list users");
@@ -115,7 +120,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
     /// Returns (key, user_id) pairs for memberships referencing deleted users.
     fn find_orphaned_memberships(
         &self,
-        namespace_id: i64,
+        namespace_id: NamespaceId,
         deleted_users: &HashSet<i64>,
     ) -> Vec<(String, i64)> {
         if deleted_users.is_empty() {
@@ -128,10 +133,15 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         // Actually, namespace-level entities (members, teams) are stored with the namespace
         // For this implementation, we assume entities are in vault_id = 0 per namespace
 
-        let entities = match self.state.list_entities(0, Some("member:"), None, MAX_BATCH_SIZE) {
+        let entities = match self.state.list_entities(
+            VaultId::new(0),
+            Some("member:"),
+            None,
+            MAX_BATCH_SIZE,
+        ) {
             Ok(e) => e,
             Err(e) => {
-                warn!(namespace_id, error = %e, "Failed to list memberships");
+                warn!(namespace_id = namespace_id.value(), error = %e, "Failed to list memberships");
                 return Vec::new();
             },
         };
@@ -153,7 +163,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
     /// Remove orphaned memberships from a namespace.
     async fn remove_orphaned_memberships(
         &self,
-        namespace_id: i64,
+        namespace_id: NamespaceId,
         orphaned: Vec<(String, i64)>,
     ) -> Result<usize, OrphanCleanupError> {
         if orphaned.is_empty() {
@@ -187,7 +197,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
 
         let request = LedgerRequest::Write {
             namespace_id,
-            vault_id: 0, // Namespace-level entities
+            vault_id: VaultId::new(0), // Namespace-level entities
             transactions: vec![transaction],
         };
 
@@ -196,7 +206,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             backtrace: snafu::Backtrace::generate(),
         })?;
 
-        info!(namespace_id, count, "Removed orphaned memberships");
+        info!(namespace_id = namespace_id.value(), count, "Removed orphaned memberships");
 
         Ok(count)
     }
@@ -236,7 +246,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             }
 
             debug!(
-                namespace_id = ns.namespace_id,
+                namespace_id = ns.namespace_id.value(),
                 count = orphaned.len(),
                 "Found orphaned memberships"
             );
@@ -245,7 +255,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
                 Ok(count) => total_removed += count,
                 Err(e) => {
                     warn!(
-                        namespace_id = ns.namespace_id,
+                        namespace_id = ns.namespace_id.value(),
                         error = %e,
                         "Failed to remove orphaned memberships"
                     );

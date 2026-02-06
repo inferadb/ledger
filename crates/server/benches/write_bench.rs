@@ -12,7 +12,7 @@ use std::{hint::black_box, sync::Arc, time::Duration};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::Operation;
+use inferadb_ledger_types::{Operation, VaultId};
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
@@ -31,26 +31,30 @@ fn bench_single_writes(c: &mut Criterion) {
     let temp_dir = TempDir::new().expect("create temp dir");
     let state = Arc::new(RwLock::new(create_state_layer(&temp_dir)));
 
-    for vault_id in [1i64, 10, 100] {
-        group.bench_with_input(BenchmarkId::new("vault", vault_id), &vault_id, |b, &vault_id| {
-            let mut counter = 0u64;
-            b.iter(|| {
-                counter += 1;
-                let key = format!("key-{}", counter);
-                let value = format!("value-{}", counter);
+    for vault_id in [VaultId::new(1), VaultId::new(10), VaultId::new(100)] {
+        group.bench_with_input(
+            BenchmarkId::new("vault", vault_id.value()),
+            &vault_id,
+            |b, &vault_id| {
+                let mut counter = 0u64;
+                b.iter(|| {
+                    counter += 1;
+                    let key = format!("key-{}", counter);
+                    let value = format!("value-{}", counter);
 
-                let operations = vec![Operation::SetEntity {
-                    key,
-                    value: value.into_bytes(),
-                    expires_at: None,
-                    condition: None,
-                }];
+                    let operations = vec![Operation::SetEntity {
+                        key,
+                        value: value.into_bytes(),
+                        expires_at: None,
+                        condition: None,
+                    }];
 
-                let state = state.read();
-                let result = state.apply_operations(vault_id, &operations, counter);
-                black_box(result)
-            });
-        });
+                    let state = state.read();
+                    let result = state.apply_operations(vault_id, &operations, counter);
+                    black_box(result)
+                });
+            },
+        );
     }
 
     group.finish();
@@ -73,7 +77,7 @@ fn bench_batch_writes(c: &mut Criterion) {
                 let mut batch_counter = 0u64;
                 b.iter(|| {
                     batch_counter += 1;
-                    let vault_id = 1i64;
+                    let vault_id = VaultId::new(1);
 
                     let operations: Vec<Operation> = (0..batch_size)
                         .map(|i| {
@@ -107,7 +111,7 @@ fn bench_state_root(c: &mut Criterion) {
     for entity_count in [100, 1000, 10000] {
         let temp_dir = TempDir::new().expect("create temp dir");
         let state = create_state_layer(&temp_dir);
-        let vault_id = 1i64;
+        let vault_id = VaultId::new(1);
 
         // Populate
         for i in 0..entity_count {
@@ -151,8 +155,9 @@ fn bench_concurrent_vault_writes(c: &mut Criterion) {
         let mut counter = 0u64;
         b.iter(|| {
             counter += 1;
-            for vault_id in 1..=10i64 {
-                let key = format!("vault-{}-key-{}", vault_id, counter);
+            for vid in 1..=10i64 {
+                let vault_id = VaultId::new(vid);
+                let key = format!("vault-{}-key-{}", vid, counter);
                 let value = format!("value-{}", counter);
 
                 let operations = vec![Operation::SetEntity {

@@ -440,7 +440,7 @@ mod tests {
 
     fn create_test_snapshot() -> Snapshot {
         let vault_states = vec![VaultSnapshotMeta {
-            vault_id: 1,
+            vault_id: VaultId::new(1),
             vault_height: 100,
             state_root: [42u8; 32],
             bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -449,7 +449,7 @@ mod tests {
 
         let mut vault_entities = HashMap::new();
         vault_entities.insert(
-            1,
+            VaultId::new(1),
             vec![
                 Entity {
                     key: b"key1".to_vec(),
@@ -468,7 +468,7 @@ mod tests {
 
         let state = SnapshotStateData { vault_entities };
 
-        Snapshot::new_simple(1, 1000, vault_states, state).expect("create snapshot")
+        Snapshot::new_simple(ShardId::new(1), 1000, vault_states, state).expect("create snapshot")
     }
 
     #[test]
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(loaded.header.shard_height, snapshot.header.shard_height);
         assert_eq!(loaded.header.vault_states.len(), snapshot.header.vault_states.len());
 
-        let entities = loaded.get_vault_entities(1).expect("vault 1 entities");
+        let entities = loaded.get_vault_entities(VaultId::new(1)).expect("vault 1 entities");
         assert_eq!(entities.len(), 2);
     }
 
@@ -497,7 +497,7 @@ mod tests {
         // Save multiple snapshots
         for height in [100, 200, 300, 400, 500] {
             let vault_states = vec![VaultSnapshotMeta {
-                vault_id: 1,
+                vault_id: VaultId::new(1),
                 vault_height: height / 2,
                 state_root: [height as u8; 32],
                 bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -505,7 +505,7 @@ mod tests {
             }];
 
             let snapshot = Snapshot::new_simple(
-                1,
+                ShardId::new(1),
                 height,
                 vault_states,
                 SnapshotStateData { vault_entities: HashMap::new() },
@@ -569,7 +569,7 @@ mod tests {
         let path = temp.path().join("chain_verified.snap");
 
         let vault_states = vec![VaultSnapshotMeta {
-            vault_id: 1,
+            vault_id: VaultId::new(1),
             vault_height: 100,
             state_root: [42u8; 32],
             bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -591,8 +591,8 @@ mod tests {
             },
         };
 
-        let snapshot =
-            Snapshot::new(1, 1000, vault_states, state, chain_params).expect("create snapshot");
+        let snapshot = Snapshot::new(ShardId::new(1), 1000, vault_states, state, chain_params)
+            .expect("create snapshot");
 
         // Verify chain fields before write
         assert_eq!(snapshot.header.genesis_hash, [1u8; 32]);

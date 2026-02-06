@@ -41,7 +41,24 @@ impl SnapshotId {
 /// The committed state that readers snapshot.
 ///
 /// Contains the root page IDs for all tables at a specific point in time.
-/// This is what gets atomically swapped on commit.
+/// This is what gets atomically swapped on commit via `ArcSwap::store`.
+///
+/// # Invariants
+///
+/// **Snapshot consistency:** Once a `CommittedState` is published (stored in the
+/// `ArcSwap`), it is immutable. Read transactions load a snapshot of this state
+/// and navigate the B+ tree through the root page IDs it contains. Because pages
+/// are copy-on-write, the tree reachable from these roots never changes — writes
+/// create new pages and a new `CommittedState` pointing to them.
+///
+/// **Monotonic snapshot IDs:** The `snapshot_id` field increases strictly with each
+/// commit. This total ordering allows `TransactionTracker` to determine when old
+/// pages are safe to reclaim: only after all readers with snapshot IDs at or before
+/// the page's deallocation point have ended.
+///
+/// **Table root validity:** Each entry in `table_roots` is either `0` (empty table)
+/// or a valid page ID containing the root node of that table's B+ tree. A zero
+/// root means the table has never been written to or has been fully cleared.
 #[derive(Clone, Debug)]
 pub struct CommittedState {
     /// Root page IDs for each table (0 means empty table).

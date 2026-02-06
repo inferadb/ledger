@@ -14,6 +14,7 @@ mod common;
 use std::time::Duration;
 
 use common::{TestCluster, create_admin_client, create_read_client, create_write_client};
+use inferadb_ledger_types::{NamespaceId, UserId};
 use serial_test::serial;
 
 // ============================================================================
@@ -245,7 +246,10 @@ async fn test_delete_user_saga_state_transitions() {
 
     // Create a DeleteUser saga
     let saga_id = "test-delete-user-1".to_string();
-    let input = DeleteUserInput { user_id, namespace_ids: vec![ns_id] };
+    let input = DeleteUserInput {
+        user_id: UserId::new(user_id),
+        namespace_ids: vec![NamespaceId::new(ns_id)],
+    };
     let saga = DeleteUserSaga::new(saga_id.clone(), input);
     let wrapped = Saga::DeleteUser(saga);
 
@@ -293,10 +297,13 @@ async fn test_completed_saga_not_reexecuted() {
         user_name: "Completed User".to_string(),
         user_email: "completed@example.com".to_string(),
         org_name: "completed-org".to_string(),
-        existing_user_id: Some(999),
+        existing_user_id: Some(UserId::new(999)),
     };
     let mut saga = CreateOrgSaga::new(saga_id.clone(), input);
-    saga.state = CreateOrgSagaState::Completed { user_id: 999, namespace_id: 888 };
+    saga.state = CreateOrgSagaState::Completed {
+        user_id: UserId::new(999),
+        namespace_id: NamespaceId::new(888),
+    };
 
     let wrapped = Saga::CreateOrg(saga);
 
@@ -318,14 +325,12 @@ async fn test_completed_saga_not_reexecuted() {
     let result: Saga = serde_json::from_slice(&saga_bytes).expect("deserialize");
 
     match result {
-        Saga::CreateOrg(s) => {
-            assert!(
-                matches!(
-                    s.state,
-                    CreateOrgSagaState::Completed { user_id: 999, namespace_id: 888 }
-                ),
-                "Completed saga should not be re-executed"
-            );
+        Saga::CreateOrg(s) => match s.state {
+            CreateOrgSagaState::Completed { user_id, namespace_id } => {
+                assert_eq!(user_id, UserId::new(999));
+                assert_eq!(namespace_id, NamespaceId::new(888));
+            },
+            other => panic!("Completed saga should not be re-executed, got: {:?}", other),
         },
         _ => panic!("Expected CreateOrg saga"),
     }
@@ -347,7 +352,7 @@ async fn test_saga_serialization_roundtrip() {
         user_name: "Round Trip User".to_string(),
         user_email: "roundtrip@example.com".to_string(),
         org_name: "roundtrip-org".to_string(),
-        existing_user_id: Some(42),
+        existing_user_id: Some(UserId::new(42)),
     };
     let saga = CreateOrgSaga::new(saga_id.clone(), input.clone());
     let wrapped = Saga::CreateOrg(saga);
@@ -372,7 +377,7 @@ async fn test_saga_serialization_roundtrip() {
             assert_eq!(s.input.user_name, "Round Trip User");
             assert_eq!(s.input.user_email, "roundtrip@example.com");
             assert_eq!(s.input.org_name, "roundtrip-org");
-            assert_eq!(s.input.existing_user_id, Some(42));
+            assert_eq!(s.input.existing_user_id, Some(UserId::new(42)));
         },
         _ => panic!("Expected CreateOrg saga"),
     }

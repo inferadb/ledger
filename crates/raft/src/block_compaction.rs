@@ -20,6 +20,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     log_storage::AppliedStateAccessor,
+    trace_context::TraceContext,
     types::{BlockRetentionMode, LedgerNodeId, LedgerTypeConfig},
 };
 
@@ -64,7 +65,8 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
             return;
         }
 
-        debug!("Starting block compaction cycle");
+        let trace_ctx = TraceContext::new();
+        debug!(trace_id = %trace_ctx.trace_id, "Starting block compaction cycle");
 
         // Get all vault metadata to check retention policies
         let vaults = self.applied_state.all_vaults();
@@ -101,8 +103,9 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                 },
                 Err(e) => {
                     warn!(
-                        namespace_id,
-                        vault_id,
+                        trace_id = %trace_ctx.trace_id,
+                        namespace_id = namespace_id.value(),
+                        vault_id = vault_id.value(),
                         error = %e,
                         "Failed to get compaction watermark"
                     );
@@ -115,14 +118,22 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
             match self.block_archive.compact_before(compact_before) {
                 Ok(count) => {
                     if count > 0 {
-                        info!(namespace_id, vault_id, compact_before, count, "Compacted blocks");
+                        info!(
+                            trace_id = %trace_ctx.trace_id,
+                            namespace_id = namespace_id.value(),
+                            vault_id = vault_id.value(),
+                            compact_before,
+                            count,
+                            "Compacted blocks"
+                        );
                         total_compacted += count;
                     }
                 },
                 Err(e) => {
                     warn!(
-                        namespace_id,
-                        vault_id,
+                        trace_id = %trace_ctx.trace_id,
+                        namespace_id = namespace_id.value(),
+                        vault_id = vault_id.value(),
                         compact_before,
                         error = %e,
                         "Block compaction failed"
@@ -132,9 +143,9 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
         }
 
         if total_compacted > 0 {
-            info!(total_compacted, "Block compaction cycle complete");
+            info!(trace_id = %trace_ctx.trace_id, total_compacted, "Block compaction cycle complete");
         } else {
-            debug!("Block compaction cycle complete (no blocks compacted)");
+            debug!(trace_id = %trace_ctx.trace_id, "Block compaction cycle complete (no blocks compacted)");
         }
     }
 

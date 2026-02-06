@@ -27,7 +27,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::Arc,
 };
@@ -40,7 +40,7 @@ use crate::{
         CommitSlot, DEFAULT_PAGE_SIZE, DatabaseHeader, FileBackend, HEADER_SIZE, InMemoryBackend,
         StorageBackend,
     },
-    btree::{BTree, PageProvider},
+    btree::{BTree, CompactionStats, PageProvider},
     error::{Error, PageId, PageType, Result},
     page::{Page, PageAllocator, PageCache},
     tables::{Table, TableEntry, TableId},
@@ -108,6 +108,17 @@ pub struct Database<B: StorageBackend> {
 
 impl Database<FileBackend> {
     /// Open an existing database at the given path.
+    ///
+    /// Recovers committed state from the dual-slot header. If the recovery
+    /// flag is set (crash detected), the free list is rebuilt automatically.
+    ///
+    /// ```no_run
+    /// use inferadb_ledger_store::Database;
+    ///
+    /// let db = Database::open("/var/lib/ledger/state.db")?;
+    /// let txn = db.read()?;
+    /// # Ok::<(), inferadb_ledger_store::Error>(())
+    /// ```
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let backend = FileBackend::open(path)?;
         let config = DatabaseConfig { page_size: backend.page_size(), ..Default::default() };
@@ -128,6 +139,25 @@ impl Database<FileBackend> {
 
 impl Database<InMemoryBackend> {
     /// Create a new in-memory database.
+    ///
+    /// Useful for testing and ephemeral workloads. Data is lost on drop.
+    ///
+    /// ```no_run
+    /// use inferadb_ledger_store::Database;
+    /// use inferadb_ledger_store::tables::Entities;
+    ///
+    /// let db = Database::open_in_memory()?;
+    ///
+    /// // Write some data
+    /// let mut txn = db.write()?;
+    /// txn.insert::<Entities>(&b"key".to_vec(), &b"value".to_vec())?;
+    /// txn.commit()?;
+    ///
+    /// // Read it back
+    /// let txn = db.read()?;
+    /// let val = txn.get::<Entities>(&b"key".to_vec())?;
+    /// # Ok::<(), inferadb_ledger_store::Error>(())
+    /// ```
     pub fn open_in_memory() -> Result<Self> {
         Self::open_in_memory_with_config(DatabaseConfig::default())
     }
@@ -773,8 +803,30 @@ impl<B: StorageBackend> Drop for ReadTransaction<'_, B> {
 /// Changes are buffered until commit. On commit, all changes are
 /// atomically written and synced to disk using Copy-on-Write semantics.
 ///
-/// Read transactions can run concurrently - they see a consistent snapshot
+/// Read transactions can run concurrently — they see a consistent snapshot
 /// and are unaffected by COW modifications.
+///
+/// # Invariants
+///
+/// **Lock ordering:** The `write_lock` (a `Mutex<()>` on `Database`) is acquired
+/// first, guaranteeing at most one `WriteTransaction` exists at a time. All other
+/// locks (`allocator`, `pending_frees`, `backend`) are acquired inside individual
+/// operations and released before returning. This total ordering prevents deadlocks.
+///
+/// **Dirty page lifecycle:**
+/// 1. B+ tree operations (insert/delete) write to COW copies via `BufferedWritePageProvider`.
+///    Modified pages are stored in `dirty_pages`; their original page IDs are appended to
+///    `pages_to_free`.
+/// 2. On `commit()`, dirty pages are moved into the shared `PageCache`, flushed to disk, and the
+///    header is durably persisted via the dual-slot commit protocol.
+/// 3. The `CommittedState` is atomically swapped (`ArcSwap::store`), making changes visible to new
+///    read transactions.
+/// 4. Pages in `pages_to_free` are recorded in `pending_frees` for deferred cleanup. They cannot be
+///    reused until all read transactions referencing the prior snapshot have ended.
+///
+/// **Drop behavior:** If a `WriteTransaction` is dropped without calling `commit()` or
+/// `abort()`, all dirty pages are discarded and the write transaction is ended in the
+/// tracker. The database state remains unchanged.
 pub struct WriteTransaction<'db, B: StorageBackend> {
     db: &'db Database<B>,
     /// Snapshot ID for this transaction (used for deferred page cleanup).
@@ -957,6 +1009,60 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         Ok(())
     }
 
+    /// Compact a table's B+ tree by merging underfull leaf nodes.
+    ///
+    /// This reclaims space from pages left sparse by deletions. Leaves
+    /// with a fill factor below `min_fill_factor` are merged with their
+    /// right sibling when the combined entries fit in one page.
+    ///
+    /// Returns statistics about pages merged and freed.
+    pub fn compact_table<T: Table>(&mut self, min_fill_factor: f64) -> Result<CompactionStats> {
+        let root = self.table_roots[T::ID as usize];
+        if root == 0 {
+            return Ok(CompactionStats::default());
+        }
+
+        let provider = BufferedWritePageProvider {
+            db: self.db,
+            txn_id: self.snapshot_id.raw(),
+            dirty_pages: &mut self.dirty_pages,
+            pages_to_free: &mut self.pages_to_free,
+        };
+        let mut btree = BTree::new(root, provider);
+        let stats = btree.compact(min_fill_factor)?;
+        self.table_roots[T::ID as usize] = btree.root_page();
+        Ok(stats)
+    }
+
+    /// Compact all tables in the database.
+    ///
+    /// Runs compaction on every non-empty table. Returns total statistics.
+    pub fn compact_all_tables(&mut self, min_fill_factor: f64) -> Result<CompactionStats> {
+        let mut total = CompactionStats::default();
+
+        for table_id in TableId::all() {
+            let root = self.table_roots[table_id as usize];
+            if root == 0 {
+                continue;
+            }
+
+            let provider = BufferedWritePageProvider {
+                db: self.db,
+                txn_id: self.snapshot_id.raw(),
+                dirty_pages: &mut self.dirty_pages,
+                pages_to_free: &mut self.pages_to_free,
+            };
+            let mut btree = BTree::new(root, provider);
+            let stats = btree.compact(min_fill_factor)?;
+            self.table_roots[table_id as usize] = btree.root_page();
+
+            total.pages_merged += stats.pages_merged;
+            total.pages_freed += stats.pages_freed;
+        }
+
+        Ok(total)
+    }
+
     /// Abort the transaction (discard all changes).
     pub fn abort(mut self) {
         // Simply drop the dirty_pages buffer - changes were never visible to others
@@ -1137,18 +1243,41 @@ impl<B: StorageBackend> PageProvider for BufferedReadPageProvider<'_, '_, B> {
 
 use crate::btree::cursor::{Bound, Range};
 
-/// Iterator over table entries.
+/// Default number of entries to buffer per refill in the streaming iterator.
+const DEFAULT_BUFFER_SIZE: usize = 1000;
+
+/// Streaming iterator over table entries.
 ///
-/// Yields (key, value) pairs in key order.
+/// Yields `(key, value)` pairs in key order using an internal buffer that is
+/// lazily refilled from the B-tree. This keeps memory usage at
+/// `O(buffer_size)` instead of `O(n)` regardless of table size.
+///
+/// # Memory characteristics
+///
+/// The iterator maintains a buffer of at most `buffer_size` entries (default:
+/// 1000). When the buffer drains, a new B-tree range scan resumes from the
+/// last key seen. For a 1000-entry buffer with 512-byte values, peak memory
+/// is approximately 1 MB rather than scaling linearly with table size.
+///
+/// # Error handling
+///
+/// The `Iterator` trait implementation silently stops on B-tree errors
+/// (returning `None`). Use [`next_entry`](Self::next_entry) for explicit
+/// `Result`-based iteration when error handling matters.
 pub struct TableIterator<'a, 'db, B: StorageBackend, T: Table> {
     db: &'db Database<B>,
     root: PageId,
     page_cache: &'a RefCell<HashMap<PageId, Page>>,
     start_bytes: Option<Vec<u8>>,
     end_bytes: Option<Vec<u8>>,
-    current_position: usize,
-    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Buffered entries awaiting consumption.
+    buffer: VecDeque<(Vec<u8>, Vec<u8>)>,
+    /// The last key returned, used to resume scanning after the buffer drains.
+    last_key: Option<Vec<u8>>,
+    /// True once the B-tree range has been fully consumed.
     exhausted: bool,
+    /// Maximum entries to fetch per refill.
+    buffer_size: usize,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -1174,22 +1303,24 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
             page_cache,
             start_bytes,
             end_bytes,
-            current_position: 0,
-            entries: Vec::new(),
+            buffer: VecDeque::with_capacity(DEFAULT_BUFFER_SIZE),
+            last_key: None,
             exhausted: false,
+            buffer_size: DEFAULT_BUFFER_SIZE,
             _marker: std::marker::PhantomData,
         };
 
-        // Pre-load entries from the B-tree
-        // This is a simplified approach - a production implementation would
-        // stream entries lazily
-        iter.load_entries()?;
+        iter.refill_buffer()?;
 
         Ok(iter)
     }
 
-    fn load_entries(&mut self) -> Result<()> {
-        if self.root == 0 {
+    /// Fill the internal buffer with the next batch of entries from the B-tree.
+    ///
+    /// After the first batch, subsequent refills start from an exclusive bound
+    /// just past the last key returned so entries are never duplicated.
+    fn refill_buffer(&mut self) -> Result<()> {
+        if self.exhausted || self.root == 0 {
             self.exhausted = true;
             return Ok(());
         }
@@ -1197,43 +1328,71 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
         let provider = CachingReadPageProvider { db: self.db, page_cache: self.page_cache };
         let btree = BTree::new(self.root, provider);
 
-        let range = match (&self.start_bytes, &self.end_bytes) {
-            (None, None) => Range::all(),
-            (Some(start), None) => {
-                Range { start: Bound::Included(start.as_slice()), end: Bound::Unbounded }
-            },
-            (None, Some(end)) => {
-                Range { start: Bound::Unbounded, end: Bound::Excluded(end.as_slice()) }
-            },
-            (Some(start), Some(end)) => Range {
-                start: Bound::Included(start.as_slice()),
-                end: Bound::Excluded(end.as_slice()),
-            },
+        // Determine the lower bound for this scan.
+        // On the first call we use the original start_bytes;
+        // on subsequent calls we resume just past the last key returned.
+        let start_bound: Bound<'_> = if let Some(ref last) = self.last_key {
+            Bound::Excluded(last.as_slice())
+        } else if let Some(ref start) = self.start_bytes {
+            Bound::Included(start.as_slice())
+        } else {
+            Bound::Unbounded
         };
 
-        let mut iter = btree.range(range)?;
-        while let Some((k, v)) = iter.next_entry()? {
-            self.entries.push((k, v));
+        let end_bound: Bound<'_> = match &self.end_bytes {
+            Some(end) => Bound::Excluded(end.as_slice()),
+            None => Bound::Unbounded,
+        };
+
+        let range = Range { start: start_bound, end: end_bound };
+
+        let mut btree_iter = btree.range(range)?;
+        let mut count = 0;
+
+        while count < self.buffer_size {
+            match btree_iter.next_entry()? {
+                Some((k, v)) => {
+                    self.buffer.push_back((k, v));
+                    count += 1;
+                },
+                None => {
+                    self.exhausted = true;
+                    break;
+                },
+            }
         }
 
         Ok(())
     }
 
-    /// Get the next entry.
-    pub fn next_entry(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
-        if self.current_position < self.entries.len() {
-            let entry = self.entries[self.current_position].clone();
-            self.current_position += 1;
-            Some(entry)
+    /// Get the next entry, returning an explicit `Result`.
+    ///
+    /// Prefer this over the `Iterator` trait when error handling is needed,
+    /// as `Iterator::next` silently converts B-tree errors into `None`.
+    pub fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        if let Some((k, v)) = self.buffer.pop_front() {
+            self.last_key = Some(k.clone());
+            return Ok(Some((k, v)));
+        }
+
+        if self.exhausted {
+            return Ok(None);
+        }
+
+        self.refill_buffer()?;
+
+        if let Some((k, v)) = self.buffer.pop_front() {
+            self.last_key = Some(k.clone());
+            Ok(Some((k, v)))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    /// Collect all remaining entries into a Vec.
+    /// Collect all remaining entries into a `Vec`.
     pub fn collect_entries(mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut result = Vec::new();
-        while let Some(entry) = self.next_entry() {
+        while let Ok(Some(entry)) = self.next_entry() {
             result.push(entry);
         }
         result
@@ -1244,7 +1403,8 @@ impl<B: StorageBackend, T: Table> Iterator for TableIterator<'_, '_, B, T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_entry()
+        // Silently convert errors to None to satisfy the Iterator trait.
+        self.next_entry().ok().flatten()
     }
 }
 
@@ -1977,5 +2137,248 @@ mod tests {
                 num_keys
             );
         }
+    }
+
+    // ========================================================================
+    // Streaming TableIterator tests
+    // ========================================================================
+
+    /// Verify that buffer refill produces the same results as unbuffered iteration.
+    /// Uses a buffer_size of 3 against 10 entries so multiple refills occur.
+    #[test]
+    fn test_streaming_iter_buffer_refill() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let num_keys = 10;
+
+        for i in 0..num_keys {
+            let mut txn = db.write().unwrap();
+            let key = format!("key-{:04}", i).into_bytes();
+            let value = format!("val-{}", i).into_bytes();
+            txn.insert::<tables::Entities>(&key, &value).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let root = txn.snapshot.table_roots[tables::Entities::ID as usize];
+
+        // Create an iterator with a tiny buffer so we exercise multiple refills.
+        let mut iter = TableIterator::<InMemoryBackend, tables::Entities>::with_range(
+            &db,
+            root,
+            &txn.page_cache,
+            None,
+            None,
+        )
+        .unwrap();
+        iter.buffer_size = 3;
+        // Drain the initial pre-fill, then let the small buffer take over.
+        iter.buffer.clear();
+        iter.exhausted = false;
+        iter.last_key = None;
+        iter.refill_buffer().unwrap();
+
+        let mut collected = Vec::new();
+        while let Ok(Some(entry)) = iter.next_entry() {
+            collected.push(entry);
+        }
+
+        assert_eq!(collected.len(), num_keys);
+
+        // Verify ordering
+        for i in 1..collected.len() {
+            assert!(collected[i].0 > collected[i - 1].0, "Entries not sorted at index {}", i);
+        }
+    }
+
+    /// Verify that streaming works correctly with range bounds and small buffer.
+    #[test]
+    fn test_streaming_iter_with_range_bounds() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        for i in 0..20u64 {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&i, &vec![i as u8]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        // Range [5, 15)
+        let start_bytes = Some(5u64.to_be_bytes().to_vec());
+        let end_bytes = Some(15u64.to_be_bytes().to_vec());
+
+        let root = txn.snapshot.table_roots[tables::RaftLog::ID as usize];
+        let mut iter = TableIterator::<InMemoryBackend, tables::RaftLog>::with_range(
+            &db,
+            root,
+            &txn.page_cache,
+            start_bytes,
+            end_bytes,
+        )
+        .unwrap();
+        iter.buffer_size = 3; // Force multiple refills within the range.
+
+        // Drain the initial oversized buffer, rebuild with small size.
+        iter.buffer.clear();
+        iter.exhausted = false;
+        iter.last_key = None;
+        iter.refill_buffer().unwrap();
+
+        let entries: Vec<_> = iter.collect_entries();
+        assert_eq!(entries.len(), 10, "Expected keys 5..15, got {}", entries.len());
+
+        // First key is 5, last key is 14
+        let first_key = u64::from_be_bytes(entries[0].0.as_slice().try_into().unwrap());
+        let last_key = u64::from_be_bytes(entries.last().unwrap().0.as_slice().try_into().unwrap());
+        assert_eq!(first_key, 5);
+        assert_eq!(last_key, 14);
+    }
+
+    /// Verify that an empty table returns no entries without error.
+    #[test]
+    fn test_streaming_iter_empty_table() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let txn = db.read().unwrap();
+        let iter = txn.iter::<tables::Entities>().unwrap();
+        let entries = iter.collect_entries();
+        assert!(entries.is_empty());
+    }
+
+    /// Verify that a single entry works correctly.
+    #[test]
+    fn test_streaming_iter_single_entry() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"only-key".to_vec(), &b"only-val".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let mut iter = txn.iter::<tables::Entities>().unwrap();
+        let first = iter.next_entry().unwrap();
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().0, b"only-key");
+
+        let second = iter.next_entry().unwrap();
+        assert!(second.is_none());
+    }
+
+    /// Verify that the Iterator trait correctly yields all entries.
+    #[test]
+    fn test_streaming_iter_trait_integration() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let count = 25;
+
+        for i in 0..count {
+            let mut txn = db.write().unwrap();
+            let key = format!("k{:04}", i).into_bytes();
+            txn.insert::<tables::Entities>(&key, &vec![0u8; 64]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let iter = txn.iter::<tables::Entities>().unwrap();
+
+        // Use the Iterator trait (for .. in ..)
+        let collected: Vec<_> = iter.collect();
+        assert_eq!(collected.len(), count);
+    }
+
+    /// Verify correct behavior with entry count exactly equal to buffer size.
+    ///
+    /// Inserts entries across separate transactions (the production pattern)
+    /// to match the B-tree structure that leaf traversal expects.
+    #[test]
+    fn test_streaming_iter_exact_buffer_boundary() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Insert exactly DEFAULT_BUFFER_SIZE entries across separate transactions.
+        for i in 0..DEFAULT_BUFFER_SIZE {
+            let mut txn = db.write().unwrap();
+            let key = format!("b{:06}", i).into_bytes();
+            txn.insert::<tables::Entities>(&key, &b"v".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let entries: Vec<_> = txn.iter::<tables::Entities>().unwrap().collect_entries();
+        assert_eq!(entries.len(), DEFAULT_BUFFER_SIZE);
+    }
+
+    /// Large dataset test: 5000 entries across separate transactions, confirming
+    /// that the streaming iterator correctly handles multiple buffer refills
+    /// across many B-tree leaf pages.
+    #[test]
+    fn test_streaming_iter_large_dataset() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let num_keys: usize = 5000;
+
+        // Insert one entry per transaction (the production pattern via Raft).
+        for i in 0..num_keys {
+            let mut txn = db.write().unwrap();
+            let key = format!("e{:08}", i).into_bytes();
+            let value = vec![0u8; 128];
+            txn.insert::<tables::Entities>(&key, &value).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let iter = txn.iter::<tables::Entities>().unwrap();
+
+        let mut count = 0;
+        let mut prev_key: Option<Vec<u8>> = None;
+        for (key, _) in iter {
+            if let Some(ref prev) = prev_key {
+                assert!(key > *prev, "Ordering violated at entry {}", count);
+            }
+            prev_key = Some(key);
+            count += 1;
+        }
+        assert_eq!(count, num_keys, "Expected {} entries, got {}", num_keys, count);
+    }
+
+    /// Test bulk single-transaction insert with iteration (exercises the
+    /// B-tree find_next_leaf path for dense intra-leaf key ranges).
+    #[test]
+    fn test_streaming_iter_bulk_single_transaction() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let num_keys = 2000;
+
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..num_keys {
+                let key = format!("bulk{:06}", i).into_bytes();
+                txn.insert::<tables::Entities>(&key, &vec![0u8; 64]).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let entries: Vec<_> = txn.iter::<tables::Entities>().unwrap().collect_entries();
+        assert_eq!(entries.len(), num_keys);
+    }
+
+    /// Verify write transaction iteration still works (sees uncommitted changes).
+    #[test]
+    fn test_streaming_iter_write_transaction() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let mut txn = db.write().unwrap();
+        for i in 0..5 {
+            let key = format!("wk{:02}", i).into_bytes();
+            txn.insert::<tables::Entities>(&key, &b"wv".to_vec()).unwrap();
+        }
+
+        // Iterate before commit — should see uncommitted entries.
+        let entries: Vec<_> = txn.iter::<tables::Entities>().unwrap().collect_entries();
+        assert_eq!(entries.len(), 5);
+
+        txn.commit().unwrap();
+
+        // After commit, a new read should also see them.
+        let rtxn = db.read().unwrap();
+        let entries: Vec<_> = rtxn.iter::<tables::Entities>().unwrap().collect_entries();
+        assert_eq!(entries.len(), 5);
     }
 }

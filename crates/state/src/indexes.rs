@@ -230,7 +230,7 @@ mod tests {
     fn test_obj_index_add_remove() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         {
             let mut txn = db.write().expect("begin write");
@@ -280,7 +280,7 @@ mod tests {
     fn test_subj_index_add_remove() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         {
             let mut txn = db.write().expect("begin write");
@@ -332,15 +332,22 @@ mod tests {
         {
             let mut txn = db.write().expect("begin write");
 
-            IndexManager::add_to_obj_index(&mut txn, 1, "doc:123", "viewer", "user:alice")
-                .expect("add");
+            IndexManager::add_to_obj_index(
+                &mut txn,
+                VaultId::new(1),
+                "doc:123",
+                "viewer",
+                "user:alice",
+            )
+            .expect("add");
             txn.commit().expect("commit");
         }
 
         {
             let txn = db.read().expect("begin read");
 
-            let subjects = IndexManager::get_subjects(&txn, 2, "doc:123", "viewer").expect("get");
+            let subjects = IndexManager::get_subjects(&txn, VaultId::new(2), "doc:123", "viewer")
+                .expect("get");
             assert!(subjects.is_empty());
         }
     }
@@ -349,7 +356,7 @@ mod tests {
     fn test_duplicate_add_is_idempotent() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         {
             let mut txn = db.write().expect("begin write");

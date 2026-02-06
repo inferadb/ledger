@@ -221,7 +221,7 @@ impl MultiShardResolver {
 impl ShardResolver for MultiShardResolver {
     fn resolve(&self, namespace_id: NamespaceId) -> Result<ShardContext, Status> {
         // System namespace (0) always goes to system shard
-        if namespace_id == 0 {
+        if namespace_id == NamespaceId::new(0) {
             return self.system_shard();
         }
 
@@ -252,7 +252,7 @@ impl ShardResolver for MultiShardResolver {
 
     fn resolve_with_forward(&self, namespace_id: NamespaceId) -> Result<ResolveResult, Status> {
         // System namespace (0) always goes to system shard
-        if namespace_id == 0 {
+        if namespace_id == NamespaceId::new(0) {
             return self.system_shard().map(ResolveResult::Local);
         }
 
@@ -330,17 +330,20 @@ mod tests {
     #[test]
     fn test_remote_shard_info_fields() {
         let routing = RoutingInfo {
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             leader_hint: Some("node-1".to_string()),
         };
 
-        let remote_info =
-            RemoteShardInfo { shard_id: 1, namespace_id: 42, routing: routing.clone() };
+        let remote_info = RemoteShardInfo {
+            shard_id: ShardId::new(1),
+            namespace_id: NamespaceId::new(42),
+            routing: routing.clone(),
+        };
 
-        assert_eq!(remote_info.shard_id, 1);
-        assert_eq!(remote_info.namespace_id, 42);
-        assert_eq!(remote_info.routing.shard_id, 1);
+        assert_eq!(remote_info.shard_id, ShardId::new(1));
+        assert_eq!(remote_info.namespace_id, NamespaceId::new(42));
+        assert_eq!(remote_info.routing.shard_id, ShardId::new(1));
         assert_eq!(remote_info.routing.member_nodes.len(), 2);
         assert_eq!(remote_info.routing.leader_hint, Some("node-1".to_string()));
     }
@@ -355,20 +358,24 @@ mod tests {
     #[test]
     fn test_resolve_result_remote_variant() {
         let routing = RoutingInfo {
-            shard_id: 2,
+            shard_id: ShardId::new(2),
             member_nodes: vec!["192.168.1.1:50051".to_string()],
             leader_hint: None,
         };
 
-        let remote = RemoteShardInfo { shard_id: 2, namespace_id: 100, routing };
+        let remote = RemoteShardInfo {
+            shard_id: ShardId::new(2),
+            namespace_id: NamespaceId::new(100),
+            routing,
+        };
 
         let result = ResolveResult::Remote(remote);
 
         match result {
             ResolveResult::Local(_) => unreachable!("Expected Remote variant"),
             ResolveResult::Remote(info) => {
-                assert_eq!(info.shard_id, 2);
-                assert_eq!(info.namespace_id, 100);
+                assert_eq!(info.shard_id, ShardId::new(2));
+                assert_eq!(info.namespace_id, NamespaceId::new(100));
                 assert_eq!(info.routing.member_nodes.len(), 1);
             },
         }
@@ -387,9 +394,13 @@ mod tests {
         let debug_output = format!(
             "{:?}",
             RemoteShardInfo {
-                shard_id: 1,
-                namespace_id: 1,
-                routing: RoutingInfo { shard_id: 1, member_nodes: vec![], leader_hint: None },
+                shard_id: ShardId::new(1),
+                namespace_id: NamespaceId::new(1),
+                routing: RoutingInfo {
+                    shard_id: ShardId::new(1),
+                    member_nodes: vec![],
+                    leader_hint: None,
+                },
             }
         );
         assert!(debug_output.contains("RemoteShardInfo"));
@@ -399,12 +410,16 @@ mod tests {
     fn test_resolve_result_debug() {
         // Verify Debug impl for RemoteShardInfo (ResolveResult::Remote)
         let routing = RoutingInfo {
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             member_nodes: vec!["node-1".to_string()],
             leader_hint: Some("node-1".to_string()),
         };
 
-        let remote_info = RemoteShardInfo { shard_id: 1, namespace_id: 42, routing };
+        let remote_info = RemoteShardInfo {
+            shard_id: ShardId::new(1),
+            namespace_id: NamespaceId::new(42),
+            routing,
+        };
 
         let result = ResolveResult::Remote(remote_info);
         let debug_output = format!("{:?}", result);

@@ -447,16 +447,25 @@ mod tests {
         let mut saga = CreateOrgSaga::new("saga-123".to_string(), input);
 
         // Transition to UserCreated
-        saga.transition(CreateOrgSagaState::UserCreated { user_id: 1 });
-        assert!(matches!(saga.state, CreateOrgSagaState::UserCreated { user_id: 1 }));
+        saga.transition(CreateOrgSagaState::UserCreated { user_id: UserId::new(1) });
+        assert!(matches!(
+            saga.state,
+            CreateOrgSagaState::UserCreated { user_id } if user_id == UserId::new(1)
+        ));
         assert!(!saga.is_terminal());
 
         // Transition to NamespaceCreated
-        saga.transition(CreateOrgSagaState::NamespaceCreated { user_id: 1, namespace_id: 100 });
+        saga.transition(CreateOrgSagaState::NamespaceCreated {
+            user_id: UserId::new(1),
+            namespace_id: NamespaceId::new(100),
+        });
         assert!(!saga.is_terminal());
 
         // Transition to Completed
-        saga.transition(CreateOrgSagaState::Completed { user_id: 1, namespace_id: 100 });
+        saga.transition(CreateOrgSagaState::Completed {
+            user_id: UserId::new(1),
+            namespace_id: NamespaceId::new(100),
+        });
         assert!(saga.is_terminal());
     }
 
@@ -523,21 +532,24 @@ mod tests {
 
     #[test]
     fn test_delete_user_saga() {
-        let input = DeleteUserInput { user_id: 1, namespace_ids: vec![100, 101] };
+        let input = DeleteUserInput {
+            user_id: UserId::new(1),
+            namespace_ids: vec![NamespaceId::new(100), NamespaceId::new(101)],
+        };
         let mut saga = DeleteUserSaga::new("delete-123".to_string(), input);
 
         assert!(!saga.is_terminal());
 
         saga.transition(DeleteUserSagaState::MarkingDeleted {
-            user_id: 1,
-            remaining_namespaces: vec![100, 101],
+            user_id: UserId::new(1),
+            remaining_namespaces: vec![NamespaceId::new(100), NamespaceId::new(101)],
         });
         assert!(!saga.is_terminal());
 
-        saga.transition(DeleteUserSagaState::MembershipsRemoved { user_id: 1 });
+        saga.transition(DeleteUserSagaState::MembershipsRemoved { user_id: UserId::new(1) });
         assert!(!saga.is_terminal());
 
-        saga.transition(DeleteUserSagaState::Completed { user_id: 1 });
+        saga.transition(DeleteUserSagaState::Completed { user_id: UserId::new(1) });
         assert!(saga.is_terminal());
     }
 

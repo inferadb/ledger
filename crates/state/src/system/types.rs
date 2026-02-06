@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn test_user_serialization() {
         let user = User {
-            id: 1,
+            id: UserId::new(1),
             name: "Alice".to_string(),
             primary_email_id: 1,
             status: UserStatus::Active,
@@ -206,9 +206,9 @@ mod tests {
     #[test]
     fn test_namespace_registry_serialization() {
         let registry = NamespaceRegistry {
-            namespace_id: 1,
+            namespace_id: NamespaceId::new(1),
             name: "acme-corp".to_string(),
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             status: NamespaceStatus::Active,
             config_version: 1,

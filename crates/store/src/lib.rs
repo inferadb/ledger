@@ -3,27 +3,28 @@
 //! inferadb-ledger-store is a simplified B+ tree storage engine designed for InferaDB's
 //! specific requirements:
 //!
-//! - **Fixed schema**: 13 tables known at compile time
-//! - **Single writer**: Leverages Raft's serialization (no MVCC needed)
+//! - **Fixed schema**: 15 tables known at compile time
+//! - **Single writer**: Leverages Raft's serialization (no write-write MVCC needed)
 //! - **Append-optimized**: Raft log access patterns
-//! - **Checksummed pages**: Crash safety with XXHash verification
-
+//! - **Checksummed pages**: Crash safety with XXH3-64 verification
+//! - **Dual-slot commit**: Atomic commits via shadow paging (no WAL)
+//!
 //! ## Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────┐
 //! │                Database API                  │
-//! │  (open, read_txn, write_txn, commit, etc.)  │
+//! │     (open, read, write, commit, etc.)       │
 //! └────────────────┬────────────────────────────┘
 //!                  │
 //! ┌────────────────▼────────────────────────────┐
 //! │             Transaction Layer                │
-//! │   (ReadTxn: snapshot, WriteTxn: COW+WAL)    │
+//! │  (ReadTxn: snapshot, WriteTxn: COW+commit)  │
 //! └────────────────┬────────────────────────────┘
 //!                  │
 //! ┌────────────────▼────────────────────────────┐
 //! │              B+ Tree Layer                   │
-//! │  (get, insert, delete, range, cursor)       │
+//! │  (get, insert, delete, range, compact)      │
 //! └────────────────┬────────────────────────────┘
 //!                  │
 //! ┌────────────────▼────────────────────────────┐
@@ -39,20 +40,22 @@
 //!
 //! ## Quick Start
 //!
-//! ```ignore
+//! ```no_run
 //! use inferadb_ledger_store::{Database, DatabaseConfig};
+//! use inferadb_ledger_store::tables::Entities;
 //!
-//! // Open or create a database
-//! let db = Database::open("my.db", DatabaseConfig::default())?;
+//! // Create an in-memory database
+//! let db = Database::open_in_memory()?;
 //!
 //! // Write transaction
-//! let mut txn = db.write_txn()?;
-//! txn.insert::<RaftLog>(42, &log_entry)?;
+//! let mut txn = db.write()?;
+//! txn.insert::<Entities>(&b"key".to_vec(), &b"value".to_vec())?;
 //! txn.commit()?;
 //!
 //! // Read transaction
-//! let txn = db.read_txn()?;
-//! let entry = txn.get::<RaftLog>(42)?;
+//! let txn = db.read()?;
+//! let value = txn.get::<Entities>(&b"key".to_vec())?;
+//! # Ok::<(), inferadb_ledger_store::Error>(())
 //! ```
 
 #![deny(unsafe_code)]
@@ -86,7 +89,7 @@ pub use backend::{
     DEFAULT_PAGE_SIZE, DatabaseHeader, FileBackend, HEADER_SIZE, InMemoryBackend, MAGIC,
     StorageBackend,
 };
-pub use btree::{BTree, PageProvider};
+pub use btree::{BTree, CompactionStats, PageProvider};
 pub use db::{
     Database, DatabaseConfig, DatabaseStats, ReadTransaction, TableIterator, WriteTransaction,
 };

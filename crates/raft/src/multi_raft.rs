@@ -60,6 +60,7 @@ use tracing::{debug, info, warn};
 use crate::{
     auto_recovery::AutoRecoveryJob,
     block_compaction::BlockCompactor,
+    btree_compaction::BTreeCompactor,
     log_storage::{AppliedStateAccessor, RaftLogStore},
     proto::BlockAnnouncement,
     raft_network::GrpcRaftNetworkFactory,
@@ -149,10 +150,10 @@ impl MultiRaftConfig {
 
     /// Get the data directory for a specific shard.
     pub fn shard_dir(&self, shard_id: ShardId) -> PathBuf {
-        if shard_id == 0 {
+        if shard_id == ShardId::new(0) {
             self.data_dir.join("shards").join("_system")
         } else {
-            self.data_dir.join("shards").join(format!("shard_{:04}", shard_id))
+            self.data_dir.join("shards").join(format!("shard_{:04}", shard_id.value()))
         }
     }
 }
@@ -177,7 +178,7 @@ impl ShardConfig {
     /// Create configuration for the system shard.
     pub fn system(node_id: LedgerNodeId, address: String) -> Self {
         Self {
-            shard_id: 0,
+            shard_id: ShardId::new(0),
             initial_members: vec![(node_id, address)],
             bootstrap: true,
             enable_background_jobs: true,
@@ -208,12 +209,19 @@ pub struct ShardBackgroundJobs {
     compactor_handle: Option<JoinHandle<()>>,
     /// Auto-recovery job handle.
     recovery_handle: Option<JoinHandle<()>>,
+    /// B+ tree compactor handle.
+    btree_compactor_handle: Option<JoinHandle<()>>,
 }
 
 impl ShardBackgroundJobs {
     /// Create with no jobs (used when background_jobs disabled).
     fn none() -> Self {
-        Self { gc_handle: None, compactor_handle: None, recovery_handle: None }
+        Self {
+            gc_handle: None,
+            compactor_handle: None,
+            recovery_handle: None,
+            btree_compactor_handle: None,
+        }
     }
 
     /// Abort all running background jobs.
@@ -225,6 +233,9 @@ impl ShardBackgroundJobs {
             handle.abort();
         }
         if let Some(handle) = self.recovery_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.btree_compactor_handle.take() {
             handle.abort();
         }
     }
@@ -336,7 +347,7 @@ impl MultiRaftManager {
 
     /// Get the system shard (_system).
     pub fn system_shard(&self) -> Result<Arc<ShardGroup>> {
-        self.get_shard(0)
+        self.get_shard(ShardId::new(0))
     }
 
     /// List all active shard IDs.
@@ -388,7 +399,7 @@ impl MultiRaftManager {
     /// It stores the namespace routing table and cluster metadata.
     /// Also initializes the ShardRouter for namespace-to-shard routing.
     pub async fn start_system_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
-        if shard_config.shard_id != 0 {
+        if shard_config.shard_id != ShardId::new(0) {
             return Err(MultiRaftError::Raft {
                 shard_id: shard_config.shard_id,
                 message: "System shard must have shard_id=0".to_string(),
@@ -412,13 +423,13 @@ impl MultiRaftManager {
     /// Requires the system shard to be started first.
     pub async fn start_data_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
         // Verify system shard is running
-        if !self.has_shard(0) {
+        if !self.has_shard(ShardId::new(0)) {
             return Err(MultiRaftError::SystemShardRequired);
         }
 
-        if shard_config.shard_id == 0 {
+        if shard_config.shard_id == ShardId::new(0) {
             return Err(MultiRaftError::Raft {
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 message: "Use start_system_shard for shard_id=0".to_string(),
             });
         }
@@ -435,7 +446,7 @@ impl MultiRaftManager {
             return Err(MultiRaftError::ShardExists { shard_id });
         }
 
-        info!(shard_id, "Starting shard group");
+        info!(shard_id = shard_id.value(), "Starting shard group");
 
         // Create shard directory
         let shard_dir = self.config.shard_dir(shard_id);
@@ -455,7 +466,7 @@ impl MultiRaftManager {
 
         // Build Raft config
         let raft_config = openraft::Config {
-            cluster_name: format!("ledger-shard-{}", shard_id),
+            cluster_name: format!("ledger-shard-{}", shard_id.value()),
             heartbeat_interval: self.config.heartbeat_interval_ms,
             election_timeout_min: self.config.election_timeout_min_ms,
             election_timeout_max: self.config.election_timeout_max_ms,
@@ -516,7 +527,7 @@ impl MultiRaftManager {
             shards.insert(shard_id, shard_group.clone());
         }
 
-        info!(shard_id, "Shard group started successfully");
+        info!(shard_id = shard_id.value(), "Shard group started successfully");
 
         Ok(shard_group)
     }
@@ -530,7 +541,7 @@ impl MultiRaftManager {
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> ShardBackgroundJobs {
-        info!(shard_id, "Starting background jobs for shard");
+        info!(shard_id = shard_id.value(), "Starting background jobs for shard");
 
         // TTL Garbage Collector
         let gc = TtlGarbageCollector::builder()
@@ -540,7 +551,7 @@ impl MultiRaftManager {
             .applied_state(applied_state.clone())
             .build();
         let gc_handle = gc.start();
-        info!(shard_id, "Started TTL garbage collector");
+        info!(shard_id = shard_id.value(), "Started TTL garbage collector");
 
         // Block Compactor
         let compactor = BlockCompactor::builder()
@@ -550,23 +561,30 @@ impl MultiRaftManager {
             .applied_state(applied_state.clone())
             .build();
         let compactor_handle = compactor.start();
-        info!(shard_id, "Started block compactor");
+        info!(shard_id = shard_id.value(), "Started block compactor");
 
         // Auto Recovery Job
         let recovery = AutoRecoveryJob::builder()
-            .raft(raft)
+            .raft(raft.clone())
             .node_id(self.config.node_id)
             .applied_state(applied_state)
-            .state(state)
+            .state(state.clone())
             .block_archive(Some(block_archive))
             .build();
         let recovery_handle = recovery.start();
-        info!(shard_id, "Started auto recovery job");
+        info!(shard_id = shard_id.value(), "Started auto recovery job");
+
+        // B+ Tree Compactor
+        let btree_compactor =
+            BTreeCompactor::builder().raft(raft).node_id(self.config.node_id).state(state).build();
+        let btree_compactor_handle = btree_compactor.start();
+        info!(shard_id = shard_id.value(), "Started B+ tree compactor");
 
         ShardBackgroundJobs {
             gc_handle: Some(gc_handle),
             compactor_handle: Some(compactor_handle),
             recovery_handle: Some(recovery_handle),
+            btree_compactor_handle: Some(btree_compactor_handle),
         }
     }
 
@@ -642,7 +660,7 @@ impl MultiRaftManager {
         })?;
 
         info!(
-            shard_id = config.shard_id,
+            shard_id = config.shard_id.value(),
             members = config.initial_members.len(),
             "Bootstrapped shard cluster"
         );
@@ -664,15 +682,15 @@ impl MultiRaftManager {
         {
             let mut jobs = shard.background_jobs.lock();
             jobs.abort();
-            debug!(shard_id, "Aborted background jobs");
+            debug!(shard_id = shard_id.value(), "Aborted background jobs");
         }
 
         // Trigger Raft shutdown
         if let Err(e) = shard.raft.shutdown().await {
-            warn!(shard_id, error = ?e, "Error during Raft shutdown");
+            warn!(shard_id = shard_id.value(), error = ?e, "Error during Raft shutdown");
         }
 
-        info!(shard_id, "Shard group stopped");
+        info!(shard_id = shard_id.value(), "Shard group stopped");
         Ok(())
     }
 
@@ -682,11 +700,52 @@ impl MultiRaftManager {
 
         for shard_id in shard_ids {
             if let Err(e) = self.stop_shard(shard_id).await {
-                warn!(shard_id, error = %e, "Error stopping shard during shutdown");
+                warn!(shard_id = shard_id.value(), error = %e, "Error stopping shard during shutdown");
             }
         }
 
         info!("Multi-Raft Manager shutdown complete");
+    }
+
+    /// Gracefully shut down all shard groups with leadership handoff.
+    ///
+    /// For each shard where this node is the leader, triggers a final
+    /// snapshot before shutdown so the new leader has up-to-date state.
+    /// Then performs the normal shutdown sequence.
+    ///
+    /// openraft 0.9 does not provide explicit leadership transfer, so
+    /// shutting down the leader triggers re-election among remaining nodes.
+    pub async fn graceful_shutdown(&self) {
+        let node_id = self.config.node_id;
+        let shard_ids = self.list_shards();
+
+        // Trigger final snapshots for leader shards
+        for shard_id in &shard_ids {
+            // Clone the shard Arc so we can drop the lock before awaiting
+            let shard = {
+                let shards = self.shards.read();
+                shards.get(shard_id).cloned()
+            };
+
+            if let Some(shard) = shard
+                && shard.is_leader(node_id)
+            {
+                info!(
+                    shard_id = shard_id.value(),
+                    "Triggering final snapshot before leadership handoff"
+                );
+                if let Err(e) = shard.raft.trigger().snapshot().await {
+                    warn!(
+                        shard_id = shard_id.value(),
+                        error = %e,
+                        "Failed to trigger final snapshot"
+                    );
+                }
+            }
+        }
+
+        // Proceed with normal shutdown
+        self.shutdown().await;
     }
 
     /// Get statistics about the manager.
@@ -740,21 +799,21 @@ mod tests {
         let config = create_test_config(&temp);
 
         // System shard directory
-        let system_dir = config.shard_dir(0);
+        let system_dir = config.shard_dir(ShardId::new(0));
         assert!(system_dir.ends_with("shards/_system"));
 
         // Data shard directory
-        let data_dir = config.shard_dir(1);
+        let data_dir = config.shard_dir(ShardId::new(1));
         assert!(data_dir.ends_with("shards/shard_0001"));
 
-        let data_dir = config.shard_dir(42);
+        let data_dir = config.shard_dir(ShardId::new(42));
         assert!(data_dir.ends_with("shards/shard_0042"));
     }
 
     #[test]
     fn test_shard_config_system() {
         let config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        assert_eq!(config.shard_id, 0);
+        assert_eq!(config.shard_id, ShardId::new(0));
         assert!(config.bootstrap);
         assert_eq!(config.initial_members.len(), 1);
     }
@@ -762,8 +821,8 @@ mod tests {
     #[test]
     fn test_shard_config_data() {
         let members = vec![(1, "127.0.0.1:50051".to_string()), (2, "127.0.0.1:50052".to_string())];
-        let config = ShardConfig::data(1, members);
-        assert_eq!(config.shard_id, 1);
+        let config = ShardConfig::data(ShardId::new(1), members);
+        assert_eq!(config.shard_id, ShardId::new(1));
         assert!(config.bootstrap);
         assert_eq!(config.initial_members.len(), 2);
     }
@@ -808,8 +867,8 @@ mod tests {
 
     #[test]
     fn test_shard_config_builder() {
-        let config = ShardConfig::builder().shard_id(5).build();
-        assert_eq!(config.shard_id, 5);
+        let config = ShardConfig::builder().shard_id(ShardId::new(5)).build();
+        assert_eq!(config.shard_id, ShardId::new(5));
         assert!(config.initial_members.is_empty());
         assert!(config.bootstrap);
         assert!(config.enable_background_jobs);
@@ -819,12 +878,12 @@ mod tests {
     fn test_shard_config_builder_with_all_fields() {
         let members = vec![(1, "127.0.0.1:50051".to_string())];
         let config = ShardConfig::builder()
-            .shard_id(3)
+            .shard_id(ShardId::new(3))
             .initial_members(members.clone())
             .bootstrap(false)
             .enable_background_jobs(false)
             .build();
-        assert_eq!(config.shard_id, 3);
+        assert_eq!(config.shard_id, ShardId::new(3));
         assert_eq!(config.initial_members, members);
         assert!(!config.bootstrap);
         assert!(!config.enable_background_jobs);
@@ -844,7 +903,7 @@ mod tests {
         let manager = MultiRaftManager::new(config);
 
         assert_eq!(manager.list_shards().len(), 0);
-        assert!(!manager.has_shard(0));
+        assert!(!manager.has_shard(ShardId::new(0)));
     }
 
     #[test]
@@ -866,7 +925,8 @@ mod tests {
         let manager = MultiRaftManager::new(config);
 
         // Try to start data shard without system shard
-        let shard_config = ShardConfig::data(1, vec![(1, "127.0.0.1:50051".to_string())]);
+        let shard_config =
+            ShardConfig::data(ShardId::new(1), vec![(1, "127.0.0.1:50051".to_string())]);
         let result = manager.start_data_shard(shard_config).await;
 
         assert!(matches!(result, Err(MultiRaftError::SystemShardRequired)));
@@ -884,9 +944,9 @@ mod tests {
         assert!(result.is_ok(), "start_system_shard failed: {:?}", result.err());
 
         let shard = result.unwrap();
-        assert_eq!(shard.shard_id(), 0);
-        assert!(manager.has_shard(0));
-        assert_eq!(manager.list_shards(), vec![0]);
+        assert_eq!(shard.shard_id(), ShardId::new(0));
+        assert!(manager.has_shard(ShardId::new(0)));
+        assert_eq!(manager.list_shards(), vec![ShardId::new(0)]);
     }
 
     #[tokio::test]
@@ -900,12 +960,13 @@ mod tests {
         manager.start_system_shard(system_config).await.expect("start system");
 
         // Start data shard
-        let data_config = ShardConfig::data(1, vec![(1, "127.0.0.1:50051".to_string())]);
+        let data_config =
+            ShardConfig::data(ShardId::new(1), vec![(1, "127.0.0.1:50051".to_string())]);
         manager.start_data_shard(data_config).await.expect("start data shard");
 
         assert_eq!(manager.list_shards().len(), 2);
-        assert!(manager.has_shard(0));
-        assert!(manager.has_shard(1));
+        assert!(manager.has_shard(ShardId::new(0)));
+        assert!(manager.has_shard(ShardId::new(1)));
     }
 
     #[tokio::test]
@@ -920,7 +981,9 @@ mod tests {
 
         // Try to start again
         let result = manager.start_system_shard(shard_config).await;
-        assert!(matches!(result, Err(MultiRaftError::ShardExists { shard_id: 0 })));
+        assert!(
+            matches!(result, Err(MultiRaftError::ShardExists { shard_id }) if shard_id == ShardId::new(0))
+        );
     }
 
     #[tokio::test]
@@ -933,12 +996,12 @@ mod tests {
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_shard(shard_config).await.expect("start system");
 
-        assert!(manager.has_shard(0));
+        assert!(manager.has_shard(ShardId::new(0)));
 
         // Stop shard
-        manager.stop_shard(0).await.expect("stop shard");
+        manager.stop_shard(ShardId::new(0)).await.expect("stop shard");
 
-        assert!(!manager.has_shard(0));
+        assert!(!manager.has_shard(ShardId::new(0)));
     }
 
     #[tokio::test]
@@ -948,19 +1011,21 @@ mod tests {
         let manager = MultiRaftManager::new(config);
 
         // Try to get non-existent shard
-        let result = manager.get_shard(0);
-        assert!(matches!(result, Err(MultiRaftError::ShardNotFound { shard_id: 0 })));
+        let result = manager.get_shard(ShardId::new(0));
+        assert!(
+            matches!(result, Err(MultiRaftError::ShardNotFound { shard_id }) if shard_id == ShardId::new(0))
+        );
 
         // Start and get
         let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_shard(shard_config).await.expect("start system");
 
-        let shard = manager.get_shard(0).expect("get shard");
-        assert_eq!(shard.shard_id(), 0);
+        let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
+        assert_eq!(shard.shard_id(), ShardId::new(0));
 
         // system_shard() should work too
         let system = manager.system_shard().expect("system shard");
-        assert_eq!(system.shard_id(), 0);
+        assert_eq!(system.shard_id(), ShardId::new(0));
     }
 
     #[test]
@@ -970,6 +1035,7 @@ mod tests {
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
+        assert!(jobs.btree_compactor_handle.is_none());
     }
 
     #[test]
@@ -994,7 +1060,7 @@ mod tests {
 
         manager.start_system_shard(shard_config).await.expect("start system");
 
-        let shard = manager.get_shard(0).expect("get shard");
+        let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
 
         // Background jobs should be None when disabled
         let jobs = shard.background_jobs.lock();
@@ -1015,7 +1081,7 @@ mod tests {
 
         manager.start_system_shard(shard_config).await.expect("start system");
 
-        let shard = manager.get_shard(0).expect("get shard");
+        let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
 
         // Background jobs should be Some when enabled
         let jobs = shard.background_jobs.lock();
@@ -1036,7 +1102,7 @@ mod tests {
 
         // Verify jobs are running before stop
         {
-            let shard = manager.get_shard(0).expect("get shard");
+            let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
             let jobs = shard.background_jobs.lock();
             assert!(jobs.gc_handle.is_some());
             assert!(jobs.compactor_handle.is_some());
@@ -1044,9 +1110,9 @@ mod tests {
         }
 
         // Stop shard - should abort jobs
-        manager.stop_shard(0).await.expect("stop shard");
+        manager.stop_shard(ShardId::new(0)).await.expect("stop shard");
 
         // Shard should be removed
-        assert!(!manager.has_shard(0));
+        assert!(!manager.has_shard(ShardId::new(0)));
     }
 }

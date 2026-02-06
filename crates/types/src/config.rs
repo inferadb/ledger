@@ -440,6 +440,275 @@ fn default_coalesce_enabled() -> bool {
     true
 }
 
+// =============================================================================
+// Rate Limiting Configuration
+// =============================================================================
+
+/// Default per-client token bucket capacity (max burst).
+fn default_client_burst() -> u64 {
+    100
+}
+
+/// Default per-client sustained rate (requests/sec).
+fn default_client_rate() -> f64 {
+    50.0
+}
+
+/// Default per-namespace token bucket capacity (max burst).
+fn default_namespace_burst() -> u64 {
+    1000
+}
+
+/// Default per-namespace sustained rate (requests/sec).
+fn default_namespace_rate() -> f64 {
+    500.0
+}
+
+/// Default backpressure threshold (pending Raft proposals).
+fn default_backpressure_threshold() -> u64 {
+    100
+}
+
+/// Configuration for multi-level token bucket rate limiting.
+///
+/// Controls three tiers of admission control:
+///
+/// 1. **Per-client** — prevents one bad actor from monopolizing the system. `client_burst` sets the
+///    max burst, `client_rate` sets sustained requests/sec.
+///
+/// 2. **Per-namespace** — ensures fair sharing across tenants in a multi-tenant shard.
+///    `namespace_burst` sets the max burst, `namespace_rate` sets sustained requests/sec.
+///
+/// 3. **Global backpressure** — throttles all requests when Raft consensus is saturated.
+///    `backpressure_threshold` is the pending proposal count above which requests are rejected.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::RateLimitConfig;
+/// let config = RateLimitConfig::builder()
+///     .client_burst(200)
+///     .client_rate(100.0)
+///     .namespace_burst(2000)
+///     .namespace_rate(1000.0)
+///     .backpressure_threshold(200)
+///     .build()
+///     .expect("valid rate limit config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Maximum burst size per client (token bucket capacity).
+    ///
+    /// Must be > 0.
+    #[serde(default = "default_client_burst")]
+    pub client_burst: u64,
+    /// Sustained requests per second per client (token refill rate).
+    ///
+    /// Must be > 0.
+    #[serde(default = "default_client_rate")]
+    pub client_rate: f64,
+    /// Maximum burst size per namespace (token bucket capacity).
+    ///
+    /// Must be > 0.
+    #[serde(default = "default_namespace_burst")]
+    pub namespace_burst: u64,
+    /// Sustained requests per second per namespace (token refill rate).
+    ///
+    /// Must be > 0.
+    #[serde(default = "default_namespace_rate")]
+    pub namespace_rate: f64,
+    /// Pending Raft proposal count above which global backpressure activates.
+    ///
+    /// Must be > 0.
+    #[serde(default = "default_backpressure_threshold")]
+    pub backpressure_threshold: u64,
+}
+
+#[bon::bon]
+impl RateLimitConfig {
+    /// Creates a new rate limit configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is zero or negative.
+    #[builder]
+    pub fn new(
+        #[builder(default = default_client_burst())] client_burst: u64,
+        #[builder(default = default_client_rate())] client_rate: f64,
+        #[builder(default = default_namespace_burst())] namespace_burst: u64,
+        #[builder(default = default_namespace_rate())] namespace_rate: f64,
+        #[builder(default = default_backpressure_threshold())] backpressure_threshold: u64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            client_burst,
+            client_rate,
+            namespace_burst,
+            namespace_rate,
+            backpressure_threshold,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl RateLimitConfig {
+    /// Validates the configuration values.
+    ///
+    /// Call after deserialization to ensure values are within valid ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.client_burst == 0 {
+            return Err(ConfigError::Validation {
+                message: "client_burst must be > 0".to_string(),
+            });
+        }
+        if self.client_rate <= 0.0 {
+            return Err(ConfigError::Validation { message: "client_rate must be > 0".to_string() });
+        }
+        if self.namespace_burst == 0 {
+            return Err(ConfigError::Validation {
+                message: "namespace_burst must be > 0".to_string(),
+            });
+        }
+        if self.namespace_rate <= 0.0 {
+            return Err(ConfigError::Validation {
+                message: "namespace_rate must be > 0".to_string(),
+            });
+        }
+        if self.backpressure_threshold == 0 {
+            return Err(ConfigError::Validation {
+                message: "backpressure_threshold must be > 0".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            client_burst: default_client_burst(),
+            client_rate: default_client_rate(),
+            namespace_burst: default_namespace_burst(),
+            namespace_rate: default_namespace_rate(),
+            backpressure_threshold: default_backpressure_threshold(),
+        }
+    }
+}
+
+// =========================================================================
+// AuditConfig defaults
+// =========================================================================
+
+/// Default max audit log file size: 100 MB.
+fn default_max_file_size_bytes() -> u64 {
+    100 * 1024 * 1024
+}
+
+/// Default max rotated audit log files to retain.
+fn default_max_rotated_files() -> u32 {
+    10
+}
+
+/// Audit logging configuration.
+///
+/// Controls the file-based audit logger for compliance (SOC2, HIPAA).
+/// Audit logs capture security-sensitive operations with durable writes.
+///
+/// # Log Rotation
+///
+/// When the active log file exceeds `max_file_size_bytes`, it is rotated
+/// to `{path}.1`, `{path}.2`, etc. Files beyond `max_rotated_files` are
+/// deleted. This prevents unbounded disk usage.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::AuditConfig;
+/// let config = AuditConfig::builder()
+///     .path("/var/log/inferadb/audit.jsonl")
+///     .max_file_size_bytes(50 * 1024 * 1024)
+///     .max_rotated_files(20)
+///     .build()
+///     .expect("valid audit config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// Path to the audit log file (JSON Lines format).
+    ///
+    /// Must be a non-empty string. Parent directory must exist at runtime.
+    pub path: String,
+    /// Maximum audit log file size in bytes before rotation.
+    ///
+    /// Must be >= 1 MB (1_048_576 bytes). Default: 100 MB.
+    #[serde(default = "default_max_file_size_bytes")]
+    pub max_file_size_bytes: u64,
+    /// Maximum number of rotated log files to retain.
+    ///
+    /// Must be >= 1. Default: 10. Oldest files are deleted when exceeded.
+    #[serde(default = "default_max_rotated_files")]
+    pub max_rotated_files: u32,
+}
+
+/// Minimum audit log file size: 1 MB.
+pub const MIN_AUDIT_FILE_SIZE: u64 = 1024 * 1024;
+
+#[bon::bon]
+impl AuditConfig {
+    /// Creates a new audit configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `path` is empty
+    /// - `max_file_size_bytes` < 1 MB
+    /// - `max_rotated_files` == 0
+    #[builder]
+    pub fn new(
+        #[builder(into)] path: String,
+        #[builder(default = default_max_file_size_bytes())] max_file_size_bytes: u64,
+        #[builder(default = default_max_rotated_files())] max_rotated_files: u32,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { path, max_file_size_bytes, max_rotated_files };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl AuditConfig {
+    /// Validates the configuration values.
+    ///
+    /// Call after deserialization to ensure values are within valid ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.path.is_empty() {
+            return Err(ConfigError::Validation {
+                message: "audit path must not be empty".to_string(),
+            });
+        }
+        if self.max_file_size_bytes < MIN_AUDIT_FILE_SIZE {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "max_file_size_bytes must be >= {} (1 MB), got {}",
+                    MIN_AUDIT_FILE_SIZE, self.max_file_size_bytes
+                ),
+            });
+        }
+        if self.max_rotated_files == 0 {
+            return Err(ConfigError::Validation {
+                message: "max_rotated_files must be >= 1".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Duration serialization using humantime format.
 mod humantime_serde {
     use std::time::Duration;
@@ -459,6 +728,381 @@ mod humantime_serde {
     {
         let s = String::deserialize(deserializer)?;
         humantime::parse_duration(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+// =========================================================================
+// BTreeCompactionConfig
+// =========================================================================
+
+fn default_min_fill_factor() -> f64 {
+    0.4
+}
+
+fn default_compaction_interval_secs() -> u64 {
+    3600
+}
+
+/// B+ tree compaction configuration.
+///
+/// Controls the background compaction job that merges underfull leaf nodes
+/// after deletions. Without compaction, deleted entries leave sparse leaf
+/// pages that waste disk space and cache memory.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::BTreeCompactionConfig;
+/// let config = BTreeCompactionConfig::builder()
+///     .min_fill_factor(0.5)
+///     .interval_secs(1800)
+///     .build()
+///     .expect("valid compaction config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BTreeCompactionConfig {
+    /// Minimum fill factor threshold (0.0 to 1.0).
+    ///
+    /// Leaf nodes with a fill factor below this value are candidates for
+    /// merging with a sibling. Must be in range (0.0, 1.0).
+    /// Default: 0.4 (40%).
+    #[serde(default = "default_min_fill_factor")]
+    pub min_fill_factor: f64,
+    /// Interval in seconds between compaction cycles.
+    ///
+    /// Must be >= 60 seconds. Default: 3600 (1 hour).
+    #[serde(default = "default_compaction_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for BTreeCompactionConfig {
+    fn default() -> Self {
+        Self {
+            min_fill_factor: default_min_fill_factor(),
+            interval_secs: default_compaction_interval_secs(),
+        }
+    }
+}
+
+#[bon::bon]
+impl BTreeCompactionConfig {
+    /// Creates a new B+ tree compaction configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `min_fill_factor` is not in (0.0, 1.0)
+    /// - `interval_secs` < 60
+    #[builder]
+    pub fn new(
+        #[builder(default = default_min_fill_factor())] min_fill_factor: f64,
+        #[builder(default = default_compaction_interval_secs())] interval_secs: u64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { min_fill_factor, interval_secs };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl BTreeCompactionConfig {
+    /// Validates the configuration values.
+    ///
+    /// Call after deserialization to ensure values are within valid ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.min_fill_factor <= 0.0 || self.min_fill_factor >= 1.0 {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "min_fill_factor must be in (0.0, 1.0), got {}",
+                    self.min_fill_factor
+                ),
+            });
+        }
+        if self.interval_secs < 60 {
+            return Err(ConfigError::Validation {
+                message: format!("interval_secs must be >= 60, got {}", self.interval_secs),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Default grace period in seconds (15s).
+const fn default_grace_period_secs() -> u64 {
+    15
+}
+
+/// Default drain timeout in seconds (30s).
+const fn default_drain_timeout_secs() -> u64 {
+    30
+}
+
+/// Minimum grace period in seconds.
+const MIN_GRACE_PERIOD_SECS: u64 = 1;
+
+/// Minimum drain timeout in seconds.
+const MIN_DRAIN_TIMEOUT_SECS: u64 = 5;
+
+/// Graceful shutdown configuration.
+///
+/// Controls how the server shuts down when receiving a termination signal.
+/// The shutdown sequence is:
+///
+/// 1. Mark readiness probe as failing (stops new traffic from load balancer)
+/// 2. Wait `grace_period_secs` for load balancer to drain connections
+/// 3. Stop accepting new requests
+/// 4. Wait up to `drain_timeout_secs` for in-flight requests to complete
+/// 5. Trigger final Raft snapshots for leader shards
+/// 6. Shut down Raft instances (triggers re-election)
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::ShutdownConfig;
+/// let config = ShutdownConfig::builder()
+///     .grace_period_secs(10)
+///     .drain_timeout_secs(60)
+///     .build()
+///     .expect("valid shutdown config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShutdownConfig {
+    /// Seconds to wait after marking readiness as failing before stopping.
+    ///
+    /// This gives load balancers time to stop sending traffic. Must be >= 1.
+    /// Default: 15 seconds.
+    #[serde(default = "default_grace_period_secs")]
+    pub grace_period_secs: u64,
+    /// Maximum seconds to wait for in-flight requests to complete.
+    ///
+    /// After the grace period, the server waits up to this duration for
+    /// active requests to finish. Must be >= 5. Default: 30 seconds.
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            grace_period_secs: default_grace_period_secs(),
+            drain_timeout_secs: default_drain_timeout_secs(),
+        }
+    }
+}
+
+#[bon::bon]
+impl ShutdownConfig {
+    /// Creates a new shutdown configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `grace_period_secs` < 1
+    /// - `drain_timeout_secs` < 5
+    #[builder]
+    pub fn new(
+        #[builder(default = default_grace_period_secs())] grace_period_secs: u64,
+        #[builder(default = default_drain_timeout_secs())] drain_timeout_secs: u64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { grace_period_secs, drain_timeout_secs };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl ShutdownConfig {
+    /// Validates the configuration values.
+    ///
+    /// Call after deserialization to ensure values are within valid ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.grace_period_secs < MIN_GRACE_PERIOD_SECS {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "grace_period_secs must be >= {}, got {}",
+                    MIN_GRACE_PERIOD_SECS, self.grace_period_secs
+                ),
+            });
+        }
+        if self.drain_timeout_secs < MIN_DRAIN_TIMEOUT_SECS {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "drain_timeout_secs must be >= {}, got {}",
+                    MIN_DRAIN_TIMEOUT_SECS, self.drain_timeout_secs
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Minimum detection window in seconds.
+const MIN_WINDOW_SECS: u64 = 1;
+
+/// Minimum hot key threshold (operations per second).
+const MIN_HOT_KEY_THRESHOLD: u64 = 1;
+
+/// Default detection window in seconds (60s).
+const fn default_window_secs() -> u64 {
+    60
+}
+
+/// Default hot key threshold (100 ops/sec).
+const fn default_hot_key_threshold() -> u64 {
+    100
+}
+
+/// Default Count-Min Sketch width (number of counters per row).
+const fn default_cms_width() -> usize {
+    1024
+}
+
+/// Default Count-Min Sketch depth (number of hash functions).
+const fn default_cms_depth() -> usize {
+    4
+}
+
+/// Default top-k keys to track for operational visibility.
+const fn default_top_k() -> usize {
+    10
+}
+
+/// Hot key detection configuration.
+///
+/// Controls the background hot key detector that identifies frequently
+/// accessed keys using a Count-Min Sketch for space-efficient frequency
+/// estimation. Hot key warnings help operators identify contention points
+/// before they cause performance issues.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::HotKeyConfig;
+/// let config = HotKeyConfig::builder()
+///     .window_secs(30)
+///     .threshold(200)
+///     .build()
+///     .expect("valid hot key config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotKeyConfig {
+    /// Detection window in seconds.
+    ///
+    /// Access counts are accumulated over this sliding window. Must be >= 1.
+    /// Default: 60 seconds.
+    #[serde(default = "default_window_secs")]
+    pub window_secs: u64,
+    /// Threshold for "hot" classification (operations per second).
+    ///
+    /// Keys exceeding this rate within the window are reported as hot.
+    /// Must be >= 1. Default: 100 ops/sec.
+    #[serde(default = "default_hot_key_threshold")]
+    pub threshold: u64,
+    /// Count-Min Sketch width (number of counters per row).
+    ///
+    /// Larger values reduce over-estimation error at the cost of memory.
+    /// Must be >= 64. Default: 1024.
+    #[serde(default = "default_cms_width")]
+    pub cms_width: usize,
+    /// Count-Min Sketch depth (number of hash functions).
+    ///
+    /// More hash functions reduce error probability at the cost of
+    /// per-increment CPU. Must be >= 2. Default: 4.
+    #[serde(default = "default_cms_depth")]
+    pub cms_depth: usize,
+    /// Maximum number of hot keys to track for `get_top_hot_keys()`.
+    ///
+    /// Only the top-k hottest keys are retained for operational visibility.
+    /// Must be >= 1. Default: 10.
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+impl Default for HotKeyConfig {
+    fn default() -> Self {
+        Self {
+            window_secs: default_window_secs(),
+            threshold: default_hot_key_threshold(),
+            cms_width: default_cms_width(),
+            cms_depth: default_cms_depth(),
+            top_k: default_top_k(),
+        }
+    }
+}
+
+#[bon::bon]
+impl HotKeyConfig {
+    /// Creates a new hot key detection configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `window_secs` < 1
+    /// - `threshold` < 1
+    /// - `cms_width` < 64
+    /// - `cms_depth` < 2
+    /// - `top_k` < 1
+    #[builder]
+    pub fn new(
+        #[builder(default = default_window_secs())] window_secs: u64,
+        #[builder(default = default_hot_key_threshold())] threshold: u64,
+        #[builder(default = default_cms_width())] cms_width: usize,
+        #[builder(default = default_cms_depth())] cms_depth: usize,
+        #[builder(default = default_top_k())] top_k: usize,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { window_secs, threshold, cms_width, cms_depth, top_k };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl HotKeyConfig {
+    /// Validates the configuration values.
+    ///
+    /// Call after deserialization to ensure values are within valid ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.window_secs < MIN_WINDOW_SECS {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "window_secs must be >= {}, got {}",
+                    MIN_WINDOW_SECS, self.window_secs
+                ),
+            });
+        }
+        if self.threshold < MIN_HOT_KEY_THRESHOLD {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "threshold must be >= {}, got {}",
+                    MIN_HOT_KEY_THRESHOLD, self.threshold
+                ),
+            });
+        }
+        if self.cms_width < 64 {
+            return Err(ConfigError::Validation {
+                message: format!("cms_width must be >= 64, got {}", self.cms_width),
+            });
+        }
+        if self.cms_depth < 2 {
+            return Err(ConfigError::Validation {
+                message: format!("cms_depth must be >= 2, got {}", self.cms_depth),
+            });
+        }
+        if self.top_k < 1 {
+            return Err(ConfigError::Validation {
+                message: format!("top_k must be >= 1, got {}", self.top_k),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -728,6 +1372,7 @@ mod tests {
         assert!(StorageConfig::default().validate().is_ok());
         assert!(RaftConfig::default().validate().is_ok());
         assert!(BatchConfig::default().validate().is_ok());
+        assert!(RateLimitConfig::default().validate().is_ok());
     }
 
     #[test]
@@ -735,6 +1380,7 @@ mod tests {
         assert_eq!(StorageConfig::builder().build().expect("valid"), StorageConfig::default());
         assert_eq!(RaftConfig::builder().build().expect("valid"), RaftConfig::default());
         assert_eq!(BatchConfig::builder().build().expect("valid"), BatchConfig::default());
+        assert_eq!(RateLimitConfig::builder().build().expect("valid"), RateLimitConfig::default());
     }
 
     // =========================================================================
@@ -884,5 +1530,544 @@ mod tests {
     fn test_config_error_display() {
         let err = ConfigError::Validation { message: "test error".to_string() };
         assert_eq!(err.to_string(), "invalid config: test error");
+    }
+
+    // =========================================================================
+    // RateLimitConfig validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_rate_limit_config_defaults_are_valid() {
+        let config = RateLimitConfig::builder().build().expect("defaults should be valid");
+        assert_eq!(config.client_burst, default_client_burst());
+        assert_eq!(config.client_rate, default_client_rate());
+        assert_eq!(config.namespace_burst, default_namespace_burst());
+        assert_eq!(config.namespace_rate, default_namespace_rate());
+        assert_eq!(config.backpressure_threshold, default_backpressure_threshold());
+    }
+
+    #[test]
+    fn test_rate_limit_config_builder_with_custom_values() {
+        let config = RateLimitConfig::builder()
+            .client_burst(200)
+            .client_rate(100.0)
+            .namespace_burst(5000)
+            .namespace_rate(2000.0)
+            .backpressure_threshold(200)
+            .build()
+            .expect("valid custom config");
+        assert_eq!(config.client_burst, 200);
+        assert_eq!(config.client_rate, 100.0);
+        assert_eq!(config.namespace_burst, 5000);
+        assert_eq!(config.namespace_rate, 2000.0);
+        assert_eq!(config.backpressure_threshold, 200);
+    }
+
+    #[test]
+    fn test_rate_limit_config_client_burst_zero() {
+        let result = RateLimitConfig::builder().client_burst(0).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("client_burst"));
+    }
+
+    #[test]
+    fn test_rate_limit_config_client_rate_zero() {
+        let result = RateLimitConfig::builder().client_rate(0.0).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("client_rate"));
+    }
+
+    #[test]
+    fn test_rate_limit_config_client_rate_negative() {
+        let result = RateLimitConfig::builder().client_rate(-1.0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rate_limit_config_namespace_burst_zero() {
+        let result = RateLimitConfig::builder().namespace_burst(0).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("namespace_burst"));
+    }
+
+    #[test]
+    fn test_rate_limit_config_namespace_rate_zero() {
+        let result = RateLimitConfig::builder().namespace_rate(0.0).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("namespace_rate"));
+    }
+
+    #[test]
+    fn test_rate_limit_config_backpressure_threshold_zero() {
+        let result = RateLimitConfig::builder().backpressure_threshold(0).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("backpressure_threshold"));
+    }
+
+    #[test]
+    fn test_rate_limit_config_boundary_values() {
+        // Minimum valid values
+        let result = RateLimitConfig::builder()
+            .client_burst(1)
+            .client_rate(0.001)
+            .namespace_burst(1)
+            .namespace_rate(0.001)
+            .backpressure_threshold(1)
+            .build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_rate_limit_config_default_impl() {
+        let config = RateLimitConfig::default();
+        assert_eq!(config.client_burst, 100);
+        assert_eq!(config.client_rate, 50.0);
+        assert_eq!(config.namespace_burst, 1000);
+        assert_eq!(config.namespace_rate, 500.0);
+        assert_eq!(config.backpressure_threshold, 100);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rate_limit_config_validate_method() {
+        let mut config = RateLimitConfig::default();
+        assert!(config.validate().is_ok());
+
+        config.client_burst = 0;
+        assert!(config.validate().is_err());
+
+        config.client_burst = 100;
+        config.namespace_rate = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_rate_limit_config_serde_roundtrip() {
+        let config = RateLimitConfig::builder()
+            .client_burst(200)
+            .client_rate(100.0)
+            .namespace_burst(3000)
+            .namespace_rate(1500.0)
+            .backpressure_threshold(150)
+            .build()
+            .expect("valid");
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: RateLimitConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_rate_limit_config_builder_matches_default() {
+        let from_builder = RateLimitConfig::builder().build().expect("valid");
+        let from_default = RateLimitConfig::default();
+        assert_eq!(from_builder, from_default);
+    }
+
+    // =========================================================================
+    // AuditConfig validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_audit_config_builder_with_valid_values() {
+        let config = AuditConfig::builder()
+            .path("/var/log/audit.jsonl")
+            .max_file_size_bytes(50 * 1024 * 1024)
+            .max_rotated_files(20)
+            .build()
+            .expect("valid config");
+        assert_eq!(config.path, "/var/log/audit.jsonl");
+        assert_eq!(config.max_file_size_bytes, 50 * 1024 * 1024);
+        assert_eq!(config.max_rotated_files, 20);
+    }
+
+    #[test]
+    fn test_audit_config_builder_with_defaults() {
+        let config = AuditConfig::builder()
+            .path("/var/log/audit.jsonl")
+            .build()
+            .expect("valid config with defaults");
+        assert_eq!(config.max_file_size_bytes, 100 * 1024 * 1024);
+        assert_eq!(config.max_rotated_files, 10);
+    }
+
+    #[test]
+    fn test_audit_config_empty_path() {
+        let result = AuditConfig::builder().path("").build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("path"));
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_audit_config_file_size_too_small() {
+        let result = AuditConfig::builder()
+            .path("/var/log/audit.jsonl")
+            .max_file_size_bytes(MIN_AUDIT_FILE_SIZE - 1)
+            .build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_file_size_bytes"));
+        assert!(err.to_string().contains("1 MB"));
+    }
+
+    #[test]
+    fn test_audit_config_file_size_minimum() {
+        let result = AuditConfig::builder()
+            .path("/var/log/audit.jsonl")
+            .max_file_size_bytes(MIN_AUDIT_FILE_SIZE)
+            .build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_audit_config_max_rotated_files_zero() {
+        let result =
+            AuditConfig::builder().path("/var/log/audit.jsonl").max_rotated_files(0).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_rotated_files"));
+    }
+
+    #[test]
+    fn test_audit_config_max_rotated_files_one() {
+        let result =
+            AuditConfig::builder().path("/var/log/audit.jsonl").max_rotated_files(1).build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_audit_config_validate_method() {
+        let mut config = AuditConfig {
+            path: "/var/log/audit.jsonl".to_string(),
+            max_file_size_bytes: 100 * 1024 * 1024,
+            max_rotated_files: 10,
+        };
+        assert!(config.validate().is_ok());
+
+        config.path = String::new();
+        assert!(config.validate().is_err());
+
+        config.path = "/var/log/audit.jsonl".to_string();
+        config.max_file_size_bytes = 0;
+        assert!(config.validate().is_err());
+
+        config.max_file_size_bytes = 100 * 1024 * 1024;
+        config.max_rotated_files = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_audit_config_serde_roundtrip() {
+        let config = AuditConfig::builder()
+            .path("/var/log/audit.jsonl")
+            .max_file_size_bytes(50 * 1024 * 1024)
+            .max_rotated_files(5)
+            .build()
+            .expect("valid");
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: AuditConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_audit_config_into_string() {
+        // Test that #[builder(into)] works for path
+        let config = AuditConfig::builder()
+            .path("/var/log/audit.jsonl") // &str should work via Into<String>
+            .build()
+            .expect("valid");
+        assert_eq!(config.path, "/var/log/audit.jsonl");
+    }
+
+    // =========================================================================
+    // BTreeCompactionConfig tests
+    // =========================================================================
+
+    #[test]
+    fn test_btree_compaction_config_defaults() {
+        let config = BTreeCompactionConfig::default();
+        assert!((config.min_fill_factor - 0.4).abs() < f64::EPSILON);
+        assert_eq!(config.interval_secs, 3600);
+    }
+
+    #[test]
+    fn test_btree_compaction_config_builder_defaults() {
+        let config = BTreeCompactionConfig::builder().build().expect("valid");
+        assert!((config.min_fill_factor - 0.4).abs() < f64::EPSILON);
+        assert_eq!(config.interval_secs, 3600);
+    }
+
+    #[test]
+    fn test_btree_compaction_config_builder_custom() {
+        let config = BTreeCompactionConfig::builder()
+            .min_fill_factor(0.6)
+            .interval_secs(1800)
+            .build()
+            .expect("valid");
+        assert!((config.min_fill_factor - 0.6).abs() < f64::EPSILON);
+        assert_eq!(config.interval_secs, 1800);
+    }
+
+    #[test]
+    fn test_btree_compaction_config_fill_factor_zero() {
+        let result = BTreeCompactionConfig::builder().min_fill_factor(0.0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_btree_compaction_config_fill_factor_one() {
+        let result = BTreeCompactionConfig::builder().min_fill_factor(1.0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_btree_compaction_config_fill_factor_negative() {
+        let result = BTreeCompactionConfig::builder().min_fill_factor(-0.1).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_btree_compaction_config_interval_too_short() {
+        let result = BTreeCompactionConfig::builder().interval_secs(59).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_btree_compaction_config_interval_minimum() {
+        let config =
+            BTreeCompactionConfig::builder().interval_secs(60).build().expect("valid at minimum");
+        assert_eq!(config.interval_secs, 60);
+    }
+
+    #[test]
+    fn test_btree_compaction_config_serde_roundtrip() {
+        let config = BTreeCompactionConfig::builder()
+            .min_fill_factor(0.5)
+            .interval_secs(7200)
+            .build()
+            .expect("valid");
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: BTreeCompactionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_btree_compaction_config_validate_after_deserialize() {
+        // Simulate deserializing invalid config
+        let config = BTreeCompactionConfig { min_fill_factor: 1.5, interval_secs: 3600 };
+        assert!(config.validate().is_err());
+    }
+
+    // =========================================================================
+    // ShutdownConfig validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_shutdown_config_defaults_are_valid() {
+        let config = ShutdownConfig::default();
+        assert_eq!(config.grace_period_secs, 15);
+        assert_eq!(config.drain_timeout_secs, 30);
+        config.validate().expect("defaults should be valid");
+    }
+
+    #[test]
+    fn test_shutdown_config_builder_defaults() {
+        let config = ShutdownConfig::builder().build().expect("valid");
+        assert_eq!(config.grace_period_secs, 15);
+        assert_eq!(config.drain_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_shutdown_config_builder_custom() {
+        let config = ShutdownConfig::builder()
+            .grace_period_secs(10)
+            .drain_timeout_secs(60)
+            .build()
+            .expect("valid custom config");
+        assert_eq!(config.grace_period_secs, 10);
+        assert_eq!(config.drain_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_shutdown_config_grace_period_zero() {
+        let result = ShutdownConfig::builder().grace_period_secs(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shutdown_config_grace_period_minimum() {
+        let config =
+            ShutdownConfig::builder().grace_period_secs(1).build().expect("valid at minimum");
+        assert_eq!(config.grace_period_secs, 1);
+    }
+
+    #[test]
+    fn test_shutdown_config_drain_timeout_too_short() {
+        let result = ShutdownConfig::builder().drain_timeout_secs(4).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shutdown_config_drain_timeout_minimum() {
+        let config =
+            ShutdownConfig::builder().drain_timeout_secs(5).build().expect("valid at minimum");
+        assert_eq!(config.drain_timeout_secs, 5);
+    }
+
+    #[test]
+    fn test_shutdown_config_serde_roundtrip() {
+        let config = ShutdownConfig::builder()
+            .grace_period_secs(20)
+            .drain_timeout_secs(45)
+            .build()
+            .expect("valid");
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ShutdownConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_shutdown_config_validate_after_deserialize() {
+        let config = ShutdownConfig { grace_period_secs: 0, drain_timeout_secs: 30 };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_shutdown_config_serde_defaults() {
+        let json = "{}";
+        let config: ShutdownConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.grace_period_secs, 15);
+        assert_eq!(config.drain_timeout_secs, 30);
+    }
+
+    // ─── HotKeyConfig Tests ───────────────────────────────────
+
+    #[test]
+    fn test_hot_key_config_defaults_are_valid() {
+        let config = HotKeyConfig::default();
+        assert_eq!(config.window_secs, 60);
+        assert_eq!(config.threshold, 100);
+        assert_eq!(config.cms_width, 1024);
+        assert_eq!(config.cms_depth, 4);
+        assert_eq!(config.top_k, 10);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_hot_key_config_builder_defaults() {
+        let config = HotKeyConfig::builder().build().unwrap();
+        assert_eq!(config, HotKeyConfig::default());
+    }
+
+    #[test]
+    fn test_hot_key_config_builder_custom() {
+        let config = HotKeyConfig::builder()
+            .window_secs(30)
+            .threshold(200)
+            .cms_width(2048)
+            .cms_depth(6)
+            .top_k(20)
+            .build()
+            .unwrap();
+        assert_eq!(config.window_secs, 30);
+        assert_eq!(config.threshold, 200);
+        assert_eq!(config.cms_width, 2048);
+        assert_eq!(config.cms_depth, 6);
+        assert_eq!(config.top_k, 20);
+    }
+
+    #[test]
+    fn test_hot_key_config_window_secs_zero() {
+        assert!(HotKeyConfig::builder().window_secs(0).build().is_err());
+    }
+
+    #[test]
+    fn test_hot_key_config_window_secs_minimum() {
+        let config = HotKeyConfig::builder().window_secs(1).build().unwrap();
+        assert_eq!(config.window_secs, 1);
+    }
+
+    #[test]
+    fn test_hot_key_config_threshold_zero() {
+        assert!(HotKeyConfig::builder().threshold(0).build().is_err());
+    }
+
+    #[test]
+    fn test_hot_key_config_threshold_minimum() {
+        let config = HotKeyConfig::builder().threshold(1).build().unwrap();
+        assert_eq!(config.threshold, 1);
+    }
+
+    #[test]
+    fn test_hot_key_config_cms_width_too_small() {
+        assert!(HotKeyConfig::builder().cms_width(63).build().is_err());
+    }
+
+    #[test]
+    fn test_hot_key_config_cms_width_minimum() {
+        let config = HotKeyConfig::builder().cms_width(64).build().unwrap();
+        assert_eq!(config.cms_width, 64);
+    }
+
+    #[test]
+    fn test_hot_key_config_cms_depth_too_small() {
+        assert!(HotKeyConfig::builder().cms_depth(1).build().is_err());
+    }
+
+    #[test]
+    fn test_hot_key_config_cms_depth_minimum() {
+        let config = HotKeyConfig::builder().cms_depth(2).build().unwrap();
+        assert_eq!(config.cms_depth, 2);
+    }
+
+    #[test]
+    fn test_hot_key_config_top_k_zero() {
+        assert!(HotKeyConfig::builder().top_k(0).build().is_err());
+    }
+
+    #[test]
+    fn test_hot_key_config_top_k_minimum() {
+        let config = HotKeyConfig::builder().top_k(1).build().unwrap();
+        assert_eq!(config.top_k, 1);
+    }
+
+    #[test]
+    fn test_hot_key_config_serde_roundtrip() {
+        let config = HotKeyConfig::builder()
+            .window_secs(30)
+            .threshold(200)
+            .cms_width(512)
+            .cms_depth(3)
+            .top_k(5)
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HotKeyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_hot_key_config_validate_after_deserialize() {
+        let config = HotKeyConfig::default();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_hot_key_config_serde_defaults() {
+        let json = "{}";
+        let config: HotKeyConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.window_secs, 60);
+        assert_eq!(config.threshold, 100);
+        assert_eq!(config.cms_width, 1024);
+        assert_eq!(config.cms_depth, 4);
+        assert_eq!(config.top_k, 10);
     }
 }

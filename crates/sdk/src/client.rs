@@ -12,7 +12,7 @@ use crate::{
     config::ClientConfig,
     connection::ConnectionPool,
     error::{self, Result},
-    retry::with_retry,
+    retry::with_retry_cancellable,
     server::{ServerResolver, ServerSource},
     streaming::{HeightTracker, ReconnectingStream},
     tracing::TraceContextInterceptor,
@@ -1196,6 +1196,23 @@ impl SetCondition {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # Cancellation
+///
+/// The client supports two levels of cancellation:
+///
+/// **Client-level** — [`shutdown()`](Self::shutdown) cancels all in-flight
+/// requests and rejects new ones with `SdkError::Shutdown`.
+///
+/// **Per-request** — Methods like [`read_with_token`](Self::read_with_token)
+/// and [`write_with_token`](Self::write_with_token) accept a
+/// [`CancellationToken`](tokio_util::sync::CancellationToken) that cancels
+/// a single request with `SdkError::Cancelled`.
+///
+/// Both mechanisms interrupt in-flight RPCs and backoff sleeps via
+/// `tokio::select!`. Access the client's token via
+/// [`cancellation_token()`](Self::cancellation_token) to create child
+/// tokens or integrate with application-level shutdown.
 #[derive(Clone)]
 pub struct LedgerClient {
     pool: ConnectionPool,
@@ -1340,6 +1357,42 @@ impl LedgerClient {
         &self.pool
     }
 
+    /// Returns the client's cancellation token.
+    ///
+    /// The token can be used to:
+    /// - Monitor shutdown state via [`CancellationToken::cancelled()`]
+    /// - Create child tokens for per-request cancellation
+    ///
+    /// # Per-Request Cancellation
+    ///
+    /// Create a child token and pass it to RPC methods that accept an
+    /// optional cancellation token. Cancelling the child token cancels
+    /// only that request, not the entire client.
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "svc").await?;
+    /// let token = client.cancellation_token().child_token();
+    ///
+    /// // Cancel after 100ms
+    /// let cancel_token = token.clone();
+    /// tokio::spawn(async move {
+    ///     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    ///     cancel_token.cancel();
+    /// });
+    ///
+    /// // This read will be cancelled if it takes longer than 100ms
+    /// let result = client.read_with_token(1, None, "key", token).await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn cancellation_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancellation
+    }
+
     // =========================================================================
     // Shutdown
     // =========================================================================
@@ -1410,16 +1463,51 @@ impl LedgerClient {
         self.cancellation.is_cancelled()
     }
 
-    /// Returns an error if the client has been shut down.
+    /// Returns an error if the client has been shut down or the request token
+    /// has been cancelled.
     ///
-    /// This is called at the start of each operation to fail fast if
-    /// shutdown has been initiated.
+    /// Called at the start of each operation to fail fast.
     #[inline]
-    fn check_shutdown(&self) -> Result<()> {
+    fn check_shutdown(
+        &self,
+        request_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<()> {
         if self.cancellation.is_cancelled() {
             return Err(error::SdkError::Shutdown);
         }
+        if let Some(token) = request_token
+            && token.is_cancelled()
+        {
+            return Err(error::SdkError::Cancelled);
+        }
         Ok(())
+    }
+
+    /// Creates a token that fires when either the client shuts down or
+    /// the per-request token is cancelled.
+    ///
+    /// When no request token is provided, returns the client's own token
+    /// (no allocation). When a request token is provided, creates a child
+    /// of the client token and links the request token to it.
+    fn effective_token(
+        &self,
+        request_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> tokio_util::sync::CancellationToken {
+        match request_token {
+            Some(req_token) => {
+                // Child of client token: cancelled when client shuts down.
+                // We also link the request token via a background task.
+                let child = self.cancellation.child_token();
+                let child_clone = child.clone();
+                let req_clone = req_token.clone();
+                tokio::spawn(async move {
+                    req_clone.cancelled().await;
+                    child_clone.cancel();
+                });
+                child
+            },
+            None => self.cancellation.clone(),
+        }
     }
 
     /// Creates a trace context interceptor based on the client's configuration.
@@ -1501,7 +1589,8 @@ impl LedgerClient {
         vault_id: Option<i64>,
         key: impl Into<String>,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(namespace_id, vault_id, key.into(), ReadConsistency::Eventual).await
+        self.read_internal(namespace_id, vault_id, key.into(), ReadConsistency::Eventual, None)
+            .await
     }
 
     /// Read a value by key with linearizable (strong) consistency.
@@ -1542,7 +1631,93 @@ impl LedgerClient {
         vault_id: Option<i64>,
         key: impl Into<String>,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(namespace_id, vault_id, key.into(), ReadConsistency::Linearizable).await
+        self.read_internal(namespace_id, vault_id, key.into(), ReadConsistency::Linearizable, None)
+            .await
+    }
+
+    /// Read a value by key with a per-request cancellation token.
+    ///
+    /// Like [`read`](Self::read) but accepts a [`CancellationToken`] that can
+    /// cancel this specific request without shutting down the client. Returns
+    /// `SdkError::Cancelled` if the token is cancelled before the RPC completes.
+    ///
+    /// [`CancellationToken`]: tokio_util::sync::CancellationToken
+    pub async fn read_with_token(
+        &self,
+        namespace_id: i64,
+        vault_id: Option<i64>,
+        key: impl Into<String>,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<Vec<u8>>> {
+        self.read_internal(
+            namespace_id,
+            vault_id,
+            key.into(),
+            ReadConsistency::Eventual,
+            Some(&token),
+        )
+        .await
+    }
+
+    /// Write a transaction with a per-request cancellation token.
+    ///
+    /// Like [`write`](Self::write) but accepts a [`CancellationToken`] that can
+    /// cancel this specific request. Note that cancellation is best-effort:
+    /// the server may still commit the transaction if the cancellation races
+    /// with the Raft commit.
+    ///
+    /// [`CancellationToken`]: tokio_util::sync::CancellationToken
+    pub async fn write_with_token(
+        &self,
+        namespace_id: i64,
+        vault_id: Option<i64>,
+        operations: Vec<Operation>,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<WriteSuccess> {
+        self.check_shutdown(Some(&token))?;
+
+        let idempotency_key = uuid::Uuid::new_v4();
+
+        self.execute_write(namespace_id, vault_id, &operations, idempotency_key, Some(&token)).await
+    }
+
+    /// Batch read with a per-request cancellation token.
+    ///
+    /// Like [`batch_read`](Self::batch_read) but accepts a cancellation token.
+    pub async fn batch_read_with_token(
+        &self,
+        namespace_id: i64,
+        vault_id: Option<i64>,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
+        self.batch_read_internal(
+            namespace_id,
+            vault_id,
+            keys.into_iter().map(Into::into).collect(),
+            ReadConsistency::Eventual,
+            Some(&token),
+        )
+        .await
+    }
+
+    /// Batch write with a per-request cancellation token.
+    ///
+    /// Like [`batch_write`](Self::batch_write) but accepts a cancellation token.
+    /// Cancellation is best-effort — the server may still commit.
+    pub async fn batch_write_with_token(
+        &self,
+        namespace_id: i64,
+        vault_id: Option<i64>,
+        batches: Vec<Vec<Operation>>,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<WriteSuccess> {
+        self.check_shutdown(Some(&token))?;
+
+        let idempotency_key = uuid::Uuid::new_v4();
+
+        self.execute_batch_write(namespace_id, vault_id, &batches, idempotency_key, Some(&token))
+            .await
     }
 
     /// Batch read multiple keys in a single RPC call.
@@ -1598,6 +1773,7 @@ impl LedgerClient {
             vault_id,
             keys.into_iter().map(Into::into).collect(),
             ReadConsistency::Eventual,
+            None,
         )
         .await
     }
@@ -1628,6 +1804,7 @@ impl LedgerClient {
             vault_id,
             keys.into_iter().map(Into::into).collect(),
             ReadConsistency::Linearizable,
+            None,
         )
         .await
     }
@@ -1636,20 +1813,23 @@ impl LedgerClient {
     // Internal Read Implementation
     // =========================================================================
 
-    /// Internal read implementation with configurable consistency.
+    /// Internal read implementation with configurable consistency and
+    /// optional per-request cancellation.
     async fn read_internal(
         &self,
         namespace_id: i64,
         vault_id: Option<i64>,
         key: String,
         consistency: ReadConsistency,
+        request_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<Option<Vec<u8>>> {
-        self.check_shutdown()?;
+        self.check_shutdown(request_token)?;
 
+        let token = self.effective_token(request_token);
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &token, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_read_client(
                 channel,
@@ -1671,20 +1851,23 @@ impl LedgerClient {
         .await
     }
 
-    /// Internal batch read implementation with configurable consistency.
+    /// Internal batch read implementation with configurable consistency and
+    /// optional per-request cancellation.
     async fn batch_read_internal(
         &self,
         namespace_id: i64,
         vault_id: Option<i64>,
         keys: Vec<String>,
         consistency: ReadConsistency,
+        request_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
-        self.check_shutdown()?;
+        self.check_shutdown(request_token)?;
 
+        let token = self.effective_token(request_token);
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &token, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_read_client(
                 channel,
@@ -1784,13 +1967,13 @@ impl LedgerClient {
         vault_id: Option<i64>,
         operations: Vec<Operation>,
     ) -> Result<WriteSuccess> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         // Generate UUID idempotency key once for this request
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_write(namespace_id, vault_id, &operations, idempotency_key).await
+        self.execute_write(namespace_id, vault_id, &operations, idempotency_key, None).await
     }
 
     /// Execute a single write attempt with retry for transient errors.
@@ -1803,7 +1986,9 @@ impl LedgerClient {
         vault_id: Option<i64>,
         operations: &[Operation],
         idempotency_key: uuid::Uuid,
+        request_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
+        let token = self.effective_token(request_token);
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
         let client_id = self.client_id().to_string();
@@ -1816,7 +2001,7 @@ impl LedgerClient {
         let idempotency_key_bytes = idempotency_key.as_bytes().to_vec();
 
         // Execute with retry for transient errors
-        with_retry(&retry_policy, || {
+        with_retry_cancellable(&retry_policy, &token, || {
             let proto_ops = proto_operations.clone();
             let cid = client_id.clone();
             let key_bytes = idempotency_key_bytes.clone();
@@ -1998,13 +2183,13 @@ impl LedgerClient {
         vault_id: Option<i64>,
         batches: Vec<Vec<Operation>>,
     ) -> Result<WriteSuccess> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         // Generate UUID idempotency key once for this request
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_batch_write(namespace_id, vault_id, &batches, idempotency_key).await
+        self.execute_batch_write(namespace_id, vault_id, &batches, idempotency_key, None).await
     }
 
     /// Execute a single batch write attempt with retry for transient errors.
@@ -2017,7 +2202,9 @@ impl LedgerClient {
         vault_id: Option<i64>,
         batches: &[Vec<Operation>],
         idempotency_key: uuid::Uuid,
+        request_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
+        let token = self.effective_token(request_token);
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
         let client_id = self.client_id().to_string();
@@ -2034,7 +2221,7 @@ impl LedgerClient {
         let idempotency_key_bytes = idempotency_key.as_bytes().to_vec();
 
         // Execute with retry for transient errors
-        with_retry(&retry_policy, || {
+        with_retry_cancellable(&retry_policy, &token, || {
             let batch_ops = proto_batches.clone();
             let cid = client_id.clone();
             let key_bytes = idempotency_key_bytes.clone();
@@ -2172,7 +2359,7 @@ impl LedgerClient {
         vault_id: i64,
         start_height: u64,
     ) -> Result<impl futures::Stream<Item = Result<BlockAnnouncement>>> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         // Get the initial stream
         let initial_stream =
@@ -2281,13 +2468,13 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn create_namespace(&self, name: impl Into<String>) -> Result<i64> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let name = name.into();
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_admin_client(
                 channel,
@@ -2337,12 +2524,12 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn get_namespace(&self, namespace_id: i64) -> Result<NamespaceInfo> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_admin_client(
                 channel,
@@ -2390,12 +2577,12 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn list_namespaces(&self) -> Result<Vec<NamespaceInfo>> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_admin_client(
                 channel,
@@ -2447,12 +2634,12 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn create_vault(&self, namespace_id: i64) -> Result<VaultInfo> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_admin_client(
                 channel,
@@ -2514,12 +2701,12 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn get_vault(&self, namespace_id: i64, vault_id: i64) -> Result<VaultInfo> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_admin_client(
                 channel,
@@ -2565,12 +2752,12 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn list_vaults(&self) -> Result<Vec<VaultInfo>> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_admin_client(
                 channel,
@@ -2620,7 +2807,7 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn health_check(&self) -> Result<bool> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let result = self.health_check_detailed().await?;
         match result.status {
@@ -2659,12 +2846,12 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn health_check_detailed(&self) -> Result<HealthCheckResult> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_health_client(
                 channel,
@@ -2718,12 +2905,12 @@ impl LedgerClient {
         namespace_id: i64,
         vault_id: i64,
     ) -> Result<HealthCheckResult> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_health_client(
                 channel,
@@ -2787,13 +2974,13 @@ impl LedgerClient {
         key: impl Into<String>,
         opts: VerifyOpts,
     ) -> Result<Option<VerifiedValue>> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let key = key.into();
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_read_client(
                 channel,
@@ -2864,12 +3051,12 @@ impl LedgerClient {
         namespace_id: i64,
         opts: ListEntitiesOpts,
     ) -> Result<PagedResult<Entity>> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_read_client(
                 channel,
@@ -2940,12 +3127,12 @@ impl LedgerClient {
         vault_id: i64,
         opts: ListRelationshipsOpts,
     ) -> Result<PagedResult<Relationship>> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_read_client(
                 channel,
@@ -3018,12 +3205,12 @@ impl LedgerClient {
         vault_id: i64,
         opts: ListResourcesOpts,
     ) -> Result<PagedResult<String>> {
-        self.check_shutdown()?;
+        self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry(&retry_policy, || async {
+        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
             let channel = pool.get_channel().await?;
             let mut client = Self::create_read_client(
                 channel,
@@ -5601,5 +5788,213 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_error_is_not_retryable() {
         assert!(!crate::error::SdkError::Shutdown.is_retryable());
+    }
+
+    // =========================================================================
+    // Cancellation tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_cancellation_token_accessor() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let token = client.cancellation_token();
+
+        // Token should not be cancelled initially
+        assert!(!token.is_cancelled());
+
+        // After shutdown, the token should be cancelled
+        client.shutdown().await;
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_child_token_cancelled_on_shutdown() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let child = client.cancellation_token().child_token();
+
+        assert!(!child.is_cancelled());
+
+        client.shutdown().await;
+        assert!(child.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_read_with_token_pre_cancelled() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+
+        let result = client.read_with_token(1, None, "key", token).await;
+        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn test_write_with_token_pre_cancelled() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+
+        let result = client
+            .write_with_token(1, None, vec![Operation::set_entity("key", b"val".to_vec())], token)
+            .await;
+        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn test_batch_read_with_token_pre_cancelled() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+
+        let result = client.batch_read_with_token(1, None, vec!["key1", "key2"], token).await;
+        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn test_batch_write_with_token_pre_cancelled() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+
+        let ops = vec![vec![Operation::set_entity("key", b"val".to_vec())]];
+        let result = client.batch_write_with_token(1, None, ops, token).await;
+        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_error_is_not_retryable() {
+        assert!(!crate::error::SdkError::Cancelled.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_differs_from_shutdown() {
+        // Cancelled and Shutdown are distinct error types
+        let cancelled = crate::error::SdkError::Cancelled;
+        let shutdown = crate::error::SdkError::Shutdown;
+
+        assert!(!matches!(cancelled, crate::error::SdkError::Shutdown));
+        assert!(!matches!(shutdown, crate::error::SdkError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn test_read_with_token_returns_cancelled_during_backoff() {
+        // Set many retries with long backoff so cancellation fires during backoff
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .retry_policy(
+                RetryPolicy::builder()
+                    .max_attempts(10)
+                    .initial_backoff(Duration::from_secs(30))
+                    .build(),
+            )
+            .connect_timeout(Duration::from_millis(50))
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let token = tokio_util::sync::CancellationToken::new();
+        let token_clone = token.clone();
+
+        // Cancel after 200ms — the first attempt fails quickly,
+        // then the 30s backoff starts, and cancellation fires during it
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            token_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let result = client.read_with_token(1, None, "key", token).await;
+        let elapsed = start.elapsed();
+
+        // Should be cancelled during the backoff sleep
+        assert!(
+            matches!(result, Err(crate::error::SdkError::Cancelled)),
+            "expected Cancelled, got: {:?}",
+            result
+        );
+        // Should return quickly, not wait for the 30s backoff
+        assert!(elapsed < Duration::from_secs(5), "took {:?}", elapsed);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_cancels_inflight_retries() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .retry_policy(
+                RetryPolicy::builder()
+                    .max_attempts(10)
+                    .initial_backoff(Duration::from_secs(30))
+                    .build(),
+            )
+            .connect_timeout(Duration::from_millis(50))
+            .build()
+            .expect("valid config");
+
+        let client = LedgerClient::new(config).await.expect("client creation");
+        let client_clone = client.clone();
+
+        // Shutdown after 200ms
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            client_clone.shutdown().await;
+        });
+
+        let start = std::time::Instant::now();
+        let result = client.read(1, None, "key").await;
+        let elapsed = start.elapsed();
+
+        // Should receive either Shutdown or Cancelled (from the client cancellation token)
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::SdkError::Cancelled | crate::error::SdkError::Shutdown)
+            ),
+            "expected cancellation-related error, got: {:?}",
+            result
+        );
+        // Should not wait for the full 10 attempts × 30s backoff
+        assert!(elapsed < Duration::from_secs(5), "took {:?}", elapsed);
     }
 }

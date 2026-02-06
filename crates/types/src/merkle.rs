@@ -224,4 +224,116 @@ mod tests {
         // Verification should fail
         assert!(!proof.verify(&tree.root()));
     }
+
+    // ============================================
+    // Property-based merkle proof tests
+    // ============================================
+
+    mod proptest_merkle {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Generate leaf data with power-of-2 count.
+        ///
+        /// Our manual `MerkleProof::verify()` uses index/2 walk which only
+        /// produces correct results for perfect binary trees (power-of-2 leaf count).
+        fn arb_leaf_data_pow2() -> impl Strategy<Value = Vec<Vec<u8>>> {
+            // Exponents 0..5 produce sizes 1, 2, 4, 8, 16
+            (0u32..5).prop_flat_map(|exp| {
+                let size = 1usize << exp;
+                proptest::collection::vec(
+                    proptest::collection::vec(any::<u8>(), 1..64),
+                    size..=size,
+                )
+            })
+        }
+
+        /// Generate leaf data with arbitrary count (for determinism tests
+        /// that don't rely on proof verification).
+        fn arb_leaf_data(max_leaves: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
+            proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..64), 1..max_leaves)
+        }
+
+        proptest! {
+            /// Valid proofs always verify against the correct root
+            /// (restricted to power-of-2 trees where our verifier is correct).
+            #[test]
+            fn prop_valid_proof_always_verifies(leaf_data in arb_leaf_data_pow2()) {
+                let leaves: Vec<Hash> = leaf_data.iter().map(|d| sha256(d)).collect();
+                let tree = MerkleTree::from_leaves(&leaves);
+                let root = tree.root();
+
+                for i in 0..leaves.len() {
+                    let proof = tree.proof(i).expect("proof should exist");
+                    prop_assert!(
+                        proof.verify(&root),
+                        "proof for leaf {} failed with {} total leaves",
+                        i,
+                        leaves.len()
+                    );
+                }
+            }
+
+            /// Tampered proofs never verify (single-byte flip in a sibling hash).
+            #[test]
+            fn prop_tampered_proof_never_verifies(
+                leaf_data in arb_leaf_data_pow2(),
+                target_leaf in any::<prop::sample::Index>(),
+                tamper_byte in any::<prop::sample::Index>(),
+            ) {
+                let leaves: Vec<Hash> = leaf_data.iter().map(|d| sha256(d)).collect();
+                let tree = MerkleTree::from_leaves(&leaves);
+                let root = tree.root();
+
+                let target = target_leaf.index(leaves.len());
+                let mut proof = tree.proof(target).expect("proof should exist");
+
+                // Only tamper if there are sibling hashes (trees with >1 leaf)
+                if !proof.proof_hashes.is_empty() {
+                    let hash_idx = tamper_byte.index(proof.proof_hashes.len());
+                    proof.proof_hashes[hash_idx][0] ^= 0xFF;
+                    prop_assert!(
+                        !proof.verify(&root),
+                        "tampered proof should not verify"
+                    );
+                }
+            }
+
+            /// Wrong root never verifies (proof for tree A doesn't verify against tree B).
+            #[test]
+            fn prop_wrong_root_never_verifies(
+                data_a in arb_leaf_data_pow2(),
+                data_b in arb_leaf_data_pow2(),
+            ) {
+                let leaves_a: Vec<Hash> = data_a.iter().map(|d| sha256(d)).collect();
+                let leaves_b: Vec<Hash> = data_b.iter().map(|d| sha256(d)).collect();
+
+                let tree_a = MerkleTree::from_leaves(&leaves_a);
+                let tree_b = MerkleTree::from_leaves(&leaves_b);
+
+                // Skip if trees happen to have the same root (extremely unlikely)
+                if tree_a.root() != tree_b.root() {
+                    let proof = tree_a.proof(0).expect("proof should exist");
+                    prop_assert!(
+                        !proof.verify(&tree_b.root()),
+                        "proof from tree A should not verify against tree B root"
+                    );
+                }
+            }
+
+            /// Merkle root is deterministic: same leaves always produce the same root.
+            #[test]
+            fn prop_merkle_root_deterministic(leaf_data in arb_leaf_data(33)) {
+                let leaves: Vec<Hash> = leaf_data.iter().map(|d| sha256(d)).collect();
+
+                let root1 = MerkleTree::from_leaves(&leaves).root();
+                let root2 = MerkleTree::from_leaves(&leaves).root();
+                let root3 = merkle_root(&leaves);
+
+                prop_assert_eq!(root1, root2);
+                prop_assert_eq!(root1, root3);
+            }
+        }
+    }
 }

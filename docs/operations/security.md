@@ -178,12 +178,40 @@ let client = Client::connect(
 
 ### Out-of-Scope Threats
 
-| Threat                       | Rationale                                               |
-| ---------------------------- | ------------------------------------------------------- |
-| Byzantine fault tolerance    | Trusted network assumption; all nodes are honest        |
-| DDoS protection              | Internal service; external traffic blocked at perimeter |
-| Client authentication        | Engine/Control handle user authentication               |
-| Audit logging for compliance | Cryptographic chain is the audit log                    |
+| Threat                         | Rationale                                                                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Full Byzantine fault tolerance | Trusted network assumption; see [Raft Message Validation](#raft-message-validation) for defensive measures |
+| DDoS protection                | Internal service; external traffic blocked at perimeter                                                    |
+| Client authentication          | Engine/Control handle user authentication                                                                  |
+| Audit logging for compliance   | Cryptographic chain is the audit log                                                                       |
+
+### Raft Message Validation
+
+Ledger uses Raft (a crash-fault-tolerant protocol) for consensus. While Raft assumes honest participants, the implementation defensively validates all incoming Raft messages to prevent state corruption from misconfigured nodes, software bugs, or network corruption.
+
+**Validated message classes:**
+
+| Category                       | Validation                                              | Behavior on Invalid Input                 |
+| ------------------------------ | ------------------------------------------------------- | ----------------------------------------- |
+| Malformed vote requests        | Missing or empty vote fields                            | Returns error or rejects vote             |
+| Malformed append entries       | Missing leader vote, empty entries                      | Rejects append; no log mutation           |
+| Stale term messages            | Term lower than current                                 | Ignores message (Raft term check)         |
+| Conflicting prev_log_id        | References non-existent log position                    | Rejects append; triggers resync           |
+| Corrupted snapshot data        | Invalid or truncated snapshot bytes                     | Rejects snapshot installation             |
+| Forged snapshot membership     | Membership config referencing unknown nodes             | Rejects snapshot                          |
+| Snapshot with future log index | Log index beyond any committed entry                    | Rejects snapshot                          |
+| Replay attacks                 | Re-sent entries with old terms or stale committed index | Ignored by term/index monotonicity checks |
+| Invalid shard routing          | Requests targeting non-existent shard IDs               | Returns NOT_FOUND status                  |
+| Oversized chunks               | Snapshot chunks exceeding expected bounds               | Processed without buffer overflow         |
+
+**Key properties:**
+
+- No invalid Raft message corrupts the log, state machine, or committed data
+- The node remains a functioning cluster member after receiving any malformed message
+- Stale-term messages are silently dropped per the Raft protocol
+- Multi-shard routing validates shard existence before forwarding
+
+These properties are verified by 22 Byzantine fault tests in `crates/raft/src/services/raft.rs`.
 
 ### Security Boundaries
 

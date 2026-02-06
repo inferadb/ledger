@@ -1,14 +1,17 @@
 //! Core types, errors, and cryptographic primitives for InferaDB Ledger.
 //!
 //! This crate provides the foundational types used throughout the ledger:
-//! - Type aliases for identifiers (NamespaceId, VaultId, etc.)
+//! - Newtype identifiers (`NamespaceId`, `VaultId`, `UserId`, `ShardId`)
 //! - Data structures for blocks, transactions, and operations
-//! - Cryptographic hashing functions (SHA-256)
+//! - Configuration types with validated builders
+//! - Cryptographic hashing functions (SHA-256, seahash)
 //! - Merkle tree implementation
+//! - Audit event types for compliance logging
 //! - Error types using snafu
 
 #![deny(unsafe_code)]
 
+pub mod audit;
 pub mod codec;
 pub mod config;
 pub mod error;
@@ -16,6 +19,7 @@ pub mod hash;
 pub mod merkle;
 pub mod types;
 
+pub use audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource};
 pub use codec::{CodecError, decode, encode};
 pub use error::{LedgerError, Result};
 pub use hash::{

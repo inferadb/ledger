@@ -74,11 +74,14 @@ const BATCH_TIMEOUT_COMMITS_TOTAL: &str = "ledger_batch_timeout_commits_total";
 
 // Rate limiting metrics
 const RATE_LIMIT_EXCEEDED: &str = "ledger_rate_limit_exceeded_total";
+const RATE_LIMIT_REJECTED: &str = "ledger_rate_limit_rejected_total";
 
 // Recovery metrics
 const RECOVERY_SUCCESS_TOTAL: &str = "ledger_recovery_success_total";
 const RECOVERY_FAILURE_TOTAL: &str = "ledger_recovery_failure_total";
 const DETERMINISM_BUG_TOTAL: &str = "ledger_determinism_bug_total";
+const RECOVERY_ATTEMPTS_TOTAL: &str = "ledger_divergence_recovery_attempts_total";
+const VAULT_HEALTH: &str = "ledger_vault_health";
 
 // Learner refresh metrics
 const LEARNER_REFRESH_TOTAL: &str = "ledger_learner_refresh_total";
@@ -107,10 +110,19 @@ pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
     histogram!(BATCH_SIZE).record(batch_size as f64);
 }
 
-/// Record a rate limit exceeded event.
+/// Record a rate limit exceeded event (legacy, namespace-only).
 #[inline]
 pub fn record_rate_limit_exceeded(namespace_id: i64) {
     counter!(RATE_LIMIT_EXCEEDED, "namespace_id" => namespace_id.to_string()).increment(1);
+}
+
+/// Record a rate limit rejection with level and reason labels.
+///
+/// Per PRD Task 4: `ledger_rate_limit_rejected_total{level, reason}`.
+#[inline]
+pub fn record_rate_limit_rejected(level: &str, reason: &str) {
+    counter!(RATE_LIMIT_REJECTED, "level" => level.to_string(), "reason" => reason.to_string())
+        .increment(1);
 }
 
 // =============================================================================
@@ -358,6 +370,39 @@ pub fn record_determinism_bug(namespace_id: i64, vault_id: i64) {
     .increment(1);
 }
 
+/// Record a divergence recovery attempt with outcome.
+#[inline]
+pub fn record_recovery_attempt(namespace_id: i64, vault_id: i64, attempt: u8, outcome: &str) {
+    counter!(
+        RECOVERY_ATTEMPTS_TOTAL,
+        "namespace_id" => namespace_id.to_string(),
+        "vault_id" => vault_id.to_string(),
+        "attempt" => attempt.to_string(),
+        "outcome" => outcome.to_string()
+    )
+    .increment(1);
+}
+
+/// Set the vault health gauge for a specific vault.
+///
+/// State values: 0 = healthy, 1 = diverged, 2 = recovering.
+#[inline]
+pub fn set_vault_health(namespace_id: i64, vault_id: i64, state: &str) {
+    let value = match state {
+        "healthy" => 0.0,
+        "diverged" => 1.0,
+        "recovering" => 2.0,
+        _ => -1.0,
+    };
+    gauge!(
+        VAULT_HEALTH,
+        "namespace_id" => namespace_id.to_string(),
+        "vault_id" => vault_id.to_string(),
+        "state" => state.to_string()
+    )
+    .set(value);
+}
+
 // =============================================================================
 // Learner Refresh Metrics
 // =============================================================================
@@ -443,6 +488,64 @@ pub fn record_serialization_bytes(bytes: usize, direction: &str, entry_type: &st
         "entry_type" => entry_type.to_string()
     )
     .record(bytes as f64);
+}
+
+// Audit logging metrics
+const AUDIT_EVENTS_TOTAL: &str = "ledger_audit_events_total";
+
+/// Record an audit event for Prometheus tracking.
+///
+/// Tracks the total number of audit events by action and outcome.
+/// This is called by the audit integration layer after each operation.
+#[inline]
+pub fn record_audit_event(action: &str, outcome: &str) {
+    counter!(
+        AUDIT_EVENTS_TOTAL,
+        "action" => action.to_string(),
+        "outcome" => outcome.to_string()
+    )
+    .increment(1);
+}
+
+// B+ tree compaction metrics
+const BTREE_COMPACTION_RUNS_TOTAL: &str = "ledger_btree_compaction_runs_total";
+const BTREE_COMPACTION_PAGES_MERGED: &str = "ledger_btree_compaction_pages_merged";
+const BTREE_COMPACTION_PAGES_FREED: &str = "ledger_btree_compaction_pages_freed";
+
+/// Record a B+ tree compaction run.
+///
+/// Tracks the number of compaction cycles and the pages merged/freed.
+#[inline]
+pub fn record_btree_compaction(pages_merged: u64, pages_freed: u64) {
+    counter!(BTREE_COMPACTION_RUNS_TOTAL).increment(1);
+    counter!(BTREE_COMPACTION_PAGES_MERGED).increment(pages_merged);
+    counter!(BTREE_COMPACTION_PAGES_FREED).increment(pages_freed);
+}
+
+// ─── Hot Key Detection ────────────────────────────────────────
+
+/// Hot key detection events.
+const HOT_KEY_DETECTED_TOTAL: &str = "ledger_hot_key_detected_total";
+
+/// Record a hot key detection event.
+///
+/// Called whenever a key's access rate exceeds the configured threshold.
+/// Labels include vault_id and a hash of the key (not the key itself,
+/// to avoid high-cardinality label explosion).
+#[inline]
+pub fn record_hot_key_detected(
+    vault_id: inferadb_ledger_types::VaultId,
+    key: &str,
+    ops_per_sec: f64,
+) {
+    let key_hash = format!("{:016x}", seahash::hash(key.as_bytes()));
+    counter!(
+        HOT_KEY_DETECTED_TOTAL,
+        "vault_id" => vault_id.value().to_string(),
+        "key_hash" => key_hash,
+        "ops_per_sec" => format!("{:.0}", ops_per_sec)
+    )
+    .increment(1);
 }
 
 // =============================================================================

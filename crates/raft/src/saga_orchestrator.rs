@@ -26,7 +26,7 @@ use inferadb_ledger_state::{
     },
 };
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, Transaction};
+use inferadb_ledger_types::{NamespaceId, Operation, Transaction, UserId, VaultId};
 use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
@@ -45,7 +45,10 @@ const SAGA_KEY_PREFIX: &str = "saga:";
 const SAGA_ACTOR: &str = "system:saga";
 
 /// System namespace ID.
-const SYSTEM_NAMESPACE_ID: i64 = 0;
+const SYSTEM_NAMESPACE_ID: NamespaceId = NamespaceId::new(0);
+
+/// System vault ID (vault 0 in _system namespace).
+const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 
 /// Saga orchestrator for cross-namespace operations.
 ///
@@ -81,13 +84,14 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
         // List all entities with saga: prefix in _system (vault_id=0)
-        let entities = match self.state.list_entities(0, Some(SAGA_KEY_PREFIX), None, 1000) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, "Failed to list sagas");
-                return Vec::new();
-            },
-        };
+        let entities =
+            match self.state.list_entities(SYSTEM_VAULT_ID, Some(SAGA_KEY_PREFIX), None, 1000) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(error = %e, "Failed to list sagas");
+                    return Vec::new();
+                },
+            };
 
         entities
             .into_iter()
@@ -132,7 +136,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let request = LedgerRequest::Write {
             namespace_id: SYSTEM_NAMESPACE_ID,
-            vault_id: 0, // _system entities are in vault 0
+            vault_id: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
         };
 
@@ -156,76 +160,91 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 if let Some(user_id) = saga.input.existing_user_id {
                     // Skip user creation, use existing
                     saga.transition(CreateOrgSagaState::UserCreated { user_id });
-                    info!(saga_id = %saga.id, user_id, "CreateOrg: using existing user");
+                    info!(saga_id = %saga.id, user_id = user_id.value(), "CreateOrg: using existing user");
                 } else {
                     // Create new user - allocate ID and write user entity
                     // Note: In production, this would call through the proper user creation flow
                     // For now, we simulate by writing to _system
-                    let user_id = self.allocate_sequence_id("user").await?;
+                    let raw_id = self.allocate_sequence_id("user").await?;
+                    let user_id = UserId::new(raw_id);
 
-                    let user_key = format!("user:{}", user_id);
+                    let user_key = format!("user:{}", user_id.value());
                     let user_value = serde_json::json!({
-                        "id": user_id,
+                        "id": user_id.value(),
                         "name": saga.input.user_name,
                         "email": saga.input.user_email,
                         "created_at": chrono::Utc::now().to_rfc3339(),
                     });
 
-                    self.write_entity(SYSTEM_NAMESPACE_ID, 0, &user_key, &user_value).await?;
+                    self.write_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &user_key, &user_value)
+                        .await?;
 
                     // Also write email index
                     let email_idx_key = format!("_idx:user:email:{}", saga.input.user_email);
-                    let email_idx_value = serde_json::json!({ "user_id": user_id });
-                    self.write_entity(SYSTEM_NAMESPACE_ID, 0, &email_idx_key, &email_idx_value)
-                        .await?;
+                    let email_idx_value = serde_json::json!({ "user_id": user_id.value() });
+                    self.write_entity(
+                        SYSTEM_NAMESPACE_ID,
+                        SYSTEM_VAULT_ID,
+                        &email_idx_key,
+                        &email_idx_value,
+                    )
+                    .await?;
 
                     saga.transition(CreateOrgSagaState::UserCreated { user_id });
-                    info!(saga_id = %saga.id, user_id, "CreateOrg: user created");
+                    info!(saga_id = %saga.id, user_id = user_id.value(), "CreateOrg: user created");
                 }
                 Ok(())
             },
 
             CreateOrgSagaState::UserCreated { user_id } => {
                 // Step 2: Create namespace
-                let namespace_id = self.allocate_sequence_id("namespace").await?;
+                let raw_ns_id = self.allocate_sequence_id("namespace").await?;
+                let namespace_id = NamespaceId::new(raw_ns_id);
 
-                let ns_key = format!("namespace:{}", namespace_id);
+                let ns_key = format!("namespace:{}", namespace_id.value());
                 let ns_value = serde_json::json!({
-                    "id": namespace_id,
+                    "id": namespace_id.value(),
                     "name": saga.input.org_name,
-                    "owner_user_id": user_id,
+                    "owner_user_id": user_id.value(),
                     "created_at": chrono::Utc::now().to_rfc3339(),
                 });
 
-                self.write_entity(SYSTEM_NAMESPACE_ID, 0, &ns_key, &ns_value).await?;
+                self.write_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &ns_key, &ns_value).await?;
 
                 // Write namespace name index
                 let name_idx_key = format!("_idx:namespace:name:{}", saga.input.org_name);
-                let name_idx_value = serde_json::json!({ "namespace_id": namespace_id });
-                self.write_entity(SYSTEM_NAMESPACE_ID, 0, &name_idx_key, &name_idx_value).await?;
+                let name_idx_value = serde_json::json!({ "namespace_id": namespace_id.value() });
+                self.write_entity(
+                    SYSTEM_NAMESPACE_ID,
+                    SYSTEM_VAULT_ID,
+                    &name_idx_key,
+                    &name_idx_value,
+                )
+                .await?;
 
                 saga.transition(CreateOrgSagaState::NamespaceCreated { user_id, namespace_id });
-                info!(saga_id = %saga.id, namespace_id, "CreateOrg: namespace created");
+                info!(saga_id = %saga.id, namespace_id = namespace_id.value(), "CreateOrg: namespace created");
                 Ok(())
             },
 
             CreateOrgSagaState::NamespaceCreated { user_id, namespace_id } => {
                 // Step 3: Create membership record in the new namespace
-                let member_key = format!("member:{}", user_id);
+                let member_key = format!("member:{}", user_id.value());
                 let member_value = serde_json::json!({
-                    "user_id": user_id,
+                    "user_id": user_id.value(),
                     "role": "owner",
                     "created_at": chrono::Utc::now().to_rfc3339(),
                 });
 
                 // Write to the new namespace (not _system)
-                self.write_entity(namespace_id, 0, &member_key, &member_value).await?;
+                self.write_entity(namespace_id, SYSTEM_VAULT_ID, &member_key, &member_value)
+                    .await?;
 
                 saga.transition(CreateOrgSagaState::Completed { user_id, namespace_id });
                 info!(
                     saga_id = %saga.id,
-                    user_id,
-                    namespace_id,
+                    user_id = user_id.value(),
+                    namespace_id = namespace_id.value(),
                     "CreateOrg: saga completed"
                 );
                 Ok(())
@@ -248,12 +267,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match &saga.state.clone() {
             DeleteUserSagaState::Pending => {
                 // Step 1: Mark user as deleting
-                let user_key = format!("user:{}", saga.input.user_id);
+                let user_key = format!("user:{}", saga.input.user_id.value());
 
                 // Read current user value (StateLayer is internally thread-safe)
                 let user_entity = self
                     .state
-                    .get_entity(0, user_key.as_bytes())
+                    .get_entity(SYSTEM_VAULT_ID, user_key.as_bytes())
                     .context(StateReadSnafu { entity_type: "User".to_string() })?;
 
                 if let Some(entity) = user_entity {
@@ -264,7 +283,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     user_data["deleted_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
                     user_data["status"] = serde_json::json!("DELETING");
 
-                    self.write_entity(SYSTEM_NAMESPACE_ID, 0, &user_key, &user_data).await?;
+                    self.write_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &user_key, &user_data)
+                        .await?;
 
                     saga.transition(DeleteUserSagaState::MarkingDeleted {
                         user_id: saga.input.user_id,
@@ -272,7 +292,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     });
                     info!(
                         saga_id = %saga.id,
-                        user_id = saga.input.user_id,
+                        user_id = saga.input.user_id.value(),
                         "DeleteUser: marked as deleting"
                     );
                 } else {
@@ -285,14 +305,14 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             DeleteUserSagaState::MarkingDeleted { user_id, remaining_namespaces } => {
                 // Step 2: Remove memberships from each namespace
                 if let Some(namespace_id) = remaining_namespaces.first() {
-                    let member_key = format!("member:{}", user_id);
+                    let member_key = format!("member:{}", user_id.value());
 
                     // Delete membership in this namespace
-                    self.delete_entity(*namespace_id, 0, &member_key).await?;
+                    self.delete_entity(*namespace_id, SYSTEM_VAULT_ID, &member_key).await?;
 
                     // Also delete the index
-                    let idx_key = format!("_idx:member:user:{}", user_id);
-                    let _ = self.delete_entity(*namespace_id, 0, &idx_key).await;
+                    let idx_key = format!("_idx:member:user:{}", user_id.value());
+                    let _ = self.delete_entity(*namespace_id, SYSTEM_VAULT_ID, &idx_key).await;
 
                     // Update remaining namespaces
                     let remaining: Vec<_> = remaining_namespaces[1..].to_vec();
@@ -308,8 +328,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     }
                     info!(
                         saga_id = %saga.id,
-                        user_id,
-                        namespace_id,
+                        user_id = user_id.value(),
+                        namespace_id = namespace_id.value(),
                         "DeleteUser: removed membership"
                     );
                 } else {
@@ -320,15 +340,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             DeleteUserSagaState::MembershipsRemoved { user_id } => {
                 // Step 3: Delete user record
-                let user_key = format!("user:{}", user_id);
-                self.delete_entity(SYSTEM_NAMESPACE_ID, 0, &user_key).await?;
+                let user_key = format!("user:{}", user_id.value());
+                self.delete_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &user_key).await?;
 
                 // Delete email index (need to look up email first)
                 // In production, we'd read the user first to get their email
                 // For now, we leave the index cleanup to the orphan cleanup job
 
                 saga.transition(DeleteUserSagaState::Completed { user_id: *user_id });
-                info!(saga_id = %saga.id, user_id, "DeleteUser: saga completed");
+                info!(saga_id = %saga.id, user_id = user_id.value(), "DeleteUser: saga completed");
                 Ok(())
             },
 
@@ -346,7 +366,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         // Read current value (StateLayer is internally thread-safe)
         let current = self
             .state
-            .get_entity(0, seq_key.as_bytes())
+            .get_entity(SYSTEM_VAULT_ID, seq_key.as_bytes())
             .context(StateReadSnafu { entity_type: "Sequence".to_string() })?
             .and_then(|e| e.value.get(..8)?.try_into().ok().map(i64::from_le_bytes))
             .unwrap_or(1);
@@ -376,7 +396,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let request = LedgerRequest::Write {
             namespace_id: SYSTEM_NAMESPACE_ID,
-            vault_id: 0,
+            vault_id: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
         };
 
@@ -391,8 +411,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Write an entity to storage through Raft.
     async fn write_entity(
         &self,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), SagaError> {
@@ -431,8 +451,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Delete an entity from storage through Raft.
     async fn delete_entity(
         &self,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         key: &str,
     ) -> Result<(), SagaError> {
         let operation = Operation::DeleteEntity { key: key.to_string() };
@@ -590,7 +610,10 @@ mod tests {
 
     #[test]
     fn test_delete_user_saga_serialization() {
-        let input = DeleteUserInput { user_id: 42, namespace_ids: vec![1, 2, 3] };
+        let input = DeleteUserInput {
+            user_id: UserId::new(42),
+            namespace_ids: vec![NamespaceId::new(1), NamespaceId::new(2), NamespaceId::new(3)],
+        };
 
         let saga = DeleteUserSaga::new("delete-456".to_string(), input);
         let wrapped = Saga::DeleteUser(saga);

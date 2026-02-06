@@ -79,11 +79,11 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
     offset += 8;
 
     // namespace_id: i64 BE
-    buf[offset..offset + 8].copy_from_slice(&header.namespace_id.to_be_bytes());
+    buf[offset..offset + 8].copy_from_slice(&header.namespace_id.value().to_be_bytes());
     offset += 8;
 
     // vault_id: i64 BE
-    buf[offset..offset + 8].copy_from_slice(&header.vault_id.to_be_bytes());
+    buf[offset..offset + 8].copy_from_slice(&header.vault_id.value().to_be_bytes());
     offset += 8;
 
     // previous_hash: 32 bytes
@@ -323,10 +323,10 @@ pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
     let mut hasher = Sha256::new();
 
     // namespace_id: i32 as LE
-    hasher.update(entry.namespace_id.to_le_bytes());
+    hasher.update(entry.namespace_id.value().to_le_bytes());
 
     // vault_id: i64 as LE
-    hasher.update(entry.vault_id.to_le_bytes());
+    hasher.update(entry.vault_id.value().to_le_bytes());
 
     // vault_height: u64 as BE (matching block_hash style)
     hasher.update(entry.vault_height.to_be_bytes());
@@ -398,6 +398,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
+    use crate::types::{NamespaceId, VaultId};
 
     #[test]
     fn test_empty_hash_is_sha256_of_empty() {
@@ -489,8 +490,8 @@ mod tests {
     fn test_block_hash_deterministic() {
         let header = BlockHeader {
             height: 100,
-            namespace_id: 1,
-            vault_id: 2,
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(2),
             previous_hash: ZERO_HASH,
             tx_merkle_root: sha256(b"tx_root"),
             state_root: sha256(b"state_root"),
@@ -619,8 +620,8 @@ mod tests {
     fn test_chain_commitment_single_block() {
         let header = BlockHeader {
             height: 1,
-            namespace_id: 1,
-            vault_id: 1,
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
             previous_hash: ZERO_HASH,
             tx_merkle_root: [1u8; 32],
             state_root: [2u8; 32],
@@ -648,8 +649,8 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=3)
             .map(|i| BlockHeader {
                 height: i,
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],
                 state_root: [(i + 20) as u8; 32],
@@ -682,8 +683,8 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=5)
             .map(|i| BlockHeader {
                 height: i,
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],
                 state_root: [(i + 20) as u8; 32],

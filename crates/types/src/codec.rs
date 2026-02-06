@@ -261,6 +261,274 @@ mod tests {
         assert!(!source_display.is_empty(), "Source should have non-empty display");
     }
 
+    // ============================================
+    // Property-based roundtrip tests
+    // ============================================
+
+    mod proptest_roundtrip {
+        use proptest::prelude::*;
+
+        use crate::{
+            codec::{decode, encode},
+            types::{
+                BlockHeader, ChainCommitment, Entity, Operation, Relationship, SetCondition,
+                ShardBlock, Transaction, VaultBlock, VaultEntry,
+            },
+        };
+
+        /// Strategy for generating arbitrary `SetCondition`.
+        fn arb_set_condition() -> impl Strategy<Value = SetCondition> {
+            prop_oneof![
+                Just(SetCondition::MustNotExist),
+                Just(SetCondition::MustExist),
+                any::<u64>().prop_map(SetCondition::VersionEquals),
+                proptest::collection::vec(any::<u8>(), 0..32).prop_map(SetCondition::ValueEquals),
+            ]
+        }
+
+        /// Strategy for generating arbitrary `Operation`.
+        fn arb_operation() -> impl Strategy<Value = Operation> {
+            prop_oneof![
+                (
+                    "[a-z]{1,16}",
+                    proptest::collection::vec(any::<u8>(), 0..32),
+                    proptest::option::of(arb_set_condition()),
+                    proptest::option::of(any::<u64>()),
+                )
+                    .prop_map(|(key, value, condition, expires_at)| {
+                        Operation::SetEntity { key, value, condition, expires_at }
+                    }),
+                "[a-z]{1,16}".prop_map(|key| Operation::DeleteEntity { key }),
+                ("[a-z]{1,16}", any::<u64>())
+                    .prop_map(|(key, expired_at)| Operation::ExpireEntity { key, expired_at }),
+                ("[a-z]{1,16}", "[a-z]{1,8}", "[a-z]{1,16}").prop_map(
+                    |(resource, relation, subject)| {
+                        Operation::CreateRelationship { resource, relation, subject }
+                    }
+                ),
+                ("[a-z]{1,16}", "[a-z]{1,8}", "[a-z]{1,16}").prop_map(
+                    |(resource, relation, subject)| {
+                        Operation::DeleteRelationship { resource, relation, subject }
+                    }
+                ),
+            ]
+        }
+
+        /// Strategy for a 32-byte hash.
+        fn arb_hash() -> impl Strategy<Value = [u8; 32]> {
+            proptest::array::uniform32(any::<u8>())
+        }
+
+        /// Strategy for a `DateTime<Utc>`.
+        fn arb_timestamp() -> impl Strategy<Value = chrono::DateTime<chrono::Utc>> {
+            use chrono::{TimeZone, Utc};
+            (1_577_836_800i64..1_893_456_000i64).prop_map(|secs| {
+                Utc.timestamp_opt(secs, 0)
+                    .single()
+                    .unwrap_or_else(|| chrono::DateTime::<Utc>::from(std::time::UNIX_EPOCH))
+            })
+        }
+
+        /// Strategy for a Transaction.
+        fn arb_transaction() -> impl Strategy<Value = Transaction> {
+            (
+                proptest::array::uniform16(any::<u8>()),
+                "[a-z]{3,10}",
+                1u64..100_000,
+                "[a-z]{3,10}",
+                proptest::collection::vec(arb_operation(), 1..5),
+                arb_timestamp(),
+            )
+                .prop_map(|(id, client_id, sequence, actor, operations, timestamp)| {
+                    Transaction { id, client_id, sequence, actor, operations, timestamp }
+                })
+        }
+
+        /// Strategy for a BlockHeader.
+        fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
+            (
+                any::<u64>(),
+                (1i64..10_000).prop_map(crate::types::NamespaceId::new),
+                (1i64..10_000).prop_map(crate::types::VaultId::new),
+                arb_hash(),
+                arb_hash(),
+                arb_hash(),
+                arb_timestamp(),
+                any::<u64>(),
+                any::<u64>(),
+            )
+                .prop_map(
+                    |(
+                        height,
+                        namespace_id,
+                        vault_id,
+                        previous_hash,
+                        tx_merkle_root,
+                        state_root,
+                        timestamp,
+                        term,
+                        committed_index,
+                    )| {
+                        BlockHeader {
+                            height,
+                            namespace_id,
+                            vault_id,
+                            previous_hash,
+                            tx_merkle_root,
+                            state_root,
+                            timestamp,
+                            term,
+                            committed_index,
+                        }
+                    },
+                )
+        }
+
+        proptest! {
+            /// Any `Operation` must survive postcard roundtrip.
+            #[test]
+            fn prop_operation_roundtrip(op in arb_operation()) {
+                let bytes = encode(&op).expect("encode operation");
+                let decoded: Operation = decode(&bytes).expect("decode operation");
+                prop_assert_eq!(op, decoded);
+            }
+
+            /// Any `SetCondition` must survive postcard roundtrip.
+            #[test]
+            fn prop_set_condition_roundtrip(cond in arb_set_condition()) {
+                let bytes = encode(&cond).expect("encode condition");
+                let decoded: SetCondition = decode(&bytes).expect("decode condition");
+                prop_assert_eq!(cond, decoded);
+            }
+
+            /// Any `Entity` must survive postcard roundtrip.
+            #[test]
+            fn prop_entity_roundtrip(
+                key in proptest::collection::vec(any::<u8>(), 0..64),
+                value in proptest::collection::vec(any::<u8>(), 0..64),
+                expires_at in any::<u64>(),
+                version in any::<u64>(),
+            ) {
+                let entity = Entity { key, value, expires_at, version };
+                let bytes = encode(&entity).expect("encode entity");
+                let decoded: Entity = decode(&bytes).expect("decode entity");
+                prop_assert_eq!(entity, decoded);
+            }
+
+            /// Any `Relationship` must survive postcard roundtrip.
+            #[test]
+            fn prop_relationship_roundtrip(
+                resource in "[a-z]{1,16}",
+                relation in "[a-z]{1,8}",
+                subject in "[a-z]{1,16}",
+            ) {
+                let rel = Relationship { resource, relation, subject };
+                let bytes = encode(&rel).expect("encode relationship");
+                let decoded: Relationship = decode(&bytes).expect("decode relationship");
+                prop_assert_eq!(rel, decoded);
+            }
+
+            /// Any `Transaction` must survive postcard roundtrip.
+            #[test]
+            fn prop_transaction_roundtrip(tx in arb_transaction()) {
+                let bytes = encode(&tx).expect("encode transaction");
+                let decoded: Transaction = decode(&bytes).expect("decode transaction");
+                prop_assert_eq!(tx, decoded);
+            }
+
+            /// Any `BlockHeader` must survive postcard roundtrip.
+            #[test]
+            fn prop_block_header_roundtrip(header in arb_block_header()) {
+                let bytes = encode(&header).expect("encode block header");
+                let decoded: BlockHeader = decode(&bytes).expect("decode block header");
+                prop_assert_eq!(header, decoded);
+            }
+
+            /// Any `VaultBlock` must survive postcard roundtrip.
+            #[test]
+            fn prop_vault_block_roundtrip(
+                header in arb_block_header(),
+                transactions in proptest::collection::vec(arb_transaction(), 0..3),
+            ) {
+                let block = VaultBlock { header, transactions };
+                let bytes = encode(&block).expect("encode vault block");
+                let decoded: VaultBlock = decode(&bytes).expect("decode vault block");
+                prop_assert_eq!(block, decoded);
+            }
+
+            /// Any `VaultEntry` must survive postcard roundtrip.
+            #[test]
+            fn prop_vault_entry_roundtrip(
+                ns_id in (1i64..10_000).prop_map(crate::types::NamespaceId::new),
+                vault_id in (1i64..10_000).prop_map(crate::types::VaultId::new),
+                vault_height in any::<u64>(),
+                previous_vault_hash in arb_hash(),
+                transactions in proptest::collection::vec(arb_transaction(), 0..2),
+                tx_merkle_root in arb_hash(),
+                state_root in arb_hash(),
+            ) {
+                let entry = VaultEntry {
+                    namespace_id: ns_id,
+                    vault_id,
+                    vault_height,
+                    previous_vault_hash,
+                    transactions,
+                    tx_merkle_root,
+                    state_root,
+                };
+                let bytes = encode(&entry).expect("encode vault entry");
+                let decoded: VaultEntry = decode(&bytes).expect("decode vault entry");
+                prop_assert_eq!(entry, decoded);
+            }
+
+            /// Any `ShardBlock` must survive postcard roundtrip.
+            #[test]
+            fn prop_shard_block_roundtrip(
+                shard_id in (1u32..1_000).prop_map(crate::types::ShardId::new),
+                shard_height in any::<u64>(),
+                previous_shard_hash in arb_hash(),
+                timestamp in arb_timestamp(),
+                leader_id in "[a-z]{3,10}",
+                term in any::<u64>(),
+                committed_index in any::<u64>(),
+            ) {
+                let block = ShardBlock {
+                    shard_id,
+                    shard_height,
+                    previous_shard_hash,
+                    vault_entries: vec![],
+                    timestamp,
+                    leader_id,
+                    term,
+                    committed_index,
+                };
+                let bytes = encode(&block).expect("encode shard block");
+                let decoded: ShardBlock = decode(&bytes).expect("decode shard block");
+                prop_assert_eq!(block, decoded);
+            }
+
+            /// Any `ChainCommitment` must survive postcard roundtrip.
+            #[test]
+            fn prop_chain_commitment_roundtrip(
+                accumulated in arb_hash(),
+                state_root_acc in arb_hash(),
+                from in any::<u64>(),
+                to in any::<u64>(),
+            ) {
+                let commitment = ChainCommitment {
+                    accumulated_header_hash: accumulated,
+                    state_root_accumulator: state_root_acc,
+                    from_height: from.min(to),
+                    to_height: from.max(to),
+                };
+                let bytes = encode(&commitment).expect("encode chain commitment");
+                let decoded: ChainCommitment =
+                    decode(&bytes).expect("decode chain commitment");
+                prop_assert_eq!(commitment, decoded);
+            }
+        }
+    }
+
     // Test Debug implementation contains useful info
     #[test]
     fn test_codec_error_debug() {

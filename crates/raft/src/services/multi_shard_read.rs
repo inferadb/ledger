@@ -15,6 +15,7 @@ use std::{pin::Pin, sync::Arc, time::Instant};
 use futures::StreamExt;
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
+use inferadb_ledger_types::{NamespaceId, VaultId};
 use tempfile::TempDir;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
@@ -37,6 +38,7 @@ use crate::{
         ForwardClient,
         shard_resolver::{RemoteShardInfo, ResolveResult, ShardResolver},
     },
+    trace_context,
 };
 
 /// Multi-shard read service implementation.
@@ -89,7 +91,7 @@ impl MultiShardReadService {
     }
 
     /// Check consistency requirements for a read request.
-    fn check_consistency(&self, namespace_id: i64, consistency: i32) -> Result<(), Status> {
+    fn check_consistency(&self, namespace_id: NamespaceId, consistency: i32) -> Result<(), Status> {
         let consistency =
             ReadConsistency::try_from(consistency).unwrap_or(ReadConsistency::Unspecified);
 
@@ -122,8 +124,8 @@ impl MultiShardReadService {
         &self,
         req: &HistoricalReadRequest,
         ctx: &crate::services::shard_resolver::ShardContext,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         start: Instant,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
         // Check that requested height doesn't exceed current tip
@@ -225,8 +227,8 @@ impl MultiShardReadService {
         &self,
         req: &WatchBlocksRequest,
         ctx: &crate::services::shard_resolver::ShardContext,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
     ) -> Result<
         Response<Pin<Box<dyn futures::Stream<Item = Result<BlockAnnouncement, Status>> + Send>>>,
         Status,
@@ -265,8 +267,8 @@ impl MultiShardReadService {
         };
 
         info!(
-            namespace_id,
-            vault_id,
+            namespace_id = namespace_id.value(),
+            vault_id = vault_id.value(),
             start_height,
             current_tip,
             historical_count = historical_blocks.len(),
@@ -287,11 +289,13 @@ impl MultiShardReadService {
                 match result {
                     Ok(announcement) => {
                         // Filter by namespace
-                        if announcement.namespace_id.as_ref().map_or(0, |n| n.id) != namespace_id {
+                        if announcement.namespace_id.as_ref().map_or(0, |n| n.id)
+                            != namespace_id.value()
+                        {
                             return None;
                         }
                         // Filter by vault
-                        if announcement.vault_id.as_ref().map_or(0, |v| v.id) != vault_id {
+                        if announcement.vault_id.as_ref().map_or(0, |v| v.id) != vault_id.value() {
                             return None;
                         }
                         // Skip blocks we already sent from history
@@ -315,8 +319,8 @@ impl MultiShardReadService {
     fn fetch_historical_announcements(
         &self,
         ctx: &crate::services::shard_resolver::ShardContext,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         start_height: u64,
         end_height: u64,
     ) -> Vec<BlockAnnouncement> {
@@ -358,8 +362,8 @@ impl MultiShardReadService {
                 let state_root = Some(crate::proto::Hash { value: entry.state_root.to_vec() });
 
                 announcements.push(BlockAnnouncement {
-                    namespace_id: Some(crate::proto::NamespaceId { id: namespace_id }),
-                    vault_id: Some(crate::proto::VaultId { id: vault_id }),
+                    namespace_id: Some(crate::proto::NamespaceId { id: namespace_id.value() }),
+                    vault_id: Some(crate::proto::VaultId { id: vault_id.value() }),
                     height,
                     block_hash,
                     state_root,
@@ -383,16 +387,17 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract namespace_id for routing
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Record span fields
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("key", &req.key);
 
         // Check consistency requirements
@@ -404,10 +409,17 @@ impl ReadService for MultiShardReadService {
         // Check vault health - diverged vaults cannot be read
         let health = ctx.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(namespace_id, vault_id, at_height, "Read rejected: vault has diverged");
+            warn!(
+                namespace_id = namespace_id.value(),
+                vault_id = vault_id.value(),
+                at_height,
+                "Read rejected: vault has diverged"
+            );
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
-                namespace_id, vault_id, at_height
+                namespace_id.value(),
+                vault_id.value(),
+                at_height
             )));
         }
 
@@ -441,12 +453,13 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract namespace_id for routing
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Limit batch size
         const MAX_BATCH_SIZE: usize = 1000;
@@ -459,8 +472,8 @@ impl ReadService for MultiShardReadService {
         }
 
         // Record span fields
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("batch_size", req.keys.len());
 
         // Check consistency requirements
@@ -472,10 +485,17 @@ impl ReadService for MultiShardReadService {
         // Check vault health - diverged vaults cannot be read
         let health = ctx.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(namespace_id, vault_id, at_height, "BatchRead rejected: vault has diverged");
+            warn!(
+                namespace_id = namespace_id.value(),
+                vault_id = vault_id.value(),
+                at_height,
+                "BatchRead rejected: vault has diverged"
+            );
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
-                namespace_id, vault_id, at_height
+                namespace_id.value(),
+                vault_id.value(),
+                at_height
             )));
         }
 
@@ -520,15 +540,16 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract namespace_id for routing
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("key", &req.key);
 
         // Resolve shard
@@ -537,11 +558,18 @@ impl ReadService for MultiShardReadService {
         // Check vault health
         let health = ctx.applied_state.vault_health(namespace_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            warn!(namespace_id, vault_id, at_height, "Verified read rejected: vault has diverged");
+            warn!(
+                namespace_id = namespace_id.value(),
+                vault_id = vault_id.value(),
+                at_height,
+                "Verified read rejected: vault has diverged"
+            );
             metrics::record_verified_read(false, start.elapsed().as_secs_f64());
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
-                namespace_id, vault_id, at_height
+                namespace_id.value(),
+                vault_id.value(),
+                at_height
             )));
         }
 
@@ -578,15 +606,16 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetTipResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
 
         // Resolve shard
         let ctx = self.resolver.resolve(namespace_id)?;
@@ -608,16 +637,17 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
 
         // Check consistency
         self.check_consistency(namespace_id, req.consistency)?;
@@ -683,15 +713,16 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<ListEntitiesResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
-        tracing::Span::current().record("namespace_id", namespace_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
 
         // Check consistency
         self.check_consistency(namespace_id, req.consistency)?;
@@ -700,7 +731,7 @@ impl ReadService for MultiShardReadService {
         let ctx = self.resolver.resolve(namespace_id)?;
 
         // Entities are namespace-level (stored in vault_id=0 by convention)
-        let vault_id = 0i64;
+        let vault_id = VaultId::new(0);
 
         // Read from state layer (internally thread-safe via inferadb-ledger-store MVCC)
         let raw_entities = ctx
@@ -742,16 +773,17 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<ListResourcesResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
 
         // Check consistency
         self.check_consistency(namespace_id, req.consistency)?;
@@ -794,16 +826,17 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetClientStateResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or_default();
 
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
 
         // Resolve shard
         let ctx = self.resolver.resolve(namespace_id)?;
@@ -825,15 +858,19 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetBlockResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
 
         // Block retrieval is complex for multi-shard
         // Return None for now - full implementation would use vault_entry_to_proto_block helper
-        warn!(namespace_id, "get_block: block retrieval not yet fully implemented for multi-shard");
+        warn!(
+            namespace_id = namespace_id.value(),
+            "get_block: block retrieval not yet fully implemented for multi-shard"
+        );
 
         Ok(Response::new(GetBlockResponse { block: None }))
     }
@@ -845,18 +882,22 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
 
         // Resolve shard to get current tip
         let ctx = self.resolver.resolve(namespace_id)?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let current_tip = ctx.applied_state.vault_height(namespace_id, vault_id);
 
-        warn!(namespace_id, "get_block_range: not yet optimized for multi-shard");
+        warn!(
+            namespace_id = namespace_id.value(),
+            "get_block_range: not yet optimized for multi-shard"
+        );
 
         // Return empty for now - full implementation would iterate blocks
         Ok(Response::new(GetBlockRangeResponse { blocks: vec![], current_tip }))
@@ -868,18 +909,20 @@ impl ReadService for MultiShardReadService {
         request: Request<HistoricalReadRequest>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
         let start = Instant::now();
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Extract identifiers
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("at_height", req.at_height);
 
         // Validate at_height
@@ -898,12 +941,12 @@ impl ReadService for MultiShardReadService {
                 ResolveResult::Remote(remote) => {
                     // Forward to the remote shard
                     debug!(
-                        namespace_id,
-                        shard_id = remote.shard_id,
+                        namespace_id = namespace_id.value(),
+                        shard_id = remote.shard_id.value(),
                         "Forwarding historical_read to remote shard"
                     );
                     let mut client = self.get_forward_client(&remote).await?;
-                    client.forward_historical_read(req).await
+                    client.forward_historical_read(req, Some(&trace_ctx)).await
                 },
             }
         } else {
@@ -921,18 +964,20 @@ impl ReadService for MultiShardReadService {
         &self,
         request: Request<WatchBlocksRequest>,
     ) -> Result<Response<Self::WatchBlocksStream>, Status> {
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Extract identifiers
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("start_height", req.start_height);
 
         // Check if resolver supports forwarding
@@ -946,12 +991,12 @@ impl ReadService for MultiShardReadService {
                 ResolveResult::Remote(remote) => {
                     // Forward to the remote shard
                     debug!(
-                        namespace_id,
-                        shard_id = remote.shard_id,
+                        namespace_id = namespace_id.value(),
+                        shard_id = remote.shard_id.value(),
                         "Forwarding watch_blocks to remote shard"
                     );
                     let mut client = self.get_forward_client(&remote).await?;
-                    let response = client.forward_watch_blocks(req).await?;
+                    let response = client.forward_watch_blocks(req, Some(&trace_ctx)).await?;
 
                     // Convert the streaming response to our expected type
                     let stream = response.into_inner();

@@ -10,7 +10,10 @@ use std::{fmt::Write, sync::Arc};
 
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::SetCondition;
+use inferadb_ledger_types::{
+    NamespaceId, SetCondition, VaultId,
+    audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
+};
 use openraft::Raft;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -27,7 +30,7 @@ use crate::{
         BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
         WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
     },
-    rate_limit::NamespaceRateLimiter,
+    rate_limit::RateLimiter,
     trace_context,
     types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
@@ -46,7 +49,7 @@ pub struct WriteServiceImpl {
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Per-namespace rate limiter.
     #[builder(default)]
-    rate_limiter: Option<Arc<NamespaceRateLimiter>>,
+    rate_limiter: Option<Arc<RateLimiter>>,
     /// Accessor for applied state (client sequences for gap detection).
     #[builder(default)]
     applied_state: Option<AppliedStateAccessor>,
@@ -68,6 +71,12 @@ pub struct WriteServiceImpl {
     /// Node ID for wide events system context.
     #[builder(default)]
     node_id: Option<u64>,
+    /// Audit logger for compliance-ready event tracking.
+    #[builder(default)]
+    audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
+    /// Hot key detector for identifying frequently accessed keys.
+    #[builder(default)]
+    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -133,6 +142,8 @@ impl WriteServiceImpl {
             proposal_mutex,
             sampler: None,
             node_id: None,
+            audit_logger: None,
+            hot_key_detector: None,
         };
 
         (service, run_future)
@@ -152,7 +163,7 @@ impl WriteServiceImpl {
 
     /// Add per-namespace rate limiting to an existing service.
     #[must_use]
-    pub fn with_rate_limiter(mut self, rate_limiter: Arc<NamespaceRateLimiter>) -> Self {
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
         self
     }
@@ -164,17 +175,115 @@ impl WriteServiceImpl {
         self
     }
 
-    /// Check for sequence gaps before submitting to Raft.
+    /// Add audit logger for compliance event tracking.
+    #[must_use]
+    pub fn with_audit_logger(mut self, logger: Arc<dyn crate::audit::AuditLogger>) -> Self {
+        self.audit_logger = Some(logger);
+        self
+    }
+
+    /// Add hot key detector for identifying frequently accessed keys.
+    #[must_use]
+    pub fn with_hot_key_detector(
+        mut self,
+        detector: Arc<crate::hot_key_detector::HotKeyDetector>,
+    ) -> Self {
+        self.hot_key_detector = Some(detector);
+        self
+    }
+
+    /// Emit an audit event and record the corresponding Prometheus metric.
     ///
-    /// Check rate limit for a namespace. Returns Status::resource_exhausted if limit exceeded.
-    fn check_rate_limit(&self, namespace_id: i64) -> Result<(), Status> {
+    /// If the audit logger is not configured, this is a no-op (only metrics recorded).
+    /// If the audit log write fails, logs a warning but does not propagate the error —
+    /// the primary operation's durability takes precedence over audit logging.
+    fn emit_audit_event(&self, event: &AuditEvent) {
+        let outcome_str = match &event.outcome {
+            AuditOutcome::Success => "success",
+            AuditOutcome::Failed { .. } => "failed",
+            AuditOutcome::Denied { .. } => "denied",
+        };
+        metrics::record_audit_event(event.action.as_str(), outcome_str);
+
+        if let Some(ref logger) = self.audit_logger
+            && let Err(e) = logger.log(event)
+        {
+            warn!(
+                event_id = %event.event_id,
+                action = %event.action.as_str(),
+                error = %e,
+                "Failed to write audit log event"
+            );
+        }
+    }
+
+    /// Build an audit event for a write-path operation.
+    fn build_audit_event(
+        &self,
+        action: AuditAction,
+        principal: &str,
+        resource: AuditResource,
+        outcome: AuditOutcome,
+        trace_id: Option<&str>,
+        operations_count: Option<usize>,
+    ) -> AuditEvent {
+        AuditEvent {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            event_id: Uuid::new_v4().to_string(),
+            principal: principal.to_string(),
+            action,
+            resource,
+            outcome,
+            node_id: self.node_id,
+            trace_id: trace_id.map(String::from),
+            operations_count,
+        }
+    }
+
+    /// Check all rate limit tiers (backpressure, namespace, client).
+    ///
+    /// Returns `Status::resource_exhausted` with `retry-after-ms` metadata if rejected.
+    fn check_rate_limit(&self, client_id: &str, namespace_id: NamespaceId) -> Result<(), Status> {
         if let Some(ref limiter) = self.rate_limiter {
-            limiter.check(namespace_id).map_err(|e| {
-                metrics::record_rate_limit_exceeded(namespace_id);
-                Status::resource_exhausted(e.to_string())
+            limiter.check(client_id, namespace_id).map_err(|rejection| {
+                metrics::record_rate_limit_rejected(
+                    rejection.level.as_str(),
+                    rejection.reason.as_str(),
+                );
+                let mut status = Status::resource_exhausted(rejection.to_string());
+                // Attach retry-after-ms as gRPC trailing metadata
+                if let Ok(val) =
+                    tonic::metadata::MetadataValue::try_from(rejection.retry_after_ms.to_string())
+                {
+                    status.metadata_mut().insert("retry-after-ms", val);
+                }
+                status
             })?;
         }
         Ok(())
+    }
+
+    /// Record key accesses from operations for hot key detection.
+    ///
+    /// Extracts entity/relationship keys from each operation and feeds them
+    /// to the hot key detector. This runs after rate limiting but before
+    /// Raft proposal, tracking all non-duplicate, non-rate-limited accesses.
+    fn record_hot_keys(&self, vault_id: VaultId, operations: &[crate::proto::Operation]) {
+        if let Some(ref detector) = self.hot_key_detector {
+            use crate::proto::operation::Op;
+            for op in operations {
+                if let Some(ref inner) = op.op {
+                    let key = match inner {
+                        Op::SetEntity(set) => &set.key,
+                        Op::DeleteEntity(del) => &del.key,
+                        Op::CreateRelationship(rel) => &rel.resource,
+                        Op::DeleteRelationship(rel) => &rel.resource,
+                        Op::ExpireEntity(exp) => &exp.key,
+                    };
+                    detector.record_access(vault_id, key);
+                }
+            }
+        }
     }
 
     /// Map a failed SetCondition to the appropriate WriteErrorCode.
@@ -243,6 +352,30 @@ impl WriteServiceImpl {
                 Op::ExpireEntity(_) => "expire_entity",
             })
             .collect()
+    }
+
+    /// Estimates the total payload bytes across all operations.
+    ///
+    /// Sums key and value sizes for entity operations, and resource/relation/subject
+    /// lengths for relationship operations.
+    fn estimate_operations_bytes(operations: &[crate::proto::Operation]) -> usize {
+        use crate::proto::operation::Op;
+
+        operations
+            .iter()
+            .filter_map(|op| op.op.as_ref())
+            .map(|op| match op {
+                Op::CreateRelationship(cr) => {
+                    cr.resource.len() + cr.relation.len() + cr.subject.len()
+                },
+                Op::DeleteRelationship(dr) => {
+                    dr.resource.len() + dr.relation.len() + dr.subject.len()
+                },
+                Op::SetEntity(se) => se.key.len() + se.value.len(),
+                Op::DeleteEntity(de) => de.key.len(),
+                Op::ExpireEntity(ee) => ee.key.len(),
+            })
+            .sum()
     }
 
     /// Compute a hash of operations for idempotency payload comparison.
@@ -364,8 +497,8 @@ impl WriteServiceImpl {
     /// Errors are logged with context for debugging.
     fn generate_write_proof(
         &self,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         vault_height: u64,
     ) -> (Option<crate::proto::BlockHeader>, Option<crate::proto::MerkleProof>) {
         let Some(archive) = &self.block_archive else {
@@ -398,8 +531,8 @@ impl WriteServiceImpl {
     /// the actual sequence will be assigned by the Raft state machine at apply time.
     fn operations_to_request(
         &self,
-        namespace_id: i64,
-        vault_id: Option<i64>,
+        namespace_id: NamespaceId,
+        vault_id: Option<VaultId>,
         operations: &[crate::proto::Operation],
         client_id: &str,
     ) -> Result<LedgerRequest, Status> {
@@ -429,7 +562,7 @@ impl WriteServiceImpl {
 
         Ok(LedgerRequest::Write {
             namespace_id,
-            vault_id: vault_id.unwrap_or(0),
+            vault_id: vault_id.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
         })
     }
@@ -441,13 +574,15 @@ impl WriteService for WriteServiceImpl {
         &self,
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
-        // Extract trace context from gRPC metadata before consuming the request
+        // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Create wide event context for this request
         let mut ctx = RequestContext::new("WriteService", "write");
         ctx.set_operation_type(OperationType::Write);
+        ctx.extract_transport_metadata(&grpc_metadata);
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
@@ -467,13 +602,14 @@ impl WriteService for WriteServiceImpl {
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
 
         // Extract namespace and vault IDs (needed for idempotency key)
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
 
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -486,17 +622,18 @@ impl WriteService for WriteServiceImpl {
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        ctx.set_target(namespace_id, vault_id);
+        ctx.set_target(namespace_id.value(), vault_id.value());
 
         // Populate write operation fields
         let operation_types = Self::extract_operation_types(&req.operations);
         ctx.set_write_operation(req.operations.len(), operation_types, req.include_tx_proof);
+        ctx.set_bytes_written(Self::estimate_operations_bytes(&req.operations));
 
         // Check idempotency cache for duplicate
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id,
-            vault_id,
+            namespace_id.value(),
+            vault_id.value(),
             &client_id,
             idempotency_key,
             request_hash,
@@ -544,11 +681,22 @@ impl WriteService for WriteServiceImpl {
             },
         }
 
-        // Check per-namespace rate limit
-        if let Err(status) = self.check_rate_limit(namespace_id) {
+        // Check rate limits (backpressure, namespace, client)
+        if let Err(status) = self.check_rate_limit(&client_id, namespace_id) {
             ctx.set_rate_limited();
+            self.emit_audit_event(&self.build_audit_event(
+                AuditAction::Write,
+                &client_id,
+                AuditResource::vault(namespace_id, vault_id),
+                AuditOutcome::Denied { reason: "rate_limited".to_string() },
+                Some(&trace_ctx.trace_id),
+                Some(req.operations.len()),
+            ));
             return Err(status);
         }
+
+        // Track key access frequency for hot key detection.
+        self.record_hot_keys(vault_id, &req.operations);
 
         // Server-assigned sequences: no gap check needed
 
@@ -612,8 +760,8 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency.insert(
-                    namespace_id,
-                    vault_id,
+                    namespace_id.value(),
+                    vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -633,6 +781,15 @@ impl WriteService for WriteServiceImpl {
 
                 metrics::record_write(true, ctx.elapsed_secs());
 
+                self.emit_audit_event(&self.build_audit_event(
+                    AuditAction::Write,
+                    &client_id,
+                    AuditResource::vault(namespace_id, vault_id),
+                    AuditOutcome::Success,
+                    Some(&trace_ctx.trace_id),
+                    Some(req.operations.len()),
+                ));
+
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Success(success)),
                 }))
@@ -640,6 +797,18 @@ impl WriteService for WriteServiceImpl {
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
                 metrics::record_write(false, ctx.elapsed_secs());
+
+                self.emit_audit_event(&self.build_audit_event(
+                    AuditAction::Write,
+                    &client_id,
+                    AuditResource::vault(namespace_id, vault_id),
+                    AuditOutcome::Failed {
+                        code: "Unspecified".to_string(),
+                        detail: message.clone(),
+                    },
+                    Some(&trace_ctx.trace_id),
+                    Some(req.operations.len()),
+                ));
 
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Error(WriteError {
@@ -670,6 +839,18 @@ impl WriteService for WriteServiceImpl {
                 ctx.set_precondition_failed(Some(&key));
                 metrics::record_write(false, ctx.elapsed_secs());
 
+                self.emit_audit_event(&self.build_audit_event(
+                    AuditAction::Write,
+                    &client_id,
+                    AuditResource::vault(namespace_id, vault_id),
+                    AuditOutcome::Failed {
+                        code: "PreconditionFailed".to_string(),
+                        detail: format!("key: {key}"),
+                    },
+                    Some(&trace_ctx.trace_id),
+                    Some(req.operations.len()),
+                ));
+
                 Ok(Response::new(WriteResponse {
                     result: Some(crate::proto::write_response::Result::Error(WriteError {
                         code: error_code.into(),
@@ -695,13 +876,15 @@ impl WriteService for WriteServiceImpl {
         &self,
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
-        // Extract trace context from gRPC metadata before consuming the request
+        // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Create wide event context for this request
         let mut ctx = RequestContext::new("WriteService", "batch_write");
         ctx.set_operation_type(OperationType::Write);
+        ctx.extract_transport_metadata(&grpc_metadata);
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
@@ -721,13 +904,14 @@ impl WriteService for WriteServiceImpl {
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
 
         // Extract namespace and vault IDs (needed for idempotency key)
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
+        let namespace_id = NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
 
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -737,7 +921,7 @@ impl WriteService for WriteServiceImpl {
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        ctx.set_target(namespace_id, vault_id);
+        ctx.set_target(namespace_id.value(), vault_id.value());
 
         // Flatten all operations from all groups
         let all_operations: Vec<crate::proto::Operation> =
@@ -752,12 +936,13 @@ impl WriteService for WriteServiceImpl {
         let operation_types = Self::extract_operation_types(&all_operations);
         ctx.set_write_operation(batch_size, operation_types, req.include_tx_proofs);
         ctx.set_batch_info(false, batch_size);
+        ctx.set_bytes_written(Self::estimate_operations_bytes(&all_operations));
 
         // Check idempotency cache for duplicate
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id,
-            vault_id,
+            namespace_id.value(),
+            vault_id.value(),
             &client_id,
             idempotency_key,
             request_hash,
@@ -813,11 +998,22 @@ impl WriteService for WriteServiceImpl {
             },
         }
 
-        // Check per-namespace rate limit
-        if let Err(status) = self.check_rate_limit(namespace_id) {
+        // Check rate limits (backpressure, namespace, client)
+        if let Err(status) = self.check_rate_limit(&client_id, namespace_id) {
             ctx.set_rate_limited();
+            self.emit_audit_event(&self.build_audit_event(
+                AuditAction::BatchWrite,
+                &client_id,
+                AuditResource::vault(namespace_id, vault_id),
+                AuditOutcome::Denied { reason: "rate_limited".to_string() },
+                Some(&trace_ctx.trace_id),
+                Some(batch_size),
+            ));
             return Err(status);
         }
+
+        // Track key access frequency for hot key detection.
+        self.record_hot_keys(vault_id, &all_operations);
 
         // Server-assigned sequences: no gap check needed
 
@@ -860,8 +1056,8 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency.insert(
-                    namespace_id,
-                    vault_id,
+                    namespace_id.value(),
+                    vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -881,6 +1077,15 @@ impl WriteService for WriteServiceImpl {
 
                 metrics::record_batch_write(true, batch_size, ctx.elapsed_secs());
 
+                self.emit_audit_event(&self.build_audit_event(
+                    AuditAction::BatchWrite,
+                    &client_id,
+                    AuditResource::vault(namespace_id, vault_id),
+                    AuditOutcome::Success,
+                    Some(&trace_ctx.trace_id),
+                    Some(batch_size),
+                ));
+
                 Ok(Response::new(BatchWriteResponse {
                     result: Some(crate::proto::batch_write_response::Result::Success(
                         BatchWriteSuccess {
@@ -896,6 +1101,18 @@ impl WriteService for WriteServiceImpl {
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+
+                self.emit_audit_event(&self.build_audit_event(
+                    AuditAction::BatchWrite,
+                    &client_id,
+                    AuditResource::vault(namespace_id, vault_id),
+                    AuditOutcome::Failed {
+                        code: "Unspecified".to_string(),
+                        detail: message.clone(),
+                    },
+                    Some(&trace_ctx.trace_id),
+                    Some(batch_size),
+                ));
 
                 Ok(Response::new(BatchWriteResponse {
                     result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
@@ -925,6 +1142,18 @@ impl WriteService for WriteServiceImpl {
 
                 ctx.set_precondition_failed(Some(&key));
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+
+                self.emit_audit_event(&self.build_audit_event(
+                    AuditAction::BatchWrite,
+                    &client_id,
+                    AuditResource::vault(namespace_id, vault_id),
+                    AuditOutcome::Failed {
+                        code: "PreconditionFailed".to_string(),
+                        detail: format!("key: {key}"),
+                    },
+                    Some(&trace_ctx.trace_id),
+                    Some(batch_size),
+                ));
 
                 Ok(Response::new(BatchWriteResponse {
                     result: Some(crate::proto::batch_write_response::Result::Error(WriteError {

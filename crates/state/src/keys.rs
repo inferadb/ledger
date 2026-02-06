@@ -28,7 +28,7 @@ pub struct StorageKey {
 pub fn encode_storage_key(vault_id: VaultId, local_key: &[u8]) -> Vec<u8> {
     let bucket = bucket_id(local_key);
     let mut key = Vec::with_capacity(9 + local_key.len());
-    key.extend_from_slice(&vault_id.to_be_bytes());
+    key.extend_from_slice(&vault_id.value().to_be_bytes());
     key.push(bucket);
     key.extend_from_slice(local_key);
     key
@@ -40,7 +40,7 @@ pub fn encode_storage_key(vault_id: VaultId, local_key: &[u8]) -> Vec<u8> {
 #[allow(dead_code)] // public API: reserved for bucket-based key encoding
 pub fn encode_key_with_bucket(vault_id: VaultId, bucket_id: u8, local_key: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(9 + local_key.len());
-    key.extend_from_slice(&vault_id.to_be_bytes());
+    key.extend_from_slice(&vault_id.value().to_be_bytes());
     key.push(bucket_id);
     key.extend_from_slice(local_key);
     key
@@ -48,13 +48,13 @@ pub fn encode_key_with_bucket(vault_id: VaultId, bucket_id: u8, local_key: &[u8]
 
 /// Create a prefix for scanning all keys in a vault.
 pub fn vault_prefix(vault_id: VaultId) -> [u8; 8] {
-    vault_id.to_be_bytes()
+    vault_id.value().to_be_bytes()
 }
 
 /// Create a prefix for scanning all keys in a specific bucket within a vault.
 pub fn bucket_prefix(vault_id: VaultId, bucket_id: u8) -> [u8; 9] {
     let mut prefix = [0u8; 9];
-    prefix[..8].copy_from_slice(&vault_id.to_be_bytes());
+    prefix[..8].copy_from_slice(&vault_id.value().to_be_bytes());
     prefix[8] = bucket_id;
     prefix
 }
@@ -71,7 +71,7 @@ pub fn decode_storage_key(key: &[u8]) -> Option<StorageKey> {
     let bucket_id = key[8];
     let local_key = key[9..].to_vec();
 
-    Some(StorageKey { vault_id, bucket_id, local_key })
+    Some(StorageKey { vault_id: VaultId::new(vault_id), bucket_id, local_key })
 }
 
 /// Encode a relationship key.
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_roundtrip() {
-        let vault_id: VaultId = 12345;
+        let vault_id = VaultId::new(12345);
         let local_key = b"user:alice";
 
         let encoded = encode_storage_key(vault_id, local_key);
@@ -117,15 +117,15 @@ mod tests {
     #[test]
     fn test_key_ordering() {
         // Keys should be ordered by vault_id first (big-endian)
-        let key1 = encode_storage_key(1, b"z");
-        let key2 = encode_storage_key(2, b"a");
+        let key1 = encode_storage_key(VaultId::new(1), b"z");
+        let key2 = encode_storage_key(VaultId::new(2), b"a");
 
         assert!(key1 < key2, "vault 1 < vault 2");
     }
 
     #[test]
     fn test_bucket_prefix() {
-        let vault_id: VaultId = 42;
+        let vault_id = VaultId::new(42);
         let prefix = bucket_prefix(vault_id, 5);
 
         let key = encode_key_with_bucket(vault_id, 5, b"test");

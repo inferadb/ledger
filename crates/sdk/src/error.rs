@@ -101,6 +101,16 @@ pub enum SdkError {
     #[snafu(display("Client shutting down"))]
     Shutdown,
 
+    /// Request was cancelled via cancellation token.
+    ///
+    /// Returned when an in-flight request is cancelled by a
+    /// [`CancellationToken`](tokio_util::sync::CancellationToken) provided
+    /// by the caller. Unlike `Shutdown`, which cancels all requests globally,
+    /// `Cancelled` applies to a single request or a group of requests sharing
+    /// a token.
+    #[snafu(display("Request cancelled"))]
+    Cancelled,
+
     /// URL parsing error.
     #[snafu(display("Invalid URL '{url}': {message}"))]
     InvalidUrl {
@@ -165,6 +175,7 @@ impl SdkError {
             Self::Idempotency { .. } => false,
             Self::RetryExhausted { .. } => false,
             Self::Shutdown => false,
+            Self::Cancelled => false, // Intentional cancellation
             Self::InvalidUrl { .. } => false,
             Self::Unavailable { .. } => true, // May become available
             Self::ProofVerification { .. } => false, // Data integrity error
@@ -456,5 +467,23 @@ mod tests {
         let display = format!("{}", err);
         assert!(display.contains("Service unavailable"));
         assert!(display.contains("service down"));
+    }
+
+    #[test]
+    fn test_cancelled_not_retryable() {
+        let err = SdkError::Cancelled;
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_cancelled_display() {
+        let err = SdkError::Cancelled;
+        assert_eq!(format!("{err}"), "Request cancelled");
+    }
+
+    #[test]
+    fn test_cancelled_has_no_code() {
+        let err = SdkError::Cancelled;
+        assert_eq!(err.code(), None);
     }
 }

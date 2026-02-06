@@ -777,7 +777,7 @@ impl TieredSnapshotManager {
 mod tests {
     use std::collections::HashMap as StdHashMap;
 
-    use inferadb_ledger_types::EMPTY_HASH;
+    use inferadb_ledger_types::{EMPTY_HASH, ShardId, VaultId};
     use tempfile::TempDir;
 
     use super::*;
@@ -788,7 +788,7 @@ mod tests {
 
     fn create_test_snapshot(height: u64) -> Snapshot {
         let vault_states = vec![VaultSnapshotMeta {
-            vault_id: 1,
+            vault_id: VaultId::new(1),
             vault_height: height / 2,
             state_root: [height as u8; 32],
             bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -797,7 +797,7 @@ mod tests {
 
         let state = SnapshotStateData { vault_entities: StdHashMap::new() };
 
-        Snapshot::new(1, height, vault_states, state, SnapshotChainParams::default())
+        Snapshot::new(ShardId::new(1), height, vault_states, state, SnapshotChainParams::default())
             .expect("create snapshot")
     }
 

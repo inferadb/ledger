@@ -25,6 +25,9 @@ chrono.workspace = true
 # Configuration types (for test config helpers)
 inferadb-ledger-types = { workspace = true }
 
+# Property-based testing strategies
+proptest = { workspace = true }
+
 [dev-dependencies]
 # For testing the test utilities themselves
 tokio = { workspace = true, features = ["full", "test-util"] }

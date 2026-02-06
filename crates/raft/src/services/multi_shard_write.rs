@@ -18,8 +18,9 @@ use crate::{
         WriteErrorCode, WriteRequest, WriteResponse, WriteSuccess,
         write_service_server::WriteService,
     },
-    rate_limit::NamespaceRateLimiter,
+    rate_limit::RateLimiter,
     services::shard_resolver::ShardResolver,
+    trace_context,
     types::{LedgerRequest, LedgerResponse},
 };
 
@@ -37,20 +38,61 @@ pub struct MultiShardWriteService {
     idempotency: Arc<IdempotencyCache>,
     /// Per-namespace rate limiter (optional).
     #[builder(default)]
-    rate_limiter: Option<Arc<NamespaceRateLimiter>>,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    /// Hot key detector for identifying frequently accessed keys (optional).
+    #[builder(default)]
+    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
 }
 
 #[allow(clippy::result_large_err)]
 impl MultiShardWriteService {
-    /// Check per-namespace rate limit.
-    fn check_rate_limit(&self, namespace_id: i64) -> Result<(), Status> {
-        if let Some(limiter) = &self.rate_limiter
-            && let Err(e) = limiter.check(namespace_id)
-        {
-            warn!(namespace_id, "Rate limit exceeded");
-            return Err(Status::resource_exhausted(e.to_string()));
+    /// Check all rate limit tiers (backpressure, namespace, client).
+    fn check_rate_limit(
+        &self,
+        client_id: &str,
+        namespace_id: inferadb_ledger_types::NamespaceId,
+    ) -> Result<(), Status> {
+        if let Some(limiter) = &self.rate_limiter {
+            limiter.check(client_id, namespace_id).map_err(|rejection| {
+                warn!(
+                    namespace_id = namespace_id.value(),
+                    level = rejection.level.as_str(),
+                    reason = rejection.reason.as_str(),
+                    "Rate limit exceeded"
+                );
+                crate::metrics::record_rate_limit_rejected(
+                    rejection.level.as_str(),
+                    rejection.reason.as_str(),
+                );
+                let mut status = Status::resource_exhausted(rejection.to_string());
+                if let Ok(val) =
+                    tonic::metadata::MetadataValue::try_from(rejection.retry_after_ms.to_string())
+                {
+                    status.metadata_mut().insert("retry-after-ms", val);
+                }
+                status
+            })?;
         }
         Ok(())
+    }
+
+    /// Record key accesses from operations for hot key detection.
+    fn record_hot_keys(&self, vault_id: inferadb_ledger_types::VaultId, operations: &[Operation]) {
+        if let Some(ref detector) = self.hot_key_detector {
+            use crate::proto::operation::Op;
+            for op in operations {
+                if let Some(ref inner) = op.op {
+                    let key = match inner {
+                        Op::SetEntity(se) => &se.key,
+                        Op::DeleteEntity(de) => &de.key,
+                        Op::CreateRelationship(cr) => &cr.resource,
+                        Op::DeleteRelationship(dr) => &dr.resource,
+                        Op::ExpireEntity(ee) => &ee.key,
+                    };
+                    detector.record_access(vault_id, key);
+                }
+            }
+        }
     }
 
     /// Compute a hash of operations for idempotency payload comparison.
@@ -102,8 +144,8 @@ impl MultiShardWriteService {
     /// Generate inclusion proof for a write.
     fn generate_write_proof(
         &self,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: inferadb_ledger_types::NamespaceId,
+        vault_id: inferadb_ledger_types::VaultId,
         vault_height: u64,
     ) -> (Option<crate::proto::BlockHeader>, Option<crate::proto::MerkleProof>) {
         let ctx = match self.resolver.resolve(namespace_id) {
@@ -201,8 +243,8 @@ impl MultiShardWriteService {
     fn build_request(
         &self,
         operations: &[Operation],
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: inferadb_ledger_types::NamespaceId,
+        vault_id: inferadb_ledger_types::VaultId,
         client_id: &str,
         actor: &str,
     ) -> Result<LedgerRequest, Status> {
@@ -236,16 +278,19 @@ impl WriteService for MultiShardWriteService {
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
         let start = Instant::now();
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = inferadb_ledger_types::NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id =
+            inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         // Actor is set by upstream Engine/Control services - Ledger uses "system" internally
         let actor = "system".to_string();
 
@@ -260,14 +305,14 @@ impl WriteService for MultiShardWriteService {
 
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
 
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id,
-            vault_id,
+            namespace_id.value(),
+            vault_id.value(),
             &client_id,
             idempotency_key,
             request_hash,
@@ -303,7 +348,10 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(namespace_id)?;
+        self.check_rate_limit(&client_id, namespace_id)?;
+
+        // Track key access frequency for hot key detection.
+        self.record_hot_keys(vault_id, &req.operations);
 
         // Server-assigned sequences: no gap check needed
 
@@ -344,8 +392,8 @@ impl WriteService for MultiShardWriteService {
 
                 // Cache the successful result
                 self.idempotency.insert(
-                    namespace_id,
-                    vault_id,
+                    namespace_id.value(),
+                    vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -354,6 +402,7 @@ impl WriteService for MultiShardWriteService {
 
                 metrics::record_write(true, latency);
                 info!(
+                    trace_id = %trace_ctx.trace_id,
                     block_height,
                     assigned_sequence,
                     latency_ms = latency * 1000.0,
@@ -381,16 +430,19 @@ impl WriteService for MultiShardWriteService {
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
         let start = Instant::now();
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let req = request.into_inner();
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let namespace_id = req
-            .namespace_id
-            .as_ref()
-            .map(|n| n.id)
-            .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?;
-        let vault_id = req.vault_id.as_ref().map_or(0, |v| v.id);
+        let namespace_id = inferadb_ledger_types::NamespaceId::new(
+            req.namespace_id
+                .as_ref()
+                .map(|n| n.id)
+                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
+        );
+        let vault_id =
+            inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -409,15 +461,15 @@ impl WriteService for MultiShardWriteService {
 
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
-        tracing::Span::current().record("namespace_id", namespace_id);
-        tracing::Span::current().record("vault_id", vault_id);
+        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("batch_size", batch_size);
 
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id,
-            vault_id,
+            namespace_id.value(),
+            vault_id.value(),
             &client_id,
             idempotency_key,
             request_hash,
@@ -461,7 +513,10 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(namespace_id)?;
+        self.check_rate_limit(&client_id, namespace_id)?;
+
+        // Track key access frequency for hot key detection.
+        self.record_hot_keys(vault_id, &all_operations);
 
         // Resolve shard
         let ctx = self.resolver.resolve(namespace_id)?;
@@ -501,8 +556,8 @@ impl WriteService for MultiShardWriteService {
 
                 // Cache the successful result
                 self.idempotency.insert(
-                    namespace_id,
-                    vault_id,
+                    namespace_id.value(),
+                    vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -519,6 +574,7 @@ impl WriteService for MultiShardWriteService {
 
                 metrics::record_batch_write(true, batch_size, latency);
                 info!(
+                    trace_id = %trace_ctx.trace_id,
                     block_height,
                     assigned_sequence,
                     batch_size,

@@ -164,7 +164,7 @@ pub struct VaultMeta {
 }
 
 /// Sequence counters for deterministic ID generation.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequenceCounters {
     /// Next namespace ID (starts at 1, 0 = _system).
     pub namespace: NamespaceId,
@@ -178,23 +178,41 @@ pub struct SequenceCounters {
     pub email_verify: i64,
 }
 
+impl Default for SequenceCounters {
+    fn default() -> Self {
+        Self {
+            namespace: NamespaceId::new(0),
+            vault: VaultId::new(0),
+            user: 0,
+            user_email: 0,
+            email_verify: 0,
+        }
+    }
+}
+
 impl SequenceCounters {
     /// Create new counters with initial values.
     pub fn new() -> Self {
-        Self { namespace: 1, vault: 1, user: 1, user_email: 1, email_verify: 1 }
+        Self {
+            namespace: NamespaceId::new(1),
+            vault: VaultId::new(1),
+            user: 1,
+            user_email: 1,
+            email_verify: 1,
+        }
     }
 
     /// Get and increment the next namespace ID.
     pub fn next_namespace(&mut self) -> NamespaceId {
         let id = self.namespace;
-        self.namespace += 1;
+        self.namespace = NamespaceId::new(id.value() + 1);
         id
     }
 
     /// Get and increment the next vault ID.
     pub fn next_vault(&mut self) -> VaultId {
         let id = self.vault;
-        self.vault += 1;
+        self.vault = VaultId::new(id.value() + 1);
         id
     }
 
@@ -237,7 +255,7 @@ pub fn select_least_loaded_shard(namespaces: &HashMap<NamespaceId, NamespaceMeta
 
     // If no namespaces exist, default to shard 0
     if shard_counts.is_empty() {
-        return 0;
+        return ShardId::new(0);
     }
 
     // Find shard with minimum count, preferring lower shard_id on ties
@@ -247,7 +265,7 @@ pub fn select_least_loaded_shard(namespaces: &HashMap<NamespaceId, NamespaceMeta
             count_a.cmp(count_b).then_with(|| shard_a.cmp(shard_b))
         })
         .map(|(shard_id, _)| shard_id)
-        .unwrap_or(0)
+        .unwrap_or(ShardId::new(0))
 }
 
 /// Maximum recovery attempts before requiring manual intervention.
@@ -468,7 +486,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             })),
             state_layer: None,
             block_archive: None,
-            shard_id: 0,
+            shard_id: ShardId::new(0),
             node_id: String::new(),
             shard_chain: RwLock::new(ShardChainState {
                 height: 0,
@@ -844,7 +862,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                         if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
                             tracing::error!(
-                                namespace_id,
+                                namespace_id = namespace_id.value(),
                                 error = %e,
                                 "Failed to persist namespace to StateLayer"
                             );
@@ -992,7 +1010,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // Auto-transition namespace to Deleted
                             ns.status = NamespaceStatus::Deleted;
                             tracing::info!(
-                                namespace_id,
+                                namespace_id = namespace_id.value(),
                                 "Namespace auto-transitioned to Deleted after last vault deleted"
                             );
                         }
@@ -1160,9 +1178,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 if *healthy {
                     // Mark vault as healthy
                     state.vault_health.insert(key, VaultHealthStatus::Healthy);
+                    crate::metrics::set_vault_health(
+                        namespace_id.value(),
+                        vault_id.value(),
+                        "healthy",
+                    );
                     tracing::info!(
-                        namespace_id,
-                        vault_id,
+                        namespace_id = namespace_id.value(),
+                        vault_id = vault_id.value(),
                         "Vault health updated to Healthy via Raft"
                     );
                 } else if let (Some(attempt), Some(started_at)) =
@@ -1176,9 +1199,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             attempt: *attempt,
                         },
                     );
+                    crate::metrics::set_vault_health(
+                        namespace_id.value(),
+                        vault_id.value(),
+                        "recovering",
+                    );
                     tracing::info!(
-                        namespace_id,
-                        vault_id,
+                        namespace_id = namespace_id.value(),
+                        vault_id = vault_id.value(),
                         attempt,
                         "Vault health updated to Recovering via Raft"
                     );
@@ -1190,9 +1218,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     state
                         .vault_health
                         .insert(key, VaultHealthStatus::Diverged { expected, computed, at_height });
+                    crate::metrics::set_vault_health(
+                        namespace_id.value(),
+                        vault_id.value(),
+                        "diverged",
+                    );
                     tracing::warn!(
-                        namespace_id,
-                        vault_id,
+                        namespace_id = namespace_id.value(),
+                        vault_id = vault_id.value(),
                         at_height,
                         "Vault health updated to Diverged via Raft"
                     );
@@ -1230,7 +1263,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 let old_shard_id = ns.shard_id;
                                 // Safe cast: we already validated shard_id >= 0 above
                                 #[allow(clippy::cast_sign_loss)]
-                                let new_shard_id = *shard_id as ShardId;
+                                let new_shard_id = ShardId::new(*shard_id as u32);
                                 ns.shard_id = new_shard_id;
                                 LedgerResponse::NamespaceMigrated {
                                     namespace_id: *namespace_id,
@@ -1287,8 +1320,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ) -> Hash {
         use inferadb_ledger_types::sha256;
         let mut data = Vec::new();
-        data.extend_from_slice(&namespace_id.to_le_bytes());
-        data.extend_from_slice(&vault_id.to_le_bytes());
+        data.extend_from_slice(&namespace_id.value().to_le_bytes());
+        data.extend_from_slice(&vault_id.value().to_le_bytes());
         data.extend_from_slice(&height.to_le_bytes());
         sha256(&data)
     }
@@ -1650,6 +1683,13 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         &mut self,
         entries: &[Entry<LedgerTypeConfig>],
     ) -> Result<Vec<LedgerResponse>, StorageError<LedgerNodeId>> {
+        let _span = tracing::info_span!(
+            "apply_to_state_machine",
+            entry_count = entries.len(),
+            shard_id = self.shard_id.value(),
+        )
+        .entered();
+
         let mut responses = Vec::new();
         let mut vault_entries = Vec::new();
         let mut state = self.applied_state.write();
@@ -1712,8 +1752,10 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 for entry in &vault_entries {
                     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
                     let announcement = BlockAnnouncement {
-                        namespace_id: Some(crate::proto::NamespaceId { id: entry.namespace_id }),
-                        vault_id: Some(crate::proto::VaultId { id: entry.vault_id }),
+                        namespace_id: Some(crate::proto::NamespaceId {
+                            id: entry.namespace_id.value(),
+                        }),
+                        vault_id: Some(crate::proto::VaultId { id: entry.vault_id.value() }),
                         height: entry.vault_height,
                         block_hash: Some(crate::proto::Hash { value: block_hash.to_vec() }),
                         state_root: Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
@@ -1725,8 +1767,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     // Ignore send errors - no receivers is valid (fire-and-forget)
                     let _ = sender.send(announcement);
                     tracing::debug!(
-                        namespace_id = entry.namespace_id,
-                        vault_id = entry.vault_id,
+                        namespace_id = entry.namespace_id.value(),
+                        vault_id = entry.vault_id.value(),
                         height = entry.vault_height,
                         "Block announcement broadcast"
                     );
@@ -1812,7 +1854,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     // Apply at the entity's version height
                     if let Err(e) = state_layer.apply_operations(*vault_id, &ops, entity.version) {
                         tracing::warn!(
-                            vault_id,
+                            vault_id = vault_id.value(),
                             key = %String::from_utf8_lossy(&entity.key),
                             error = %e,
                             "Failed to restore entity from snapshot"
@@ -1851,8 +1893,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                         if !entities.is_empty() {
                             entities_map.insert(vault_id, entities);
                             tracing::debug!(
-                                namespace_id,
-                                vault_id,
+                                namespace_id = namespace_id.value(),
+                                vault_id = vault_id.value(),
                                 count = entities_map.get(&vault_id).map(|e| e.len()).unwrap_or(0),
                                 "Collected entities for snapshot"
                             );
@@ -1860,8 +1902,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     },
                     Err(e) => {
                         tracing::warn!(
-                            namespace_id,
-                            vault_id,
+                            namespace_id = namespace_id.value(),
+                            vault_id = vault_id.value(),
                             error = %e,
                             "Failed to list entities for snapshot"
                         );
@@ -1963,10 +2005,10 @@ mod tests {
     async fn test_sequence_counters() {
         let mut counters = SequenceCounters::new();
 
-        assert_eq!(counters.next_namespace(), 1);
-        assert_eq!(counters.next_namespace(), 2);
-        assert_eq!(counters.next_vault(), 1);
-        assert_eq!(counters.next_vault(), 2);
+        assert_eq!(counters.next_namespace(), NamespaceId::new(1));
+        assert_eq!(counters.next_namespace(), NamespaceId::new(2));
+        assert_eq!(counters.next_vault(), VaultId::new(1));
+        assert_eq!(counters.next_vault(), VaultId::new(2));
         assert_eq!(counters.next_user(), 1);
         assert_eq!(counters.next_user(), 2);
         assert_eq!(counters.next_user_email(), 1);
@@ -1990,7 +2032,7 @@ mod tests {
 
         match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => {
-                assert_eq!(namespace_id, 1);
+                assert_eq!(namespace_id, NamespaceId::new(1));
             },
             _ => panic!("unexpected response"),
         }
@@ -1999,34 +2041,34 @@ mod tests {
     #[test]
     fn test_select_least_loaded_shard_empty() {
         let namespaces = HashMap::new();
-        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
     }
 
     #[test]
     fn test_select_least_loaded_shard_single_shard() {
         let mut namespaces = HashMap::new();
         namespaces.insert(
-            1,
+            NamespaceId::new(1),
             NamespaceMeta {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: "ns1".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            2,
+            NamespaceId::new(2),
             NamespaceMeta {
-                namespace_id: 2,
+                namespace_id: NamespaceId::new(2),
                 name: "ns2".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         // Only shard 0 exists, so it should be selected
-        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
     }
 
     #[test]
@@ -2034,48 +2076,48 @@ mod tests {
         let mut namespaces = HashMap::new();
         // Shard 0: 2 namespaces
         namespaces.insert(
-            1,
+            NamespaceId::new(1),
             NamespaceMeta {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: "ns1".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            2,
+            NamespaceId::new(2),
             NamespaceMeta {
-                namespace_id: 2,
+                namespace_id: NamespaceId::new(2),
                 name: "ns2".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         // Shard 1: 2 namespaces (equal load)
         namespaces.insert(
-            3,
+            NamespaceId::new(3),
             NamespaceMeta {
-                namespace_id: 3,
+                namespace_id: NamespaceId::new(3),
                 name: "ns3".to_string(),
-                shard_id: 1,
+                shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            4,
+            NamespaceId::new(4),
             NamespaceMeta {
-                namespace_id: 4,
+                namespace_id: NamespaceId::new(4),
                 name: "ns4".to_string(),
-                shard_id: 1,
+                shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         // Tie-breaker: lower shard_id wins
-        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
     }
 
     #[test]
@@ -2083,48 +2125,48 @@ mod tests {
         let mut namespaces = HashMap::new();
         // Shard 0: 3 namespaces
         namespaces.insert(
-            1,
+            NamespaceId::new(1),
             NamespaceMeta {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: "ns1".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            2,
+            NamespaceId::new(2),
             NamespaceMeta {
-                namespace_id: 2,
+                namespace_id: NamespaceId::new(2),
                 name: "ns2".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            3,
+            NamespaceId::new(3),
             NamespaceMeta {
-                namespace_id: 3,
+                namespace_id: NamespaceId::new(3),
                 name: "ns3".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         // Shard 1: 1 namespace (lighter)
         namespaces.insert(
-            4,
+            NamespaceId::new(4),
             NamespaceMeta {
-                namespace_id: 4,
+                namespace_id: NamespaceId::new(4),
                 name: "ns4".to_string(),
-                shard_id: 1,
+                shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         // Shard 1 has fewer namespaces
-        assert_eq!(select_least_loaded_shard(&namespaces), 1);
+        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(1));
     }
 
     #[test]
@@ -2132,104 +2174,104 @@ mod tests {
         let mut namespaces = HashMap::new();
         // Shard 0: 1 active, 2 deleted
         namespaces.insert(
-            1,
+            NamespaceId::new(1),
             NamespaceMeta {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: "ns1".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            2,
+            NamespaceId::new(2),
             NamespaceMeta {
-                namespace_id: 2,
+                namespace_id: NamespaceId::new(2),
                 name: "ns2".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Deleted,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            3,
+            NamespaceId::new(3),
             NamespaceMeta {
-                namespace_id: 3,
+                namespace_id: NamespaceId::new(3),
                 name: "ns3".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Deleted,
                 pending_shard_id: None,
             },
         );
         // Shard 1: 2 active
         namespaces.insert(
-            4,
+            NamespaceId::new(4),
             NamespaceMeta {
-                namespace_id: 4,
+                namespace_id: NamespaceId::new(4),
                 name: "ns4".to_string(),
-                shard_id: 1,
+                shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         namespaces.insert(
-            5,
+            NamespaceId::new(5),
             NamespaceMeta {
-                namespace_id: 5,
+                namespace_id: NamespaceId::new(5),
                 name: "ns5".to_string(),
-                shard_id: 1,
+                shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         // Shard 0 has only 1 active namespace (deleted don't count)
-        assert_eq!(select_least_loaded_shard(&namespaces), 0);
+        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
     }
 
     #[test]
     fn test_select_least_loaded_shard_many_shards() {
         let mut namespaces = HashMap::new();
         // Shard 0: 5 namespaces
-        for i in 1..=5 {
+        for i in 1..=5i64 {
             namespaces.insert(
-                i,
+                NamespaceId::new(i),
                 NamespaceMeta {
-                    namespace_id: i,
+                    namespace_id: NamespaceId::new(i),
                     name: format!("ns{}", i),
-                    shard_id: 0,
+                    shard_id: ShardId::new(0),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
                 },
             );
         }
         // Shard 1: 3 namespaces
-        for i in 6..=8 {
+        for i in 6..=8i64 {
             namespaces.insert(
-                i,
+                NamespaceId::new(i),
                 NamespaceMeta {
-                    namespace_id: i,
+                    namespace_id: NamespaceId::new(i),
                     name: format!("ns{}", i),
-                    shard_id: 1,
+                    shard_id: ShardId::new(1),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
                 },
             );
         }
         // Shard 2: 2 namespaces (minimum)
-        for i in 9..=10 {
+        for i in 9..=10i64 {
             namespaces.insert(
-                i,
+                NamespaceId::new(i),
                 NamespaceMeta {
-                    namespace_id: i,
+                    namespace_id: NamespaceId::new(i),
                     name: format!("ns{}", i),
-                    shard_id: 2,
+                    shard_id: ShardId::new(2),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
                 },
             );
         }
         // Shard 2 has the fewest namespaces
-        assert_eq!(select_least_loaded_shard(&namespaces), 2);
+        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(2));
     }
 
     #[tokio::test]
@@ -2242,13 +2284,13 @@ mod tests {
 
         // Pre-populate with namespaces on different shards
         // Shard 0: 3 namespaces
-        for i in 1..=3 {
+        for i in 1..=3i64 {
             state.namespaces.insert(
-                i,
+                NamespaceId::new(i),
                 NamespaceMeta {
-                    namespace_id: i,
+                    namespace_id: NamespaceId::new(i),
                     name: format!("existing-ns-{}", i),
-                    shard_id: 0,
+                    shard_id: ShardId::new(0),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
                 },
@@ -2256,16 +2298,16 @@ mod tests {
         }
         // Shard 1: 1 namespace
         state.namespaces.insert(
-            4,
+            NamespaceId::new(4),
             NamespaceMeta {
-                namespace_id: 4,
+                namespace_id: NamespaceId::new(4),
                 name: "existing-ns-4".to_string(),
-                shard_id: 1,
+                shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
-        state.sequences.namespace = 5; // Next ID is 5
+        state.sequences.namespace = NamespaceId::new(5); // Next ID is 5
 
         drop(state);
 
@@ -2276,9 +2318,9 @@ mod tests {
 
         match response {
             LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                assert_eq!(namespace_id, 5);
+                assert_eq!(namespace_id, NamespaceId::new(5));
                 // Should be assigned to shard 1 (fewer namespaces)
-                assert_eq!(shard_id, 1, "Should assign to least-loaded shard");
+                assert_eq!(shard_id, ShardId::new(1), "Should assign to least-loaded shard");
             },
             _ => panic!("unexpected response"),
         }
@@ -2294,28 +2336,34 @@ mod tests {
 
         // Pre-populate: shard 0 has fewer namespaces
         state.namespaces.insert(
-            1,
+            NamespaceId::new(1),
             NamespaceMeta {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: "existing".to_string(),
-                shard_id: 0,
+                shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
-        state.sequences.namespace = 2;
+        state.sequences.namespace = NamespaceId::new(2);
 
         // Request explicit shard 5 (even though it would be "heavy" if it existed)
-        let request =
-            LedgerRequest::CreateNamespace { name: "new-ns".to_string(), shard_id: Some(5) };
+        let request = LedgerRequest::CreateNamespace {
+            name: "new-ns".to_string(),
+            shard_id: Some(ShardId::new(5)),
+        };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
             LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                assert_eq!(namespace_id, 2);
+                assert_eq!(namespace_id, NamespaceId::new(2));
                 // Explicit shard_id should override load balancing
-                assert_eq!(shard_id, 5, "Explicit shard_id should override load balancing");
+                assert_eq!(
+                    shard_id,
+                    ShardId::new(5),
+                    "Explicit shard_id should override load balancing"
+                );
             },
             _ => panic!("unexpected response"),
         }
@@ -2330,7 +2378,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         let request = LedgerRequest::CreateVault {
-            namespace_id: 1,
+            namespace_id: NamespaceId::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
@@ -2339,8 +2387,11 @@ mod tests {
 
         match response {
             LedgerResponse::VaultCreated { vault_id } => {
-                assert_eq!(vault_id, 1);
-                assert_eq!(state.vault_heights.get(&(1, 1)), Some(&0));
+                assert_eq!(vault_id, VaultId::new(1));
+                assert_eq!(
+                    state.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
+                    Some(&0)
+                );
             },
             _ => panic!("unexpected response"),
         }
@@ -2356,11 +2407,15 @@ mod tests {
 
         // Mark vault as diverged
         state.vault_health.insert(
-            (1, 1),
+            (NamespaceId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
-        let request = LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] };
+        let request = LedgerRequest::Write {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            transactions: vec![],
+        };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
@@ -2382,14 +2437,14 @@ mod tests {
 
         // Start with a diverged vault
         state.vault_health.insert(
-            (1, 1),
+            (NamespaceId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         // Update to healthy
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: 1,
-            vault_id: 1,
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
             healthy: true,
             expected_root: None,
             computed_root: None,
@@ -2408,7 +2463,10 @@ mod tests {
         }
 
         // Verify vault is now healthy
-        assert_eq!(state.vault_health.get(&(1, 1)), Some(&VaultHealthStatus::Healthy));
+        assert_eq!(
+            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            Some(&VaultHealthStatus::Healthy)
+        );
     }
 
     #[tokio::test]
@@ -2420,12 +2478,14 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Start healthy
-        state.vault_health.insert((1, 1), VaultHealthStatus::Healthy);
+        state
+            .vault_health
+            .insert((NamespaceId::new(1), VaultId::new(1)), VaultHealthStatus::Healthy);
 
         // Update to diverged
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: 1,
-            vault_id: 1,
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
             healthy: false,
             expected_root: Some([0xAA; 32]),
             computed_root: Some([0xBB; 32]),
@@ -2444,7 +2504,7 @@ mod tests {
         }
 
         // Verify vault is now diverged with correct values
-        match state.vault_health.get(&(1, 1)) {
+        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
             Some(VaultHealthStatus::Diverged { expected, computed, at_height }) => {
                 assert_eq!(*expected, [0xAA; 32]);
                 assert_eq!(*computed, [0xBB; 32]);
@@ -2464,14 +2524,14 @@ mod tests {
 
         // Start with a diverged vault
         state.vault_health.insert(
-            (1, 1),
+            (NamespaceId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         // Update to recovering
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: 1,
-            vault_id: 1,
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
             healthy: false,
             expected_root: None,
             computed_root: None,
@@ -2490,7 +2550,7 @@ mod tests {
         }
 
         // Verify vault is now recovering
-        match state.vault_health.get(&(1, 1)) {
+        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
             Some(VaultHealthStatus::Recovering { attempt, .. }) => {
                 assert_eq!(*attempt, 1);
             },
@@ -2499,8 +2559,8 @@ mod tests {
 
         // Test recovery attempt 2 (circuit breaker)
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: 1,
-            vault_id: 1,
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
             healthy: false,
             expected_root: None,
             computed_root: None,
@@ -2518,7 +2578,7 @@ mod tests {
             _ => panic!("expected VaultHealthUpdated response"),
         }
 
-        match state.vault_health.get(&(1, 1)) {
+        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
             Some(VaultHealthStatus::Recovering { attempt, .. }) => {
                 assert_eq!(*attempt, 2);
             },
@@ -2543,8 +2603,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -2601,8 +2663,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -2654,8 +2718,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace with no vaults
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "empty-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "empty-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -2684,7 +2750,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Try to delete non-existent namespace
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id: 999 };
+        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id: NamespaceId::new(999) };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
@@ -2705,8 +2771,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -2780,12 +2848,14 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace on shard 0
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                assert_eq!(shard_id, 0);
+                assert_eq!(shard_id, ShardId::new(0));
                 namespace_id
             },
             _ => panic!("expected NamespaceCreated"),
@@ -2793,7 +2863,7 @@ mod tests {
 
         // Verify initial state
         let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.shard_id, 0);
+        assert_eq!(meta.shard_id, ShardId::new(0));
         assert_eq!(meta.status, NamespaceStatus::Active);
 
         // Migrate to shard 1
@@ -2810,15 +2880,15 @@ mod tests {
                 new_shard_id,
             } => {
                 assert_eq!(ns_id, namespace_id);
-                assert_eq!(old_shard_id, 0);
-                assert_eq!(new_shard_id, 1);
+                assert_eq!(old_shard_id, ShardId::new(0));
+                assert_eq!(new_shard_id, ShardId::new(1));
             },
             _ => panic!("expected NamespaceMigrated, got {:?}", response),
         }
 
         // Verify updated state
         let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.shard_id, 1, "shard_id should be updated");
+        assert_eq!(meta.shard_id, ShardId::new(1), "shard_id should be updated");
         assert_eq!(meta.status, NamespaceStatus::Active, "status should remain unchanged");
     }
 
@@ -2832,7 +2902,7 @@ mod tests {
 
         // Try to migrate non-existent namespace
         let migrate = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id: 999,
+            namespace_id: NamespaceId::new(999),
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
@@ -2855,8 +2925,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and delete namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "deleted-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "deleted-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -2899,8 +2971,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -2923,7 +2997,7 @@ mod tests {
 
         // Verify shard_id remains unchanged
         let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.shard_id, 0, "shard_id should remain unchanged after error");
+        assert_eq!(meta.shard_id, ShardId::new(0), "shard_id should remain unchanged after error");
     }
 
     #[tokio::test]
@@ -2935,12 +3009,14 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace on shard 0
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                assert_eq!(shard_id, 0);
+                assert_eq!(shard_id, ShardId::new(0));
                 namespace_id
             },
             _ => panic!("expected NamespaceCreated"),
@@ -2960,15 +3036,15 @@ mod tests {
                 new_shard_id,
             } => {
                 assert_eq!(ns_id, namespace_id);
-                assert_eq!(old_shard_id, 0);
-                assert_eq!(new_shard_id, 0, "should be idempotent - same shard");
+                assert_eq!(old_shard_id, ShardId::new(0));
+                assert_eq!(new_shard_id, ShardId::new(0), "should be idempotent - same shard");
             },
             _ => panic!("expected NamespaceMigrated (idempotent), got {:?}", response),
         }
 
         // Verify state remains consistent
         let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.shard_id, 0);
+        assert_eq!(meta.shard_id, ShardId::new(0));
         assert_eq!(meta.status, NamespaceStatus::Active);
     }
 
@@ -2981,8 +3057,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "migrating-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "migrating-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -2997,8 +3075,8 @@ mod tests {
         let (response, _) = store.apply_request(&migrate1, &mut state);
         match response {
             LedgerResponse::NamespaceMigrated { old_shard_id, new_shard_id, .. } => {
-                assert_eq!(old_shard_id, 0);
-                assert_eq!(new_shard_id, 1);
+                assert_eq!(old_shard_id, ShardId::new(0));
+                assert_eq!(new_shard_id, ShardId::new(1));
             },
             _ => panic!("expected NamespaceMigrated"),
         }
@@ -3011,8 +3089,8 @@ mod tests {
         let (response, _) = store.apply_request(&migrate2, &mut state);
         match response {
             LedgerResponse::NamespaceMigrated { old_shard_id, new_shard_id, .. } => {
-                assert_eq!(old_shard_id, 1);
-                assert_eq!(new_shard_id, 2);
+                assert_eq!(old_shard_id, ShardId::new(1));
+                assert_eq!(new_shard_id, ShardId::new(2));
             },
             _ => panic!("expected NamespaceMigrated"),
         }
@@ -3025,15 +3103,15 @@ mod tests {
         let (response, _) = store.apply_request(&migrate3, &mut state);
         match response {
             LedgerResponse::NamespaceMigrated { old_shard_id, new_shard_id, .. } => {
-                assert_eq!(old_shard_id, 2);
-                assert_eq!(new_shard_id, 0);
+                assert_eq!(old_shard_id, ShardId::new(2));
+                assert_eq!(new_shard_id, ShardId::new(0));
             },
             _ => panic!("expected NamespaceMigrated"),
         }
 
         // Verify final state
         let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.shard_id, 0);
+        assert_eq!(meta.shard_id, ShardId::new(0));
     }
 
     // ========================================================================
@@ -3052,8 +3130,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3092,8 +3172,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3136,8 +3218,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace on shard 0
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3145,13 +3229,14 @@ mod tests {
         };
 
         // Start migration to shard 1
-        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
             LedgerResponse::MigrationStarted { namespace_id: ns_id, target_shard_id } => {
                 assert_eq!(ns_id, namespace_id);
-                assert_eq!(target_shard_id, 1);
+                assert_eq!(target_shard_id, ShardId::new(1));
             },
             _ => panic!("expected MigrationStarted"),
         }
@@ -3159,8 +3244,8 @@ mod tests {
         // Verify namespace is in Migrating state with pending shard
         let ns = state.namespaces.get(&namespace_id).unwrap();
         assert_eq!(ns.status, NamespaceStatus::Migrating);
-        assert_eq!(ns.shard_id, 0); // Still on old shard
-        assert_eq!(ns.pending_shard_id, Some(1)); // Target shard stored
+        assert_eq!(ns.shard_id, ShardId::new(0)); // Still on old shard
+        assert_eq!(ns.pending_shard_id, Some(ShardId::new(1))); // Target shard stored
     }
 
     #[tokio::test]
@@ -3171,8 +3256,10 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        let start_migration =
-            LedgerRequest::StartMigration { namespace_id: 999, target_shard_id: 1 };
+        let start_migration = LedgerRequest::StartMigration {
+            namespace_id: NamespaceId::new(999),
+            target_shard_id: ShardId::new(1),
+        };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
@@ -3192,8 +3279,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3201,12 +3290,14 @@ mod tests {
         };
 
         // Start migration
-        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
         let (response, _) = store.apply_request(&start_migration, &mut state);
         assert!(matches!(response, LedgerResponse::MigrationStarted { .. }));
 
         // Try to start another migration - should fail
-        let start_migration2 = LedgerRequest::StartMigration { namespace_id, target_shard_id: 2 };
+        let start_migration2 =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(2) };
         let (response, _) = store.apply_request(&start_migration2, &mut state);
 
         match response {
@@ -3226,8 +3317,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3238,7 +3331,8 @@ mod tests {
         store.apply_request(&suspend, &mut state);
 
         // Try to start migration - should fail
-        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
@@ -3258,8 +3352,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace on shard 0
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3267,7 +3363,8 @@ mod tests {
         };
 
         // Start migration to shard 1
-        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
         store.apply_request(&start_migration, &mut state);
 
         // Complete migration
@@ -3281,8 +3378,8 @@ mod tests {
                 new_shard_id,
             } => {
                 assert_eq!(ns_id, namespace_id);
-                assert_eq!(old_shard_id, 0);
-                assert_eq!(new_shard_id, 1);
+                assert_eq!(old_shard_id, ShardId::new(0));
+                assert_eq!(new_shard_id, ShardId::new(1));
             },
             _ => panic!("expected MigrationCompleted"),
         }
@@ -3290,7 +3387,7 @@ mod tests {
         // Verify namespace is back to Active on new shard
         let ns = state.namespaces.get(&namespace_id).unwrap();
         assert_eq!(ns.status, NamespaceStatus::Active);
-        assert_eq!(ns.shard_id, 1);
+        assert_eq!(ns.shard_id, ShardId::new(1));
         assert_eq!(ns.pending_shard_id, None);
     }
 
@@ -3303,8 +3400,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace (Active state)
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3332,8 +3431,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace and vault
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3352,7 +3453,8 @@ mod tests {
         };
 
         // Start migration
-        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
         store.apply_request(&start_migration, &mut state);
 
         // Try to write - should be blocked
@@ -3376,8 +3478,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3385,7 +3489,8 @@ mod tests {
         };
 
         // Start migration
-        let start_migration = LedgerRequest::StartMigration { namespace_id, target_shard_id: 1 };
+        let start_migration =
+            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
         store.apply_request(&start_migration, &mut state);
 
         // Try to create vault - should be blocked
@@ -3417,8 +3522,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3476,8 +3583,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace and vault
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3520,8 +3629,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace with a vault
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3564,8 +3675,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend namespace with a vault
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3613,8 +3726,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3655,8 +3770,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3697,8 +3814,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create namespace (active by default)
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3726,8 +3845,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and delete namespace
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3762,7 +3883,8 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Try to suspend non-existent namespace
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id: 999, reason: None };
+        let suspend =
+            LedgerRequest::SuspendNamespace { namespace_id: NamespaceId::new(999), reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
@@ -3783,7 +3905,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Try to resume non-existent namespace
-        let resume = LedgerRequest::ResumeNamespace { namespace_id: 999 };
+        let resume = LedgerRequest::ResumeNamespace { namespace_id: NamespaceId::new(999) };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
@@ -3804,8 +3926,10 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend namespace (no vaults)
-        let create_ns =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
             LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
@@ -3866,23 +3990,35 @@ mod tests {
             LedgerRequest::CreateNamespace { name: "acme-corp".to_string(), shard_id: None },
             LedgerRequest::CreateNamespace { name: "startup-inc".to_string(), shard_id: None },
             LedgerRequest::CreateVault {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: Some("production".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: Some("staging".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                namespace_id: 2,
+                namespace_id: NamespaceId::new(2),
                 name: Some("main".to_string()),
                 retention_policy: None,
             },
-            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
-            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
-            LedgerRequest::Write { namespace_id: 2, vault_id: 3, transactions: vec![] },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![],
+            },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![],
+            },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(2),
+                vault_id: VaultId::new(3),
+                transactions: vec![],
+            },
             LedgerRequest::System(SystemRequest::CreateUser {
                 name: "Alice".to_string(),
                 email: "alice@example.com".to_string(),
@@ -3992,13 +4128,13 @@ mod tests {
             .expect("open store b");
 
         // Same inputs must produce same hash
-        let hash_a = store_a.compute_block_hash(1, 2, 3);
-        let hash_b = store_b.compute_block_hash(1, 2, 3);
+        let hash_a = store_a.compute_block_hash(NamespaceId::new(1), VaultId::new(2), 3);
+        let hash_b = store_b.compute_block_hash(NamespaceId::new(1), VaultId::new(2), 3);
 
         assert_eq!(hash_a, hash_b, "Block hashes must be deterministic");
 
         // Different inputs must produce different hashes
-        let hash_c = store_a.compute_block_hash(1, 2, 4);
+        let hash_c = store_a.compute_block_hash(NamespaceId::new(1), VaultId::new(2), 4);
         assert_ne!(hash_a, hash_c, "Different inputs should produce different hashes");
     }
 
@@ -4020,7 +4156,7 @@ mod tests {
 
         // Create vault on both nodes
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id: 1,
+            namespace_id: NamespaceId::new(1),
             name: Some("test".to_string()),
             retention_policy: None,
         };
@@ -4029,19 +4165,23 @@ mod tests {
 
         // Apply multiple writes
         for _ in 0..5 {
-            let write = LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] };
+            let write = LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![],
+            };
             store_a.apply_request(&write, &mut state_a);
             store_b.apply_request(&write, &mut state_b);
         }
 
         // Heights must match
         assert_eq!(
-            state_a.vault_heights.get(&(1, 1)),
-            state_b.vault_heights.get(&(1, 1)),
+            state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state_b.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
             "Vault heights must be identical after same operations"
         );
         assert_eq!(
-            state_a.vault_heights.get(&(1, 1)),
+            state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
             Some(&5),
             "Height should be 5 after 5 writes"
         );
@@ -4068,12 +4208,12 @@ mod tests {
         let requests: Vec<LedgerRequest> = vec![
             LedgerRequest::CreateNamespace { name: "ns1".to_string(), shard_id: None },
             LedgerRequest::CreateVault {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: Some("vault-a".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: Some("vault-b".to_string()),
                 retention_policy: None,
             },
@@ -4086,11 +4226,31 @@ mod tests {
 
         // Interleaved writes to different vaults
         let interleaved: Vec<LedgerRequest> = vec![
-            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
-            LedgerRequest::Write { namespace_id: 1, vault_id: 2, transactions: vec![] },
-            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
-            LedgerRequest::Write { namespace_id: 1, vault_id: 2, transactions: vec![] },
-            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![],
+            },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(2),
+                transactions: vec![],
+            },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![],
+            },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(2),
+                transactions: vec![],
+            },
+            LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![],
+            },
         ];
 
         let mut results_a = Vec::new();
@@ -4107,8 +4267,8 @@ mod tests {
         assert_eq!(results_a, results_b, "Interleaved operation results must match");
 
         // Vault 1: 3 writes, Vault 2: 2 writes
-        assert_eq!(state_a.vault_heights.get(&(1, 1)), Some(&3));
-        assert_eq!(state_a.vault_heights.get(&(1, 2)), Some(&2));
+        assert_eq!(state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))), Some(&3));
+        assert_eq!(state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(2))), Some(&2));
         assert_eq!(state_a.vault_heights, state_b.vault_heights);
     }
 
@@ -4123,11 +4283,11 @@ mod tests {
         // Apply same mutations
         state_a.sequences.next_namespace();
         state_a.sequences.next_vault();
-        state_a.vault_heights.insert((1, 1), 42);
+        state_a.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
 
         state_b.sequences.next_namespace();
         state_b.sequences.next_vault();
-        state_b.vault_heights.insert((1, 1), 42);
+        state_b.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
 
         // Serialize both
         let bytes_a = postcard::to_allocvec(&state_a).expect("serialize a");
@@ -4153,8 +4313,8 @@ mod tests {
         // Verify initial values per DESIGN.md:
         // - namespace 0 is reserved for _system
         // - IDs start at 1
-        assert_eq!(counters.namespace, 1, "Namespace counter should start at 1");
-        assert_eq!(counters.vault, 1, "Vault counter should start at 1");
+        assert_eq!(counters.namespace, NamespaceId::new(1), "Namespace counter should start at 1");
+        assert_eq!(counters.vault, VaultId::new(1), "Vault counter should start at 1");
         assert_eq!(counters.user, 1, "User counter should start at 1");
         assert_eq!(counters.user_email, 1, "User email counter should start at 1");
         assert_eq!(counters.email_verify, 1, "Email verify counter should start at 1");
@@ -4185,7 +4345,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: Some("vault1".to_string()),
                 retention_policy: None,
             },
@@ -4207,7 +4367,11 @@ mod tests {
             actor: "test-actor".to_string(),
         };
 
-        let request = LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![tx] };
+        let request = LedgerRequest::Write {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            transactions: vec![tx],
+        };
 
         let (response, vault_entry) = store.apply_request(&request, &mut state);
 
@@ -4221,8 +4385,8 @@ mod tests {
 
         // Verify VaultEntry was created
         let entry = vault_entry.expect("VaultEntry should be created");
-        assert_eq!(entry.namespace_id, 1);
-        assert_eq!(entry.vault_id, 1);
+        assert_eq!(entry.namespace_id, NamespaceId::new(1));
+        assert_eq!(entry.vault_id, VaultId::new(1));
         assert_eq!(entry.vault_height, 1);
         assert_eq!(entry.transactions.len(), 1);
         // state_root and tx_merkle_root will be ZERO_HASH without StateLayer configured
@@ -4269,28 +4433,28 @@ mod tests {
         // Add some data
         original.sequences.next_namespace();
         original.sequences.next_vault();
-        original.vault_heights.insert((1, 1), 100);
-        original.vault_heights.insert((1, 2), 50);
+        original.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 100);
+        original.vault_heights.insert((NamespaceId::new(1), VaultId::new(2)), 50);
         original.vault_health.insert(
-            (2, 1),
+            (NamespaceId::new(2), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
-        original.previous_vault_hashes.insert((1, 1), [0xCD; 32]);
+        original.previous_vault_hashes.insert((NamespaceId::new(1), VaultId::new(1)), [0xCD; 32]);
         original.namespaces.insert(
-            1,
+            NamespaceId::new(1),
             NamespaceMeta {
-                namespace_id: 1,
-                shard_id: 0,
+                namespace_id: NamespaceId::new(1),
+                shard_id: ShardId::new(0),
                 name: "test-ns".to_string(),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         original.vaults.insert(
-            (1, 1),
+            (NamespaceId::new(1), VaultId::new(1)),
             VaultMeta {
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 name: Some("test-vault".to_string()),
                 deleted: false,
                 last_write_timestamp: 1234567899,
@@ -4315,8 +4479,8 @@ mod tests {
         // Verify namespace and vault counts (HashMaps don't implement PartialEq for complex types)
         assert_eq!(restored.namespaces.len(), 1);
         assert_eq!(restored.vaults.len(), 1);
-        assert!(restored.namespaces.contains_key(&1));
-        assert!(restored.vaults.contains_key(&(1, 1)));
+        assert!(restored.namespaces.contains_key(&NamespaceId::new(1)));
+        assert!(restored.vaults.contains_key(&(NamespaceId::new(1), VaultId::new(1))));
     }
 
     /// Test that AppliedStateAccessor provides correct data.
@@ -4331,14 +4495,14 @@ mod tests {
         // Setup some state
         {
             let mut state = store.applied_state.write();
-            state.vault_heights.insert((1, 1), 42);
-            state.vault_heights.insert((1, 2), 100);
+            state.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
+            state.vault_heights.insert((NamespaceId::new(1), VaultId::new(2)), 100);
             state.shard_height = 99;
             state.namespaces.insert(
-                1,
+                NamespaceId::new(1),
                 NamespaceMeta {
-                    namespace_id: 1,
-                    shard_id: 0,
+                    namespace_id: NamespaceId::new(1),
+                    shard_id: ShardId::new(0),
                     name: "test".to_string(),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
@@ -4347,17 +4511,17 @@ mod tests {
         }
 
         // Test accessor methods
-        assert_eq!(accessor.vault_height(1, 1), 42);
-        assert_eq!(accessor.vault_height(1, 2), 100);
-        assert_eq!(accessor.vault_height(1, 99), 0); // Non-existent returns 0
+        assert_eq!(accessor.vault_height(NamespaceId::new(1), VaultId::new(1)), 42);
+        assert_eq!(accessor.vault_height(NamespaceId::new(1), VaultId::new(2)), 100);
+        assert_eq!(accessor.vault_height(NamespaceId::new(1), VaultId::new(99)), 0); // Non-existent returns 0
         assert_eq!(accessor.shard_height(), 99);
 
         let all_heights = accessor.all_vault_heights();
         assert_eq!(all_heights.len(), 2);
-        assert_eq!(all_heights.get(&(1, 1)), Some(&42));
+        assert_eq!(all_heights.get(&(NamespaceId::new(1), VaultId::new(1))), Some(&42));
 
-        assert!(accessor.get_namespace(1).is_some());
-        assert!(accessor.get_namespace(99).is_none());
+        assert!(accessor.get_namespace(NamespaceId::new(1)).is_some());
+        assert!(accessor.get_namespace(NamespaceId::new(99)).is_none());
     }
 
     // ========================================================================
@@ -4396,33 +4560,33 @@ mod tests {
         applied_state.sequences.next_namespace();
         applied_state.sequences.next_namespace();
         applied_state.sequences.next_vault();
-        applied_state.vault_heights.insert((1, 1), 42);
-        applied_state.vault_heights.insert((1, 2), 100);
+        applied_state.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
+        applied_state.vault_heights.insert((NamespaceId::new(1), VaultId::new(2)), 100);
         applied_state.namespaces.insert(
-            1,
+            NamespaceId::new(1),
             NamespaceMeta {
-                namespace_id: 1,
-                shard_id: 0,
+                namespace_id: NamespaceId::new(1),
+                shard_id: ShardId::new(0),
                 name: "production".to_string(),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         applied_state.namespaces.insert(
-            2,
+            NamespaceId::new(2),
             NamespaceMeta {
-                namespace_id: 2,
-                shard_id: 0,
+                namespace_id: NamespaceId::new(2),
+                shard_id: ShardId::new(0),
                 name: "staging".to_string(),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
             },
         );
         applied_state.vaults.insert(
-            (1, 1),
+            (NamespaceId::new(1), VaultId::new(1)),
             VaultMeta {
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 name: Some("main-vault".to_string()),
                 deleted: false,
                 last_write_timestamp: 1234567890,
@@ -4458,12 +4622,16 @@ mod tests {
         let restored = target_store.applied_state.read();
 
         // Check sequence counters
-        assert_eq!(restored.sequences.namespace, 3, "namespace counter should be restored");
-        assert_eq!(restored.sequences.vault, 2, "vault counter should be restored");
+        assert_eq!(
+            restored.sequences.namespace,
+            NamespaceId::new(3),
+            "namespace counter should be restored"
+        );
+        assert_eq!(restored.sequences.vault, VaultId::new(2), "vault counter should be restored");
 
         // Check vault heights
-        assert_eq!(restored.vault_heights.get(&(1, 1)), Some(&42));
-        assert_eq!(restored.vault_heights.get(&(1, 2)), Some(&100));
+        assert_eq!(restored.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))), Some(&42));
+        assert_eq!(restored.vault_heights.get(&(NamespaceId::new(1), VaultId::new(2))), Some(&100));
 
         // Check shard tracking
         assert_eq!(restored.shard_height, 55, "shard_height should be restored");
@@ -4474,12 +4642,15 @@ mod tests {
 
         // Check namespace registry
         assert_eq!(restored.namespaces.len(), 2);
-        let ns1 = restored.namespaces.get(&1).expect("namespace 1 should exist");
+        let ns1 = restored.namespaces.get(&NamespaceId::new(1)).expect("namespace 1 should exist");
         assert_eq!(ns1.name, "production");
 
         // Check vault registry
         assert_eq!(restored.vaults.len(), 1);
-        let v1 = restored.vaults.get(&(1, 1)).expect("vault (1,1) should exist");
+        let v1 = restored
+            .vaults
+            .get(&(NamespaceId::new(1), VaultId::new(1)))
+            .expect("vault (1,1) should exist");
         assert_eq!(v1.name, Some("main-vault".to_string()));
 
         // Verify the target store's runtime fields are also updated
@@ -4500,15 +4671,15 @@ mod tests {
                 last_applied: Some(make_log_id(2, 50)),
                 membership: StoredMembership::default(),
                 sequences: SequenceCounters {
-                    namespace: 5,
-                    vault: 10,
+                    namespace: NamespaceId::new(5),
+                    vault: VaultId::new(10),
                     user: 3,
                     user_email: 7,
                     email_verify: 12,
                 },
                 vault_heights: {
                     let mut h = HashMap::new();
-                    h.insert((1, 1), 25);
+                    h.insert((NamespaceId::new(1), VaultId::new(1)), 25);
                     h
                 },
                 vault_health: HashMap::new(),
@@ -4543,11 +4714,14 @@ mod tests {
 
         // Verify state
         assert_eq!(store.current_shard_height(), 30);
-        assert_eq!(store.applied_state.read().sequences.namespace, 5);
-        assert_eq!(store.applied_state.read().sequences.vault, 10);
+        assert_eq!(store.applied_state.read().sequences.namespace, NamespaceId::new(5));
+        assert_eq!(store.applied_state.read().sequences.vault, VaultId::new(10));
         assert_eq!(store.applied_state.read().sequences.user_email, 7);
         assert_eq!(store.applied_state.read().sequences.email_verify, 12);
-        assert_eq!(store.applied_state.read().vault_heights.get(&(1, 1)), Some(&25));
+        assert_eq!(
+            store.applied_state.read().vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
+            Some(&25)
+        );
     }
 
     #[tokio::test]
@@ -4641,7 +4815,9 @@ mod tests {
 
         use openraft::RaftStorage;
 
-        use crate::proto::{BlockAnnouncement, NamespaceId, VaultId};
+        use crate::proto::{
+            BlockAnnouncement, NamespaceId as ProtoNamespaceId, VaultId as ProtoVaultId,
+        };
 
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
@@ -4656,14 +4832,16 @@ mod tests {
         {
             let mut state = store.applied_state.write();
 
-            let create_ns =
-                LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+            let create_ns = LedgerRequest::CreateNamespace {
+                name: "test-ns".to_string(),
+                shard_id: Some(ShardId::new(0)),
+            };
             let (response, _) = store.apply_request(&create_ns, &mut state);
             let namespace_id = match response {
                 LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
                 _ => panic!("expected NamespaceCreated"),
             };
-            assert_eq!(namespace_id, 1);
+            assert_eq!(namespace_id, NamespaceId::new(1));
 
             let create_vault = LedgerRequest::CreateVault {
                 namespace_id,
@@ -4675,14 +4853,14 @@ mod tests {
                 LedgerResponse::VaultCreated { vault_id } => vault_id,
                 _ => panic!("expected VaultCreated"),
             };
-            assert_eq!(vault_id, 1);
+            assert_eq!(vault_id, VaultId::new(1));
         }
 
         // Now call apply_to_state_machine with a Write entry
         // This should broadcast a BlockAnnouncement
         let write_request = LedgerRequest::Write {
-            namespace_id: 1,
-            vault_id: 1,
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
             transactions: vec![], // Empty transactions still create a block
         };
 
@@ -4716,8 +4894,8 @@ mod tests {
         );
 
         // Verify announcement contents
-        assert_eq!(received.namespace_id, Some(NamespaceId { id: 1 }));
-        assert_eq!(received.vault_id, Some(VaultId { id: 1 }));
+        assert_eq!(received.namespace_id, Some(ProtoNamespaceId { id: 1 }));
+        assert_eq!(received.vault_id, Some(ProtoVaultId { id: 1 }));
         assert_eq!(received.height, 1);
         assert!(received.block_hash.is_some(), "block_hash should be set");
         assert!(received.state_root.is_some(), "state_root should be set");
@@ -4740,12 +4918,14 @@ mod tests {
         {
             let mut state = store.applied_state.write();
 
-            let create_ns =
-                LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: Some(0) };
+            let create_ns = LedgerRequest::CreateNamespace {
+                name: "test-ns".to_string(),
+                shard_id: Some(ShardId::new(0)),
+            };
             store.apply_request(&create_ns, &mut state);
 
             let create_vault = LedgerRequest::CreateVault {
-                namespace_id: 1,
+                namespace_id: NamespaceId::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
             };
@@ -4753,8 +4933,11 @@ mod tests {
         }
 
         // Apply write - should not panic even without sender
-        let write_request =
-            LedgerRequest::Write { namespace_id: 1, vault_id: 1, transactions: vec![] };
+        let write_request = LedgerRequest::Write {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            transactions: vec![],
+        };
 
         let entry =
             Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(write_request) };
@@ -4765,5 +4948,261 @@ mod tests {
             LedgerResponse::Write { .. } => {},
             other => panic!("expected WriteCompleted, got {:?}", other),
         }
+    }
+
+    // ========================================================================
+    // Divergence Recovery Lifecycle Tests
+    // ========================================================================
+    //
+    // These tests verify the complete recovery lifecycle through the state
+    // machine: Healthy → Diverged → Recovering (attempts 1..N) → Healthy,
+    // including circuit breaker behavior at MAX_RECOVERY_ATTEMPTS.
+
+    #[tokio::test]
+    async fn test_recovery_lifecycle_healthy_diverged_recovering_healthy() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // 1. Start healthy
+        state
+            .vault_health
+            .insert((NamespaceId::new(1), VaultId::new(1)), VaultHealthStatus::Healthy);
+        assert_eq!(
+            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            Some(&VaultHealthStatus::Healthy)
+        );
+
+        // 2. Transition to Diverged (detected by auto-recovery scanner)
+        let diverge = LedgerRequest::UpdateVaultHealth {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            healthy: false,
+            expected_root: Some([0xAA; 32]),
+            computed_root: Some([0xBB; 32]),
+            diverged_at_height: Some(100),
+            recovery_attempt: None,
+            recovery_started_at: None,
+        };
+        let (response, _) = store.apply_request(&diverge, &mut state);
+        assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
+        assert!(matches!(
+            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            Some(VaultHealthStatus::Diverged { at_height: 100, .. })
+        ));
+
+        // 3. Transition to Recovering attempt 1
+        let now = chrono::Utc::now().timestamp();
+        let recover1 = LedgerRequest::UpdateVaultHealth {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            healthy: false,
+            expected_root: None,
+            computed_root: None,
+            diverged_at_height: None,
+            recovery_attempt: Some(1),
+            recovery_started_at: Some(now),
+        };
+        let (response, _) = store.apply_request(&recover1, &mut state);
+        assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
+        assert!(matches!(
+            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            Some(VaultHealthStatus::Recovering { attempt: 1, .. })
+        ));
+
+        // Recovering vaults do NOT block writes (only Diverged does)
+        // Recovery happens in the background via replay, not inline
+
+        // 4. Recovery succeeds → Healthy
+        let healthy = LedgerRequest::UpdateVaultHealth {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            healthy: true,
+            expected_root: None,
+            computed_root: None,
+            diverged_at_height: None,
+            recovery_attempt: None,
+            recovery_started_at: None,
+        };
+        let (response, _) = store.apply_request(&healthy, &mut state);
+        assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
+        assert_eq!(
+            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            Some(&VaultHealthStatus::Healthy)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recovery_repeated_failure_escalating_attempts() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Start diverged
+        state.vault_health.insert(
+            (NamespaceId::new(1), VaultId::new(1)),
+            VaultHealthStatus::Diverged {
+                expected: [0xAA; 32],
+                computed: [0xBB; 32],
+                at_height: 50,
+            },
+        );
+
+        let base_time = chrono::Utc::now().timestamp();
+
+        // Simulate escalating recovery attempts (1, 2, 3)
+        for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
+            let recover = LedgerRequest::UpdateVaultHealth {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                healthy: false,
+                expected_root: None,
+                computed_root: None,
+                diverged_at_height: None,
+                recovery_attempt: Some(attempt),
+                recovery_started_at: Some(base_time + i64::from(attempt) * 10),
+            };
+            let (response, _) = store.apply_request(&recover, &mut state);
+            assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
+
+            match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
+                Some(VaultHealthStatus::Recovering { attempt: a, .. }) => {
+                    assert_eq!(*a, attempt);
+                },
+                other => panic!("expected Recovering with attempt {attempt}, got {:?}", other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recovery_circuit_breaker_max_attempts() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Start diverged
+        state.vault_health.insert(
+            (NamespaceId::new(1), VaultId::new(1)),
+            VaultHealthStatus::Diverged {
+                expected: [0xAA; 32],
+                computed: [0xBB; 32],
+                at_height: 50,
+            },
+        );
+
+        // Exhaust all attempts
+        let now = chrono::Utc::now().timestamp();
+        for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
+            let recover = LedgerRequest::UpdateVaultHealth {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                healthy: false,
+                expected_root: None,
+                computed_root: None,
+                diverged_at_height: None,
+                recovery_attempt: Some(attempt),
+                recovery_started_at: Some(now),
+            };
+            let _ = store.apply_request(&recover, &mut state);
+        }
+
+        // Verify vault is at max recovery attempt
+        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
+            Some(VaultHealthStatus::Recovering { attempt, .. }) => {
+                assert_eq!(*attempt, MAX_RECOVERY_ATTEMPTS);
+            },
+            other => panic!("expected Recovering at max attempt, got {:?}", other),
+        }
+
+        // Writes should still go through when in Recovering state
+        // (only Diverged blocks writes per DESIGN.md)
+        // The circuit breaker is enforced by AutoRecoveryJob not attempting
+        // recovery beyond MAX_RECOVERY_ATTEMPTS
+    }
+
+    #[tokio::test]
+    async fn test_diverged_vault_blocks_writes_recovering_does_not() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace so writes don't fail for missing namespace
+        let create_ns = LedgerRequest::CreateNamespace {
+            name: "test".to_string(),
+            shard_id: Some(ShardId::new(0)),
+        };
+        store.apply_request(&create_ns, &mut state);
+        let create_vault = LedgerRequest::CreateVault {
+            namespace_id: NamespaceId::new(1),
+            name: Some("vault".to_string()),
+            retention_policy: None,
+        };
+        store.apply_request(&create_vault, &mut state);
+
+        // Diverged blocks writes
+        state.vault_health.insert(
+            (NamespaceId::new(1), VaultId::new(1)),
+            VaultHealthStatus::Diverged { expected: [1; 32], computed: [2; 32], at_height: 1 },
+        );
+        let write = LedgerRequest::Write {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            transactions: vec![],
+        };
+        let (response, _) = store.apply_request(&write, &mut state);
+        assert!(matches!(response, LedgerResponse::Error { .. }));
+
+        // Recovering does NOT block writes (recovery is background replay)
+        state.vault_health.insert(
+            (NamespaceId::new(1), VaultId::new(1)),
+            VaultHealthStatus::Recovering {
+                started_at: chrono::Utc::now().timestamp(),
+                attempt: 1,
+            },
+        );
+        let (response, _) = store.apply_request(&write, &mut state);
+        // Should succeed (Write response, not Error)
+        assert!(
+            matches!(response, LedgerResponse::Write { .. }),
+            "expected Write response during Recovering, got {:?}",
+            response
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vault_health_transition_idempotent() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Mark healthy twice
+        let healthy = LedgerRequest::UpdateVaultHealth {
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(1),
+            healthy: true,
+            expected_root: None,
+            computed_root: None,
+            diverged_at_height: None,
+            recovery_attempt: None,
+            recovery_started_at: None,
+        };
+        let (r1, _) = store.apply_request(&healthy, &mut state);
+        let (r2, _) = store.apply_request(&healthy, &mut state);
+        assert!(matches!(r1, LedgerResponse::VaultHealthUpdated { success: true }));
+        assert!(matches!(r2, LedgerResponse::VaultHealthUpdated { success: true }));
+        assert_eq!(
+            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            Some(&VaultHealthStatus::Healthy)
+        );
     }
 }

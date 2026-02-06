@@ -139,7 +139,8 @@ impl CommitSlot {
 
 /// Database header structure with dual-slot commit for crash safety.
 ///
-/// Layout (768 bytes total):
+/// # Layout (768 bytes total)
+///
 /// - Bytes 0-15: Common header (magic, version, page_size, god_byte)
 /// - Bytes 16-79: Commit slot 0 (64 bytes)
 /// - Bytes 80-143: Commit slot 1 (64 bytes)
@@ -148,6 +149,34 @@ impl CommitSlot {
 /// The "god byte" (byte 15) determines which slot is primary:
 /// - Bit 0: Primary slot index (0 or 1)
 /// - Bit 1: Recovery required flag (set on commit, cleared on clean shutdown)
+///
+/// # Dual-Slot Commit Safety Guarantees
+///
+/// The protocol ensures **at least one valid commit slot** survives any crash:
+///
+/// 1. **Write to secondary slot:** New state is written to the inactive slot while the primary
+///    remains untouched. If a crash occurs here, the primary slot is still valid.
+///
+/// 2. **First fsync:** Ensures the secondary slot data is durable on disk. After this point, the
+///    secondary slot has a valid XXH3-64 checksum.
+///
+/// 3. **Flip the god byte:** The primary slot index toggles, making the secondary become primary.
+///    This is the atomic commit point — a single byte write.
+///
+/// 4. **Second fsync:** Ensures the god byte flip is durable.
+///
+/// **Crash scenarios:**
+/// - Before step 2: Old primary is valid, secondary may be partial → recover from primary.
+/// - Between steps 2-4: Both slots have valid checksums → either is usable.
+/// - After step 4: New primary is valid.
+///
+/// **Recovery:** On open, both slots are read. The slot indicated by the god byte is tried
+/// first. If its checksum is invalid (partial write), the other slot is used as fallback.
+/// If both checksums are invalid, the database is unrecoverable (requires external restore).
+///
+/// **Recovery flag (bit 1):** Set before commit, cleared on clean shutdown. If set on open,
+/// the free list is rebuilt by scanning all reachable pages — this handles the case where
+/// a crash occurred after committing data pages but before persisting the free list.
 #[derive(Debug, Clone)]
 pub struct DatabaseHeader {
     /// Magic number: "INFERADB"

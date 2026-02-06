@@ -100,6 +100,109 @@ where
         })
 }
 
+/// Execute an async operation with retry and cancellation support.
+///
+/// Behaves identically to [`with_retry`], but races each attempt against the
+/// provided [`CancellationToken`]. If the token is cancelled before the
+/// operation completes, the function returns `SdkError::Cancelled` immediately
+/// without further retries.
+///
+/// # Cancellation Semantics
+///
+/// - If the token is already cancelled at call time, returns `Cancelled` immediately.
+/// - If the token is cancelled during an attempt, the in-flight attempt is dropped and `Cancelled`
+///   is returned.
+/// - If the token is cancelled during a backoff sleep, the sleep is interrupted and `Cancelled` is
+///   returned.
+///
+/// # Example
+///
+/// ```ignore
+/// use inferadb_ledger_sdk::{with_retry_cancellable, RetryPolicy, SdkError};
+/// use tokio_util::sync::CancellationToken;
+///
+/// let policy = RetryPolicy::default();
+/// let token = CancellationToken::new();
+///
+/// let result = with_retry_cancellable(&policy, &token, || async {
+///     Ok::<_, SdkError>("success")
+/// }).await;
+/// ```
+pub async fn with_retry_cancellable<F, Fut, T>(
+    policy: &RetryPolicy,
+    token: &tokio_util::sync::CancellationToken,
+    mut operation: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    // Fail fast if already cancelled
+    if token.is_cancelled() {
+        return Err(SdkError::Cancelled);
+    }
+
+    let mut attempt: u32 = 0;
+    let mut backoff_duration = policy.initial_backoff;
+
+    loop {
+        attempt += 1;
+
+        // Race the operation against cancellation
+        let result = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                return Err(SdkError::Cancelled);
+            }
+            result = operation() => result,
+        };
+
+        match result {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                // Non-retryable or out of attempts — return immediately
+                if !err.is_retryable() || attempt >= policy.max_attempts {
+                    if err.is_retryable() {
+                        return Err(RetryExhaustedSnafu {
+                            attempts: attempt,
+                            last_error: err.to_string(),
+                        }
+                        .build());
+                    }
+                    return Err(err);
+                }
+
+                // Apply jitter to backoff
+                let jittered = apply_jitter(backoff_duration, policy.jitter);
+
+                tracing::debug!(
+                    attempt = attempt,
+                    backoff_ms = jittered.as_millis() as u64,
+                    error = %err,
+                    "retrying after backoff (cancellable)"
+                );
+
+                // Sleep with cancellation
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        return Err(SdkError::Cancelled);
+                    }
+                    () = tokio::time::sleep(jittered) => {}
+                }
+
+                // Advance backoff for next attempt
+                backoff_duration = std::cmp::min(
+                    Duration::from_nanos(
+                        (backoff_duration.as_nanos() as f64 * policy.multiplier) as u64,
+                    ),
+                    policy.max_backoff,
+                );
+            },
+        }
+    }
+}
+
 /// Apply jitter to a duration.
 ///
 /// Jitter adds randomness in the range `[dur * (1 - factor), dur * (1 + factor)]`
@@ -336,6 +439,188 @@ mod tests {
             // With factor clamped to 1.0, should be within [0, 2000]
             assert!(jittered_ms <= 2000, "jittered duration {}ms exceeds maximum", jittered_ms);
         }
+    }
+
+    // =========================================================================
+    // Cancellable retry tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_cancellable_success_on_first_attempt() {
+        let policy = test_policy();
+        let token = tokio_util::sync::CancellationToken::new();
+
+        let result =
+            with_retry_cancellable(&policy, &token, || async { Ok::<_, SdkError>("success") })
+                .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "success");
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_pre_cancelled_token() {
+        let policy = test_policy();
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+
+        let result = with_retry_cancellable(&policy, &token, || async {
+            Ok::<_, SdkError>("should not reach")
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SdkError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_cancelled_during_operation() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(100),
+            multiplier: 2.0,
+            jitter: 0.0,
+        };
+        let token = tokio_util::sync::CancellationToken::new();
+        let token_clone = token.clone();
+
+        // Cancel after 50ms — the operation takes 200ms
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            token_clone.cancel();
+        });
+
+        let result = with_retry_cancellable(&policy, &token, || async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<_, SdkError>("too slow")
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SdkError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_cancelled_during_backoff() {
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            initial_backoff: Duration::from_secs(10), // Very long backoff
+            max_backoff: Duration::from_secs(10),
+            multiplier: 1.0,
+            jitter: 0.0,
+        };
+        let token = tokio_util::sync::CancellationToken::new();
+        let token_clone = token.clone();
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        // Cancel after 50ms — first attempt fails instantly, backoff is 10s
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            token_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let result = with_retry_cancellable(&policy, &token, || {
+            let count = Arc::clone(&call_count_clone);
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<String, _>(
+                    RpcSnafu { code: Code::Unavailable, message: "fail".to_string() }.build(),
+                )
+            }
+        })
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SdkError::Cancelled));
+        // Should have been called once before cancellation during backoff
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        // Should not have waited the full 10s backoff
+        assert!(elapsed < Duration::from_secs(1), "took {:?}", elapsed);
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_retries_until_success() {
+        let policy = test_policy();
+        let token = tokio_util::sync::CancellationToken::new();
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = with_retry_cancellable(&policy, &token, || {
+            let count = Arc::clone(&call_count_clone);
+            async move {
+                let current = count.fetch_add(1, Ordering::SeqCst);
+                if current == 0 {
+                    Err(RpcSnafu { code: Code::Unavailable, message: "transient".to_string() }
+                        .build())
+                } else {
+                    Ok::<_, SdkError>("success")
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "success");
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_exhausts_retries() {
+        let policy = test_policy(); // max_attempts = 3
+        let token = tokio_util::sync::CancellationToken::new();
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = with_retry_cancellable(&policy, &token, || {
+            let count = Arc::clone(&call_count_clone);
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<String, _>(
+                    RpcSnafu { code: Code::Unavailable, message: "always fails".to_string() }
+                        .build(),
+                )
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SdkError::RetryExhausted { .. }));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_non_retryable_returns_immediately() {
+        let policy = test_policy();
+        let token = tokio_util::sync::CancellationToken::new();
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = with_retry_cancellable(&policy, &token, || {
+            let count = Arc::clone(&call_count_clone);
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<String, _>(
+                    RpcSnafu { code: Code::InvalidArgument, message: "bad".to_string() }.build(),
+                )
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SdkError::Rpc { code: Code::InvalidArgument, .. }));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_error_is_not_retryable() {
+        // Ensure that Cancelled errors short-circuit the retry loop
+        let err = SdkError::Cancelled;
+        assert!(!err.is_retryable());
     }
 }
 

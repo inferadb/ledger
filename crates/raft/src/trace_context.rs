@@ -514,4 +514,117 @@ mod tests {
         assert_eq!(ctx.trace_flags, 0x00);
         assert!(!ctx.is_sampled());
     }
+
+    #[test]
+    fn test_child_inject_extract_roundtrip() {
+        // Simulates ForwardClient: create child span, inject into metadata,
+        // extract on receiving side — verifying trace continuity across shard forwarding.
+        let parent = TraceContext {
+            trace_id: "0af7651916cd43dd8448eb211c80319c".to_string(),
+            span_id: "b7ad6b7169203331".to_string(),
+            parent_span_id: None,
+            trace_flags: 0x01,
+            trace_state: Some("congo=t61rcWkgMzE".to_string()),
+        };
+
+        // ForwardClient creates a child and injects it
+        let child = parent.child();
+        let mut metadata = MetadataMap::new();
+        inject_into_metadata(&mut metadata, &child);
+
+        // Receiving service extracts the context
+        let extracted = extract_or_generate(&metadata);
+
+        // Trace ID is preserved across the hop
+        assert_eq!(extracted.trace_id, parent.trace_id);
+
+        // The extracted context's parent_span_id should be the child's span_id
+        // (because inject writes child's traceparent, and extract parses parent_id from it)
+        assert_eq!(extracted.parent_span_id.as_deref(), Some(child.span_id.as_str()));
+
+        // Trace flags propagate
+        assert_eq!(extracted.trace_flags, parent.trace_flags);
+
+        // Tracestate propagates
+        assert_eq!(extracted.trace_state, parent.trace_state);
+    }
+
+    #[test]
+    fn test_multi_hop_trace_continuity() {
+        // Simulates trace propagation across 3 services:
+        // Client → Service A → Service B → Service C
+        // Each hop creates a child span and injects/extracts.
+        let client_ctx = TraceContext::new();
+        let original_trace_id = client_ctx.trace_id.clone();
+
+        // Hop 1: Client → Service A
+        let child_a = client_ctx.child();
+        let mut metadata_a = MetadataMap::new();
+        inject_into_metadata(&mut metadata_a, &child_a);
+        let service_a_ctx = extract_or_generate(&metadata_a);
+
+        // Hop 2: Service A → Service B
+        let child_b = service_a_ctx.child();
+        let mut metadata_b = MetadataMap::new();
+        inject_into_metadata(&mut metadata_b, &child_b);
+        let service_b_ctx = extract_or_generate(&metadata_b);
+
+        // Hop 3: Service B → Service C
+        let child_c = service_b_ctx.child();
+        let mut metadata_c = MetadataMap::new();
+        inject_into_metadata(&mut metadata_c, &child_c);
+        let service_c_ctx = extract_or_generate(&metadata_c);
+
+        // All contexts share the same trace_id
+        assert_eq!(service_a_ctx.trace_id, original_trace_id);
+        assert_eq!(service_b_ctx.trace_id, original_trace_id);
+        assert_eq!(service_c_ctx.trace_id, original_trace_id);
+
+        // Each service has a unique span_id
+        let span_ids = [
+            &client_ctx.span_id,
+            &child_a.span_id,
+            &service_a_ctx.span_id,
+            &child_b.span_id,
+            &service_b_ctx.span_id,
+            &child_c.span_id,
+            &service_c_ctx.span_id,
+        ];
+        for (i, a) in span_ids.iter().enumerate() {
+            for (j, b) in span_ids.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "span_ids[{i}] == span_ids[{j}]");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_background_job_trace_context() {
+        // Background jobs create a fresh TraceContext (no parent).
+        // Verify the generated context is valid for logging.
+        let ctx = TraceContext::new();
+
+        assert_eq!(ctx.trace_id.len(), 32);
+        assert!(ctx.trace_id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(ctx.span_id.len(), 16);
+        assert!(ctx.parent_span_id.is_none());
+        assert!(ctx.is_sampled());
+
+        // trace_id can be used as a Display field in tracing macros
+        let trace_id_str = ctx.trace_id.to_string();
+        assert_eq!(trace_id_str.len(), 32);
+    }
+
+    #[test]
+    fn test_inject_without_trace_context_generates_new() {
+        // When no trace context is provided (e.g. None in ForwardClient),
+        // the receiving side generates a fresh context.
+        let metadata = MetadataMap::new();
+        let ctx = extract_or_generate(&metadata);
+
+        assert_eq!(ctx.trace_id.len(), 32);
+        assert!(ctx.parent_span_id.is_none());
+        assert!(ctx.is_sampled());
+    }
 }

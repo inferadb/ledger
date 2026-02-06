@@ -1,9 +1,37 @@
-//! Bucket-based state commitment.
+//! Bucket-based state commitment for incremental state root computation.
 //!
-//! Each vault's state is divided into 256 buckets using seahash % 256.
-//! Only dirty buckets are rehashed when computing state_root.
+//! # Design Rationale
 //!
-//! This provides O(k) state root updates where k = number of dirty buckets.
+//! Each vault's entities and relationships are distributed across 256 buckets
+//! using `seahash(key) % 256`. This bucketing scheme serves two purposes:
+//!
+//! 1. **Incremental state roots:** When a write modifies entities in bucket B, only bucket B's hash
+//!    needs recomputation — the other 255 bucket roots are unchanged. The vault's `state_root` is
+//!    then `SHA-256(bucket_root[0] || ... || bucket_root[255])`. This reduces state root
+//!    computation from O(n) to O(k) where k = number of dirty buckets per commit (typically 1-5 for
+//!    a write batch).
+//!
+//! 2. **Key distribution:** Using seahash (a non-cryptographic hash) for bucket assignment provides
+//!    uniform distribution across buckets. Cryptographic strength is not needed here because the
+//!    bucket assignment has no security implications — SHA-256 is used for the actual commitment
+//!    hashes.
+//!
+//! # Why 256 Buckets?
+//!
+//! The value 256 balances three concerns:
+//! - **Granularity:** With 1M entities, each bucket averages ~3,900 entries. A single write
+//!   rehashes only that bucket, not the full dataset.
+//! - **State root overhead:** 256 × 32-byte hashes = 8 KB per vault, stored in `VaultCommitment`.
+//!   This fits comfortably in L1 cache.
+//! - **Snapshot metadata:** Bucket roots are stored in snapshots for incremental state restoration.
+//!   256 is compact enough to include in snapshot headers.
+//!
+//! # Dirty Tracking
+//!
+//! `VaultCommitment` maintains a `BTreeSet<u8>` of dirty bucket IDs. On each write,
+//! the affected bucket is marked dirty via `mark_dirty_by_key()`. At commit time,
+//! only dirty buckets are rehashed (by iterating all entities in that bucket from
+//! the storage layer), then `clear_dirty()` resets the set for the next batch.
 
 use std::collections::BTreeSet;
 
@@ -26,6 +54,11 @@ pub struct VaultCommitment {
 
 impl VaultCommitment {
     /// Create a new vault commitment with all empty buckets.
+    ///
+    /// All 256 bucket roots are initialized to `EMPTY_HASH`. Use
+    /// [`mark_dirty_by_key`](Self::mark_dirty_by_key) after mutations, then
+    /// [`compute_state_root`](Self::compute_state_root) to derive the vault's
+    /// state root from the dirty buckets.
     pub fn new() -> Self {
         Self { bucket_roots: [EMPTY_HASH; NUM_BUCKETS], dirty_buckets: BTreeSet::new() }
     }

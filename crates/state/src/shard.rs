@@ -388,7 +388,7 @@ impl<B: StorageBackend> ShardManager<B> {
             vault_meta.insert(
                 vault_state.vault_id,
                 VaultMeta {
-                    namespace_id: 0, // Would need to be stored in snapshot
+                    namespace_id: NamespaceId::new(0), // Would need to be stored in snapshot
                     height: vault_state.vault_height,
                     state_root: vault_state.state_root,
                     previous_hash: inferadb_ledger_types::ZERO_HASH, // Would need snapshot
@@ -453,7 +453,7 @@ mod tests {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
 
-        let manager = ShardManager::new(1, engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
 
         (manager, temp)
     }
@@ -462,19 +462,19 @@ mod tests {
     fn test_register_vault() {
         let (manager, _temp) = create_test_manager();
 
-        manager.register_vault(1, 1);
-        manager.register_vault(1, 2);
+        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
+        manager.register_vault(NamespaceId::new(1), VaultId::new(2));
 
         let vaults = manager.list_vaults();
         assert_eq!(vaults.len(), 2);
-        assert!(vaults.contains(&1));
-        assert!(vaults.contains(&2));
+        assert!(vaults.contains(&VaultId::new(1)));
+        assert!(vaults.contains(&VaultId::new(2)));
     }
 
     #[test]
     fn test_apply_block() {
         let (manager, _temp) = create_test_manager();
-        manager.register_vault(1, 1);
+        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
 
         // Create a block with a SetEntity operation
         let tx = Transaction {
@@ -492,22 +492,23 @@ mod tests {
         };
 
         // Compute expected state root
-        let _ = manager.state.apply_operations(1, &tx.operations, 1).expect("apply");
-        let expected_root = manager.state.compute_state_root(1).expect("compute root");
+        let _ = manager.state.apply_operations(VaultId::new(1), &tx.operations, 1).expect("apply");
+        let expected_root =
+            manager.state.compute_state_root(VaultId::new(1)).expect("compute root");
 
         // Reset state and apply via block
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
-        let manager = ShardManager::new(1, engine.db(), temp.join("snapshots"), 3);
-        manager.register_vault(1, 1);
+        let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
+        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
 
         let block = ShardBlock {
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 vault_height: 1,
                 previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
                 transactions: vec![tx],
@@ -523,7 +524,7 @@ mod tests {
         manager.apply_block(&block).expect("apply block");
 
         // Verify vault metadata updated
-        let meta = manager.get_vault_meta(1).expect("vault meta");
+        let meta = manager.get_vault_meta(VaultId::new(1)).expect("vault meta");
         assert_eq!(meta.height, 1);
         assert_eq!(meta.state_root, expected_root);
     }
@@ -531,7 +532,7 @@ mod tests {
     #[test]
     fn test_state_root_mismatch() {
         let (manager, _temp) = create_test_manager();
-        manager.register_vault(1, 1);
+        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
 
         let tx = Transaction {
             id: [0u8; 16],
@@ -549,12 +550,12 @@ mod tests {
 
         // Block with wrong state root
         let block = ShardBlock {
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 vault_height: 1,
                 previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
                 transactions: vec![tx],
@@ -571,7 +572,7 @@ mod tests {
         assert!(matches!(result, Err(ShardError::StateRootMismatch { .. })));
 
         // Vault should be marked diverged
-        let health = manager.vault_health(1).expect("health");
+        let health = manager.vault_health(VaultId::new(1)).expect("health");
         assert!(matches!(health, VaultHealth::Diverged { .. }));
     }
 
@@ -579,9 +580,9 @@ mod tests {
     fn test_snapshot_and_restore() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
-        let manager = ShardManager::new(1, engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
 
-        manager.register_vault(1, 1);
+        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
 
         // Add some data
         let ops = vec![Operation::SetEntity {
@@ -590,13 +591,13 @@ mod tests {
             condition: None,
             expires_at: None,
         }];
-        manager.state.apply_operations(1, &ops, 1).expect("apply");
-        manager.state.compute_state_root(1).expect("compute root");
+        manager.state.apply_operations(VaultId::new(1), &ops, 1).expect("apply");
+        manager.state.compute_state_root(VaultId::new(1)).expect("compute root");
 
         // Update vault meta
         {
             let mut meta = manager.vault_meta.write();
-            if let Some(m) = meta.get_mut(&1) {
+            if let Some(m) = meta.get_mut(&VaultId::new(1)) {
                 m.height = 1;
             }
         }
@@ -607,13 +608,14 @@ mod tests {
 
         // Create new manager and restore
         let engine2 = InMemoryStorageEngine::open().expect("open engine");
-        let manager2 = ShardManager::new(1, engine2.db(), temp.path().join("snapshots"), 3);
+        let manager2 =
+            ShardManager::new(ShardId::new(1), engine2.db(), temp.path().join("snapshots"), 3);
 
         let snapshot = Snapshot::read_from_file(&snapshot_path).expect("read snapshot");
         manager2.restore_from_snapshot(&snapshot).expect("restore");
 
         // Verify data restored
-        let entity = manager2.state.get_entity(1, b"key1").expect("get entity");
+        let entity = manager2.state.get_entity(VaultId::new(1), b"key1").expect("get entity");
         assert!(entity.is_some());
         assert_eq!(entity.unwrap().value, b"value1");
     }

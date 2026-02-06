@@ -18,6 +18,11 @@ use crate::{
 };
 
 /// Health service implementation.
+///
+/// Provides three-probe health checking for Kubernetes orchestration:
+/// - **Startup**: passes once initialization is complete
+/// - **Liveness**: passes when the event loop is responsive
+/// - **Readiness**: passes when the node can serve traffic
 pub struct HealthServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -25,6 +30,8 @@ pub struct HealthServiceImpl {
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
+    /// Shared node health state for lifecycle probes.
+    health_state: crate::graceful_shutdown::HealthState,
 }
 
 impl HealthServiceImpl {
@@ -33,8 +40,9 @@ impl HealthServiceImpl {
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
+        health_state: crate::graceful_shutdown::HealthState,
     ) -> Self {
-        Self { raft, state, applied_state }
+        Self { raft, state, applied_state, health_state }
     }
 }
 
@@ -48,9 +56,10 @@ impl HealthService for HealthServiceImpl {
 
         // If a vault_id is specified, check vault health
         if let Some(vault_id_proto) = req.vault_id {
-            let vault_id = vault_id_proto.id;
+            let vault_id = inferadb_ledger_types::VaultId::new(vault_id_proto.id);
             // Get namespace_id from request, default to 0 if not provided
-            let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+            let namespace_id =
+                inferadb_ledger_types::NamespaceId::new(req.namespace_id.map_or(0, |n| n.id));
 
             let mut details = std::collections::HashMap::new();
 
@@ -107,7 +116,7 @@ impl HealthService for HealthServiceImpl {
             }));
         }
 
-        // Check overall node health
+        // Check overall node health using three-probe pattern
         let metrics = self.raft.metrics().borrow().clone();
         let mut details = std::collections::HashMap::new();
 
@@ -121,13 +130,28 @@ impl HealthService for HealthServiceImpl {
             metrics.membership_config.membership().nodes().count().to_string(),
         );
 
-        // Determine health status based on Raft state
-        let (status, message) = if metrics.current_leader.is_some() {
-            (HealthStatus::Healthy, "Node is healthy and has a leader")
-        } else if metrics.vote.leader_id.node_id == 0 {
-            (HealthStatus::Degraded, "Node is starting up")
-        } else {
-            (HealthStatus::Degraded, "No leader elected")
+        // Include Kubernetes probe results in details
+        details.insert("startup".to_string(), self.health_state.startup_check().to_string());
+        details.insert("liveness".to_string(), self.health_state.liveness_check().to_string());
+        details.insert("readiness".to_string(), self.health_state.readiness_check().to_string());
+        details.insert("phase".to_string(), format!("{:?}", self.health_state.phase()));
+
+        // Determine health status based on node phase and Raft state
+        let phase = self.health_state.phase();
+        let (status, message) = match phase {
+            crate::graceful_shutdown::NodePhase::Starting => {
+                (HealthStatus::Degraded, "Node is starting up")
+            },
+            crate::graceful_shutdown::NodePhase::ShuttingDown => {
+                (HealthStatus::Unavailable, "Node is shutting down")
+            },
+            crate::graceful_shutdown::NodePhase::Ready => {
+                if metrics.current_leader.is_some() {
+                    (HealthStatus::Healthy, "Node is healthy and has a leader")
+                } else {
+                    (HealthStatus::Degraded, "No leader elected")
+                }
+            },
         };
 
         Ok(Response::new(HealthCheckResponse {

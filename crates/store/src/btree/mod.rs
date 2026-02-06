@@ -17,8 +17,8 @@ pub mod node;
 pub mod split;
 
 use cursor::{Range, RangeIterState, SeekResult, cursor_ops};
-use node::{BranchNode, LeafNode, SearchResult};
-use split::{split_branch, split_leaf_for_key};
+use node::{BranchNode, LeafNode, LeafNodeRef, SearchResult};
+use split::{can_merge_leaves, leaf_fill_factor, merge_leaves, split_branch, split_leaf_for_key};
 
 use crate::{
     error::{Error, PageId, PageType, Result},
@@ -48,6 +48,15 @@ pub trait PageProvider {
 
     /// Get the current transaction ID.
     fn txn_id(&self) -> u64;
+}
+
+/// Statistics returned by B+ tree compaction.
+#[derive(Debug, Clone, Default)]
+pub struct CompactionStats {
+    /// Number of leaf page merges performed.
+    pub pages_merged: u64,
+    /// Number of pages freed (returned to allocator).
+    pub pages_freed: u64,
 }
 
 /// B+ tree structure for a single table.
@@ -132,6 +141,103 @@ impl<P: PageProvider> BTree<P> {
                     return Err(Error::PageTypeMismatch {
                         expected: PageType::BTreeLeaf,
                         found: page_type,
+                    });
+                },
+            }
+        }
+    }
+
+    /// Find the next leaf page after the one containing `key`.
+    ///
+    /// Descends from the root tracking the path, then backtracks to find
+    /// the nearest ancestor with a right sibling child. Returns `None` if
+    /// the key is in the rightmost leaf (no next leaf exists).
+    fn find_next_leaf(&self, key: &[u8]) -> Result<Option<PageId>> {
+        // Collect the path from root to leaf: (branch_page_id, child_index_taken).
+        // child_index is the separator index whose left child we followed,
+        // or cell_count if we followed rightmost_child.
+        let mut path: Vec<(PageId, usize)> = Vec::new();
+        let mut current = self.root_page;
+
+        loop {
+            let page = self.provider.read_page(current)?;
+            match page.page_type()? {
+                PageType::BTreeLeaf => break,
+                PageType::BTreeBranch => {
+                    let mut page = page;
+                    let branch = BranchNode::from_page(&mut page)?;
+                    let count = branch.cell_count() as usize;
+
+                    // Determine which child we descend into.
+                    let mut child_idx = count; // default: rightmost_child
+                    for i in 0..count {
+                        let sep_key = branch.key(i);
+                        if key < sep_key {
+                            child_idx = i;
+                            break;
+                        }
+                    }
+
+                    let child_page = if child_idx < count {
+                        branch.child(child_idx)
+                    } else {
+                        branch.rightmost_child()
+                    };
+
+                    path.push((current, child_idx));
+                    current = child_page;
+                },
+                pt => {
+                    return Err(Error::PageTypeMismatch {
+                        expected: PageType::BTreeLeaf,
+                        found: pt,
+                    });
+                },
+            }
+        }
+
+        // Backtrack to find the nearest ancestor with a right sibling.
+        while let Some((branch_page_id, child_idx)) = path.pop() {
+            let mut page = self.provider.read_page(branch_page_id)?;
+            let branch = BranchNode::from_page(&mut page)?;
+            let count = branch.cell_count() as usize;
+
+            // If we followed child(i) where i < count, the next child is
+            // child(i+1) if i+1 < count, otherwise rightmost_child.
+            // If we followed rightmost_child (child_idx == count), no right sibling.
+            if child_idx < count {
+                let next_child = if child_idx + 1 < count {
+                    branch.child(child_idx + 1)
+                } else {
+                    branch.rightmost_child()
+                };
+                // Descend to the leftmost leaf of next_child.
+                return self.find_first_leaf_from(next_child).map(Some);
+            }
+            // child_idx == count means we were in the rightmost subtree;
+            // continue backtracking.
+        }
+
+        // Exhausted path — current leaf is the rightmost leaf.
+        Ok(None)
+    }
+
+    /// Find the leftmost leaf starting from a given page.
+    fn find_first_leaf_from(&self, start: PageId) -> Result<PageId> {
+        let mut current = start;
+        loop {
+            let page = self.provider.read_page(current)?;
+            match page.page_type()? {
+                PageType::BTreeLeaf => return Ok(current),
+                PageType::BTreeBranch => {
+                    let mut page = page;
+                    let branch = BranchNode::from_page(&mut page)?;
+                    current = branch.child(0);
+                },
+                pt => {
+                    return Err(Error::PageTypeMismatch {
+                        expected: PageType::BTreeLeaf,
+                        found: pt,
                     });
                 },
             }
@@ -534,28 +640,223 @@ impl<P: PageProvider> BTree<P> {
             }
         }
     }
-}
 
-/// Increment a key lexicographically to get its successor.
-///
-/// For fixed-width big-endian encoded keys, this properly increments
-/// the key as a large integer. Returns None if the key is all 0xFF
-/// (maximum value, no successor exists).
-fn increment_key(key: &[u8]) -> Option<Vec<u8>> {
-    let mut result = key.to_vec();
-
-    // Increment from the least significant byte (rightmost)
-    for i in (0..result.len()).rev() {
-        if result[i] == 0xFF {
-            result[i] = 0x00; // Carry
-        } else {
-            result[i] += 1;
-            return Some(result);
+    /// Compact the B+ tree by merging underfull leaf nodes.
+    ///
+    /// Walks all leaves left-to-right. When a leaf's fill factor is below
+    /// `min_fill_factor`, attempts to merge it with its right sibling
+    /// (if the combined entries fit in one page). After merging, the
+    /// separator key is removed from the parent branch and the right
+    /// sibling page is freed.
+    ///
+    /// # Arguments
+    /// * `min_fill_factor` — Threshold below which a leaf is considered underfull (0.0 to 1.0,
+    ///   default recommendation: 0.4).
+    ///
+    /// # Returns
+    /// Statistics about the compaction: pages merged and pages freed.
+    pub fn compact(&mut self, min_fill_factor: f64) -> Result<CompactionStats> {
+        if self.root_page == 0 {
+            return Ok(CompactionStats::default());
         }
+
+        let mut stats = CompactionStats::default();
+
+        // Collect all (leaf_page_id, parent_page_id, child_index_in_parent) tuples
+        // by walking the tree. We collect first to avoid borrowing issues.
+        let mut leaf_info = self.collect_leaf_info()?;
+
+        // Process pairs of adjacent leaves that share the same parent.
+        // We iterate with a window: for each underfull leaf, check if it can
+        // merge with the next leaf (which must share the same parent branch).
+        // After each merge, re-collect leaf info since the tree structure changed.
+        let mut i = 0;
+        while i + 1 < leaf_info.len() {
+            let (left_id, left_parent_id, _left_child_idx) = leaf_info[i];
+            let (right_id, right_parent_id, _right_child_idx) = leaf_info[i + 1];
+
+            // Only merge siblings under the same parent branch
+            if left_parent_id != right_parent_id {
+                i += 1;
+                continue;
+            }
+
+            let left_page = self.provider.read_page(left_id)?;
+            let left_fill = leaf_fill_factor(&left_page)?;
+
+            if left_fill >= min_fill_factor {
+                i += 1;
+                continue;
+            }
+
+            let right_page = self.provider.read_page(right_id)?;
+
+            // Check if combined entries fit in one page
+            if !can_merge_leaves(&left_page, &right_page)? {
+                i += 1;
+                continue;
+            }
+
+            // Perform the merge: move all right entries into left
+            let mut left_page = left_page;
+            let mut right_page = right_page;
+            merge_leaves(&mut left_page, &mut right_page)?;
+            self.provider.write_page(left_page);
+
+            // Update parent branch: remove the separator between left and right.
+            //
+            // In our B+ tree layout, branch cells have the form:
+            //   cell[i] = (separator_key, left_child)
+            // and rightmost_child covers the rightmost subtree.
+            //
+            // When we merge left+right, we need to remove the separator
+            // that pointed to the right child. The separator index in the
+            // parent is `left_child_idx` — the separator whose left child
+            // is the left leaf. After removing it, the left leaf absorbs
+            // the right leaf's entries, and the right child pointer is no
+            // longer needed.
+            if left_parent_id != 0 {
+                let mut parent_page = self.provider.read_page(left_parent_id)?;
+                let mut branch = BranchNode::from_page(&mut parent_page)?;
+                let branch_count = branch.cell_count() as usize;
+
+                // Find the separator index that separates left from right.
+                // The separator at index `sep_idx` has:
+                //   child(sep_idx) = left_id (or it could be rightmost)
+                // The right sibling is either child(sep_idx+1) or rightmost_child.
+                let sep_idx = self.find_separator_index(&branch, left_id, right_id, branch_count);
+
+                if let Some(idx) = sep_idx {
+                    // If the right child was at child(idx+1), just delete
+                    // the separator at idx. The child at idx (left) stays.
+                    if idx + 1 < branch_count {
+                        // Right is child(idx+1). After deleting separator at idx,
+                        // cell at idx+1 shifts to idx, and its child becomes the
+                        // left child pointer. We need to set that child to left_id.
+                        branch.delete(idx);
+                        branch.set_child(idx, left_id);
+                    } else {
+                        // Right is the rightmost_child.
+                        // Delete the last separator, set rightmost to left_id.
+                        branch.delete(idx);
+                        branch.set_rightmost_child(left_id);
+                    }
+
+                    drop(branch);
+
+                    // If parent is now empty and is the root, collapse tree height
+                    let parent_count = {
+                        let b = BranchNode::from_page(&mut parent_page)?;
+                        b.cell_count()
+                    };
+
+                    if parent_count == 0 && parent_page.id == self.root_page {
+                        // Root branch has no separators — its rightmost_child is the only child.
+                        let only_child = {
+                            let b = BranchNode::from_page(&mut parent_page)?;
+                            b.rightmost_child()
+                        };
+                        self.provider.free_page(parent_page.id);
+                        self.root_page = only_child;
+                        stats.pages_freed += 1;
+                    } else {
+                        self.provider.write_page(parent_page);
+                    }
+                }
+            }
+
+            // Free the right (now empty) page
+            self.provider.free_page(right_id);
+            stats.pages_merged += 1;
+            stats.pages_freed += 1;
+
+            // Re-collect leaf info since the tree structure changed (parent
+            // branch was modified, right page was freed). Restart the scan
+            // so the merged left can potentially merge with its new neighbor.
+            leaf_info = self.collect_leaf_info()?;
+            i = 0;
+        }
+
+        Ok(stats)
     }
 
-    // All bytes were 0xFF - no successor
-    None
+    /// Collect (leaf_page_id, parent_page_id, child_index_in_parent) for all leaves.
+    ///
+    /// `parent_page_id` is 0 for the root when the root is a leaf.
+    /// `child_index_in_parent` is the index of the child pointer in the parent
+    /// branch that leads to this leaf. For rightmost children, the index is
+    /// set to the branch's cell_count (one past the last separator).
+    fn collect_leaf_info(&self) -> Result<Vec<(PageId, PageId, usize)>> {
+        let mut result = Vec::new();
+        self.collect_leaf_info_recursive(self.root_page, 0, 0, &mut result)?;
+        Ok(result)
+    }
+
+    fn collect_leaf_info_recursive(
+        &self,
+        page_id: PageId,
+        parent_id: PageId,
+        child_idx: usize,
+        result: &mut Vec<(PageId, PageId, usize)>,
+    ) -> Result<()> {
+        let page = self.provider.read_page(page_id)?;
+        match page.page_type()? {
+            PageType::BTreeLeaf => {
+                result.push((page_id, parent_id, child_idx));
+            },
+            PageType::BTreeBranch => {
+                let mut page = page;
+                let branch = BranchNode::from_page(&mut page)?;
+                let count = branch.cell_count() as usize;
+
+                // Visit each child
+                for i in 0..count {
+                    let child = branch.child(i);
+                    self.collect_leaf_info_recursive(child, page_id, i, result)?;
+                }
+
+                // Visit rightmost child
+                let rightmost = branch.rightmost_child();
+                self.collect_leaf_info_recursive(rightmost, page_id, count, result)?;
+            },
+            pt => {
+                return Err(Error::PageTypeMismatch { expected: PageType::BTreeLeaf, found: pt });
+            },
+        }
+        Ok(())
+    }
+
+    /// Find the separator index in a parent branch that separates left_id from right_id.
+    ///
+    /// Returns `Some(idx)` where `child(idx) == left_id` and either
+    /// `child(idx+1) == right_id` or `rightmost_child == right_id`.
+    fn find_separator_index(
+        &self,
+        branch: &BranchNode<'_>,
+        left_id: PageId,
+        right_id: PageId,
+        count: usize,
+    ) -> Option<usize> {
+        for i in 0..count {
+            let child = branch.child(i);
+            if child == left_id {
+                // Check if right sibling is child(i+1) or rightmost
+                if i + 1 < count {
+                    if branch.child(i + 1) == right_id {
+                        return Some(i);
+                    }
+                } else if branch.rightmost_child() == right_id {
+                    return Some(i);
+                }
+            }
+        }
+
+        // Check if left is the second-to-last child and right is rightmost
+        // This handles the case where left is child(count-1)
+        // (already covered above)
+
+        None
+    }
 }
 
 /// Iterator over B-tree entries.
@@ -628,14 +929,14 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             return Ok(true);
         }
 
-        // Current leaf exhausted - try to move to next leaf
-        // Get the last key in current leaf to find the next leaf
+        // Current leaf exhausted — navigate to the next leaf via the branch
+        // structure. This correctly handles variable-length keys where
+        // increment_key may produce a key still within the current leaf's range.
         let page = self
             .current_leaf
-            .as_mut()
+            .as_ref()
             .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
-        let current_page_id = page.id;
-        let leaf = LeafNode::from_page(page)?;
+        let leaf = LeafNodeRef::from_page(page)?;
         let count = leaf.cell_count() as usize;
 
         if count == 0 {
@@ -643,36 +944,21 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             return Ok(false);
         }
 
-        // Get the last key from this leaf
-        let (last_key, _) = leaf.get(count - 1);
-        let last_key = last_key.to_vec();
-
-        // Create a successor key by incrementing the last key
-        // This handles fixed-width big-endian keys correctly
-        let next_key = match increment_key(&last_key) {
-            Some(k) => k,
-            None => {
-                // Key is all 0xFF - no successor exists
-                self.state.position.valid = false;
-                return Ok(false);
+        // Use the last key to locate the current leaf in the tree, then find
+        // its right sibling via branch-node backtracking.
+        let last_key = leaf.key(count - 1);
+        match self.tree.find_next_leaf(last_key)? {
+            Some(next_leaf_id) => {
+                self.current_leaf = Some(self.tree.provider.read_page(next_leaf_id)?);
+                let new_page = self.current_leaf.as_ref().unwrap();
+                cursor_ops::move_to_first_in_leaf(&mut self.state.position, new_page)?;
+                Ok(self.state.position.valid)
             },
-        };
-
-        // Find the leaf that would contain the successor key
-        let next_leaf_id = self.tree.find_leaf(&next_key)?;
-
-        // If we end up at the same leaf, we're done
-        if next_leaf_id == current_page_id {
-            self.state.position.valid = false;
-            return Ok(false);
+            None => {
+                self.state.position.valid = false;
+                Ok(false)
+            },
         }
-
-        self.current_leaf = Some(self.tree.provider.read_page(next_leaf_id)?);
-        let new_page = self.current_leaf.as_ref().unwrap();
-
-        cursor_ops::move_to_first_in_leaf(&mut self.state.position, new_page)?;
-
-        Ok(self.state.position.valid)
     }
 
     /// Get the current key-value pair, if positioned (returns owned copies).
@@ -918,5 +1204,399 @@ mod tests {
             "Expected 100 entries from partial range [50, 150), got {}",
             partial.len()
         );
+    }
+
+    // ============================================
+    // Property-based B+ tree invariant tests
+    // ============================================
+
+    mod proptest_btree {
+        use proptest::prelude::*;
+
+        use super::*;
+        use crate::btree::cursor::Range;
+
+        /// Generate a vector of unique keys (formatted for sort stability).
+        fn arb_unique_keys(max_count: usize) -> impl Strategy<Value = Vec<String>> {
+            proptest::collection::hash_set("[a-z]{1,4}", 1..max_count)
+                .prop_map(|s| s.into_iter().collect::<Vec<_>>())
+        }
+
+        /// Generate key-value pairs with unique keys.
+        fn arb_kv_pairs(max_count: usize) -> impl Strategy<Value = Vec<(String, Vec<u8>)>> {
+            arb_unique_keys(max_count).prop_flat_map(|keys| {
+                let n = keys.len();
+                proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..32), n..=n)
+                    .prop_map(move |values| {
+                        keys.clone().into_iter().zip(values).collect::<Vec<_>>()
+                    })
+            })
+        }
+
+        proptest! {
+            /// Inserted keys are always retrievable.
+            #[test]
+            fn prop_inserted_keys_retrievable(pairs in arb_kv_pairs(200)) {
+                let mut tree = make_tree();
+
+                for (key, value) in &pairs {
+                    tree.insert(key.as_bytes(), value).unwrap();
+                }
+
+                for (key, value) in &pairs {
+                    let result = tree.get(key.as_bytes()).unwrap();
+                    prop_assert_eq!(
+                        result.as_deref(),
+                        Some(value.as_slice()),
+                        "key {:?} not found or has wrong value",
+                        key
+                    );
+                }
+            }
+
+            /// Full-range iteration returns keys in sorted (lexicographic) order.
+            #[test]
+            fn prop_iteration_returns_sorted_keys(pairs in arb_kv_pairs(200)) {
+                let mut tree = make_tree();
+
+                for (key, value) in &pairs {
+                    tree.insert(key.as_bytes(), value).unwrap();
+                }
+
+                let mut iter = tree.range(Range::all()).unwrap();
+                let mut keys = Vec::new();
+                while let Some((k, _v)) = iter.next_entry().unwrap() {
+                    keys.push(k);
+                }
+
+                // Keys must be in ascending lexicographic order
+                for window in keys.windows(2) {
+                    prop_assert!(
+                        window[0] < window[1],
+                        "keys not sorted: {:?} >= {:?}",
+                        window[0],
+                        window[1]
+                    );
+                }
+
+                // Must have exactly the same number of entries as we inserted
+                prop_assert_eq!(keys.len(), pairs.len());
+            }
+
+            /// Delete removes keys and they become unretrievable.
+            #[test]
+            fn prop_delete_removes_keys(
+                pairs in arb_kv_pairs(100),
+                delete_indices in proptest::collection::vec(any::<prop::sample::Index>(), 1..20),
+            ) {
+                let mut tree = make_tree();
+
+                for (key, value) in &pairs {
+                    tree.insert(key.as_bytes(), value).unwrap();
+                }
+
+                // Delete a subset of keys
+                let mut deleted = std::collections::HashSet::new();
+                for idx in &delete_indices {
+                    let i = idx.index(pairs.len());
+                    let key = &pairs[i].0;
+                    tree.delete(key.as_bytes()).unwrap();
+                    deleted.insert(key.clone());
+                }
+
+                // Verify: deleted keys return None, others return correct value
+                for (key, value) in &pairs {
+                    let result = tree.get(key.as_bytes()).unwrap();
+                    if deleted.contains(key) {
+                        prop_assert_eq!(
+                            result, None,
+                            "deleted key {:?} still found",
+                            key
+                        );
+                    } else {
+                        prop_assert_eq!(
+                            result.as_deref(),
+                            Some(value.as_slice()),
+                            "surviving key {:?} has wrong value",
+                            key
+                        );
+                    }
+                }
+            }
+
+            /// Update overwrites value while keeping key present.
+            #[test]
+            fn prop_update_overwrites_value(
+                pairs in arb_kv_pairs(100),
+                update_indices in proptest::collection::vec(any::<prop::sample::Index>(), 1..20),
+            ) {
+                let mut tree = make_tree();
+
+                for (key, value) in &pairs {
+                    tree.insert(key.as_bytes(), value).unwrap();
+                }
+
+                // Update a subset of keys with new values
+                let new_value = b"UPDATED";
+                let mut updated = std::collections::HashSet::new();
+                for idx in &update_indices {
+                    let i = idx.index(pairs.len());
+                    let key = &pairs[i].0;
+                    tree.insert(key.as_bytes(), new_value).unwrap();
+                    updated.insert(key.clone());
+                }
+
+                for (key, original_value) in &pairs {
+                    let result = tree.get(key.as_bytes()).unwrap();
+                    if updated.contains(key) {
+                        prop_assert_eq!(
+                            result.as_deref(),
+                            Some(new_value.as_slice()),
+                            "updated key {:?} has wrong value",
+                            key
+                        );
+                    } else {
+                        prop_assert_eq!(
+                            result.as_deref(),
+                            Some(original_value.as_slice()),
+                            "non-updated key {:?} changed",
+                            key
+                        );
+                    }
+                }
+            }
+
+            /// Iteration count matches number of unique inserted keys.
+            #[test]
+            fn prop_iteration_count_matches_inserts(pairs in arb_kv_pairs(200)) {
+                let mut tree = make_tree();
+
+                for (key, value) in &pairs {
+                    tree.insert(key.as_bytes(), value).unwrap();
+                }
+
+                let mut iter = tree.range(Range::all()).unwrap();
+                let mut count = 0;
+                while iter.next_entry().unwrap().is_some() {
+                    count += 1;
+                }
+
+                prop_assert_eq!(count, pairs.len());
+            }
+
+            /// Seek finds exact key or correct insertion position.
+            #[test]
+            fn prop_get_consistency_with_iteration(pairs in arb_kv_pairs(100)) {
+                let mut tree = make_tree();
+
+                for (key, value) in &pairs {
+                    tree.insert(key.as_bytes(), value).unwrap();
+                }
+
+                // Collect all keys via iteration
+                let mut iter = tree.range(Range::all()).unwrap();
+                let mut iterated_keys = Vec::new();
+                while let Some((k, _)) = iter.next_entry().unwrap() {
+                    iterated_keys.push(k);
+                }
+
+                // Every iterated key should be gettable
+                for k in &iterated_keys {
+                    let result = tree.get(k).unwrap();
+                    prop_assert!(
+                        result.is_some(),
+                        "iterated key {:?} not found via get()",
+                        k
+                    );
+                }
+
+                // Non-existent key should return None
+                let result = tree.get(b"__definitely_not_in_tree__").unwrap();
+                prop_assert_eq!(result, None);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Compaction tests
+    // =========================================================================
+
+    #[test]
+    fn test_compact_empty_tree() {
+        let tree = make_tree();
+        // Compacting an empty tree should be a no-op
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_compact_single_leaf() {
+        let mut tree = make_tree();
+        tree.insert(b"a", b"1").unwrap();
+        tree.insert(b"b", b"2").unwrap();
+
+        // Single-leaf tree: nothing to merge
+        let stats = tree.compact(0.4).unwrap();
+        assert_eq!(stats.pages_merged, 0);
+        assert_eq!(stats.pages_freed, 0);
+
+        // Data should be intact
+        assert_eq!(tree.get(b"a").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(tree.get(b"b").unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn test_compact_after_bulk_delete() {
+        let mut tree = make_tree();
+
+        // Insert enough keys to create many leaves.
+        // With 4K pages, each key-value pair takes ~20 bytes, so ~100 entries per leaf.
+        // 500 keys should create 5+ leaf pages.
+        for i in 0..500 {
+            let key = format!("key-{:04}", i);
+            let val = format!("val-{:04}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete most keys to create underfull leaves
+        for i in 0..480 {
+            let key = format!("key-{:04}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        // Remaining keys should still be readable before compaction
+        for i in 480..500 {
+            let key = format!("key-{:04}", i);
+            let val = format!("val-{:04}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), Some(val.into_bytes()));
+        }
+
+        // Compact should merge underfull leaves
+        let stats = tree.compact(0.4).unwrap();
+
+        // With 500 keys spread across 5+ leaves, deleting 96% should leave
+        // many underfull leaves that can merge.
+        assert!(
+            stats.pages_merged > 0 || stats.pages_freed > 0,
+            "Expected some merges after deleting 96% of keys"
+        );
+
+        // All remaining keys should still be readable after compaction
+        for i in 480..500 {
+            let key = format!("key-{:04}", i);
+            let val = format!("val-{:04}", i);
+            assert_eq!(
+                tree.get(key.as_bytes()).unwrap(),
+                Some(val.into_bytes()),
+                "Key {} not found after compaction",
+                key
+            );
+        }
+
+        // Deleted keys should still be absent
+        for i in 0..480 {
+            let key = format!("key-{:04}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn test_compact_preserves_all_data() {
+        let mut tree = make_tree();
+
+        // Insert keys
+        for i in 0..100 {
+            let key = format!("k{:04}", i);
+            let val = format!("v{:04}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete every other key
+        for i in (0..100).step_by(2) {
+            let key = format!("k{:04}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        // Compact with a high fill factor to force merges
+        let _stats = tree.compact(0.9).unwrap();
+
+        // All odd keys should still be present
+        for i in (1..100).step_by(2) {
+            let key = format!("k{:04}", i);
+            let val = format!("v{:04}", i);
+            assert_eq!(
+                tree.get(key.as_bytes()).unwrap(),
+                Some(val.into_bytes()),
+                "Key {} missing after compaction",
+                key
+            );
+        }
+
+        // All even keys should still be absent
+        for i in (0..100).step_by(2) {
+            let key = format!("k{:04}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn test_compact_idempotent() {
+        let mut tree = make_tree();
+
+        for i in 0..150 {
+            let key = format!("key-{:04}", i);
+            tree.insert(key.as_bytes(), b"value").unwrap();
+        }
+
+        // Delete half
+        for i in 0..75 {
+            let key = format!("key-{:04}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        // First compaction
+        let stats1 = tree.compact(0.4).unwrap();
+
+        // Second compaction should do less or no work
+        let stats2 = tree.compact(0.4).unwrap();
+
+        assert!(
+            stats2.pages_merged <= stats1.pages_merged,
+            "Second compaction merged more than first: {} > {}",
+            stats2.pages_merged,
+            stats1.pages_merged
+        );
+
+        // Data integrity check
+        for i in 75..150 {
+            let key = format!("key-{:04}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), Some(b"value".to_vec()));
+        }
+    }
+
+    #[test]
+    fn test_compact_iteration_after() {
+        let mut tree = make_tree();
+
+        // Insert and delete to create underfull pages
+        for i in 0..100 {
+            let key = format!("iter-{:04}", i);
+            tree.insert(key.as_bytes(), b"v").unwrap();
+        }
+        for i in 0..80 {
+            let key = format!("iter-{:04}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        tree.compact(0.4).unwrap();
+
+        // Iteration should still work and return remaining 20 keys
+        let mut iter = tree.range(Range::all()).unwrap();
+        let mut count = 0;
+        while let Some((key, _)) = iter.next_entry().unwrap() {
+            let expected = format!("iter-{:04}", 80 + count);
+            assert_eq!(key, expected.as_bytes());
+            count += 1;
+        }
+        assert_eq!(count, 20, "Expected 20 remaining keys after compaction");
     }
 }

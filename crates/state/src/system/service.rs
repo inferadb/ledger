@@ -20,10 +20,10 @@ use super::{
 use crate::state::{StateError, StateLayer};
 
 /// The reserved namespace ID for _system.
-pub const SYSTEM_NAMESPACE_ID: NamespaceId = 0;
+pub const SYSTEM_NAMESPACE_ID: NamespaceId = NamespaceId::new(0);
 
 /// The reserved vault ID for _system entities.
-pub const SYSTEM_VAULT_ID: VaultId = 0;
+pub const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 
 /// Errors from system namespace operations.
 #[derive(Debug, Snafu)]
@@ -113,12 +113,12 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     /// Get the next namespace ID.
     pub fn next_namespace_id(&self) -> Result<NamespaceId> {
         // Start at 1 because 0 is reserved for _system
-        self.next_sequence(SystemKeys::NAMESPACE_SEQ_KEY, 1)
+        self.next_sequence(SystemKeys::NAMESPACE_SEQ_KEY, 1).map(NamespaceId::new)
     }
 
     /// Get the next vault ID.
     pub fn next_vault_id(&self) -> Result<VaultId> {
-        self.next_sequence(SystemKeys::VAULT_SEQ_KEY, 1)
+        self.next_sequence(SystemKeys::VAULT_SEQ_KEY, 1).map(VaultId::new)
     }
 
     // =========================================================================
@@ -190,7 +190,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
 
         // Also create the name index
         let name_index_key = SystemKeys::namespace_name_index_key(&registry.name);
-        let name_index_value = registry.namespace_id.to_string().into_bytes();
+        let name_index_value = registry.namespace_id.value().to_string().into_bytes();
 
         let ops = vec![
             Operation::SetEntity { key, value, condition: None, expires_at: None },
@@ -331,9 +331,9 @@ mod tests {
         let id2 = svc.next_namespace_id().unwrap();
         let id3 = svc.next_namespace_id().unwrap();
 
-        assert_eq!(id1, 1); // Starts at 1, 0 is reserved
-        assert_eq!(id2, 2);
-        assert_eq!(id3, 3);
+        assert_eq!(id1, NamespaceId::new(1)); // Starts at 1, 0 is reserved
+        assert_eq!(id2, NamespaceId::new(2));
+        assert_eq!(id3, NamespaceId::new(3));
     }
 
     #[test]
@@ -381,9 +381,9 @@ mod tests {
         let svc = create_test_service();
 
         let registry = NamespaceRegistry {
-            namespace_id: 1,
+            namespace_id: NamespaceId::new(1),
             name: "acme-corp".to_string(),
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             status: NamespaceStatus::Active,
             config_version: 1,
@@ -393,14 +393,14 @@ mod tests {
         svc.register_namespace(&registry).unwrap();
 
         // Get by ID
-        let retrieved = svc.get_namespace(1).unwrap();
+        let retrieved = svc.get_namespace(NamespaceId::new(1)).unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "acme-corp");
 
         // Get by name
         let by_name = svc.get_namespace_by_name("acme-corp").unwrap();
         assert!(by_name.is_some());
-        assert_eq!(by_name.unwrap().namespace_id, 1);
+        assert_eq!(by_name.unwrap().namespace_id, NamespaceId::new(1));
 
         // Case-insensitive name lookup
         let by_name_upper = svc.get_namespace_by_name("ACME-CORP").unwrap();
@@ -413,9 +413,9 @@ mod tests {
 
         for i in 1..=3 {
             let registry = NamespaceRegistry {
-                namespace_id: i,
+                namespace_id: NamespaceId::new(i),
                 name: format!("ns-{}", i),
-                shard_id: 1,
+                shard_id: ShardId::new(1),
                 member_nodes: vec![],
                 status: NamespaceStatus::Active,
                 config_version: 1,
@@ -433,9 +433,9 @@ mod tests {
         let svc = create_test_service();
 
         let registry = NamespaceRegistry {
-            namespace_id: 1,
+            namespace_id: NamespaceId::new(1),
             name: "test-ns".to_string(),
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             member_nodes: vec![],
             status: NamespaceStatus::Active,
             config_version: 1,
@@ -443,9 +443,9 @@ mod tests {
         };
         svc.register_namespace(&registry).unwrap();
 
-        svc.update_namespace_status(1, NamespaceStatus::Suspended).unwrap();
+        svc.update_namespace_status(NamespaceId::new(1), NamespaceStatus::Suspended).unwrap();
 
-        let updated = svc.get_namespace(1).unwrap().unwrap();
+        let updated = svc.get_namespace(NamespaceId::new(1)).unwrap().unwrap();
         assert_eq!(updated.status, NamespaceStatus::Suspended);
         assert_eq!(updated.config_version, 2); // Incremented
     }

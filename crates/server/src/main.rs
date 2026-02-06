@@ -96,17 +96,33 @@ async fn main() -> Result<(), ServerError> {
         init_metrics_exporter(metrics_addr)?;
     }
 
-    let node =
-        bootstrap::bootstrap_node(&config, &data_dir).await.map_err(ServerError::Bootstrap)?;
+    // Set up graceful shutdown before bootstrap so we can wire the signal
+    let shutdown_config = inferadb_ledger_types::config::ShutdownConfig::default();
+    let health_state = inferadb_ledger_raft::HealthState::new();
+    let (graceful_shutdown, shutdown_rx) =
+        inferadb_ledger_raft::GracefulShutdown::new(shutdown_config, health_state.clone());
 
-    let shutdown_coordinator = shutdown::ShutdownCoordinator::new();
-    let shutdown_handle = {
-        let coordinator = shutdown_coordinator.clone();
-        tokio::spawn(async move {
-            shutdown::shutdown_signal().await;
-            coordinator.shutdown();
-        })
-    };
+    let node = bootstrap::bootstrap_node(&config, &data_dir, health_state.clone(), shutdown_rx)
+        .await
+        .map_err(ServerError::Bootstrap)?;
+
+    // Mark node as ready now that bootstrap is complete
+    health_state.mark_ready();
+
+    // Spawn shutdown handler
+    let raft_for_shutdown = node.raft.clone();
+    let shutdown_handle = tokio::spawn(async move {
+        shutdown::shutdown_signal().await;
+        graceful_shutdown
+            .execute(|| async move {
+                // Trigger final snapshot if leader
+                let _ = raft_for_shutdown.trigger().snapshot().await;
+                if let Err(e) = raft_for_shutdown.shutdown().await {
+                    tracing::warn!(error = %e, "Error during Raft shutdown");
+                }
+            })
+            .await;
+    });
 
     tracing::info!("Server ready, accepting connections");
     let server_result = node.server.serve().await;
@@ -192,12 +208,4 @@ fn init_metrics_exporter(addr: SocketAddr) -> Result<(), ServerError> {
 
     tracing::info!(metrics_addr = %addr, "Prometheus metrics exporter started");
     Ok(())
-}
-
-impl Clone for shutdown::ShutdownCoordinator {
-    fn clone(&self) -> Self {
-        // Note: This creates a new coordinator that shares the same broadcast channel
-        // This is intentional for the shutdown use case
-        Self::new()
-    }
 }

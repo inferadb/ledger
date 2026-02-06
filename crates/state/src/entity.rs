@@ -143,10 +143,10 @@ impl EntityStore {
             }
 
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault_id {
+            if key_vault_id < vault_id.value() {
                 continue;
             }
-            if key_vault_id > vault_id {
+            if key_vault_id > vault_id.value() {
                 break;
             }
 
@@ -228,6 +228,8 @@ impl EntityStore {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, unused_mut)]
 mod tests {
+    use inferadb_ledger_types::VaultId;
+
     use super::*;
     use crate::engine::InMemoryStorageEngine;
 
@@ -235,7 +237,7 @@ mod tests {
     fn test_entity_crud() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         {
             let mut txn = db.write().expect("begin write");
@@ -283,7 +285,7 @@ mod tests {
     fn test_list_in_vault() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         {
             let mut txn = db.write().expect("begin write");
@@ -325,20 +327,21 @@ mod tests {
                 expires_at: 0,
                 version: 1,
             };
-            EntityStore::set(&mut txn, 1, &entity).expect("set entity");
+            EntityStore::set(&mut txn, VaultId::new(1), &entity).expect("set entity");
             txn.commit().expect("commit");
         }
 
         {
             let txn = db.read().expect("begin read");
 
-            let entity = EntityStore::get(&txn, 2, b"shared_key").expect("get entity");
+            let entity =
+                EntityStore::get(&txn, VaultId::new(2), b"shared_key").expect("get entity");
             assert!(entity.is_none());
 
-            let count = EntityStore::count_in_vault(&txn, 1).expect("count");
+            let count = EntityStore::count_in_vault(&txn, VaultId::new(1)).expect("count");
             assert_eq!(count, 1);
 
-            let count = EntityStore::count_in_vault(&txn, 2).expect("count");
+            let count = EntityStore::count_in_vault(&txn, VaultId::new(2)).expect("count");
             assert_eq!(count, 0);
         }
     }
@@ -349,7 +352,7 @@ mod tests {
     fn test_entity_exists() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Entity doesn't exist initially
         {
@@ -375,7 +378,9 @@ mod tests {
             let txn = db.read().expect("begin read");
             assert!(EntityStore::exists(&txn, vault_id, b"exists_key").expect("exists check"));
             // Still doesn't exist in different vault
-            assert!(!EntityStore::exists(&txn, 999, b"exists_key").expect("exists check"));
+            assert!(
+                !EntityStore::exists(&txn, VaultId::new(999), b"exists_key").expect("exists check")
+            );
         }
     }
 
@@ -383,7 +388,7 @@ mod tests {
     fn test_scan_prefix() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create entities with different prefixes
         {
@@ -464,7 +469,7 @@ mod tests {
     fn test_list_in_bucket() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create several entities
         {
@@ -516,7 +521,7 @@ mod tests {
                     expires_at: 0,
                     version: 1,
                 };
-                EntityStore::set(&mut txn, 1, &entity).expect("set entity");
+                EntityStore::set(&mut txn, VaultId::new(1), &entity).expect("set entity");
             }
 
             // Vault 2: 5 entities
@@ -527,7 +532,7 @@ mod tests {
                     expires_at: 0,
                     version: 1,
                 };
-                EntityStore::set(&mut txn, 2, &entity).expect("set entity");
+                EntityStore::set(&mut txn, VaultId::new(2), &entity).expect("set entity");
             }
 
             txn.commit().expect("commit");
@@ -537,9 +542,9 @@ mod tests {
         {
             let txn = db.read().expect("begin read");
 
-            assert_eq!(EntityStore::count_in_vault(&txn, 1).expect("count"), 3);
-            assert_eq!(EntityStore::count_in_vault(&txn, 2).expect("count"), 5);
-            assert_eq!(EntityStore::count_in_vault(&txn, 999).expect("count"), 0);
+            assert_eq!(EntityStore::count_in_vault(&txn, VaultId::new(1)).expect("count"), 3);
+            assert_eq!(EntityStore::count_in_vault(&txn, VaultId::new(2)).expect("count"), 5);
+            assert_eq!(EntityStore::count_in_vault(&txn, VaultId::new(999)).expect("count"), 0);
         }
     }
 
@@ -547,7 +552,7 @@ mod tests {
     fn test_delete_nonexistent() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Delete non-existent entity should return false
         {
@@ -566,7 +571,7 @@ mod tests {
         // List from empty vault
         {
             let txn = db.read().expect("begin read");
-            let entities = EntityStore::list_in_vault(&txn, 1, 10, 0).expect("list");
+            let entities = EntityStore::list_in_vault(&txn, VaultId::new(1), 10, 0).expect("list");
             assert!(entities.is_empty());
         }
     }

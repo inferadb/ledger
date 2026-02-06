@@ -466,7 +466,7 @@ mod tests {
     fn test_ledger_request_serialization() {
         let request = LedgerRequest::CreateNamespace {
             name: "test-namespace".to_string(),
-            shard_id: Some(1),
+            shard_id: Some(ShardId::new(1)),
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
@@ -475,7 +475,7 @@ mod tests {
         match deserialized {
             LedgerRequest::CreateNamespace { name, shard_id } => {
                 assert_eq!(name, "test-namespace");
-                assert_eq!(shard_id, Some(1));
+                assert_eq!(shard_id, Some(ShardId::new(1)));
             },
             _ => panic!("unexpected variant"),
         }
@@ -504,6 +504,180 @@ mod tests {
                 assert_eq!(email, "alice@example.com");
             },
             _ => panic!("unexpected variant"),
+        }
+    }
+
+    // ============================================
+    // Property-based Raft log invariant tests
+    // ============================================
+
+    mod proptest_raft_log {
+        use inferadb_ledger_types::{NamespaceId, ShardId, VaultId};
+        use openraft::{CommittedLeaderId, LogId};
+        use proptest::prelude::*;
+
+        use crate::types::{LedgerNodeId, LedgerRequest};
+
+        /// Helper to create a LogId from term and index.
+        fn make_log_id(term: u64, index: u64) -> LogId<LedgerNodeId> {
+            LogId::new(CommittedLeaderId::new(term, 0), index)
+        }
+
+        /// Represents a Raft log entry with term and index.
+        #[derive(Debug, Clone)]
+        struct LogEntry {
+            term: u64,
+            index: u64,
+        }
+
+        /// Generate a valid Raft log sequence with monotonic indices and
+        /// non-decreasing terms. Optionally includes term changes (leader elections).
+        fn arb_valid_log(max_entries: usize) -> impl Strategy<Value = Vec<LogEntry>> {
+            proptest::collection::vec(
+                (1u64..100, prop::bool::ANY), // (term_increment, is_election)
+                1..max_entries,
+            )
+            .prop_map(|decisions| {
+                let mut entries = Vec::new();
+                let mut current_term = 1u64;
+                let mut current_index = 1u64;
+
+                for (term_inc, is_election) in decisions {
+                    if is_election {
+                        current_term += term_inc;
+                    }
+                    entries.push(LogEntry { term: current_term, index: current_index });
+                    current_index += 1;
+                }
+                entries
+            })
+        }
+
+        proptest! {
+            /// Log indices must be strictly monotonic (sequential, no gaps).
+            #[test]
+            fn prop_log_indices_strictly_monotonic(log in arb_valid_log(200)) {
+                for window in log.windows(2) {
+                    prop_assert_eq!(
+                        window[1].index,
+                        window[0].index + 1,
+                        "indices not sequential: {} -> {}",
+                        window[0].index,
+                        window[1].index
+                    );
+                }
+            }
+
+            /// Log terms must be non-decreasing (can stay same or increase, never decrease).
+            #[test]
+            fn prop_log_terms_nondecreasing(log in arb_valid_log(200)) {
+                for window in log.windows(2) {
+                    prop_assert!(
+                        window[1].term >= window[0].term,
+                        "term decreased: {} -> {} at indices {}-{}",
+                        window[0].term,
+                        window[1].term,
+                        window[0].index,
+                        window[1].index
+                    );
+                }
+            }
+
+            /// LogId ordering: later entries have greater or equal LogId.
+            /// This verifies that openraft's LogId ordering matches our expectations.
+            #[test]
+            fn prop_logid_ordering_consistent(log in arb_valid_log(200)) {
+                let log_ids: Vec<LogId<LedgerNodeId>> = log
+                    .iter()
+                    .map(|e| make_log_id(e.term, e.index))
+                    .collect();
+
+                for window in log_ids.windows(2) {
+                    prop_assert!(
+                        window[1] >= window[0],
+                        "LogId ordering violated: {:?} > {:?}",
+                        window[0],
+                        window[1]
+                    );
+                }
+            }
+
+            /// First entry always has index >= 1 (0 is reserved for initial state).
+            #[test]
+            fn prop_first_index_nonzero(log in arb_valid_log(50)) {
+                if let Some(first) = log.first() {
+                    prop_assert!(
+                        first.index >= 1,
+                        "first index should be >= 1, got {}",
+                        first.index
+                    );
+                }
+            }
+
+            /// Term changes represent leader elections: within the same term,
+            /// indices must be contiguous (no gaps within a term).
+            #[test]
+            fn prop_no_index_gaps_within_term(log in arb_valid_log(200)) {
+                // Group consecutive entries by term
+                let mut term_groups: Vec<Vec<u64>> = Vec::new();
+                let mut current_term = 0u64;
+
+                for entry in &log {
+                    if entry.term != current_term {
+                        term_groups.push(Vec::new());
+                        current_term = entry.term;
+                    }
+                    if let Some(group) = term_groups.last_mut() {
+                        group.push(entry.index);
+                    }
+                }
+
+                // Within each term group, indices must be contiguous
+                for group in &term_groups {
+                    for window in group.windows(2) {
+                        prop_assert_eq!(
+                            window[1],
+                            window[0] + 1,
+                            "gap within term: indices {} -> {}",
+                            window[0],
+                            window[1]
+                        );
+                    }
+                }
+            }
+
+            /// LedgerRequest serialization roundtrip preserves all variants.
+            #[test]
+            fn prop_ledger_request_roundtrip(
+                variant_idx in 0u8..4,
+                name in "[a-z]{1,16}",
+                namespace_id in (1i64..10_000).prop_map(NamespaceId::new),
+                vault_id in (1i64..10_000).prop_map(VaultId::new),
+                shard_id in (1u32..1_000).prop_map(ShardId::new),
+            ) {
+                let request = match variant_idx {
+                    0 => LedgerRequest::CreateNamespace {
+                        name: name.clone(),
+                        shard_id: Some(shard_id),
+                    },
+                    1 => LedgerRequest::CreateVault {
+                        namespace_id,
+                        name: Some(name.clone()),
+                        retention_policy: None,
+                    },
+                    2 => LedgerRequest::DeleteNamespace { namespace_id },
+                    _ => LedgerRequest::DeleteVault { namespace_id, vault_id },
+                };
+
+                let bytes = postcard::to_allocvec(&request).expect("serialize");
+                let decoded: super::LedgerRequest =
+                    postcard::from_bytes(&bytes).expect("deserialize");
+                prop_assert_eq!(
+                    postcard::to_allocvec(&decoded).expect("re-serialize"),
+                    bytes,
+                    "roundtrip changed encoding"
+                );
+            }
         }
     }
 }

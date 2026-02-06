@@ -32,7 +32,7 @@ use crate::{
         system_discovery_service_server::SystemDiscoveryServiceServer,
         write_service_server::WriteServiceServer,
     },
-    rate_limit::NamespaceRateLimiter,
+    rate_limit::RateLimiter,
     services::{
         AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, MultiShardRaftService,
         MultiShardReadService, MultiShardResolver, MultiShardWriteService,
@@ -42,7 +42,8 @@ use crate::{
 /// Multi-shard Ledger gRPC server.
 ///
 /// Combines multi-shard read/write services with the MultiRaftManager
-/// for routing requests to the correct shard.
+/// for routing requests to the correct shard. Supports graceful shutdown
+/// via a `shutdown_rx` watch channel.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct MultiShardLedgerServer {
@@ -61,13 +62,24 @@ pub struct MultiShardLedgerServer {
     timeout_secs: u64,
     /// Per-namespace rate limiter (optional).
     #[builder(default)]
-    namespace_rate_limiter: Option<Arc<NamespaceRateLimiter>>,
+    namespace_rate_limiter: Option<Arc<RateLimiter>>,
+    /// Hot key detector for identifying frequently accessed keys (optional).
+    #[builder(default)]
+    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    /// Node health state for three-probe health checking.
+    #[builder(default)]
+    health_state: crate::graceful_shutdown::HealthState,
+    /// Shutdown signal receiver. When `true` is sent, the server stops.
+    #[builder(default)]
+    shutdown_rx: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl MultiShardLedgerServer {
     /// Start the gRPC server.
     ///
-    /// This method blocks until the server is shut down.
+    /// This method blocks until the server is shut down. If a `shutdown_rx`
+    /// was provided via the builder, the server will stop when the signal
+    /// is received. Otherwise, it blocks indefinitely.
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             max_concurrent = self.max_concurrent,
@@ -94,6 +106,7 @@ impl MultiShardLedgerServer {
             .resolver(resolver.clone())
             .idempotency(self.idempotency.clone())
             .rate_limiter(self.namespace_rate_limiter.clone())
+            .hot_key_detector(self.hot_key_detector.clone())
             .build();
 
         // Admin, Health, and Discovery services use the system shard
@@ -115,6 +128,7 @@ impl MultiShardLedgerServer {
             system_shard.raft().clone(),
             system_shard.state().clone(),
             system_shard.applied_state().clone(),
+            self.health_state,
         );
 
         let discovery_service = DiscoveryServiceImpl::builder()
@@ -132,16 +146,25 @@ impl MultiShardLedgerServer {
             "Starting multi-shard Ledger gRPC server"
         );
 
-        Server::builder()
+        let router = Server::builder()
             .layer(layer)
             .add_service(ReadServiceServer::new(read_service))
             .add_service(WriteServiceServer::new(write_service))
             .add_service(AdminServiceServer::new(admin_service))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
-            .add_service(RaftServiceServer::new(raft_service))
-            .serve(self.addr)
-            .await?;
+            .add_service(RaftServiceServer::new(raft_service));
+
+        if let Some(mut shutdown_rx) = self.shutdown_rx {
+            router
+                .serve_with_shutdown(self.addr, async move {
+                    let _ = shutdown_rx.wait_for(|v| *v).await;
+                    tracing::info!("Shutdown signal received, stopping multi-shard gRPC server");
+                })
+                .await?;
+        } else {
+            router.serve(self.addr).await?;
+        }
 
         Ok(())
     }

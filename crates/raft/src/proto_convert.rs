@@ -228,8 +228,8 @@ pub fn vault_entry_to_proto_block(
     // Build block header
     let header = proto::BlockHeader {
         height: entry.vault_height,
-        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id }),
-        vault_id: Some(proto::VaultId { id: entry.vault_id }),
+        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id.value() }),
+        vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),
@@ -540,8 +540,8 @@ mod tests {
         use chrono::Utc;
 
         let entry = inferadb_ledger_types::VaultEntry {
-            namespace_id: 1,
-            vault_id: 2,
+            namespace_id: inferadb_ledger_types::NamespaceId::new(1),
+            vault_id: inferadb_ledger_types::VaultId::new(2),
             vault_height: 10,
             previous_vault_hash: Hash::from([0xABu8; 32]),
             transactions: vec![],
@@ -550,7 +550,7 @@ mod tests {
         };
 
         let shard_block = inferadb_ledger_types::ShardBlock {
-            shard_id: 1,
+            shard_id: inferadb_ledger_types::ShardId::new(1),
             shard_height: 100,
             previous_shard_hash: Hash::default(),
             vault_entries: vec![],
@@ -589,8 +589,8 @@ mod tests {
         };
 
         let entry = inferadb_ledger_types::VaultEntry {
-            namespace_id: 5,
-            vault_id: 10,
+            namespace_id: inferadb_ledger_types::NamespaceId::new(5),
+            vault_id: inferadb_ledger_types::VaultId::new(10),
             vault_height: 1,
             previous_vault_hash: Hash::default(),
             transactions: vec![tx],
@@ -599,7 +599,7 @@ mod tests {
         };
 
         let shard_block = inferadb_ledger_types::ShardBlock {
-            shard_id: 1,
+            shard_id: inferadb_ledger_types::ShardId::new(1),
             shard_height: 50,
             previous_shard_hash: Hash::default(),
             vault_entries: vec![],

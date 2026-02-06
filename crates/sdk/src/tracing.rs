@@ -87,6 +87,11 @@ impl Interceptor for TraceContextInterceptor {
         &mut self,
         mut request: tonic::Request<()>,
     ) -> Result<tonic::Request<()>, tonic::Status> {
+        // Always inject SDK version for canonical log line correlation
+        if let Ok(val) = SDK_VERSION.parse() {
+            request.metadata_mut().insert("x-sdk-version", val);
+        }
+
         if !self.enabled {
             return Ok(request);
         }
@@ -97,6 +102,11 @@ impl Interceptor for TraceContextInterceptor {
         Ok(request)
     }
 }
+
+/// SDK version string injected into all outgoing gRPC requests via the
+/// `x-sdk-version` metadata header. Enables server-side canonical log lines
+/// to correlate with specific SDK versions.
+const SDK_VERSION: &str = concat!("rust-sdk/", env!("CARGO_PKG_VERSION"));
 
 /// Extract trace context from the current tracing span, if OpenTelemetry context is present.
 ///

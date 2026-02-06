@@ -17,6 +17,7 @@ use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::StorageBackend;
+use inferadb_ledger_types::{NamespaceId, VaultId};
 use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::{sync::mpsc, time::interval};
@@ -28,6 +29,7 @@ use crate::{
         RecoveryError, StateRootComputationSnafu,
     },
     log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus},
+    trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig},
 };
 
@@ -134,7 +136,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Returns vaults that are:
     /// - Diverged (need initial recovery)
     /// - Recovering and ready for retry (backoff elapsed)
-    fn find_vaults_needing_recovery(&self) -> Vec<(i64, i64, VaultHealthStatus)> {
+    fn find_vaults_needing_recovery(&self) -> Vec<(NamespaceId, VaultId, VaultHealthStatus)> {
         let all_vaults = self.applied_state.all_vaults();
         let mut needs_recovery = Vec::new();
 
@@ -169,8 +171,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// 3. Verifying the computed state_root matches expected
     async fn attempt_recovery(
         &self,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         current_health: &VaultHealthStatus,
     ) -> RecoveryResult {
         // Determine current attempt number
@@ -181,6 +183,12 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         };
 
         if attempt > MAX_RECOVERY_ATTEMPTS {
+            crate::metrics::record_recovery_attempt(
+                namespace_id.value(),
+                vault_id.value(),
+                attempt,
+                "max_attempts_exceeded",
+            );
             return RecoveryResult::MaxAttemptsExceeded;
         }
 
@@ -200,16 +208,29 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             .await
         {
             warn!(
-                namespace_id,
-                vault_id,
+                namespace_id = namespace_id.value(),
+                vault_id = vault_id.value(),
                 attempt,
                 error = %e,
                 "Failed to transition vault to Recovering state"
             );
+            crate::metrics::record_recovery_attempt(
+                namespace_id.value(),
+                vault_id.value(),
+                attempt,
+                "transition_failed",
+            );
             return RecoveryResult::TransientFailure(e.to_string());
         }
 
-        info!(namespace_id, vault_id, attempt, "Starting vault recovery attempt");
+        crate::metrics::set_vault_health(namespace_id.value(), vault_id.value(), "recovering");
+        info!(
+            namespace_id = namespace_id.value(),
+            vault_id = vault_id.value(),
+            attempt,
+            max_attempts = MAX_RECOVERY_ATTEMPTS,
+            "Recovery attempt started"
+        );
 
         // Get the expected state root from the divergence info
         let (expected_root, diverged_height) = match current_health {
@@ -230,7 +251,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 if computed_root == expected_root
                     || expected_root == inferadb_ledger_types::ZERO_HASH
                 {
-                    // Recovery successful
+                    // Recovery successful — transition to healthy
                     if let Err(e) = self
                         .propose_health_update(
                             namespace_id,
@@ -245,35 +266,72 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                         .await
                     {
                         warn!(
-                            namespace_id,
-                            vault_id,
+                            namespace_id = namespace_id.value(),
+                            vault_id = vault_id.value(),
                             error = %e,
                             "Failed to mark vault as healthy after recovery"
                         );
+                        crate::metrics::record_recovery_attempt(
+                            namespace_id.value(),
+                            vault_id.value(),
+                            attempt,
+                            "health_update_failed",
+                        );
                         return RecoveryResult::TransientFailure(e.to_string());
                     }
-                    info!(namespace_id, vault_id, "Vault recovery successful");
+                    crate::metrics::set_vault_health(
+                        namespace_id.value(),
+                        vault_id.value(),
+                        "healthy",
+                    );
+                    crate::metrics::record_recovery_attempt(
+                        namespace_id.value(),
+                        vault_id.value(),
+                        attempt,
+                        "success",
+                    );
+                    info!(
+                        namespace_id = namespace_id.value(),
+                        vault_id = vault_id.value(),
+                        attempt,
+                        "Recovery completed successfully, vault restored to healthy"
+                    );
                     RecoveryResult::Success
                 } else {
-                    // Divergence reproduced - this is a determinism bug
+                    // Divergence reproduced — determinism bug
                     error!(
-                        namespace_id,
-                        vault_id,
+                        namespace_id = namespace_id.value(),
+                        vault_id = vault_id.value(),
                         ?expected_root,
                         ?computed_root,
-                        "Recovery reproduced divergence - determinism bug detected"
+                        diverged_height,
+                        attempt,
+                        "Recovery reproduced divergence — determinism bug detected, manual intervention required"
                     );
-                    crate::metrics::record_determinism_bug(namespace_id, vault_id);
+                    crate::metrics::record_determinism_bug(namespace_id.value(), vault_id.value());
+                    crate::metrics::record_recovery_attempt(
+                        namespace_id.value(),
+                        vault_id.value(),
+                        attempt,
+                        "determinism_bug",
+                    );
                     RecoveryResult::DeterminismBug
                 }
             },
             Err(e) => {
                 warn!(
-                    namespace_id,
-                    vault_id,
+                    namespace_id = namespace_id.value(),
+                    vault_id = vault_id.value(),
                     attempt,
+                    max_attempts = MAX_RECOVERY_ATTEMPTS,
                     error = %e,
-                    "Vault recovery attempt failed"
+                    "Recovery attempt failed, will retry with backoff"
+                );
+                crate::metrics::record_recovery_attempt(
+                    namespace_id.value(),
+                    vault_id.value(),
+                    attempt,
+                    "transient_failure",
                 );
                 RecoveryResult::TransientFailure(e.to_string())
             },
@@ -283,8 +341,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Replay vault state from snapshot/genesis to verify state root.
     async fn replay_vault_state(
         &self,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         _expected_root: inferadb_ledger_types::Hash,
         _diverged_height: u64,
     ) -> Result<inferadb_ledger_types::Hash, RecoveryError> {
@@ -302,15 +360,22 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         let tip_height = self.applied_state.vault_height(namespace_id, vault_id);
 
         debug!(
-            namespace_id,
-            vault_id, start_height, tip_height, "Replaying vault state for recovery"
+            namespace_id = namespace_id.value(),
+            vault_id = vault_id.value(),
+            start_height,
+            tip_height,
+            "Replaying vault state for recovery"
         );
 
         // Replay blocks from start_height to tip
         for height in start_height..=tip_height {
-            let shard_height = archive
-                .find_shard_height(namespace_id, vault_id, height)
-                .context(IndexLookupSnafu { namespace_id, vault_id, height })?;
+            let shard_height = archive.find_shard_height(namespace_id, vault_id, height).context(
+                IndexLookupSnafu {
+                    namespace_id: namespace_id.value(),
+                    vault_id: vault_id.value(),
+                    height,
+                },
+            )?;
 
             let shard_height = match shard_height {
                 Some(h) => h,
@@ -337,7 +402,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 computed_root = self
                     .state
                     .compute_state_root(vault_id)
-                    .context(StateRootComputationSnafu { vault_id })?;
+                    .context(StateRootComputationSnafu { vault_id: vault_id.value() })?;
             }
         }
 
@@ -347,8 +412,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Find the optimal starting point for recovery.
     fn find_recovery_start_point(
         &self,
-        _namespace_id: i64,
-        vault_id: i64,
+        _namespace_id: NamespaceId,
+        vault_id: VaultId,
     ) -> Result<(u64, inferadb_ledger_types::Hash), RecoveryError> {
         // Try to find a snapshot to start from
         if let Some(snapshot_manager) = &self.snapshot_manager
@@ -372,8 +437,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     #[allow(clippy::too_many_arguments)]
     async fn propose_health_update(
         &self,
-        namespace_id: i64,
-        vault_id: i64,
+        namespace_id: NamespaceId,
+        vault_id: VaultId,
         healthy: bool,
         expected_root: Option<inferadb_ledger_types::Hash>,
         computed_root: Option<inferadb_ledger_types::Hash>,
@@ -424,7 +489,13 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         let mut ticker = interval(self.config.scan_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        info!(interval_secs = self.config.scan_interval.as_secs(), "Auto-recovery job started");
+        info!(
+            interval_secs = self.config.scan_interval.as_secs(),
+            max_attempts = MAX_RECOVERY_ATTEMPTS,
+            base_retry_delay_secs = self.config.base_retry_delay.as_secs(),
+            max_retry_delay_secs = self.config.max_retry_delay.as_secs(),
+            "Auto-recovery job started"
+        );
 
         loop {
             tokio::select! {
@@ -434,9 +505,15 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                         continue;
                     }
 
+                    let trace_ctx = TraceContext::new();
+
                     let vaults = self.find_vaults_needing_recovery();
                     if !vaults.is_empty() {
-                        info!(count = vaults.len(), "Found vaults needing recovery");
+                        info!(
+                            trace_id = %trace_ctx.trace_id,
+                            count = vaults.len(),
+                            "Recovery scan found vaults needing attention"
+                        );
                     }
 
                     for (namespace_id, vault_id, health) in vaults {
@@ -444,25 +521,28 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
 
                         match result {
                             RecoveryResult::Success => {
-                                crate::metrics::record_recovery_success(namespace_id, vault_id);
+                                crate::metrics::record_recovery_success(namespace_id.value(), vault_id.value());
                             }
                             RecoveryResult::TransientFailure(ref msg) => {
-                                crate::metrics::record_recovery_failure(namespace_id, vault_id, msg);
+                                crate::metrics::record_recovery_failure(namespace_id.value(), vault_id.value(), msg);
                             }
                             RecoveryResult::DeterminismBug => {
                                 // Metrics already recorded in attempt_recovery
                                 error!(
-                                    namespace_id,
-                                    vault_id,
-                                    "Vault requires manual intervention due to determinism bug"
+                                    trace_id = %trace_ctx.trace_id,
+                                    namespace_id = namespace_id.value(),
+                                    vault_id = vault_id.value(),
+                                    "Circuit breaker: vault requires manual intervention due to determinism bug"
                                 );
                             }
                             RecoveryResult::MaxAttemptsExceeded => {
-                                warn!(
-                                    namespace_id,
-                                    vault_id,
+                                crate::metrics::set_vault_health(namespace_id.value(), vault_id.value(), "diverged");
+                                error!(
+                                    trace_id = %trace_ctx.trace_id,
+                                    namespace_id = namespace_id.value(),
+                                    vault_id = vault_id.value(),
                                     max_attempts = MAX_RECOVERY_ATTEMPTS,
-                                    "Vault exceeded max recovery attempts, requires manual intervention"
+                                    "Circuit breaker tripped: vault exceeded max recovery attempts, manual intervention required"
                                 );
                             }
                         }

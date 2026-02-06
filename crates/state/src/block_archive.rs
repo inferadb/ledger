@@ -477,8 +477,8 @@ fn encode_vault_block_index_key(
     vault_height: u64,
 ) -> [u8; 24] {
     let mut key = [0u8; 24];
-    key[0..8].copy_from_slice(&namespace_id.to_be_bytes());
-    key[8..16].copy_from_slice(&vault_id.to_be_bytes());
+    key[0..8].copy_from_slice(&namespace_id.value().to_be_bytes());
+    key[8..16].copy_from_slice(&vault_id.value().to_be_bytes());
     key[16..24].copy_from_slice(&vault_height.to_be_bytes());
     key
 }
@@ -487,19 +487,19 @@ fn encode_vault_block_index_key(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use chrono::Utc;
-    use inferadb_ledger_types::VaultEntry;
+    use inferadb_ledger_types::{ShardId, VaultEntry};
 
     use super::*;
     use crate::engine::InMemoryStorageEngine;
 
     fn create_test_block(shard_height: u64) -> ShardBlock {
         ShardBlock {
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             shard_height,
             previous_shard_hash: [0u8; 32],
             vault_entries: vec![VaultEntry {
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 vault_height: shard_height, // Simplify: vault_height == shard_height
                 previous_vault_hash: [0u8; 32],
                 transactions: vec![],
@@ -535,12 +535,15 @@ mod tests {
         archive.append_block(&block).expect("append block");
 
         // Should find the shard height from vault coordinates
-        let shard_height =
-            archive.find_shard_height(1, 1, 100).expect("find").expect("should exist");
+        let shard_height = archive
+            .find_shard_height(NamespaceId::new(1), VaultId::new(1), 100)
+            .expect("find")
+            .expect("should exist");
         assert_eq!(shard_height, 100);
 
         // Non-existent vault block
-        let not_found = archive.find_shard_height(1, 1, 999).expect("find");
+        let not_found =
+            archive.find_shard_height(NamespaceId::new(1), VaultId::new(1), 999).expect("find");
         assert!(not_found.is_none());
     }
 
@@ -603,8 +606,8 @@ mod tests {
 
         let mut block = create_test_block(100);
         block.vault_entries.push(VaultEntry {
-            namespace_id: 1,
-            vault_id: 2, // Different vault
+            namespace_id: NamespaceId::new(1),
+            vault_id: VaultId::new(2), // Different vault
             vault_height: 50,
             previous_vault_hash: [0u8; 32],
             transactions: vec![],
@@ -615,8 +618,9 @@ mod tests {
         archive.append_block(&block).expect("append block");
 
         // Both vaults should point to same shard height
-        let h1 = archive.find_shard_height(1, 1, 100).expect("find");
-        let h2 = archive.find_shard_height(1, 2, 50).expect("find");
+        let h1 =
+            archive.find_shard_height(NamespaceId::new(1), VaultId::new(1), 100).expect("find");
+        let h2 = archive.find_shard_height(NamespaceId::new(1), VaultId::new(2), 50).expect("find");
 
         assert_eq!(h1, Some(100));
         assert_eq!(h2, Some(100));
@@ -646,12 +650,12 @@ mod tests {
             .collect();
 
         ShardBlock {
-            shard_id: 1,
+            shard_id: ShardId::new(1),
             shard_height,
             previous_shard_hash: [shard_height as u8; 32],
             vault_entries: vec![VaultEntry {
-                namespace_id: 1,
-                vault_id: 1,
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
                 vault_height: shard_height,
                 previous_vault_hash: [(shard_height.saturating_sub(1)) as u8; 32],
                 transactions,
@@ -815,8 +819,10 @@ mod tests {
         archive.compact_before(101).expect("compact");
 
         // Index should still work
-        let shard_height =
-            archive.find_shard_height(1, 1, 100).expect("find").expect("should exist");
+        let shard_height = archive
+            .find_shard_height(NamespaceId::new(1), VaultId::new(1), 100)
+            .expect("find")
+            .expect("should exist");
         assert_eq!(shard_height, 100);
     }
 }

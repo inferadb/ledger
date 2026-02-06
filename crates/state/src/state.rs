@@ -9,7 +9,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use inferadb_ledger_store::{Database, StorageBackend, tables};
+use inferadb_ledger_store::{CompactionStats, Database, StorageBackend, tables};
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
@@ -79,10 +79,23 @@ pub type Result<T> = std::result::Result<T, StateError>;
 /// State layer managing per-vault materialized state.
 ///
 /// Provides fast K/V queries and efficient state root computation
-/// via bucket-based dirty tracking.
+/// via bucket-based dirty tracking. Each vault's state is independently
+/// tracked with its own [`VaultCommitment`] for incremental hashing.
 ///
-/// Generic over StorageBackend to support both file-based (production)
+/// Generic over `StorageBackend` to support both file-based (production)
 /// and in-memory (testing) storage.
+///
+/// # Usage
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use inferadb_ledger_store::Database;
+/// use inferadb_ledger_state::StateLayer;
+///
+/// let db = Arc::new(Database::open_in_memory()?);
+/// let state = StateLayer::new(db);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct StateLayer<B: StorageBackend> {
     /// Shared database handle.
     db: Arc<Database<B>>,
@@ -301,10 +314,10 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault_id {
+            if key_vault_id < vault_id.value() {
                 continue;
             }
-            if key_vault_id != vault_id {
+            if key_vault_id != vault_id.value() {
                 break;
             }
             keys_to_delete.push(key_bytes);
@@ -321,10 +334,10 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault_id {
+            if key_vault_id < vault_id.value() {
                 continue;
             }
-            if key_vault_id != vault_id {
+            if key_vault_id != vault_id.value() {
                 break;
             }
             keys_to_delete.push(key_bytes);
@@ -449,10 +462,10 @@ impl<B: StorageBackend> StateLayer<B> {
                     continue;
                 }
                 let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                if key_vault_id < vault_id {
+                if key_vault_id < vault_id.value() {
                     continue;
                 }
-                if key_vault_id > vault_id {
+                if key_vault_id > vault_id.value() {
                     break;
                 }
 
@@ -493,6 +506,16 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Get the current bucket roots for a vault (for persistence).
     pub fn get_bucket_roots(&self, vault_id: VaultId) -> Option<[Hash; NUM_BUCKETS]> {
         self.vault_commitments.read().get(&vault_id).map(|c| *c.bucket_roots())
+    }
+
+    /// Compact all B+ tree tables, merging underfull leaf nodes.
+    ///
+    /// Returns aggregate compaction statistics across all tables.
+    pub fn compact_tables(&self, min_fill_factor: f64) -> Result<CompactionStats> {
+        let mut txn = self.db.write().context(StoreSnafu)?;
+        let stats = txn.compact_all_tables(min_fill_factor).context(StoreSnafu)?;
+        txn.commit().context(StoreSnafu)?;
+        Ok(stats)
     }
 
     /// List subjects for a given resource and relation.
@@ -562,7 +585,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id != vault_id {
+            if key_vault_id != vault_id.value() {
                 break;
             }
 
@@ -626,7 +649,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id != vault_id {
+            if key_vault_id != vault_id.value() {
                 break;
             }
 
@@ -652,6 +675,7 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use inferadb_ledger_store::InMemoryBackend;
+    use inferadb_ledger_types::VaultId;
 
     use super::*;
     use crate::engine::InMemoryStorageEngine;
@@ -664,7 +688,7 @@ mod tests {
     #[test]
     fn test_set_and_get_entity() {
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         let ops = vec![Operation::SetEntity {
             key: "test_key".to_string(),
@@ -686,7 +710,7 @@ mod tests {
     #[test]
     fn test_set_entity_must_not_exist() {
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // First set
         let ops = vec![Operation::SetEntity {
@@ -728,7 +752,7 @@ mod tests {
     #[test]
     fn test_delete_entity() {
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Set then delete
         let ops = vec![Operation::SetEntity {
@@ -754,7 +778,7 @@ mod tests {
     #[test]
     fn test_create_relationship() {
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         let ops = vec![Operation::CreateRelationship {
             resource: "doc:123".to_string(),
@@ -775,7 +799,7 @@ mod tests {
     #[test]
     fn test_delete_relationship() {
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create
         let ops = vec![Operation::CreateRelationship {
@@ -809,7 +833,7 @@ mod tests {
         use inferadb_ledger_types::bucket_id;
 
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create relationships with resource names chosen to land in different buckets.
         // We want at least some in buckets < 185 to catch the regression.
@@ -892,7 +916,7 @@ mod tests {
         use inferadb_ledger_types::bucket_id;
 
         let state = create_test_state();
-        let vault_id = 20_000_002_690_000i64; // Same vault ID pattern as integration tests
+        let vault_id = VaultId::new(20_000_002_690_000); // Same vault ID pattern as integration tests
 
         // First: sequential write (like Engine test does)
         let seq_ops = vec![Operation::CreateRelationship {
@@ -994,7 +1018,7 @@ mod tests {
     #[test]
     fn test_state_root_changes_on_writes() {
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         let root1 = state.compute_state_root(vault_id).unwrap();
 
@@ -1029,21 +1053,21 @@ mod tests {
             condition: None,
             expires_at: None,
         }];
-        state.apply_operations(1, &ops, 1).unwrap();
+        state.apply_operations(VaultId::new(1), &ops, 1).unwrap();
 
         // Vault 2 should not see vault 1's data
-        assert!(state.get_entity(2, b"key").unwrap().is_none());
+        assert!(state.get_entity(VaultId::new(2), b"key").unwrap().is_none());
 
         // State roots should differ
-        let root1 = state.compute_state_root(1).unwrap();
-        let root2 = state.compute_state_root(2).unwrap();
+        let root1 = state.compute_state_root(VaultId::new(1)).unwrap();
+        let root2 = state.compute_state_root(VaultId::new(2)).unwrap();
         assert_ne!(root1, root2);
     }
 
     #[test]
     fn test_clear_vault() {
         let state = create_test_state();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create entities and relationships
         let ops = vec![
@@ -1074,7 +1098,7 @@ mod tests {
             condition: None,
             expires_at: None,
         }];
-        state.apply_operations(2, &ops_vault2, 1).unwrap();
+        state.apply_operations(VaultId::new(2), &ops_vault2, 1).unwrap();
 
         // Verify data exists in vault 1
         assert!(state.get_entity(vault_id, b"entity1").unwrap().is_some());
@@ -1090,7 +1114,7 @@ mod tests {
         assert!(!state.relationship_exists(vault_id, "doc:1", "viewer", "user:alice").unwrap());
 
         // Verify vault 2 data is still there (isolation)
-        assert!(state.get_entity(2, b"entity_v2").unwrap().is_some());
+        assert!(state.get_entity(VaultId::new(2), b"entity_v2").unwrap().is_some());
 
         // State root should be back to empty
         let empty_root = state.compute_state_root(vault_id).unwrap();
@@ -1104,7 +1128,7 @@ mod tests {
     #[test]
     fn test_many_sequential_writes_then_verify() {
         let state = create_test_state();
-        let vault_id = 1i64;
+        let vault_id = VaultId::new(1);
 
         // Write 500 entities sequentially
         let num_keys = 500;
@@ -1152,7 +1176,7 @@ mod tests {
         use std::{sync::Arc, thread};
 
         let state = Arc::new(create_test_state());
-        let vault_id = 1i64;
+        let vault_id = VaultId::new(1);
         let num_threads = 4;
         let writes_per_thread = 50;
 
@@ -1290,7 +1314,7 @@ mod tests {
             fn state_determinism_same_operations(
                 operations in arb_operation_sequence()
             ) {
-                let vault_id: VaultId = 1;
+                let vault_id = VaultId::new(1);
 
                 // Create two independent StateLayer instances
                 let state1 = create_test_state();
@@ -1326,7 +1350,7 @@ mod tests {
             fn state_determinism_batch_vs_individual(
                 operations in arb_operation_sequence()
             ) {
-                let vault_id: VaultId = 1;
+                let vault_id = VaultId::new(1);
                 let block_height: u64 = 1; // Same height for both
 
                 // Apply one-by-one at the SAME block height
@@ -1355,7 +1379,7 @@ mod tests {
             fn state_root_idempotent(
                 operations in arb_operation_sequence()
             ) {
-                let vault_id: VaultId = 1;
+                let vault_id = VaultId::new(1);
                 let state = create_test_state();
 
                 // Apply operations
@@ -1383,7 +1407,7 @@ mod tests {
                 // Only test when sequences are actually different
                 prop_assume!(ops1 != ops2);
 
-                let vault_id: VaultId = 1;
+                let vault_id = VaultId::new(1);
 
                 let state1 = create_test_state();
                 let state2 = create_test_state();
@@ -1485,5 +1509,56 @@ mod tests {
             display.contains("test_key"),
             "PreconditionFailed should mention the key: {display}"
         );
+    }
+
+    #[test]
+    fn test_compact_tables_empty() {
+        let state = create_test_state();
+        let stats = state.compact_tables(0.4).unwrap();
+        assert_eq!(stats.pages_merged, 0);
+        assert_eq!(stats.pages_freed, 0);
+    }
+
+    #[test]
+    fn test_compact_tables_preserves_data() {
+        let state = create_test_state();
+        let vault_id = VaultId::new(1);
+
+        // Insert many entities
+        for i in 0..100 {
+            let ops = vec![Operation::SetEntity {
+                key: format!("ckey-{:04}", i),
+                value: format!("cval-{:04}", i).into_bytes(),
+                condition: None,
+                expires_at: None,
+            }];
+            state.apply_operations(vault_id, &ops, i as u64 + 1).unwrap();
+        }
+
+        // Delete most to create sparse leaves
+        for i in 0..80 {
+            let ops = vec![Operation::DeleteEntity { key: format!("ckey-{:04}", i) }];
+            state.apply_operations(vault_id, &ops, 200 + i as u64).unwrap();
+        }
+
+        // Run compaction
+        let stats = state.compact_tables(0.4).unwrap();
+
+        // Verify remaining data is intact
+        for i in 80..100 {
+            let entity = state.get_entity(vault_id, format!("ckey-{:04}", i).as_bytes()).unwrap();
+            assert!(entity.is_some(), "Entity ckey-{:04} missing after compaction", i);
+            assert_eq!(entity.unwrap().value, format!("cval-{:04}", i).into_bytes());
+        }
+
+        // Verify deleted keys are still gone
+        for i in 0..80 {
+            let entity = state.get_entity(vault_id, format!("ckey-{:04}", i).as_bytes()).unwrap();
+            assert!(entity.is_none());
+        }
+
+        // At least the stats struct should be populated (may or may not have merges
+        // depending on actual page layout)
+        let _ = stats;
     }
 }

@@ -1,7 +1,8 @@
 //! Wide events logging system for comprehensive request observability.
+//! Canonical log lines (wide events) for structured request-level observability.
 //!
-//! This module implements a "wide events" pattern where each request emits exactly one
-//! structured JSON event containing 50+ contextual fields. This enables:
+//! This module implements the canonical log line pattern where each request emits
+//! exactly one structured JSON event containing all request context. This enables:
 //!
 //! - Single-line debugging: all request context in one log entry
 //! - Log-based analytics: query patterns without separate metrics infrastructure
@@ -9,17 +10,49 @@
 //!
 //! # Architecture
 //!
-//! The core abstraction is [`RequestContext`], a builder that accumulates fields
-//! throughout the request lifecycle. On drop, it emits a single structured event
-//! to the `ledger::events` tracing target.
+//! The core abstraction is [`RequestContext`] (aliased as [`CanonicalLogLine`]),
+//! a builder that accumulates fields throughout the request lifecycle. On drop,
+//! it emits a single structured event to the `ledger::events` tracing target.
+//!
+//! # Canonical Log Line Schema
+//!
+//! Every event emitted to `ledger::events` includes these field groups:
+//!
+//! | Group | Fields | Description |
+//! |-------|--------|-------------|
+//! | Identity | `request_id`, `service`, `method` | Request routing |
+//! | Client | `client_id`, `sequence`, `actor`, `sdk_version`, `source_ip` | Client metadata |
+//! | Target | `namespace_id`, `vault_id` | Scope of the operation |
+//! | System | `node_id`, `is_leader`, `raft_term`, `shard_id` | Cluster state |
+//! | Write | `operations_count`, `operation_types`, `bytes_written`, `raft_round_trips` | Write metrics |
+//! | Read | `key`, `keys_count`, `found_count`, `bytes_read` | Read metrics |
+//! | Outcome | `outcome`, `error_code`, `error_message`, `block_height` | Result |
+//! | Tracing | `trace_id`, `span_id`, `parent_span_id`, `trace_flags` | W3C Trace Context |
+//! | Timing | `duration_ms`, `raft_latency_ms`, `storage_latency_ms` | Latency breakdown |
+//!
+//! # Sampling
+//!
+//! High-volume deployments can reduce log volume via [`SamplingConfig`]:
+//! - Errors and slow requests are always logged (100% sample rate)
+//! - VIP namespaces get elevated sampling (default 50%)
+//! - Normal writes sample at 10%, reads at 1%
+//! - Admin operations are always logged
+//!
+//! # Log Aggregation
+//!
+//! Events are emitted as structured JSON to the `ledger::events` tracing target.
+//! Configure your tracing subscriber to route this target to your log aggregation
+//! system (Datadog, Loki, Elasticsearch, etc.).
+//!
+//! Example Datadog query: `@service:WriteService @outcome:error @duration_ms:>100`
 //!
 //! # Example
 //!
 //! ```no_run
-//! use inferadb_ledger_raft::wide_events::{RequestContext, Outcome};
+//! use inferadb_ledger_raft::wide_events::{CanonicalLogLine, Outcome};
 //!
 //! async fn handle_request() {
-//!     let mut ctx = RequestContext::new("WriteService", "write");
+//!     let mut ctx = CanonicalLogLine::new("WriteService", "write");
 //!     ctx.set_client_info("client_123", 42, Some("user@example.com".into()));
 //!     ctx.set_target(1, 2);
 //!
@@ -515,6 +548,15 @@ pub struct RequestContext {
     block_hash: Option<String>,
     state_root: Option<String>,
 
+    // I/O metrics
+    bytes_read: Option<usize>,
+    bytes_written: Option<usize>,
+    raft_round_trips: Option<u32>,
+
+    // Client transport metadata
+    sdk_version: Option<String>,
+    source_ip: Option<String>,
+
     // Tracing context (W3C Trace Context)
     trace_id: Option<String>,
     span_id: Option<String>,
@@ -580,6 +622,11 @@ impl RequestContext {
             block_height: None,
             block_hash: None,
             state_root: None,
+            bytes_read: None,
+            bytes_written: None,
+            raft_round_trips: None,
+            sdk_version: None,
+            source_ip: None,
             trace_id: None,
             span_id: None,
             parent_span_id: None,
@@ -891,6 +938,71 @@ impl RequestContext {
         self.state_root = Some(truncate_hash(root));
     }
 
+    // =========================================================================
+    // I/O metrics setters
+    // =========================================================================
+
+    /// Sets the number of bytes read during this request.
+    pub fn set_bytes_read(&mut self, bytes: usize) {
+        self.bytes_read = Some(bytes);
+    }
+
+    /// Sets the number of bytes written during this request.
+    pub fn set_bytes_written(&mut self, bytes: usize) {
+        self.bytes_written = Some(bytes);
+    }
+
+    /// Increments the Raft round trip counter by one.
+    ///
+    /// Call this each time a Raft proposal round trip completes.
+    pub fn increment_raft_round_trips(&mut self) {
+        *self.raft_round_trips.get_or_insert(0) += 1;
+    }
+
+    /// Sets the Raft round trip count directly.
+    pub fn set_raft_round_trips(&mut self, count: u32) {
+        self.raft_round_trips = Some(count);
+    }
+
+    // =========================================================================
+    // Client transport metadata setters
+    // =========================================================================
+
+    /// Sets the SDK version string reported by the client.
+    ///
+    /// Extracted from gRPC `x-sdk-version` metadata header.
+    pub fn set_sdk_version(&mut self, version: &str) {
+        self.sdk_version = Some(truncate_string(version, 64));
+    }
+
+    /// Sets the source IP address of the client connection.
+    ///
+    /// Extracted from the gRPC transport remote address.
+    pub fn set_source_ip(&mut self, ip: &str) {
+        self.source_ip = Some(truncate_string(ip, 45)); // IPv6 max length
+    }
+
+    /// Extracts SDK version and source IP from gRPC request metadata.
+    ///
+    /// Reads:
+    /// - `x-sdk-version` header for the client SDK version
+    /// - `x-forwarded-for` header for the client source IP (behind load balancers)
+    pub fn extract_transport_metadata(&mut self, metadata: &tonic::metadata::MetadataMap) {
+        if let Some(version) = metadata.get("x-sdk-version")
+            && let Ok(v) = version.to_str()
+        {
+            self.set_sdk_version(v);
+        }
+        if let Some(forwarded_for) = metadata.get("x-forwarded-for")
+            && let Ok(ips) = forwarded_for.to_str()
+        {
+            // x-forwarded-for may contain multiple IPs; take the first (client IP)
+            if let Some(client_ip) = ips.split(',').next() {
+                self.set_source_ip(client_ip.trim());
+            }
+        }
+    }
+
     // === Tracing Context ===
 
     /// Sets the W3C trace ID (32 hex chars).
@@ -944,9 +1056,12 @@ impl RequestContext {
     }
 
     /// Ends the Raft consensus timer and records the duration.
+    ///
+    /// Also increments the Raft round trip counter.
     pub fn end_raft_timer(&mut self) {
         if let Some(start) = self.timing.raft_start.take() {
             self.timing.raft_latency_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+            *self.raft_round_trips.get_or_insert(0) += 1;
         }
     }
 
@@ -1082,6 +1197,11 @@ impl RequestContext {
             block_height = self.block_height,
             block_hash = self.block_hash.as_deref(),
             state_root = self.state_root.as_deref(),
+            bytes_read = self.bytes_read,
+            bytes_written = self.bytes_written,
+            raft_round_trips = self.raft_round_trips,
+            sdk_version = self.sdk_version.as_deref(),
+            source_ip = self.source_ip.as_deref(),
             trace_id = self.trace_id.as_deref(),
             span_id = self.span_id.as_deref(),
             parent_span_id = self.parent_span_id.as_deref(),
@@ -1089,7 +1209,7 @@ impl RequestContext {
             duration_ms = duration_ms,
             raft_latency_ms = self.timing.raft_latency_ms,
             storage_latency_ms = self.timing.storage_latency_ms,
-            "wide_event"
+            "canonical_log_line"
         );
 
         // Export span to OTEL if enabled
@@ -1127,6 +1247,11 @@ impl RequestContext {
                 block_height: self.block_height,
                 block_hash: self.block_hash.clone(),
                 state_root: self.state_root.clone(),
+                bytes_read: self.bytes_read,
+                bytes_written: self.bytes_written,
+                raft_round_trips: self.raft_round_trips,
+                sdk_version: self.sdk_version.clone(),
+                source_ip: self.source_ip.clone(),
                 duration_ms: Some(duration_ms),
                 raft_latency_ms: self.timing.raft_latency_ms,
                 storage_latency_ms: self.timing.storage_latency_ms,
@@ -1152,6 +1277,12 @@ impl Drop for RequestContext {
         }
     }
 }
+
+/// Alias for [`RequestContext`] emphasizing the canonical log line pattern.
+///
+/// Each request creates one `CanonicalLogLine` that accumulates context throughout
+/// its lifecycle and emits a single structured JSON event on completion.
+pub type CanonicalLogLine = RequestContext;
 
 #[cfg(test)]
 mod tests {
@@ -2456,5 +2587,246 @@ mod tests {
         assert!(event.contains("\"span_id\":\"0011223344556677\""));
         assert!(event.contains("\"parent_span_id\":\"aabbccddeeff0011\""));
         assert!(event.contains("\"trace_flags\":1"));
+    }
+
+    // === Canonical Log Line Field Tests (Task 16) ===
+
+    #[test]
+    fn test_bytes_read_in_json_output() {
+        let (_, events) = with_json_capturing_subscriber(|| {
+            let mut ctx = RequestContext::new("ReadService", "read");
+            ctx.set_bytes_read(4096);
+            ctx.set_success();
+        });
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(event.contains("\"bytes_read\":4096"), "bytes_read field missing: {event}");
+    }
+
+    #[test]
+    fn test_bytes_written_in_json_output() {
+        let (_, events) = with_json_capturing_subscriber(|| {
+            let mut ctx = RequestContext::new("WriteService", "write");
+            ctx.set_bytes_written(2048);
+            ctx.set_success();
+        });
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(event.contains("\"bytes_written\":2048"), "bytes_written field missing: {event}");
+    }
+
+    #[test]
+    fn test_raft_round_trips_in_json_output() {
+        let (_, events) = with_json_capturing_subscriber(|| {
+            let mut ctx = RequestContext::new("WriteService", "write");
+            ctx.set_raft_round_trips(3);
+            ctx.set_success();
+        });
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(
+            event.contains("\"raft_round_trips\":3"),
+            "raft_round_trips field missing: {event}"
+        );
+    }
+
+    #[test]
+    fn test_sdk_version_in_json_output() {
+        let (_, events) = with_json_capturing_subscriber(|| {
+            let mut ctx = RequestContext::new("ReadService", "read");
+            ctx.set_sdk_version("rust-sdk/0.1.0");
+            ctx.set_success();
+        });
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(
+            event.contains("\"sdk_version\":\"rust-sdk/0.1.0\""),
+            "sdk_version field missing: {event}"
+        );
+    }
+
+    #[test]
+    fn test_source_ip_in_json_output() {
+        let (_, events) = with_json_capturing_subscriber(|| {
+            let mut ctx = RequestContext::new("ReadService", "read");
+            ctx.set_source_ip("192.168.1.100");
+            ctx.set_success();
+        });
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(
+            event.contains("\"source_ip\":\"192.168.1.100\""),
+            "source_ip field missing: {event}"
+        );
+    }
+
+    #[test]
+    fn test_end_raft_timer_auto_increments_round_trips() {
+        let mut ctx = RequestContext::new("WriteService", "write");
+
+        assert!(ctx.raft_round_trips.is_none());
+
+        // First raft round trip
+        ctx.start_raft_timer();
+        ctx.end_raft_timer();
+        assert_eq!(ctx.raft_round_trips, Some(1));
+
+        // Second raft round trip
+        ctx.start_raft_timer();
+        ctx.end_raft_timer();
+        assert_eq!(ctx.raft_round_trips, Some(2));
+
+        // Manual set overrides
+        ctx.set_raft_round_trips(10);
+        assert_eq!(ctx.raft_round_trips, Some(10));
+
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn test_increment_raft_round_trips_without_timer() {
+        let mut ctx = RequestContext::new("WriteService", "write");
+
+        ctx.increment_raft_round_trips();
+        assert_eq!(ctx.raft_round_trips, Some(1));
+
+        ctx.increment_raft_round_trips();
+        assert_eq!(ctx.raft_round_trips, Some(2));
+
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn test_extract_transport_metadata() {
+        let mut ctx = RequestContext::new("WriteService", "write");
+
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata
+            .insert("x-sdk-version", tonic::metadata::MetadataValue::from_static("rust-sdk/0.2.0"));
+        metadata.insert(
+            "x-forwarded-for",
+            tonic::metadata::MetadataValue::from_static("10.0.0.1, 192.168.1.1"),
+        );
+
+        ctx.extract_transport_metadata(&metadata);
+
+        assert_eq!(ctx.sdk_version.as_deref(), Some("rust-sdk/0.2.0"));
+        // extract_transport_metadata takes the first IP from x-forwarded-for (client IP)
+        assert_eq!(ctx.source_ip.as_deref(), Some("10.0.0.1"));
+
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn test_extract_transport_metadata_empty() {
+        let mut ctx = RequestContext::new("WriteService", "write");
+
+        let metadata = tonic::metadata::MetadataMap::new();
+        ctx.extract_transport_metadata(&metadata);
+
+        assert!(ctx.sdk_version.is_none());
+        assert!(ctx.source_ip.is_none());
+
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn test_canonical_log_line_type_alias() {
+        // CanonicalLogLine is just a type alias for RequestContext
+        let mut ctx: CanonicalLogLine = CanonicalLogLine::new("WriteService", "write");
+        ctx.set_bytes_written(512);
+        ctx.set_sdk_version("rust-sdk/0.1.0");
+        ctx.set_source_ip("127.0.0.1");
+        ctx.set_success();
+
+        // If it compiles and runs, the alias works
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn test_canonical_log_line_completeness() {
+        // Verify that a fully-populated canonical log line emits all field groups.
+        let (_, events) = with_json_capturing_subscriber(|| {
+            let mut ctx = RequestContext::new("WriteService", "write");
+
+            // Identity fields
+            ctx.set_client_info("client_123", 42, Some("user@example.com".into()));
+
+            // Target fields
+            ctx.set_target(1, 2);
+
+            // System fields
+            ctx.set_node_id(100);
+            ctx.set_is_leader(true);
+            ctx.set_raft_term(5);
+            ctx.set_shard_id(3);
+
+            // Write metrics
+            ctx.set_operations_count(10);
+            ctx.set_bytes_written(4096);
+            ctx.set_raft_round_trips(2);
+
+            // Client transport metadata
+            ctx.set_sdk_version("rust-sdk/0.3.0");
+            ctx.set_source_ip("10.0.0.42");
+
+            // Tracing context
+            ctx.set_trace_context(
+                "aabbccdd11223344aabbccdd11223344",
+                "1122334455667788",
+                None,
+                0x01,
+            );
+
+            // Outcome
+            ctx.set_success();
+        });
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+
+        // Identity
+        assert!(event.contains("\"service\":\"WriteService\""), "missing service");
+        assert!(event.contains("\"method\":\"write\""), "missing method");
+        assert!(event.contains("\"client_id\":\"client_123\""), "missing client_id");
+
+        // Target
+        assert!(event.contains("\"namespace_id\":1"), "missing namespace_id");
+        assert!(event.contains("\"vault_id\":2"), "missing vault_id");
+
+        // System
+        assert!(event.contains("\"node_id\":100"), "missing node_id");
+        assert!(event.contains("\"is_leader\":true"), "missing is_leader");
+        assert!(event.contains("\"raft_term\":5"), "missing raft_term");
+        assert!(event.contains("\"shard_id\":3"), "missing shard_id");
+
+        // Write metrics
+        assert!(event.contains("\"operations_count\":10"), "missing operations_count");
+        assert!(event.contains("\"bytes_written\":4096"), "missing bytes_written");
+        assert!(event.contains("\"raft_round_trips\":2"), "missing raft_round_trips");
+
+        // Client transport
+        assert!(event.contains("\"sdk_version\":\"rust-sdk/0.3.0\""), "missing sdk_version");
+        assert!(event.contains("\"source_ip\":\"10.0.0.42\""), "missing source_ip");
+
+        // Tracing
+        assert!(
+            event.contains("\"trace_id\":\"aabbccdd11223344aabbccdd11223344\""),
+            "missing trace_id"
+        );
+
+        // Outcome
+        assert!(event.contains("\"outcome\":\"success\""), "missing outcome");
+
+        // Timing (always present)
+        assert!(event.contains("\"duration_ms\":"), "missing duration_ms");
+
+        // Message format
+        assert!(event.contains("canonical_log_line"), "missing canonical_log_line message");
     }
 }

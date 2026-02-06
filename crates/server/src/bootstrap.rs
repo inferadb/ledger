@@ -110,6 +110,8 @@ pub struct BootstrappedNode {
 pub async fn bootstrap_node(
     config: &Config,
     data_dir: &std::path::Path,
+    health_state: inferadb_ledger_raft::HealthState,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<BootstrappedNode, BootstrapError> {
     // Validate bootstrap configuration
     config.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
@@ -144,7 +146,7 @@ pub async fn bootstrap_node(
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
-        .with_shard_config(0, node_id.to_string()) // Default shard 0
+        .with_shard_config(inferadb_ledger_types::ShardId::new(0), node_id.to_string()) // Default shard 0
         .with_block_announcements(block_announcements.clone());
 
     // Determine bootstrap behavior before log_store is consumed by Adaptor
@@ -258,6 +260,8 @@ pub async fn bootstrap_node(
         .addr(config.listen_addr)
         .max_concurrent(config.max_concurrent)
         .timeout_secs(config.timeout_secs)
+        .health_state(health_state.clone())
+        .shutdown_rx(Some(shutdown_rx))
         .build();
 
     let gc = TtlGarbageCollector::builder()
@@ -532,7 +536,9 @@ mod tests {
         let data_dir = temp_dir.path().to_path_buf();
         let config = Config::for_test(1, 50051, data_dir.clone());
 
-        let result = bootstrap_node(&config, &data_dir).await;
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let result = bootstrap_node(&config, &data_dir, health, rx).await;
         assert!(result.is_ok(), "bootstrap should succeed: {:?}", result.err());
     }
 }

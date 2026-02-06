@@ -217,7 +217,7 @@ mod tests {
     fn test_relationship_crud() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create
         {
@@ -284,7 +284,7 @@ mod tests {
     fn test_list_in_vault() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create multiple relationships
         {
@@ -319,7 +319,7 @@ mod tests {
     fn test_get_relationship() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Get non-existent relationship
         {
@@ -353,7 +353,7 @@ mod tests {
     fn test_list_for_resource() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create relationships for different resources
         {
@@ -416,7 +416,7 @@ mod tests {
     fn test_list_in_vault_pagination() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let db = engine.db();
-        let vault_id = 1;
+        let vault_id = VaultId::new(1);
 
         // Create 10 relationships
         {
@@ -466,7 +466,7 @@ mod tests {
         let db = engine.db();
 
         let txn = db.read().expect("begin read");
-        let count = RelationshipStore::count_in_vault(&txn, 999).expect("count");
+        let count = RelationshipStore::count_in_vault(&txn, VaultId::new(999)).expect("count");
         assert_eq!(count, 0);
     }
 
@@ -478,8 +478,14 @@ mod tests {
         // Create in vault 1
         {
             let mut txn = db.write().expect("begin write");
-            RelationshipStore::create(&mut txn, 1, "doc:shared", "viewer", "user:alice")
-                .expect("create");
+            RelationshipStore::create(
+                &mut txn,
+                VaultId::new(1),
+                "doc:shared",
+                "viewer",
+                "user:alice",
+            )
+            .expect("create");
             txn.commit().expect("commit");
         }
 
@@ -488,11 +494,17 @@ mod tests {
             let txn = db.read().expect("begin read");
 
             assert!(
-                !RelationshipStore::exists(&txn, 2, "doc:shared", "viewer", "user:alice")
-                    .expect("exists")
+                !RelationshipStore::exists(
+                    &txn,
+                    VaultId::new(2),
+                    "doc:shared",
+                    "viewer",
+                    "user:alice"
+                )
+                .expect("exists")
             );
 
-            let count = RelationshipStore::count_in_vault(&txn, 2).expect("count");
+            let count = RelationshipStore::count_in_vault(&txn, VaultId::new(2)).expect("count");
             assert_eq!(count, 0);
         }
     }

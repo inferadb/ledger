@@ -37,7 +37,7 @@ use criterion::{
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::Operation;
+use inferadb_ledger_types::{Operation, VaultId};
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
@@ -63,7 +63,7 @@ fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
 }
 
 /// Pre-populate a vault with entities for read benchmarks.
-fn populate_vault(state: &StateLayer<FileBackend>, vault_id: i64, count: usize) {
+fn populate_vault(state: &StateLayer<FileBackend>, vault_id: VaultId, count: usize) {
     // Use batched writes for faster population
     const BATCH_SIZE: usize = 1000;
 
@@ -124,7 +124,7 @@ fn bench_read_latency(c: &mut Criterion) {
 
     for entity_count in [10_000, 100_000] {
         let temp_dir = TempDir::new().expect("create temp dir");
-        let vault_id = 1i64;
+        let vault_id = VaultId::new(1);
         let state = create_state_layer(&temp_dir);
 
         // Pre-populate
@@ -161,7 +161,7 @@ fn bench_read_latency_random(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     let temp_dir = TempDir::new().expect("create temp dir");
-    let vault_id = 1i64;
+    let vault_id = VaultId::new(1);
     let entity_count = SCALE_ENTITY_COUNT;
     let state = create_state_layer(&temp_dir);
 
@@ -213,7 +213,7 @@ fn bench_write_latency(c: &mut Criterion) {
         let mut counter = 0u64;
         b.iter(|| {
             counter += 1;
-            let vault_id = 1i64;
+            let vault_id = VaultId::new(1);
             let key = format!("key-{}", counter);
             let value = format!("value-{}", counter);
 
@@ -254,7 +254,7 @@ fn bench_write_throughput(c: &mut Criterion) {
         let mut batch_counter = 0u64;
         b.iter(|| {
             batch_counter += 1;
-            let vault_id = 1i64;
+            let vault_id = VaultId::new(1);
 
             let operations: Vec<Operation> = (0..OPTIMAL_BATCH_SIZE)
                 .map(|i| {
@@ -292,7 +292,7 @@ fn bench_read_throughput(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(15));
 
     let temp_dir = TempDir::new().expect("create temp dir");
-    let vault_id = 1i64;
+    let vault_id = VaultId::new(1);
     let entity_count = SCALE_ENTITY_COUNT;
     let state = create_state_layer(&temp_dir);
 
@@ -336,7 +336,7 @@ fn bench_state_root(c: &mut Criterion) {
     // Test at different database sizes to validate O(k) claim
     for entity_count in [10_000, 50_000, 100_000] {
         let temp_dir = TempDir::new().expect("create temp dir");
-        let vault_id = 1i64;
+        let vault_id = VaultId::new(1);
         let state = create_state_layer(&temp_dir);
 
         populate_vault(&state, vault_id, entity_count);
@@ -370,7 +370,7 @@ fn bench_state_root_incremental(c: &mut Criterion) {
 
     // Fixed large dataset
     let temp_dir = TempDir::new().expect("create temp dir");
-    let vault_id = 1i64;
+    let vault_id = VaultId::new(1);
     let state = create_state_layer(&temp_dir);
 
     populate_vault(&state, vault_id, SCALE_ENTITY_COUNT);
@@ -428,7 +428,7 @@ fn bench_whitepaper_summary(c: &mut Criterion) {
 
     // Single comprehensive benchmark that outputs summary statistics
     let temp_dir = TempDir::new().expect("create temp dir");
-    let vault_id = 1i64;
+    let vault_id = VaultId::new(1);
     let state = create_state_layer(&temp_dir);
 
     // Populate with significant data
@@ -467,7 +467,7 @@ fn bench_latency_percentiles(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     let temp_dir = TempDir::new().expect("create temp dir");
-    let vault_id = 1i64;
+    let vault_id = VaultId::new(1);
     let state = create_state_layer(&temp_dir);
 
     let entity_count = 50_000;
@@ -526,7 +526,7 @@ fn bench_latency_percentiles(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut collector = LatencyCollector::new(iters as usize);
             let mut counter = 0u64;
-            let vault_id = 1i64;
+            let vault_id = VaultId::new(1);
 
             for _ in 0..iters {
                 counter += 1;

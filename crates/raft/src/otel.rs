@@ -272,6 +272,15 @@ pub struct SpanAttributes {
     pub block_hash: Option<String>,
     pub state_root: Option<String>,
 
+    // I/O metrics
+    pub bytes_read: Option<usize>,
+    pub bytes_written: Option<usize>,
+    pub raft_round_trips: Option<u32>,
+
+    // Client transport metadata
+    pub sdk_version: Option<String>,
+    pub source_ip: Option<String>,
+
     // Timing fields
     pub duration_ms: Option<f64>,
     pub raft_latency_ms: Option<f64>,

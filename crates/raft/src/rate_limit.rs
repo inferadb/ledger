@@ -1,11 +1,17 @@
-//! Per-namespace rate limiting.
+//! Multi-level token bucket rate limiting.
+//!
+//! Provides three tiers of admission control for write requests:
+//!
+//! 1. **Per-client** — prevents a single bad actor from monopolizing resources
+//! 2. **Per-namespace** — ensures fair sharing across tenants in a multi-tenant shard
+//! 3. **Global backpressure** — throttles all requests when Raft queue depth is high
+//!
+//! Uses the token bucket algorithm, which allows controlled bursts while maintaining
+//! an average rate. Each bucket has a capacity (max burst) and a refill rate (sustained
+//! throughput). Tokens are consumed on each request and refilled over time.
 //!
 //! Per DESIGN.md §3.7: Mitigates noisy neighbor problems in multi-tenant shards
 //! by applying rate limits per namespace_id at the shard leader.
-//!
-//! Uses a simple sliding window counter for simplicity. For production use cases
-//! requiring more sophisticated rate limiting (token bucket, leaky bucket),
-//! this module can be extended.
 
 use std::{
     collections::HashMap,
@@ -16,201 +22,613 @@ use std::{
 use inferadb_ledger_types::NamespaceId;
 use parking_lot::Mutex;
 
-/// Default requests per second per namespace.
-const DEFAULT_REQUESTS_PER_SECOND: u64 = 1000;
-
-/// Default window size for sliding window counter.
-const DEFAULT_WINDOW_SIZE: Duration = Duration::from_secs(1);
-
-/// Per-namespace rate limiter.
-///
-/// Uses a sliding window counter to track requests per namespace.
-/// When a namespace exceeds its limit, new requests are rejected.
-#[derive(Debug)]
-pub struct NamespaceRateLimiter {
-    /// Rate limit per namespace (requests per second).
-    limit_per_namespace: u64,
-    /// Window size for counting requests.
-    window_size: Duration,
-    /// Per-namespace counters: (window_start, count).
-    counters: Mutex<HashMap<NamespaceId, WindowCounter>>,
-    /// Total requests rejected due to rate limiting (for metrics).
-    rejected_count: AtomicU64,
+/// Level at which a rate limit was enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitLevel {
+    /// Per-client rate limit.
+    Client,
+    /// Per-namespace rate limit.
+    Namespace,
+    /// Global backpressure based on Raft queue depth.
+    Backpressure,
 }
 
-/// A sliding window counter for a single namespace.
-#[derive(Debug)]
-struct WindowCounter {
-    /// Start of the current window.
-    window_start: Instant,
-    /// Count of requests in the current window.
-    count: u64,
-}
-
-impl NamespaceRateLimiter {
-    /// Create a new rate limiter with default settings.
-    pub fn new() -> Self {
-        Self::with_limit(DEFAULT_REQUESTS_PER_SECOND)
-    }
-
-    /// Create a rate limiter with a specific requests-per-second limit.
-    pub fn with_limit(requests_per_second: u64) -> Self {
-        Self {
-            limit_per_namespace: requests_per_second,
-            window_size: DEFAULT_WINDOW_SIZE,
-            counters: Mutex::new(HashMap::new()),
-            rejected_count: AtomicU64::new(0),
+impl RateLimitLevel {
+    /// Return a static string label for metrics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Namespace => "namespace",
+            Self::Backpressure => "backpressure",
         }
     }
+}
 
-    /// Check if a request should be allowed for the given namespace.
-    ///
-    /// Returns `Ok(())` if the request is allowed, `Err(RateLimitExceeded)` otherwise.
-    pub fn check(&self, namespace_id: NamespaceId) -> Result<(), RateLimitExceeded> {
-        let now = Instant::now();
-        let mut counters = self.counters.lock();
+/// Reason for rate limit rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitReason {
+    /// Token bucket exhausted (burst + sustained rate exceeded).
+    TokensExhausted,
+    /// Raft pending proposals exceed threshold.
+    QueueDepth,
+}
 
-        let counter = counters
-            .entry(namespace_id)
-            .or_insert_with(|| WindowCounter { window_start: now, count: 0 });
-
-        // If we're in a new window, reset the counter
-        if now.duration_since(counter.window_start) >= self.window_size {
-            counter.window_start = now;
-            counter.count = 0;
+impl RateLimitReason {
+    /// Return a static string label for metrics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TokensExhausted => "tokens_exhausted",
+            Self::QueueDepth => "queue_depth",
         }
-
-        // Check if we're within the limit
-        if counter.count >= self.limit_per_namespace {
-            self.rejected_count.fetch_add(1, Ordering::Relaxed);
-            return Err(RateLimitExceeded {
-                namespace_id,
-                limit: self.limit_per_namespace,
-                window_size: self.window_size,
-            });
-        }
-
-        // Allow the request
-        counter.count += 1;
-        Ok(())
-    }
-
-    /// Get the number of rejected requests (for metrics).
-    pub fn rejected_count(&self) -> u64 {
-        self.rejected_count.load(Ordering::Relaxed)
-    }
-
-    /// Get the current request count for a namespace.
-    ///
-    /// Useful for metrics and debugging.
-    #[allow(dead_code)] // public API: utility for rate limit inspection
-    pub fn current_count(&self, namespace_id: NamespaceId) -> u64 {
-        let counters = self.counters.lock();
-        counters.get(&namespace_id).map_or(0, |c| c.count)
-    }
-
-    /// Remove stale entries that haven't been accessed recently.
-    ///
-    /// Call periodically to prevent unbounded memory growth.
-    pub fn cleanup_stale(&self, max_age: Duration) {
-        let now = Instant::now();
-        let mut counters = self.counters.lock();
-        counters.retain(|_, counter| now.duration_since(counter.window_start) < max_age);
     }
 }
 
-impl Default for NamespaceRateLimiter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Error returned when a namespace exceeds its rate limit.
+/// Error returned when a request is rate limited.
 #[derive(Debug, Clone)]
-pub struct RateLimitExceeded {
-    /// The namespace that exceeded its limit.
-    pub namespace_id: NamespaceId,
-    /// The configured limit.
-    pub limit: u64,
-    /// The window size.
-    pub window_size: Duration,
+pub struct RateLimitRejection {
+    /// Which level rejected the request.
+    pub level: RateLimitLevel,
+    /// Why the request was rejected.
+    pub reason: RateLimitReason,
+    /// Estimated milliseconds until the client should retry.
+    pub retry_after_ms: u64,
+    /// The identifier that was rate limited (client_id or namespace_id).
+    pub identifier: String,
 }
 
-impl std::fmt::Display for RateLimitExceeded {
+impl std::fmt::Display for RateLimitRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Rate limit exceeded for namespace {}: {} requests per {:?}",
-            self.namespace_id, self.limit, self.window_size
+            "Rate limit exceeded at {} level for {}: {}",
+            self.level.as_str(),
+            self.identifier,
+            self.reason.as_str()
         )
     }
 }
 
-impl std::error::Error for RateLimitExceeded {}
+impl std::error::Error for RateLimitRejection {}
+
+/// A token bucket that allows controlled bursts while enforcing an average rate.
+///
+/// Tokens refill at `refill_rate` per second up to `capacity`. Each request
+/// consumes one token. When no tokens remain, requests are rejected.
+#[derive(Debug)]
+struct TokenBucket {
+    /// Current number of available tokens (scaled by 1000 for sub-token precision).
+    tokens_millis: u64,
+    /// Maximum tokens the bucket can hold (scaled by 1000).
+    capacity_millis: u64,
+    /// Tokens added per second.
+    refill_rate: f64,
+    /// Last time tokens were refilled.
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    /// Create a new token bucket starting at full capacity.
+    fn new(capacity: u64, refill_rate: f64) -> Self {
+        Self {
+            tokens_millis: capacity * 1000,
+            capacity_millis: capacity * 1000,
+            refill_rate,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Refill tokens based on elapsed time, then try to consume one token.
+    ///
+    /// Returns `true` if the request is allowed, `false` if rate limited.
+    fn try_acquire(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill);
+
+        // Refill tokens based on elapsed time
+        let refill = (elapsed.as_secs_f64() * self.refill_rate * 1000.0) as u64;
+        if refill > 0 {
+            self.tokens_millis = (self.tokens_millis + refill).min(self.capacity_millis);
+            self.last_refill = now;
+        }
+
+        // Try to consume one token (1000 millis = 1 token)
+        if self.tokens_millis >= 1000 {
+            self.tokens_millis -= 1000;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Estimate milliseconds until the next token is available.
+    fn retry_after_ms(&self) -> u64 {
+        if self.refill_rate <= 0.0 {
+            return 1000;
+        }
+        let deficit_millis = 1000u64.saturating_sub(self.tokens_millis);
+        let ms = (deficit_millis as f64 / (self.refill_rate * 1000.0) * 1000.0).ceil() as u64;
+        ms.max(1)
+    }
+}
+
+/// Multi-level rate limiter with per-client, per-namespace, and backpressure tiers.
+///
+/// Thread-safe: all mutable state is behind `Mutex`.
+///
+/// # Usage
+///
+/// ```no_run
+/// use inferadb_ledger_raft::RateLimiter;
+///
+/// let limiter = RateLimiter::new(
+///     1000, 500.0,  // per-client: burst 1000, 500/s sustained
+///     5000, 2000.0, // per-namespace: burst 5000, 2000/s sustained
+///     100,          // backpressure threshold: 100 pending proposals
+/// );
+///
+/// // Check all three tiers
+/// limiter.check("client-1", 42.into()).unwrap();
+/// ```
+#[derive(Debug)]
+pub struct RateLimiter {
+    /// Per-client token buckets keyed by client_id.
+    client_buckets: Mutex<HashMap<String, TokenBucket>>,
+    /// Per-namespace token buckets keyed by namespace_id.
+    namespace_buckets: Mutex<HashMap<NamespaceId, TokenBucket>>,
+
+    /// Capacity for per-client token buckets (max burst).
+    client_capacity: u64,
+    /// Refill rate for per-client buckets (tokens per second).
+    client_refill_rate: f64,
+
+    /// Capacity for per-namespace token buckets (max burst).
+    namespace_capacity: u64,
+    /// Refill rate for per-namespace buckets (tokens per second).
+    namespace_refill_rate: f64,
+
+    /// Raft pending proposal count above which backpressure is applied.
+    backpressure_threshold: u64,
+    /// Current pending proposal count (updated externally).
+    pending_proposals: AtomicU64,
+
+    /// Total rejected requests counter.
+    rejected_count: AtomicU64,
+}
+
+impl RateLimiter {
+    /// Create a new multi-level rate limiter.
+    ///
+    /// # Arguments
+    ///
+    /// * `client_capacity` — max burst size per client
+    /// * `client_refill_rate` — sustained requests/sec per client
+    /// * `namespace_capacity` — max burst size per namespace
+    /// * `namespace_refill_rate` — sustained requests/sec per namespace
+    /// * `backpressure_threshold` — pending Raft proposals above which all requests are throttled
+    pub fn new(
+        client_capacity: u64,
+        client_refill_rate: f64,
+        namespace_capacity: u64,
+        namespace_refill_rate: f64,
+        backpressure_threshold: u64,
+    ) -> Self {
+        Self {
+            client_buckets: Mutex::new(HashMap::new()),
+            namespace_buckets: Mutex::new(HashMap::new()),
+            client_capacity,
+            client_refill_rate,
+            namespace_capacity,
+            namespace_refill_rate,
+            backpressure_threshold,
+            pending_proposals: AtomicU64::new(0),
+            rejected_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Check all rate limit tiers for an incoming request.
+    ///
+    /// Check order ensures shared tokens are not wasted by per-client rejections:
+    /// 1. Global backpressure (no token consumption — atomic threshold check)
+    /// 2. Per-client token bucket (most specific, checked before shared namespace bucket)
+    /// 3. Per-namespace token bucket (shared resource, only consumed after client passes)
+    ///
+    /// Returns `Ok(())` if allowed, `Err(RateLimitRejection)` with retry hint if rejected.
+    pub fn check(
+        &self,
+        client_id: &str,
+        namespace_id: NamespaceId,
+    ) -> Result<(), RateLimitRejection> {
+        // Tier 1: Global backpressure (cheapest — single atomic load, no token consumption)
+        let pending = self.pending_proposals.load(Ordering::Relaxed);
+        if pending > self.backpressure_threshold {
+            self.rejected_count.fetch_add(1, Ordering::Relaxed);
+            return Err(RateLimitRejection {
+                level: RateLimitLevel::Backpressure,
+                reason: RateLimitReason::QueueDepth,
+                // Backoff proportional to queue depth overage
+                retry_after_ms: ((pending - self.backpressure_threshold) * 10).min(5000),
+                identifier: format!("pending_proposals={pending}"),
+            });
+        }
+
+        // Tier 2: Per-client token bucket (checked before namespace to avoid
+        // wasting shared namespace tokens on client-rejected requests)
+        if !client_id.is_empty() {
+            let mut buckets = self.client_buckets.lock();
+            let bucket = buckets
+                .entry(client_id.to_string())
+                .or_insert_with(|| TokenBucket::new(self.client_capacity, self.client_refill_rate));
+
+            if !bucket.try_acquire() {
+                let retry_after_ms = bucket.retry_after_ms();
+                self.rejected_count.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitRejection {
+                    level: RateLimitLevel::Client,
+                    reason: RateLimitReason::TokensExhausted,
+                    retry_after_ms,
+                    identifier: client_id.to_string(),
+                });
+            }
+        }
+
+        // Tier 3: Per-namespace token bucket (shared across all clients in a namespace)
+        {
+            let mut buckets = self.namespace_buckets.lock();
+            let bucket = buckets.entry(namespace_id).or_insert_with(|| {
+                TokenBucket::new(self.namespace_capacity, self.namespace_refill_rate)
+            });
+
+            if !bucket.try_acquire() {
+                let retry_after_ms = bucket.retry_after_ms();
+                self.rejected_count.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitRejection {
+                    level: RateLimitLevel::Namespace,
+                    reason: RateLimitReason::TokensExhausted,
+                    retry_after_ms,
+                    identifier: namespace_id.to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update the pending Raft proposal count for backpressure calculation.
+    ///
+    /// Called externally by the Raft metrics observer.
+    pub fn set_pending_proposals(&self, count: u64) {
+        self.pending_proposals.store(count, Ordering::Relaxed);
+    }
+
+    /// Get the current pending proposal count.
+    pub fn pending_proposals(&self) -> u64 {
+        self.pending_proposals.load(Ordering::Relaxed)
+    }
+
+    /// Total number of rejected requests across all tiers.
+    pub fn rejected_count(&self) -> u64 {
+        self.rejected_count.load(Ordering::Relaxed)
+    }
+
+    /// Remove stale entries that haven't been accessed recently.
+    ///
+    /// Call periodically to prevent unbounded memory growth from departed
+    /// clients or decommissioned namespaces.
+    pub fn cleanup_stale(&self, max_idle: Duration) {
+        let now = Instant::now();
+        {
+            let mut buckets = self.client_buckets.lock();
+            buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
+        }
+        {
+            let mut buckets = self.namespace_buckets.lock();
+            buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
+        }
+    }
+
+    /// Get the current token count for a specific namespace (for testing/metrics).
+    #[cfg(test)]
+    fn namespace_tokens(&self, namespace_id: NamespaceId) -> Option<u64> {
+        let buckets = self.namespace_buckets.lock();
+        buckets.get(&namespace_id).map(|b| b.tokens_millis / 1000)
+    }
+
+    /// Get the current token count for a specific client (for testing/metrics).
+    #[cfg(test)]
+    fn client_tokens(&self, client_id: &str) -> Option<u64> {
+        let buckets = self.client_buckets.lock();
+        buckets.get(client_id).map(|b| b.tokens_millis / 1000)
+    }
+}
+
+// Backwards compatibility: re-export as NamespaceRateLimiter for existing call sites
+// that only need namespace-level rate limiting.
+/// Alias for backwards compatibility with code using the namespace-only rate limiter.
+pub type NamespaceRateLimiter = RateLimiter;
+
+/// Alias for backwards compatibility.
+pub type RateLimitExceeded = RateLimitRejection;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_allows_under_limit() {
-        let limiter = NamespaceRateLimiter::with_limit(10);
+    /// Helper to create a rate limiter with small capacity for testing.
+    fn test_limiter() -> RateLimiter {
+        RateLimiter::new(
+            5,    // client burst: 5
+            10.0, // client refill: 10/s
+            10,   // namespace burst: 10
+            20.0, // namespace refill: 20/s
+            50,   // backpressure threshold: 50 pending
+        )
+    }
 
-        // Should allow 10 requests
-        for _ in 0..10 {
-            assert!(limiter.check(1).is_ok());
+    // ── Token bucket unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn token_bucket_starts_full() {
+        let bucket = TokenBucket::new(100, 50.0);
+        assert_eq!(bucket.tokens_millis, 100_000);
+        assert_eq!(bucket.capacity_millis, 100_000);
+    }
+
+    #[test]
+    fn token_bucket_allows_up_to_capacity() {
+        let mut bucket = TokenBucket::new(5, 1.0);
+        for _ in 0..5 {
+            assert!(bucket.try_acquire());
+        }
+        assert!(!bucket.try_acquire());
+    }
+
+    #[test]
+    fn token_bucket_refills_over_time() {
+        let mut bucket = TokenBucket::new(5, 1000.0);
+        // Exhaust all tokens
+        for _ in 0..5 {
+            assert!(bucket.try_acquire());
+        }
+        assert!(!bucket.try_acquire());
+
+        // Simulate time passing (move last_refill back)
+        bucket.last_refill = Instant::now() - Duration::from_millis(100);
+        // At 1000/s, 100ms should refill ~100 tokens, capped at capacity 5
+        assert!(bucket.try_acquire());
+    }
+
+    #[test]
+    fn token_bucket_caps_at_capacity() {
+        let mut bucket = TokenBucket::new(3, 1000.0);
+        // Simulate long time passing
+        bucket.last_refill = Instant::now() - Duration::from_secs(60);
+        // Should still be capped at 3
+        assert!(bucket.try_acquire());
+        assert!(bucket.try_acquire());
+        assert!(bucket.try_acquire());
+        assert!(!bucket.try_acquire());
+    }
+
+    #[test]
+    fn token_bucket_retry_after_reasonable() {
+        let mut bucket = TokenBucket::new(5, 100.0);
+        // Exhaust all tokens
+        for _ in 0..5 {
+            bucket.try_acquire();
+        }
+        let retry = bucket.retry_after_ms();
+        // At 100 tokens/sec, 1 token should take 10ms
+        assert!(retry >= 1, "retry_after_ms should be at least 1, got {retry}");
+        assert!(retry <= 50, "retry_after_ms should be reasonable, got {retry}");
+    }
+
+    // ── Per-client rate limiting ─────────────────────────────────────────
+
+    #[test]
+    fn client_rate_limit_enforced() {
+        let limiter = test_limiter();
+
+        // Exhaust client burst (5 requests)
+        for _ in 0..5 {
+            assert!(limiter.check("client-1", 1.into()).is_ok());
+        }
+
+        // 6th request should be rejected at client level
+        let err = limiter.check("client-1", 1.into()).unwrap_err();
+        assert_eq!(err.level, RateLimitLevel::Client);
+        assert_eq!(err.reason, RateLimitReason::TokensExhausted);
+        assert!(err.retry_after_ms >= 1);
+        assert_eq!(err.identifier, "client-1");
+    }
+
+    #[test]
+    fn different_clients_have_separate_buckets() {
+        let limiter = test_limiter();
+
+        // Exhaust client-1
+        for _ in 0..5 {
+            limiter.check("client-1", 1.into()).unwrap();
+        }
+        assert!(limiter.check("client-1", 1.into()).is_err());
+
+        // client-2 should still have its own quota
+        for _ in 0..5 {
+            assert!(limiter.check("client-2", 1.into()).is_ok());
         }
     }
 
     #[test]
-    fn test_rejects_over_limit() {
-        let limiter = NamespaceRateLimiter::with_limit(10);
+    fn empty_client_id_skips_client_check() {
+        let limiter = RateLimiter::new(
+            1,     // very low client burst
+            0.1,   // very low client refill
+            1000,  // high namespace burst
+            500.0, // high namespace refill
+            100,   // backpressure threshold
+        );
 
-        // Should allow 10 requests
-        for _ in 0..10 {
-            limiter.check(1).unwrap();
+        // With empty client_id, should only hit namespace limit
+        for _ in 0..100 {
+            assert!(limiter.check("", 1.into()).is_ok());
+        }
+    }
+
+    // ── Per-namespace rate limiting ──────────────────────────────────────
+
+    #[test]
+    fn namespace_rate_limit_enforced() {
+        let limiter = test_limiter();
+
+        // Exhaust namespace burst (10 requests, using different clients to avoid client limit)
+        for i in 0..10 {
+            assert!(limiter.check(&format!("client-{i}"), 42.into()).is_ok());
         }
 
-        // 11th should be rejected
-        assert!(limiter.check(1).is_err());
+        // 11th request should be rejected at namespace level
+        let err = limiter.check("client-99", 42.into()).unwrap_err();
+        assert_eq!(err.level, RateLimitLevel::Namespace);
+        assert_eq!(err.reason, RateLimitReason::TokensExhausted);
+        assert_eq!(err.identifier, "ns:42");
+    }
+
+    #[test]
+    fn different_namespaces_have_separate_buckets() {
+        let limiter = test_limiter();
+
+        // Exhaust namespace 1
+        for i in 0..10 {
+            limiter.check(&format!("c-{i}"), 1.into()).unwrap();
+        }
+        assert!(limiter.check("c-99", 1.into()).is_err());
+
+        // Namespace 2 should still have its own quota
+        for i in 0..10 {
+            assert!(limiter.check(&format!("c-{i}"), 2.into()).is_ok());
+        }
+    }
+
+    // ── Backpressure ─────────────────────────────────────────────────────
+
+    #[test]
+    fn backpressure_rejects_when_queue_deep() {
+        let limiter = test_limiter();
+
+        // Set pending proposals above threshold (50)
+        limiter.set_pending_proposals(60);
+
+        let err = limiter.check("client-1", 1.into()).unwrap_err();
+        assert_eq!(err.level, RateLimitLevel::Backpressure);
+        assert_eq!(err.reason, RateLimitReason::QueueDepth);
+        // retry_after_ms = (60 - 50) * 10 = 100
+        assert_eq!(err.retry_after_ms, 100);
+    }
+
+    #[test]
+    fn backpressure_allows_when_below_threshold() {
+        let limiter = test_limiter();
+
+        limiter.set_pending_proposals(49);
+        assert!(limiter.check("client-1", 1.into()).is_ok());
+
+        limiter.set_pending_proposals(50);
+        assert!(limiter.check("client-1", 1.into()).is_ok());
+    }
+
+    #[test]
+    fn backpressure_retry_capped_at_5000ms() {
+        let limiter = test_limiter();
+
+        // Set very high pending proposals
+        limiter.set_pending_proposals(1000);
+
+        let err = limiter.check("client-1", 1.into()).unwrap_err();
+        assert_eq!(err.retry_after_ms, 5000);
+    }
+
+    // ── Integration checks ───────────────────────────────────────────────
+
+    #[test]
+    fn check_order_backpressure_first() {
+        // If both backpressure and namespace are exceeded, backpressure wins
+        let limiter = RateLimiter::new(100, 100.0, 1, 0.001, 10);
+
+        // Exhaust namespace
+        limiter.check("c", 1.into()).unwrap();
+        assert!(limiter.check("c2", 1.into()).is_err()); // namespace exhausted
+
+        // Now also trigger backpressure
+        limiter.set_pending_proposals(20);
+        let err = limiter.check("c3", 1.into()).unwrap_err();
+        // Backpressure should be checked first
+        assert_eq!(err.level, RateLimitLevel::Backpressure);
+    }
+
+    #[test]
+    fn rejected_count_tracks_all_tiers() {
+        let limiter = test_limiter();
+        assert_eq!(limiter.rejected_count(), 0);
+
+        // Exhaust namespace to trigger rejection
+        for i in 0..10 {
+            limiter.check(&format!("c-{i}"), 1.into()).unwrap();
+        }
+        let _ = limiter.check("c-99", 1.into());
         assert_eq!(limiter.rejected_count(), 1);
     }
 
     #[test]
-    fn test_separate_namespaces() {
-        let limiter = NamespaceRateLimiter::with_limit(5);
+    fn cleanup_removes_stale_entries() {
+        let limiter = test_limiter();
 
-        // Namespace 1: use all 5
-        for _ in 0..5 {
-            limiter.check(1).unwrap();
-        }
+        // Create some entries
+        limiter.check("client-1", 1.into()).unwrap();
+        limiter.check("client-2", 2.into()).unwrap();
 
-        // Namespace 2: should still have its own quota
-        for _ in 0..5 {
-            assert!(limiter.check(2).is_ok());
-        }
+        // Cleanup with very short max_idle should remove everything
+        // (entries were just created, but we use a 0-duration which means
+        //  any non-zero elapsed time qualifies as stale)
+        // In practice, entries just created won't be stale yet
+        limiter.cleanup_stale(Duration::from_secs(3600));
+        // Entries should still exist (created < 3600s ago)
+        assert!(limiter.client_tokens("client-1").is_some());
 
-        // Both should now be at limit
-        assert!(limiter.check(1).is_err());
-        assert!(limiter.check(2).is_err());
+        // Cleanup with zero duration removes everything
+        // (need to wait a tiny bit so elapsed > 0)
+        std::thread::sleep(Duration::from_millis(2));
+        limiter.cleanup_stale(Duration::ZERO);
+        assert!(limiter.client_tokens("client-1").is_none());
+        assert!(limiter.namespace_tokens(1.into()).is_none());
     }
 
     #[test]
-    fn test_default_rate_limiter() {
-        let limiter = NamespaceRateLimiter::new();
-        // Should allow many requests with default limit of 1000
-        for _ in 0..100 {
-            assert!(limiter.check(1).is_ok());
-        }
+    fn set_pending_proposals_updates_atomically() {
+        let limiter = test_limiter();
+        assert_eq!(limiter.pending_proposals(), 0);
+        limiter.set_pending_proposals(42);
+        assert_eq!(limiter.pending_proposals(), 42);
     }
 
     #[test]
-    fn test_error_display() {
-        let err =
-            RateLimitExceeded { namespace_id: 42, limit: 100, window_size: Duration::from_secs(1) };
-        let msg = format!("{}", err);
+    fn rejection_display_format() {
+        let rejection = RateLimitRejection {
+            level: RateLimitLevel::Namespace,
+            reason: RateLimitReason::TokensExhausted,
+            retry_after_ms: 50,
+            identifier: "42".to_string(),
+        };
+        let msg = format!("{rejection}");
+        assert!(msg.contains("namespace"));
         assert!(msg.contains("42"));
-        assert!(msg.contains("100"));
+        assert!(msg.contains("tokens_exhausted"));
+    }
+
+    #[test]
+    fn level_and_reason_as_str() {
+        assert_eq!(RateLimitLevel::Client.as_str(), "client");
+        assert_eq!(RateLimitLevel::Namespace.as_str(), "namespace");
+        assert_eq!(RateLimitLevel::Backpressure.as_str(), "backpressure");
+        assert_eq!(RateLimitReason::TokensExhausted.as_str(), "tokens_exhausted");
+        assert_eq!(RateLimitReason::QueueDepth.as_str(), "queue_depth");
     }
 }

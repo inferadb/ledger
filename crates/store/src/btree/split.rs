@@ -1,8 +1,43 @@
-//! Node splitting logic for B-tree insertions.
+//! Node splitting, merging, and fill factor analysis for the B+ tree.
 //!
-//! When a node becomes full, it must be split into two nodes.
-//! The middle key is promoted to the parent, and entries are
-//! distributed between the original and new node.
+//! # Algorithm Overview
+//!
+//! ## Splitting (insertion path)
+//!
+//! When a leaf or branch node cannot accommodate a new entry, it is split:
+//!
+//! 1. **Leaf split** (`split_leaf_for_key`): A new page is allocated. Entries are distributed so
+//!    the new key lands in the correct half. The first key of the right (new) leaf becomes the
+//!    separator promoted to the parent branch.
+//!
+//! 2. **Branch split** (`split_branch`): Similar to leaf split, but the median separator key is
+//!    promoted to the parent rather than copied — branches store separators, not data, so the
+//!    promoted key is removed from the split node.
+//!
+//! Splits propagate upward: if the parent branch is also full, it splits too,
+//! potentially growing the tree height by one level (when the root splits).
+//!
+//! ## Merging (compaction path)
+//!
+//! After deletions, leaf nodes may become underfull. `merge_leaves` combines two
+//! adjacent siblings:
+//!
+//! 1. All live entries from both leaves are collected.
+//! 2. The left page is rebuilt from scratch via `LeafNode::init()`, reclaiming dead space left by
+//!    prior deletes.
+//! 3. All entries are inserted into the rebuilt left page.
+//! 4. The right page is freed.
+//!
+//! The rebuild-from-scratch approach is deliberate: after deletes, leaf pages
+//! contain dead cell data that inflates their physical size. Rebuilding ensures
+//! the merged page has zero fragmentation.
+//!
+//! ## Fill Factor Analysis
+//!
+//! `leaf_fill_factor` computes the ratio of live data to page capacity by
+//! iterating live cells — not by inferring from free space. This distinction
+//! matters because `free_space()` (the gap between `free_start` and `free_end`)
+//! does not account for dead cell data left by deletions.
 
 use super::node::{BranchNode, BranchNodeRef, LeafNode, LeafNodeRef};
 use crate::{
@@ -302,24 +337,33 @@ pub fn branch_needs_split(page: &Page, key: &[u8]) -> Result<bool> {
 /// All entries from `right` are moved into `left`.
 /// Returns the key that was separating them in the parent.
 pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
-    // Collect entries from right
-    let right_entries: Vec<(Vec<u8>, Vec<u8>)> = {
+    // Collect all live entries from both pages.
+    // By rebuilding from scratch, we reclaim dead space left by prior deletes.
+    let mut all_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+
+    {
+        let node = LeafNode::from_page(left)?;
+        let count = node.cell_count() as usize;
+        for i in 0..count {
+            let (k, v) = node.get(i);
+            all_entries.push((k.to_vec(), v.to_vec()));
+        }
+    }
+
+    {
         let node = LeafNode::from_page(right)?;
         let count = node.cell_count() as usize;
-        (0..count)
-            .map(|i| {
-                let (k, v) = node.get(i);
-                (k.to_vec(), v.to_vec())
-            })
-            .collect()
-    };
+        for i in 0..count {
+            let (k, v) = node.get(i);
+            all_entries.push((k.to_vec(), v.to_vec()));
+        }
+    }
 
-    // Append to left
+    // Re-initialize left page fresh (reclaims all dead space)
     {
-        let mut left_node = LeafNode::from_page(left)?;
-        let start_index = left_node.cell_count() as usize;
-        for (i, (key, value)) in right_entries.iter().enumerate() {
-            left_node.insert(start_index + i, key, value);
+        let mut left_node = LeafNode::init(left);
+        for (i, (key, value)) in all_entries.iter().enumerate() {
+            left_node.insert(i, key, value);
         }
     }
 
@@ -332,12 +376,64 @@ pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
 /// Calculate the fill factor of a leaf node (0.0 to 1.0).
 pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
     let node = LeafNodeRef::from_page(page)?;
+    let count = node.cell_count() as usize;
 
-    let total_content = page.size() - crate::page::PAGE_HEADER_SIZE - 8; // Rough usable space
-    let free = node.free_space();
-    let used = total_content.saturating_sub(free);
+    if count == 0 {
+        return Ok(0.0);
+    }
 
-    Ok(used as f64 / total_content as f64)
+    // Calculate actual live data: cell pointers + cell data for each entry.
+    // This correctly ignores dead space left by deleted entries.
+    let mut live_bytes = 0usize;
+    for i in 0..count {
+        let key = node.key(i);
+        let value = node.value(i);
+        // cell_ptr(2) + key_len(2) + val_len(2) + key + value
+        live_bytes += 2 + 2 + 2 + key.len() + value.len();
+    }
+
+    // Total usable space = page size - page header - node header (cell_count + free_start +
+    // free_end = 6 bytes)
+    let total_content = page.size() - crate::page::PAGE_HEADER_SIZE - 6;
+
+    Ok(live_bytes as f64 / total_content as f64)
+}
+
+/// Check whether two leaf nodes can be merged (combined entries fit in one page).
+///
+/// Returns `true` if all entries from `right` can fit into `left`'s free space.
+pub fn can_merge_leaves(left: &Page, right: &Page) -> Result<bool> {
+    let left_node = LeafNodeRef::from_page(left)?;
+    let right_node = LeafNodeRef::from_page(right)?;
+
+    let right_count = right_node.cell_count() as usize;
+    if right_count == 0 {
+        return Ok(true);
+    }
+
+    let left_count = left_node.cell_count() as usize;
+
+    // Calculate total live data size for both leaves (ignoring dead space).
+    // After merge, all entries will be compacted into a fresh page layout.
+    let mut total_live = 0usize;
+
+    for i in 0..left_count {
+        let key = left_node.key(i);
+        let value = left_node.value(i);
+        // cell_ptr(2) + key_len(2) + val_len(2) + key + value
+        total_live += 2 + 2 + 2 + key.len() + value.len();
+    }
+
+    for i in 0..right_count {
+        let key = right_node.key(i);
+        let value = right_node.value(i);
+        total_live += 2 + 2 + 2 + key.len() + value.len();
+    }
+
+    // Total usable space in one page (page_header + node_header overhead)
+    let total_content = left.size() - crate::page::PAGE_HEADER_SIZE - 6;
+
+    Ok(total_live <= total_content)
 }
 
 #[cfg(test)]
@@ -453,5 +549,49 @@ mod tests {
             let empty = LeafNode::from_page(&mut right).unwrap();
             assert_eq!(empty.cell_count(), 0);
         }
+    }
+
+    #[test]
+    fn test_can_merge_leaves_both_empty() {
+        let mut left = Page::new(1, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        let mut right = Page::new(2, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        // init() writes leaf header fields (cell_count, free_start, free_end)
+        LeafNode::init(&mut left);
+        LeafNode::init(&mut right);
+
+        assert!(can_merge_leaves(&left, &right).unwrap());
+    }
+
+    #[test]
+    fn test_can_merge_leaves_right_empty() {
+        let mut left = Page::new(1, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        let mut right = Page::new(2, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        {
+            let mut l = LeafNode::init(&mut left);
+            l.insert(0, b"a", b"1");
+        }
+        // init() writes the leaf header so free_end is valid
+        LeafNode::init(&mut right);
+
+        assert!(can_merge_leaves(&left, &right).unwrap());
+    }
+
+    #[test]
+    fn test_can_merge_leaves_small_entries() {
+        let mut left = Page::new(1, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        let mut right = Page::new(2, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+
+        {
+            let mut l = LeafNode::init(&mut left);
+            l.insert(0, b"a", b"1");
+            l.insert(1, b"b", b"2");
+        }
+        {
+            let mut r = LeafNode::init(&mut right);
+            r.insert(0, b"c", b"3");
+        }
+
+        // Small entries should easily fit
+        assert!(can_merge_leaves(&left, &right).unwrap());
     }
 }

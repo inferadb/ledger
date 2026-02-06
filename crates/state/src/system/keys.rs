@@ -22,10 +22,11 @@ impl SystemKeys {
     /// # Example
     /// ```
     /// use inferadb_ledger_state::system::SystemKeys;
-    /// assert_eq!(SystemKeys::user_key(123), "user:123");
+    /// use inferadb_ledger_types::UserId;
+    /// assert_eq!(SystemKeys::user_key(UserId::new(123)), "user:123");
     /// ```
     pub fn user_key(user_id: UserId) -> String {
-        format!("user:{user_id}")
+        format!("user:{}", user_id.value())
     }
 
     /// Parse a user ID from a user key.
@@ -59,7 +60,7 @@ impl SystemKeys {
     ///
     /// Pattern: `_idx:user_emails:{user_id}` → [email_id, ...]
     pub fn user_emails_index_key(user_id: UserId) -> String {
-        format!("_idx:user_emails:{user_id}")
+        format!("_idx:user_emails:{}", user_id.value())
     }
 
     /// Primary key for an email verification token.
@@ -77,7 +78,7 @@ impl SystemKeys {
     ///
     /// Pattern: `ns:{namespace_id}`
     pub fn namespace_key(namespace_id: NamespaceId) -> String {
-        format!("ns:{namespace_id}")
+        format!("ns:{}", namespace_id.value())
     }
 
     /// Parse a namespace ID from a namespace key.
@@ -183,8 +184,8 @@ mod tests {
 
     #[test]
     fn test_user_key() {
-        assert_eq!(SystemKeys::user_key(123), "user:123");
-        assert_eq!(SystemKeys::parse_user_key("user:123"), Some(123));
+        assert_eq!(SystemKeys::user_key(UserId::new(123)), "user:123");
+        assert_eq!(SystemKeys::parse_user_key("user:123"), Some(UserId::new(123)));
         assert_eq!(SystemKeys::parse_user_key("invalid:123"), None);
     }
 
@@ -199,8 +200,8 @@ mod tests {
 
     #[test]
     fn test_namespace_key() {
-        assert_eq!(SystemKeys::namespace_key(42), "ns:42");
-        assert_eq!(SystemKeys::parse_namespace_key("ns:42"), Some(42));
+        assert_eq!(SystemKeys::namespace_key(NamespaceId::new(42)), "ns:42");
+        assert_eq!(SystemKeys::parse_namespace_key("ns:42"), Some(NamespaceId::new(42)));
     }
 
     #[test]
@@ -222,8 +223,11 @@ mod tests {
 
     #[test]
     fn test_prefixes() {
-        assert!(SystemKeys::user_key(1).starts_with(SystemKeys::USER_PREFIX));
-        assert!(SystemKeys::namespace_key(1).starts_with(SystemKeys::NAMESPACE_PREFIX));
+        assert!(SystemKeys::user_key(UserId::new(1)).starts_with(SystemKeys::USER_PREFIX));
+        assert!(
+            SystemKeys::namespace_key(NamespaceId::new(1))
+                .starts_with(SystemKeys::NAMESPACE_PREFIX)
+        );
         assert!(SystemKeys::node_key(&"n".to_string()).starts_with(SystemKeys::NODE_PREFIX));
     }
 }

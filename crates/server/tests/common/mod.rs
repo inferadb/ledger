@@ -99,9 +99,14 @@ impl TestCluster {
             ..inferadb_ledger_server::config::Config::default()
         };
 
-        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
-            .await
-            .expect("bootstrap node");
+        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
+            &config,
+            &data_dir,
+            inferadb_ledger_raft::HealthState::new(),
+            tokio::sync::watch::channel(false).1,
+        )
+        .await
+        .expect("bootstrap node");
 
         // Get the auto-generated Snowflake ID from Raft metrics
         let node_id = bootstrapped.raft.metrics().borrow().id;
@@ -165,10 +170,14 @@ impl TestCluster {
             // Create the node - with bootstrap_expect=0, it won't initialize its own
             // Raft cluster. It just starts the gRPC server and waits to be added via
             // AdminService's JoinCluster RPC.
-            let bootstrapped =
-                inferadb_ledger_server::bootstrap::bootstrap_node(&config, &data_dir)
-                    .await
-                    .expect("bootstrap node");
+            let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
+                &config,
+                &data_dir,
+                inferadb_ledger_raft::HealthState::new(),
+                tokio::sync::watch::channel(false).1,
+            )
+            .await
+            .expect("bootstrap node");
 
             // Get the auto-generated Snowflake ID from Raft metrics
             let node_id = bootstrapped.raft.metrics().borrow().id;
@@ -465,12 +474,12 @@ impl MultiShardTestNode {
     }
 
     /// Get a data shard by ID.
-    pub fn shard(&self, shard_id: u32) -> Option<Arc<ShardGroup>> {
+    pub fn shard(&self, shard_id: inferadb_ledger_types::ShardId) -> Option<Arc<ShardGroup>> {
         self.manager.get_shard(shard_id).ok()
     }
 
     /// Get all shard IDs.
-    pub fn shard_ids(&self) -> Vec<u32> {
+    pub fn shard_ids(&self) -> Vec<inferadb_ledger_types::ShardId> {
         self.manager.list_shards()
     }
 
@@ -555,7 +564,7 @@ impl MultiShardTestCluster {
 
             // Start system shard (shard 0) - required first
             let system_config = ShardConfig {
-                shard_id: 0,
+                shard_id: inferadb_ledger_types::ShardId::new(0),
                 initial_members: members.clone(),
                 bootstrap: i == 0, // Only first node bootstraps
                 enable_background_jobs: true,
@@ -565,7 +574,7 @@ impl MultiShardTestCluster {
             // Start data shards (shard 1, 2, ...)
             for shard_id in 1..=num_data_shards {
                 let shard_config = ShardConfig {
-                    shard_id: shard_id as u32,
+                    shard_id: inferadb_ledger_types::ShardId::new(shard_id as u32),
                     initial_members: members.clone(),
                     bootstrap: i == 0,
                     enable_background_jobs: true,
@@ -612,7 +621,9 @@ impl MultiShardTestCluster {
             // Check each shard on the first node
             if let Some(node) = nodes.first() {
                 for shard_id in 0..=num_data_shards as u32 {
-                    if let Ok(shard) = node.manager.get_shard(shard_id) {
+                    if let Ok(shard) =
+                        node.manager.get_shard(inferadb_ledger_types::ShardId::new(shard_id))
+                    {
                         let metrics = shard.raft().metrics().borrow().clone();
                         if metrics.current_leader.is_none() {
                             all_ready = false;

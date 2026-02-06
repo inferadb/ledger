@@ -393,9 +393,9 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
                     NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
                 };
                 NamespaceRegistry {
-                    namespace_id: Some(NamespaceId { id: ns.namespace_id }),
+                    namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,
-                    shard_id: Some(ShardId { id: ns.shard_id }),
+                    shard_id: Some(ShardId { id: ns.shard_id.value() }),
                     members: member_nodes.clone(),
                     status: status.into(),
                     config_version: current_version,

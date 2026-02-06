@@ -6,6 +6,9 @@
 //! - [`assert_eventually`] - Poll a condition until it's true or timeout
 //! - [`test_batch_config`] - Default batch configuration for tests
 //! - [`test_rate_limit_config`] - Default rate limit configuration for tests
+//! - [`CrashInjector`] - Crash injection for testing crash recovery
+//! - [`CrashPoint`] - Enumeration of crash points in commit protocol
+//! - [`strategies`] - Proptest strategies for domain types
 
 #![deny(unsafe_code)]
 // Test utilities are allowed to use unwrap for simplicity
@@ -19,6 +22,11 @@ pub use assertions::assert_eventually;
 
 mod config;
 pub use config::{TestRateLimitConfig, test_batch_config, test_rate_limit_config};
+
+mod crash_injector;
+pub use crash_injector::{CrashInjector, CrashPoint};
+
+pub mod strategies;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

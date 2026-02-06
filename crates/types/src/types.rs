@@ -5,6 +5,8 @@
 //! - Block and transaction structures
 //! - Operations and conditions
 
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -14,17 +16,118 @@ use crate::hash::Hash;
 // Identifier Types
 // ============================================================================
 
-/// Unique identifier for a namespace (organization-level isolation).
-pub type NamespaceId = i64;
+/// Generates a newtype wrapper around a numeric type for type-safe identifiers.
+///
+/// Each generated type provides:
+/// - Standard derives: Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord
+/// - Serde with `#[serde(transparent)]` for wire format compatibility
+/// - `From<inner>` and `Into<inner>` conversions
+/// - `Display` with a semantic prefix (e.g., `ns:123`)
+/// - `new()` constructor and `value()` accessor
+macro_rules! define_id {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $inner:ty, $prefix:expr
+    ) => {
+        $(#[$meta])*
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord,
+            Serialize, Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name($inner);
 
-/// Unique identifier for a vault within a namespace.
-pub type VaultId = i64;
+        impl $name {
+            /// Creates a new identifier from a raw value.
+            #[inline]
+            pub const fn new(value: $inner) -> Self {
+                Self(value)
+            }
 
-/// Unique identifier for a user in the `_system` namespace.
-pub type UserId = i64;
+            /// Returns the raw numeric value.
+            #[inline]
+            pub const fn value(self) -> $inner {
+                self.0
+            }
+        }
 
-/// Unique identifier for a Raft shard group.
-pub type ShardId = u32;
+        impl From<$inner> for $name {
+            #[inline]
+            fn from(value: $inner) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for $inner {
+            #[inline]
+            fn from(id: $name) -> Self {
+                id.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}:{}", $prefix, self.0)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = <$inner as std::str::FromStr>::Err;
+
+            fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+                s.parse::<$inner>().map(Self)
+            }
+        }
+    };
+}
+
+define_id!(
+    /// Unique identifier for a namespace (organization-level isolation).
+    ///
+    /// Wraps an `i64` with compile-time type safety to prevent mixing with
+    /// other identifier types.
+    ///
+    /// # Display
+    ///
+    /// Formats with `ns:` prefix: `ns:42`.
+    NamespaceId, i64, "ns"
+);
+
+define_id!(
+    /// Unique identifier for a vault within a namespace.
+    ///
+    /// Wraps an `i64` with compile-time type safety to prevent mixing with
+    /// other identifier types.
+    ///
+    /// # Display
+    ///
+    /// Formats with `vault:` prefix: `vault:7`.
+    VaultId, i64, "vault"
+);
+
+define_id!(
+    /// Unique identifier for a user in the `_system` namespace.
+    ///
+    /// Wraps an `i64` with compile-time type safety to prevent mixing with
+    /// other identifier types.
+    ///
+    /// # Display
+    ///
+    /// Formats with `user:` prefix: `user:1`.
+    UserId, i64, "user"
+);
+
+define_id!(
+    /// Unique identifier for a Raft shard group.
+    ///
+    /// Wraps a `u32` with compile-time type safety to prevent mixing with
+    /// other identifier types.
+    ///
+    /// # Display
+    ///
+    /// Formats with `shard:` prefix: `shard:3`.
+    ShardId, u32, "shard"
+);
 
 /// Transaction identifier (16 bytes, typically UUIDv4).
 pub type TxId = [u8; 16];
@@ -49,8 +152,10 @@ pub struct BlockHeader {
     /// Block height (0 for genesis).
     pub height: u64,
     /// Namespace owning this vault.
+    #[builder(into)]
     pub namespace_id: NamespaceId,
     /// Vault identifier within the namespace.
+    #[builder(into)]
     pub vault_id: VaultId,
     /// Hash of the previous block (ZERO_HASH for genesis).
     pub previous_hash: Hash,
@@ -193,8 +298,8 @@ impl ShardBlock {
 
         BlockHeader {
             height: self.shard_height,
-            namespace_id: 0, // Shard-level aggregate, not vault-specific
-            vault_id: self.shard_id as VaultId,
+            namespace_id: NamespaceId::new(0), // Shard-level aggregate, not vault-specific
+            vault_id: VaultId::new(self.shard_id.value() as i64),
             previous_hash: self.previous_shard_hash,
             tx_merkle_root,
             state_root,
@@ -496,7 +601,7 @@ pub struct WriteResult {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::hash::ZERO_HASH;
@@ -535,8 +640,8 @@ mod tests {
             .build();
 
         assert_eq!(header.height, 100);
-        assert_eq!(header.namespace_id, 1);
-        assert_eq!(header.vault_id, 2);
+        assert_eq!(header.namespace_id, NamespaceId::new(1));
+        assert_eq!(header.vault_id, VaultId::new(2));
         assert_eq!(header.previous_hash, ZERO_HASH);
         assert_eq!(header.tx_merkle_root, ZERO_HASH);
         assert_eq!(header.state_root, ZERO_HASH);
@@ -696,5 +801,170 @@ mod tests {
             .expect("valid transaction with multiple operations");
 
         assert_eq!(tx.operations.len(), 3);
+    }
+
+    // ========================================================================
+    // Newtype Identifier Tests
+    // ========================================================================
+
+    #[test]
+    fn test_namespace_id_new_and_value() {
+        let id = NamespaceId::new(42);
+        assert_eq!(id.value(), 42);
+    }
+
+    #[test]
+    fn test_vault_id_new_and_value() {
+        let id = VaultId::new(7);
+        assert_eq!(id.value(), 7);
+    }
+
+    #[test]
+    fn test_user_id_new_and_value() {
+        let id = UserId::new(99);
+        assert_eq!(id.value(), 99);
+    }
+
+    #[test]
+    fn test_shard_id_new_and_value() {
+        let id = ShardId::new(3);
+        assert_eq!(id.value(), 3);
+    }
+
+    #[test]
+    fn test_namespace_id_display() {
+        assert_eq!(format!("{}", NamespaceId::new(123)), "ns:123");
+    }
+
+    #[test]
+    fn test_vault_id_display() {
+        assert_eq!(format!("{}", VaultId::new(456)), "vault:456");
+    }
+
+    #[test]
+    fn test_user_id_display() {
+        assert_eq!(format!("{}", UserId::new(789)), "user:789");
+    }
+
+    #[test]
+    fn test_shard_id_display() {
+        assert_eq!(format!("{}", ShardId::new(10)), "shard:10");
+    }
+
+    #[test]
+    fn test_namespace_id_from_i64() {
+        let id: NamespaceId = 42_i64.into();
+        assert_eq!(id.value(), 42);
+    }
+
+    #[test]
+    fn test_vault_id_into_i64() {
+        let id = VaultId::new(7);
+        let raw: i64 = id.into();
+        assert_eq!(raw, 7);
+    }
+
+    #[test]
+    fn test_shard_id_from_u32() {
+        let id: ShardId = 5_u32.into();
+        assert_eq!(id.value(), 5);
+    }
+
+    #[test]
+    fn test_shard_id_into_u32() {
+        let id = ShardId::new(3);
+        let raw: u32 = id.into();
+        assert_eq!(raw, 3);
+    }
+
+    #[test]
+    fn test_id_equality() {
+        assert_eq!(NamespaceId::new(1), NamespaceId::new(1));
+        assert_ne!(NamespaceId::new(1), NamespaceId::new(2));
+    }
+
+    #[test]
+    fn test_id_ordering() {
+        assert!(NamespaceId::new(1) < NamespaceId::new(2));
+        assert!(VaultId::new(10) > VaultId::new(5));
+        assert!(ShardId::new(0) < ShardId::new(1));
+    }
+
+    #[test]
+    fn test_id_hash_map_key() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(NamespaceId::new(1), "org-a");
+        map.insert(NamespaceId::new(2), "org-b");
+        assert_eq!(map.get(&NamespaceId::new(1)), Some(&"org-a"));
+        assert_eq!(map.get(&NamespaceId::new(3)), None);
+    }
+
+    #[test]
+    fn test_id_copy_semantics() {
+        let id = NamespaceId::new(42);
+        let id2 = id; // Copy
+        assert_eq!(id, id2); // Original still accessible
+    }
+
+    #[test]
+    fn test_id_serde_roundtrip() {
+        let id = NamespaceId::new(42);
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "42"); // transparent serialization
+        let deserialized: NamespaceId = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, id);
+    }
+
+    #[test]
+    fn test_vault_id_serde_roundtrip() {
+        let id = VaultId::new(7);
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "7");
+        let deserialized: VaultId = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, id);
+    }
+
+    #[test]
+    fn test_shard_id_serde_roundtrip() {
+        let id = ShardId::new(3);
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "3");
+        let deserialized: ShardId = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, id);
+    }
+
+    #[test]
+    fn test_id_negative_values() {
+        // IDs can be negative (leader-assigned sequential)
+        let id = NamespaceId::new(-1);
+        assert_eq!(id.value(), -1);
+        assert_eq!(format!("{id}"), "ns:-1");
+    }
+
+    #[test]
+    fn test_id_zero_value() {
+        // Zero has special meaning (system namespace)
+        let id = NamespaceId::new(0);
+        assert_eq!(id.value(), 0);
+        assert_eq!(format!("{id}"), "ns:0");
+    }
+
+    #[test]
+    fn test_block_header_builder_with_newtype_ids() {
+        let header = BlockHeader::builder()
+            .height(1)
+            .namespace_id(NamespaceId::new(10))
+            .vault_id(VaultId::new(20))
+            .previous_hash(ZERO_HASH)
+            .tx_merkle_root(ZERO_HASH)
+            .state_root(ZERO_HASH)
+            .timestamp(Utc::now())
+            .term(1)
+            .committed_index(0)
+            .build();
+
+        assert_eq!(header.namespace_id, NamespaceId::new(10));
+        assert_eq!(header.vault_id, VaultId::new(20));
     }
 }

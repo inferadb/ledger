@@ -34,6 +34,7 @@ use crate::{
         read_service_client::ReadServiceClient, write_service_client::WriteServiceClient,
     },
     shard_router::ShardConnection,
+    trace_context::{self, TraceContext},
 };
 
 /// Default timeout for forwarded requests.
@@ -74,6 +75,21 @@ impl ForwardClient {
         self.shard_id
     }
 
+    /// Create a gRPC request with trace context injection.
+    ///
+    /// Injects W3C Trace Context headers (`traceparent`, `tracestate`) into
+    /// the outgoing request metadata, enabling distributed trace continuity
+    /// across shard boundaries.
+    fn make_request<T>(&self, message: T, trace_ctx: Option<&TraceContext>) -> Request<T> {
+        let mut req = Request::new(message);
+        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        if let Some(ctx) = trace_ctx {
+            let child = ctx.child();
+            trace_context::inject_into_metadata(req.metadata_mut(), &child);
+        }
+        req
+    }
+
     // ========================================================================
     // Read Service Forwarding
     // ========================================================================
@@ -82,12 +98,12 @@ impl ForwardClient {
     pub async fn forward_read(
         &mut self,
         request: ReadRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<ReadResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding read request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding read request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.read(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward read failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward read failed");
             e
         })
     }
@@ -96,12 +112,12 @@ impl ForwardClient {
     pub async fn forward_verified_read(
         &mut self,
         request: VerifiedReadRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding verified_read request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding verified_read request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.verified_read(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward verified_read failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward verified_read failed");
             e
         })
     }
@@ -110,12 +126,12 @@ impl ForwardClient {
     pub async fn forward_historical_read(
         &mut self,
         request: HistoricalReadRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding historical_read request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding historical_read request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.historical_read(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward historical_read failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward historical_read failed");
             e
         })
     }
@@ -126,11 +142,12 @@ impl ForwardClient {
     pub async fn forward_watch_blocks(
         &mut self,
         request: WatchBlocksRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<tonic::Streaming<BlockAnnouncement>>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding watch_blocks request");
-        let req = Request::new(request);
+        debug!(shard_id = self.shard_id.value(), "Forwarding watch_blocks request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.watch_blocks(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward watch_blocks failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward watch_blocks failed");
             e
         })
     }
@@ -139,12 +156,12 @@ impl ForwardClient {
     pub async fn forward_get_block(
         &mut self,
         request: GetBlockRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<GetBlockResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding get_block request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding get_block request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.get_block(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward get_block failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_block failed");
             e
         })
     }
@@ -153,12 +170,12 @@ impl ForwardClient {
     pub async fn forward_get_block_range(
         &mut self,
         request: GetBlockRangeRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding get_block_range request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding get_block_range request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.get_block_range(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward get_block_range failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_block_range failed");
             e
         })
     }
@@ -167,12 +184,12 @@ impl ForwardClient {
     pub async fn forward_get_tip(
         &mut self,
         request: GetTipRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<GetTipResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding get_tip request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding get_tip request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.get_tip(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward get_tip failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_tip failed");
             e
         })
     }
@@ -181,12 +198,12 @@ impl ForwardClient {
     pub async fn forward_get_client_state(
         &mut self,
         request: GetClientStateRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding get_client_state request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding get_client_state request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.get_client_state(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward get_client_state failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_client_state failed");
             e
         })
     }
@@ -195,12 +212,12 @@ impl ForwardClient {
     pub async fn forward_list_relationships(
         &mut self,
         request: ListRelationshipsRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding list_relationships request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding list_relationships request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.list_relationships(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward list_relationships failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward list_relationships failed");
             e
         })
     }
@@ -209,12 +226,12 @@ impl ForwardClient {
     pub async fn forward_list_resources(
         &mut self,
         request: ListResourcesRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding list_resources request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding list_resources request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.list_resources(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward list_resources failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward list_resources failed");
             e
         })
     }
@@ -223,12 +240,12 @@ impl ForwardClient {
     pub async fn forward_list_entities(
         &mut self,
         request: ListEntitiesRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding list_entities request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding list_entities request");
+        let req = self.make_request(request, trace_ctx);
         self.read_client.list_entities(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward list_entities failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward list_entities failed");
             e
         })
     }
@@ -241,12 +258,12 @@ impl ForwardClient {
     pub async fn forward_write(
         &mut self,
         request: WriteRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<WriteResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding write request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding write request");
+        let req = self.make_request(request, trace_ctx);
         self.write_client.write(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward write failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward write failed");
             e
         })
     }
@@ -255,12 +272,12 @@ impl ForwardClient {
     pub async fn forward_batch_write(
         &mut self,
         request: BatchWriteRequest,
+        trace_ctx: Option<&TraceContext>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
-        debug!(shard_id = self.shard_id, "Forwarding batch_write request");
-        let mut req = Request::new(request);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        debug!(shard_id = self.shard_id.value(), "Forwarding batch_write request");
+        let req = self.make_request(request, trace_ctx);
         self.write_client.batch_write(req).await.map_err(|e| {
-            warn!(shard_id = self.shard_id, error = %e, "Forward batch_write failed");
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward batch_write failed");
             e
         })
     }

@@ -14,13 +14,14 @@ use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, Transaction, VaultId};
+use inferadb_ledger_types::{NamespaceId, Operation, Transaction, VaultId};
 use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
     log_storage::AppliedStateAccessor,
+    trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
 };
 
@@ -85,7 +86,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
                 })
                 .collect(),
             Err(e) => {
-                warn!(vault_id, error = %e, "Failed to list entities for GC");
+                warn!(vault_id = vault_id.value(), error = %e, "Failed to list entities for GC");
                 Vec::new()
             },
         }
@@ -94,7 +95,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
     /// Submit ExpireEntity operations through Raft.
     async fn expire_entities(
         &self,
-        namespace_id: i64,
+        namespace_id: NamespaceId,
         vault_id: VaultId,
         expired: Vec<(String, u64)>,
     ) -> Result<(), String> {
@@ -127,7 +128,12 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
         self.raft.client_write(request).await.map_err(|e| format!("Raft write failed: {}", e))?;
 
-        info!(namespace_id, vault_id, count = expired.len(), "GC expired entities");
+        info!(
+            namespace_id = namespace_id.value(),
+            vault_id = vault_id.value(),
+            count = expired.len(),
+            "GC expired entities"
+        );
 
         Ok(())
     }
@@ -140,7 +146,8 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             return;
         }
 
-        debug!("Starting GC cycle");
+        let trace_ctx = TraceContext::new();
+        debug!(trace_id = %trace_ctx.trace_id, "Starting GC cycle");
 
         // Get all active vaults from the applied state registry
         let vault_heights = self.applied_state.all_vault_heights();
@@ -151,10 +158,22 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
                 continue;
             }
 
-            debug!(namespace_id, vault_id, count = expired.len(), "Found expired entities");
+            debug!(
+                trace_id = %trace_ctx.trace_id,
+                namespace_id = namespace_id.value(),
+                vault_id = vault_id.value(),
+                count = expired.len(),
+                "Found expired entities"
+            );
 
             if let Err(e) = self.expire_entities(namespace_id, vault_id, expired).await {
-                warn!(namespace_id, vault_id, error = %e, "GC cycle failed");
+                warn!(
+                    trace_id = %trace_ctx.trace_id,
+                    namespace_id = namespace_id.value(),
+                    vault_id = vault_id.value(),
+                    error = %e,
+                    "GC cycle failed"
+                );
             }
         }
     }

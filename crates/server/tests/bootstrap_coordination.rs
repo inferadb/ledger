@@ -42,7 +42,13 @@ async fn test_single_node_bootstrap() {
     };
 
     // Bootstrap should succeed
-    let result = bootstrap_node(&config, &data_dir).await;
+    let result = bootstrap_node(
+        &config,
+        &data_dir,
+        inferadb_ledger_raft::HealthState::new(),
+        tokio::sync::watch::channel(false).1,
+    )
+    .await;
     assert!(result.is_ok(), "single-node bootstrap should succeed: {:?}", result.err());
 
     let bootstrapped = result.unwrap();
@@ -98,8 +104,14 @@ async fn test_node_restart_preserves_id() {
 
     // First startup - bootstrap fresh node
     let first_id = {
-        let bootstrapped =
-            bootstrap_node(&config, &data_dir).await.expect("first bootstrap should succeed");
+        let bootstrapped = bootstrap_node(
+            &config,
+            &data_dir,
+            inferadb_ledger_raft::HealthState::new(),
+            tokio::sync::watch::channel(false).1,
+        )
+        .await
+        .expect("first bootstrap should succeed");
 
         // Get the generated node ID
         let raft_metrics = bootstrapped.raft.metrics().borrow().clone();
@@ -137,8 +149,14 @@ async fn test_node_restart_preserves_id() {
             ..Config::default()
         };
 
-        let bootstrapped =
-            bootstrap_node(&config2, &data_dir).await.expect("restart should succeed");
+        let bootstrapped = bootstrap_node(
+            &config2,
+            &data_dir,
+            inferadb_ledger_raft::HealthState::new(),
+            tokio::sync::watch::channel(false).1,
+        )
+        .await
+        .expect("restart should succeed");
 
         let raft_metrics = bootstrapped.raft.metrics().borrow().clone();
         let node_id = raft_metrics.id;
@@ -249,7 +267,14 @@ async fn test_late_joiner_finds_existing_cluster() {
         ..Config::default()
     };
 
-    let leader = bootstrap_node(&leader_config, &leader_data_dir).await.expect("leader bootstrap");
+    let leader = bootstrap_node(
+        &leader_config,
+        &leader_data_dir,
+        inferadb_ledger_raft::HealthState::new(),
+        tokio::sync::watch::channel(false).1,
+    )
+    .await
+    .expect("leader bootstrap");
     let leader_server = leader.server;
     let leader_raft = leader.raft.clone();
 
@@ -321,7 +346,13 @@ async fn test_join_mode_does_not_bootstrap() {
     };
 
     // Bootstrap should succeed (node starts but doesn't initialize cluster)
-    let result = bootstrap_node(&config, &data_dir).await;
+    let result = bootstrap_node(
+        &config,
+        &data_dir,
+        inferadb_ledger_raft::HealthState::new(),
+        tokio::sync::watch::channel(false).1,
+    )
+    .await;
     assert!(result.is_ok(), "join mode should start successfully: {:?}", result.err());
 
     let bootstrapped = result.unwrap();
