@@ -94,10 +94,11 @@ check: fmt-check clippy test
 # Quick check (format + clippy only) - faster pre-commit validation
 check-quick: fmt-check clippy
 
-# CI validation: format + clippy + tests (excludes e2e tests that require a running cluster)
+# CI validation: format + clippy + tests (excludes integration tests that require a running cluster)
 ci: fmt-check clippy
-    cargo +{{rust}} test --workspace --exclude inferadb-ledger-sdk
+    cargo +{{rust}} test --workspace --exclude inferadb-ledger-sdk --exclude inferadb-ledger-server
     cargo +{{rust}} test -p inferadb-ledger-sdk --lib
+    cargo +{{rust}} test -p inferadb-ledger-server --lib
 
 # Pre-PR validation: regenerate protos, autoformat, lint, and test
 ready: proto fmt clippy test
