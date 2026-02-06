@@ -94,8 +94,8 @@ check: fmt-check clippy test
 # Quick check (format + clippy only) - faster pre-commit validation
 check-quick: fmt-check clippy
 
-# CI validation: format + clippy + tests (excludes integration tests that require a running cluster)
-ci: fmt-check clippy
+# CI validation: format + clippy + doc + tests (excludes integration tests that require a running cluster)
+ci: fmt-check clippy doc-check
     cargo +{{rust}} test --workspace --exclude inferadb-ledger-sdk --exclude inferadb-ledger-server
     cargo +{{rust}} test -p inferadb-ledger-sdk --lib
     cargo +{{rust}} test -p inferadb-ledger-server --lib
@@ -110,6 +110,10 @@ ready: proto fmt clippy test
 # Build documentation
 doc:
     cargo +{{rust}} doc --workspace --no-deps
+
+# Check documentation builds without warnings (broken links, missing docs)
+doc-check:
+    RUSTDOCFLAGS="-D warnings" cargo +{{rust}} doc --workspace --no-deps
 
 # Build and open documentation in browser
 doc-open:

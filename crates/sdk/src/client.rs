@@ -1360,7 +1360,7 @@ impl LedgerClient {
     /// Returns the client's cancellation token.
     ///
     /// The token can be used to:
-    /// - Monitor shutdown state via [`CancellationToken::cancelled()`]
+    /// - Monitor shutdown state via `CancellationToken::cancelled()`
     /// - Create child tokens for per-request cancellation
     ///
     /// # Per-Request Cancellation

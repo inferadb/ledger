@@ -103,7 +103,7 @@ where
 /// Execute an async operation with retry and cancellation support.
 ///
 /// Behaves identically to [`with_retry`], but races each attempt against the
-/// provided [`CancellationToken`]. If the token is cancelled before the
+/// provided `CancellationToken`. If the token is cancelled before the
 /// operation completes, the function returns `SdkError::Cancelled` immediately
 /// without further retries.
 ///
