@@ -1,0 +1,54 @@
+[package]
+name = "inferadb-ledger-fuzz"
+version = "0.0.0"
+authors = ["InferaDB Contributors"]
+publish = false
+edition = "2024"
+rust-version = "1.92"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+inferadb-ledger-types = { path = "../crates/types" }
+inferadb-ledger-store = { path = "../crates/store" }
+inferadb-ledger-raft = { path = "../crates/raft" }
+
+# Protobuf (needed for proto fuzz target)
+prost = "0.14"
+
+# Serialization (needed for codec fuzz targets)
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+
+# Crypto (needed for pagination token fuzz target)
+base64 = "0.22"
+
+# Prevent this from interfering with the parent workspace
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_proto_convert"
+path = "fuzz_targets/fuzz_proto_convert.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_postcard_codec"
+path = "fuzz_targets/fuzz_postcard_codec.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_btree_keys"
+path = "fuzz_targets/fuzz_btree_keys.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_pagination_token"
+path = "fuzz_targets/fuzz_pagination_token.rs"
+test = false
+doc = false

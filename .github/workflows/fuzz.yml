@@ -1,0 +1,89 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+
+name: Fuzz
+
+on:
+  schedule:
+    # Run at 3am UTC daily (after nightly at 2am)
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+# Cancel in-progress runs when new runs are triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_FUZZ_VERSION: "0.12.0"
+  # Seconds per fuzz target (5 minutes for nightly, override via workflow_dispatch)
+  FUZZ_TIME: 300
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.fuzz_target }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fuzz_target: fuzz_proto_convert
+          - fuzz_target: fuzz_postcard_codec
+          - fuzz_target: fuzz_btree_keys
+          - fuzz_target: fuzz_pagination_token
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install nightly Rust
+        run: |
+          rustup toolchain install nightly
+          rustup default nightly
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Cache cargo-fuzz
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/cargo-fuzz
+          key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
+
+      - name: Install cargo-fuzz
+        run: |
+          echo "${{ runner.tool_cache }}/cargo-fuzz/bin" >> "$GITHUB_PATH"
+          cargo install --root "${{ runner.tool_cache }}/cargo-fuzz" --version "$CARGO_FUZZ_VERSION" cargo-fuzz --locked
+
+      - name: Cache Rust dependencies
+        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
+        with:
+          shared-key: fuzz
+          workspaces: fuzz
+
+      - name: Build fuzz target
+        working-directory: fuzz
+        run: cargo +nightly fuzz build "${{ matrix.fuzz_target }}"
+
+      - name: Run fuzz target
+        working-directory: fuzz
+        run: cargo +nightly fuzz run "${{ matrix.fuzz_target }}" -- -max_total_time="$FUZZ_TIME"
+
+      - name: Upload artifacts on failure
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: failure()
+        with:
+          name: fuzz-artifacts-${{ matrix.fuzz_target }}-${{ github.sha }}
+          path: fuzz/artifacts
+          retention-days: 30
