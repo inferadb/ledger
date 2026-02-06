@@ -13,6 +13,7 @@ InferaDB Ledger: blockchain database for cryptographically verifiable authorizat
 - No TODO/FIXME/HACK comments
 - No backwards compatibility shims or feature flags
 - Write tests before implementation, target 90%+ coverage
+- Never make git commits
 
 ## Source of Truth
 
@@ -42,6 +43,37 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 2. `find_symbol` with `depth=1` to see methods without bodies
 3. `include_body=True` only when needed
 4. `find_referencing_symbols` before any refactor
+
+## Task Completion
+
+**A task is not complete until all of these pass — no "pre-existing issue" exceptions:**
+
+- `cargo build --workspace` — no errors or warnings
+- `cargo nextest run` — all tests pass
+- `cargo +1.92 clippy --workspace --all-targets -- -D warnings` — no warnings
+- `cargo +nightly fmt --all -- --check` — no formatting issues
+
+**Review workflow:**
+
+1. Run `just ci` — all checks must pass
+2. Review changes with CodeRabbit: `mcp__coderabbit__review_changes`
+3. Fix all identified issues — no exceptions
+4. Re-review if fixes were substantial
+
+## Code Conventions
+
+**Builders (bon):**
+
+- `#[builder(into)]` for `String` fields to accept `&str`
+- Match `#[builder(default)]` with `#[serde(default)]` for config
+- Fallible builders via `#[bon]` impl block when validation needed
+- Prefer compile-time required fields over runtime checks
+
+**Doc comments:** Use ` ```no_run ` — `cargo test` skips, `cargo doc` validates.
+
+**Writing:** No filler (very, really, basically), no wordiness (in order to → to), active voice, specific language.
+
+**Markdown:** Concise, kebab-case filenames, specify language in code blocks.
 
 ## Commands
 
@@ -203,7 +235,7 @@ impl TlsConfig {
 
 **Formatting:** `cargo +nightly fmt` (nightly required)
 
-**Doc comments:** Use ```` ```no_run ```` for code examples — `cargo test` skips execution; `cargo doc` validates syntax.
+**Doc comments:** Use ` ```no_run ` for code examples — `cargo test` skips execution; `cargo doc` validates syntax.
 
 **Markdown:** Be concise, no filler words, kebab-case filenames, specify language in code blocks. Prefer showing to telling.
 
