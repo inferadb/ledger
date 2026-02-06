@@ -387,7 +387,7 @@ impl AppliedStateAccessor {
     }
 }
 
-/// Combined Raft storage backed by Inkwell.
+/// Combined Raft storage.
 ///
 /// This implementation stores:
 /// - Log entries in the RaftLog table indexed by log index
@@ -402,7 +402,7 @@ impl AppliedStateAccessor {
 /// The generic parameter `B` controls the storage backend for StateLayer and
 /// BlockArchive. The raft log itself always uses FileBackend for durability.
 pub struct RaftLogStore<B: StorageBackend = FileBackend> {
-    /// Inkwell database handle for raft log.
+    /// Database handle for raft log.
     db: Arc<Database<FileBackend>>,
     /// Cached vote state.
     vote_cache: RwLock<Option<Vote<LedgerNodeId>>>,
@@ -457,8 +457,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
             let config = DatabaseConfig { page_size: Self::RAFT_PAGE_SIZE, ..Default::default() };
             Database::create_with_config(path.as_ref(), config).map_err(|e| to_storage_error(&e))?
         };
-
-        // Inkwell has fixed tables - no need to create them explicitly
 
         let store = Self {
             db: Arc::new(db),

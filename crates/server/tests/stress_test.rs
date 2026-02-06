@@ -1205,7 +1205,7 @@ async fn test_stress_single_node() {
 /// - batch_size=100 @ 25ms = 4,000 ops/sec max (requires 16KB pages)
 ///
 /// With multi-shard (8 shards) and batch_size=100, achieves 6000+ ops/sec.
-/// All Inkwell databases now use 16KB pages to support larger batch sizes.
+/// All databases use 16KB pages to support larger batch sizes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_stress_batched() {
     run_stress_test_with_cluster_size(
@@ -1578,7 +1578,7 @@ async fn test_stress_multi_shard() {
 /// - Per-shard throughput: ~750-800 ops/sec
 ///
 /// ## Technical Notes
-/// - All Inkwell databases (raft, state, blocks) use 16KB pages
+/// - All databases (raft, state, blocks) use 16KB pages
 /// - batch_size=100 requires 16KB pages (~10KB serialized per batch)
 /// - 16 write workers distribute load across 8 shards
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]

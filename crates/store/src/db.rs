@@ -1830,4 +1830,152 @@ mod tests {
             );
         }
     }
+
+    // ========================================================================
+    // Iteration Tests (after multi-transaction writes)
+    // ========================================================================
+
+    /// Test that iteration returns all entries written across separate transactions.
+    ///
+    /// This is a minimal reproduction case for a bug where iteration was returning
+    /// incomplete results even though direct `get()` operations worked correctly.
+    #[test]
+    fn test_iteration_after_multi_transaction_writes() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let num_keys = 20;
+
+        // Write entries in SEPARATE transactions (like gRPC server would)
+        for i in 0..num_keys {
+            let mut txn = db.write().unwrap();
+            let key = format!("key-{:04}", i).into_bytes();
+            let value = format!("value-{}", i).into_bytes();
+            txn.insert::<tables::Entities>(&key, &value).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Verify all entries via direct get()
+        {
+            let txn = db.read().unwrap();
+            let mut missing_get = Vec::new();
+            for i in 0..num_keys {
+                let key = format!("key-{:04}", i).into_bytes();
+                if txn.get::<tables::Entities>(&key).unwrap().is_none() {
+                    missing_get.push(i);
+                }
+            }
+            assert!(
+                missing_get.is_empty(),
+                "Direct get() missing {} keys: {:?}",
+                missing_get.len(),
+                missing_get
+            );
+        }
+
+        // Verify all entries via iteration
+        {
+            let txn = db.read().unwrap();
+            let iter = txn.iter::<tables::Entities>().unwrap();
+            let all_entries: Vec<_> = iter.collect_entries();
+
+            assert_eq!(
+                all_entries.len(),
+                num_keys,
+                "Iteration returned {} entries, expected {}. Missing entries!",
+                all_entries.len(),
+                num_keys
+            );
+
+            // Verify entries are in order
+            let mut prev_key: Option<Vec<u8>> = None;
+            for (key, _) in &all_entries {
+                if let Some(prev) = &prev_key {
+                    assert!(key > prev, "Entries not in order: {:?} should be > {:?}", key, prev);
+                }
+                prev_key = Some(key.clone());
+            }
+        }
+    }
+
+    /// Same test with variable-length keys that span multiple buckets.
+    ///
+    /// This mimics the Ledger state layer's key encoding where keys are
+    /// scattered across buckets based on seahash.
+    #[test]
+    fn test_iteration_with_bucketed_keys() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let num_keys = 50;
+
+        // Simulate the Ledger state layer's key format:
+        // {vault_id:8BE}{bucket_id:1}{local_key:var}
+        // Using different bucket values to scatter keys
+        for i in 0..num_keys {
+            let mut txn = db.write().unwrap();
+
+            // Vault ID (fixed) + bucket ID (varying) + local key
+            let vault_id: i64 = 1;
+            let bucket_id = (i * 7) % 256; // Scatter across buckets
+            let local_key = format!("rel:doc:{}#viewer@user:{}", i, i);
+
+            let mut key = Vec::with_capacity(9 + local_key.len());
+            key.extend_from_slice(&vault_id.to_be_bytes());
+            key.push(bucket_id as u8);
+            key.extend_from_slice(local_key.as_bytes());
+
+            let value = format!("entity-{}", i).into_bytes();
+            txn.insert::<tables::Entities>(&key, &value).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Verify all entries via iteration
+        let txn = db.read().unwrap();
+        let iter = txn.iter::<tables::Entities>().unwrap();
+        let all_entries: Vec<_> = iter.collect_entries();
+
+        assert_eq!(
+            all_entries.len(),
+            num_keys,
+            "Iteration returned {} entries, expected {}. Missing entries!",
+            all_entries.len(),
+            num_keys
+        );
+    }
+
+    /// Test iteration with file-backed database across reopen.
+    ///
+    /// Ensures that iteration works correctly after database close and reopen.
+    #[test]
+    fn test_iteration_after_file_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("iter_test.ink");
+        let num_keys = 30;
+
+        // Create database and write entries
+        {
+            let db = Database::<FileBackend>::create(&db_path).unwrap();
+
+            for i in 0..num_keys {
+                let mut txn = db.write().unwrap();
+                let key = format!("persistent-key-{:04}", i).into_bytes();
+                let value = format!("value-{}", i).into_bytes();
+                txn.insert::<tables::Entities>(&key, &value).unwrap();
+                txn.commit().unwrap();
+            }
+        }
+
+        // Reopen and verify via iteration
+        {
+            let db = Database::<FileBackend>::open(&db_path).unwrap();
+            let txn = db.read().unwrap();
+            let iter = txn.iter::<tables::Entities>().unwrap();
+            let all_entries: Vec<_> = iter.collect_entries();
+
+            assert_eq!(
+                all_entries.len(),
+                num_keys,
+                "After reopen, iteration returned {} entries, expected {}",
+                all_entries.len(),
+                num_keys
+            );
+        }
+    }
 }

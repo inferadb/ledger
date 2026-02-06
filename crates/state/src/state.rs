@@ -881,6 +881,106 @@ mod tests {
         }
     }
 
+    /// Reproduction test for Engine integration test failure.
+    ///
+    /// Simulates the concurrent write + list pattern that fails in the Engine's
+    /// ledger_integration.rs tests. Writes 11 relationships (1 sequential + 10 concurrent)
+    /// and verifies all are returned by list_relationships.
+    #[test]
+    fn test_list_relationships_after_concurrent_writes() {
+        use inferadb_ledger_types::bucket_id;
+        use std::thread;
+
+        let state = create_test_state();
+        let vault_id = 20_000_002_690_000i64; // Same vault ID pattern as integration tests
+
+        // First: sequential write (like Engine test does)
+        let seq_ops = vec![Operation::CreateRelationship {
+            resource: "document:seq-test".to_string(),
+            relation: "viewer".to_string(),
+            subject: "user:seq-test".to_string(),
+        }];
+        let statuses = state.apply_operations(vault_id, &seq_ops, 1).unwrap();
+        assert_eq!(statuses, vec![WriteStatus::Created]);
+
+        // Verify sequential write via direct read
+        assert!(state.relationship_exists(vault_id, "document:seq-test", "viewer", "user:seq-test").unwrap());
+
+        // Now: concurrent writes (mimicking tokio::spawn in integration test)
+        // Note: StateLayer is internally thread-safe, so we use threads
+        let state_arc = std::sync::Arc::new(state);
+        let mut handles = Vec::new();
+
+        for i in 0..10 {
+            let state = std::sync::Arc::clone(&state_arc);
+            let handle = thread::spawn(move || {
+                let ops = vec![Operation::CreateRelationship {
+                    resource: format!("document:concurrent-{}", i),
+                    relation: "viewer".to_string(),
+                    subject: format!("user:concurrent-{}", i),
+                }];
+                state.apply_operations(vault_id, &ops, (i + 2) as u64).unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all concurrent writes
+        for handle in handles {
+            let statuses = handle.join().expect("thread panicked");
+            assert_eq!(statuses, vec![WriteStatus::Created]);
+        }
+
+        // Verify all concurrent writes via direct reads
+        for i in 0..10 {
+            assert!(
+                state_arc.relationship_exists(
+                    vault_id,
+                    &format!("document:concurrent-{}", i),
+                    "viewer",
+                    &format!("user:concurrent-{}", i)
+                ).unwrap(),
+                "Direct read failed for concurrent-{}", i
+            );
+        }
+
+        // Debug: print bucket distribution
+        eprintln!("=== Bucket distribution ===");
+        let seq_key = format!("rel:document:seq-test#viewer@user:seq-test");
+        eprintln!("seq-test: bucket {}", bucket_id(seq_key.as_bytes()));
+        for i in 0..10 {
+            let key = format!("rel:document:concurrent-{}#viewer@user:concurrent-{}", i, i);
+            eprintln!("concurrent-{}: bucket {}", i, bucket_id(key.as_bytes()));
+        }
+
+        // Now: list all relationships (the operation that fails in integration tests)
+        let all_relationships = state_arc.list_relationships(vault_id, None, 100).unwrap();
+
+        eprintln!("=== Listed {} relationships ===", all_relationships.len());
+        for rel in &all_relationships {
+            eprintln!("  {}#{}@{}", rel.resource, rel.relation, rel.subject);
+        }
+
+        // Should have all 11 relationships
+        assert_eq!(
+            all_relationships.len(),
+            11,
+            "Expected 11 relationships (1 seq + 10 concurrent), got {}",
+            all_relationships.len()
+        );
+
+        // Verify specific relationships are present
+        assert!(
+            all_relationships.iter().any(|r| r.resource == "document:seq-test"),
+            "Sequential relationship not found in list"
+        );
+        for i in 0..10 {
+            assert!(
+                all_relationships.iter().any(|r| r.resource == format!("document:concurrent-{}", i)),
+                "Concurrent relationship {} not found in list", i
+            );
+        }
+    }
+
     #[test]
     fn test_state_root_changes_on_writes() {
         let state = create_test_state();

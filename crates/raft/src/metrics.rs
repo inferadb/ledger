@@ -414,7 +414,7 @@ pub fn record_proto_decode(latency_secs: f64, operation: &str) {
 ///
 /// This measures serialization time when appending entries to the Raft log.
 /// Per DESIGN.md architecture: internal types are postcard-serialized for
-/// efficient storage in Inkwell.
+/// efficient storage.
 #[inline]
 pub fn record_postcard_encode(latency_secs: f64, entry_type: &str) {
     histogram!(SERIALIZATION_POSTCARD_ENCODE, "entry_type" => entry_type.to_string())
