@@ -1294,11 +1294,7 @@ impl ReadService for ReadServiceImpl {
                     .into_iter()
                     .filter(|r| req.resource.as_ref().is_none_or(|res| r.resource == *res))
                     .filter(|r| req.relation.as_ref().is_none_or(|rel| r.relation == *rel))
-                    .map(|r| crate::proto::Relationship {
-                        resource: r.resource,
-                        relation: r.relation,
-                        subject: r.subject,
-                    })
+                    .map(|r| r.into())
                     .collect()
             };
 
@@ -1486,16 +1482,7 @@ impl ReadService for ReadServiceImpl {
             .collect();
 
         // Convert to proto entities
-        let entities: Vec<crate::proto::Entity> = filtered
-            .iter()
-            .map(|e| crate::proto::Entity {
-                key: String::from_utf8_lossy(&e.key).to_string(),
-                value: e.value.clone(),
-                version: e.version,
-                // Convert 0 (never expires) to None
-                expires_at: if e.expires_at == 0 { None } else { Some(e.expires_at) },
-            })
-            .collect();
+        let entities: Vec<crate::proto::Entity> = filtered.iter().map(|e| e.into()).collect();
 
         // Create secure pagination token from last key if there are more
         let next_page_token = if entities.len() >= limit {

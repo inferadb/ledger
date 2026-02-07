@@ -154,6 +154,7 @@ impl TokenBucket {
 /// Multi-level rate limiter with per-client, per-namespace, and backpressure tiers.
 ///
 /// Thread-safe: all mutable state is behind `Mutex`.
+/// Config thresholds use atomics for lock-free runtime reconfiguration.
 ///
 /// # Usage
 ///
@@ -177,17 +178,17 @@ pub struct RateLimiter {
     namespace_buckets: Mutex<HashMap<NamespaceId, TokenBucket>>,
 
     /// Capacity for per-client token buckets (max burst).
-    client_capacity: u64,
-    /// Refill rate for per-client buckets (tokens per second).
-    client_refill_rate: f64,
+    client_capacity: AtomicU64,
+    /// Refill rate for per-client buckets (tokens per second), stored as f64 bits.
+    client_refill_rate_bits: AtomicU64,
 
     /// Capacity for per-namespace token buckets (max burst).
-    namespace_capacity: u64,
-    /// Refill rate for per-namespace buckets (tokens per second).
-    namespace_refill_rate: f64,
+    namespace_capacity: AtomicU64,
+    /// Refill rate for per-namespace buckets (tokens per second), stored as f64 bits.
+    namespace_refill_rate_bits: AtomicU64,
 
     /// Raft pending proposal count above which backpressure is applied.
-    backpressure_threshold: u64,
+    backpressure_threshold: AtomicU64,
     /// Current pending proposal count (updated externally).
     pending_proposals: AtomicU64,
 
@@ -215,11 +216,11 @@ impl RateLimiter {
         Self {
             client_buckets: Mutex::new(HashMap::new()),
             namespace_buckets: Mutex::new(HashMap::new()),
-            client_capacity,
-            client_refill_rate,
-            namespace_capacity,
-            namespace_refill_rate,
-            backpressure_threshold,
+            client_capacity: AtomicU64::new(client_capacity),
+            client_refill_rate_bits: AtomicU64::new(client_refill_rate.to_bits()),
+            namespace_capacity: AtomicU64::new(namespace_capacity),
+            namespace_refill_rate_bits: AtomicU64::new(namespace_refill_rate.to_bits()),
+            backpressure_threshold: AtomicU64::new(backpressure_threshold),
             pending_proposals: AtomicU64::new(0),
             rejected_count: AtomicU64::new(0),
         }
@@ -240,13 +241,14 @@ impl RateLimiter {
     ) -> Result<(), RateLimitRejection> {
         // Tier 1: Global backpressure (cheapest — single atomic load, no token consumption)
         let pending = self.pending_proposals.load(Ordering::Relaxed);
-        if pending > self.backpressure_threshold {
+        let backpressure_threshold = self.backpressure_threshold.load(Ordering::Relaxed);
+        if pending > backpressure_threshold {
             self.rejected_count.fetch_add(1, Ordering::Relaxed);
             return Err(RateLimitRejection {
                 level: RateLimitLevel::Backpressure,
                 reason: RateLimitReason::QueueDepth,
                 // Backoff proportional to queue depth overage
-                retry_after_ms: ((pending - self.backpressure_threshold) * 10).min(5000),
+                retry_after_ms: ((pending - backpressure_threshold) * 10).min(5000),
                 identifier: format!("pending_proposals={pending}"),
             });
         }
@@ -255,9 +257,12 @@ impl RateLimiter {
         // wasting shared namespace tokens on client-rejected requests)
         if !client_id.is_empty() {
             let mut buckets = self.client_buckets.lock();
-            let bucket = buckets
-                .entry(client_id.to_string())
-                .or_insert_with(|| TokenBucket::new(self.client_capacity, self.client_refill_rate));
+            let bucket = buckets.entry(client_id.to_string()).or_insert_with(|| {
+                TokenBucket::new(
+                    self.client_capacity.load(Ordering::Relaxed),
+                    f64::from_bits(self.client_refill_rate_bits.load(Ordering::Relaxed)),
+                )
+            });
 
             if !bucket.try_acquire() {
                 let retry_after_ms = bucket.retry_after_ms();
@@ -275,7 +280,10 @@ impl RateLimiter {
         {
             let mut buckets = self.namespace_buckets.lock();
             let bucket = buckets.entry(namespace_id).or_insert_with(|| {
-                TokenBucket::new(self.namespace_capacity, self.namespace_refill_rate)
+                TokenBucket::new(
+                    self.namespace_capacity.load(Ordering::Relaxed),
+                    f64::from_bits(self.namespace_refill_rate_bits.load(Ordering::Relaxed)),
+                )
             });
 
             if !bucket.try_acquire() {
@@ -296,8 +304,10 @@ impl RateLimiter {
     /// Update the pending Raft proposal count for backpressure calculation.
     ///
     /// Called externally by the Raft metrics observer.
+    /// Also emits the `ledger_rate_limit_queue_depth` gauge for SLI monitoring.
     pub fn set_pending_proposals(&self, count: u64) {
         self.pending_proposals.store(count, Ordering::Relaxed);
+        crate::metrics::set_rate_limit_queue_depth(count);
     }
 
     /// Get the current pending proposal count.
@@ -338,6 +348,26 @@ impl RateLimiter {
     fn client_tokens(&self, client_id: &str) -> Option<u64> {
         let buckets = self.client_buckets.lock();
         buckets.get(client_id).map(|b| b.tokens_millis / 1000)
+    }
+
+    /// Update rate limiter configuration at runtime.
+    ///
+    /// Atomically updates all threshold fields. Existing token buckets retain
+    /// their current token counts — only new buckets created after this call
+    /// will use the updated capacity and refill rate.
+    pub fn update_config(
+        &self,
+        client_capacity: u64,
+        client_refill_rate: f64,
+        namespace_capacity: u64,
+        namespace_refill_rate: f64,
+        backpressure_threshold: u64,
+    ) {
+        self.client_capacity.store(client_capacity, Ordering::Relaxed);
+        self.client_refill_rate_bits.store(client_refill_rate.to_bits(), Ordering::Relaxed);
+        self.namespace_capacity.store(namespace_capacity, Ordering::Relaxed);
+        self.namespace_refill_rate_bits.store(namespace_refill_rate.to_bits(), Ordering::Relaxed);
+        self.backpressure_threshold.store(backpressure_threshold, Ordering::Relaxed);
     }
 }
 

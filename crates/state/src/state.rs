@@ -9,7 +9,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use inferadb_ledger_store::{CompactionStats, Database, StorageBackend, tables};
+use inferadb_ledger_store::{CompactionStats, Database, DatabaseStats, StorageBackend, tables};
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
@@ -110,6 +110,18 @@ impl<B: StorageBackend> StateLayer<B> {
         Self { db, vault_commitments: RwLock::new(HashMap::new()) }
     }
 
+    /// Get database-level statistics for metrics collection.
+    pub fn database_stats(&self) -> DatabaseStats {
+        self.db.stats()
+    }
+
+    /// Get B-tree depths for all non-empty tables.
+    ///
+    /// Opens a read transaction internally to walk each table's B-tree.
+    pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
+        self.db.table_depths().context(StoreSnafu)
+    }
+
     /// Execute a function with mutable access to a vault's commitment.
     ///
     /// Creates the commitment if it doesn't exist.
@@ -124,7 +136,30 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Apply a batch of operations to a vault's state.
     ///
-    /// Returns the status for each operation.
+    /// Executes all operations atomically within a single write transaction.
+    /// Returns a `WriteStatus` for each operation indicating whether it was
+    /// created, updated, deleted, or failed a precondition check.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use inferadb_ledger_store::Database;
+    /// # use inferadb_ledger_state::StateLayer;
+    /// use inferadb_ledger_types::types::{Operation, VaultId};
+    ///
+    /// # let db = Arc::new(Database::open_in_memory()?);
+    /// # let state = StateLayer::new(db);
+    /// let ops = vec![Operation::SetEntity {
+    ///     key: "user:alice".into(),
+    ///     value: b"data".to_vec(),
+    ///     condition: None,
+    ///     expires_at: None,
+    /// }];
+    ///
+    /// let statuses = state.apply_operations(VaultId::new(1), &ops, 1)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn apply_operations(
         &self,
         vault_id: VaultId,

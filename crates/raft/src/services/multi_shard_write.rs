@@ -4,14 +4,20 @@
 //! Per DESIGN.md §4.6: Each namespace is assigned to a shard, and requests
 //! are routed to the Raft instance for that shard.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use inferadb_ledger_types::{config::ValidationConfig, validation};
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
-    IdempotencyCache, metrics,
+    IdempotencyCache,
+    error::classify_raft_error,
+    metrics,
     proof::{self, ProofError},
     proto::{
         BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, Operation, TxId, WriteError,
@@ -19,7 +25,10 @@ use crate::{
         write_service_server::WriteService,
     },
     rate_limit::RateLimiter,
-    services::shard_resolver::ShardResolver,
+    services::{
+        shard_resolver::ShardResolver,
+        write::{response_with_correlation, status_with_correlation},
+    },
     trace_context,
     types::{LedgerRequest, LedgerResponse},
 };
@@ -42,6 +51,14 @@ pub struct MultiShardWriteService {
     /// Hot key detector for identifying frequently accessed keys (optional).
     #[builder(default)]
     hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    /// Input validation configuration for request field limits.
+    #[builder(default = Arc::new(ValidationConfig::default()))]
+    validation_config: Arc<ValidationConfig>,
+    /// Maximum time to wait for a Raft proposal to commit.
+    ///
+    /// If a gRPC deadline is shorter, the deadline takes precedence.
+    #[builder(default = Duration::from_secs(30))]
+    proposal_timeout: Duration,
 }
 
 #[allow(clippy::result_large_err)]
@@ -73,6 +90,73 @@ impl MultiShardWriteService {
                 status
             })?;
         }
+        Ok(())
+    }
+
+    /// Set input validation configuration for request field limits.
+    #[must_use]
+    pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
+        self.validation_config = config;
+        self
+    }
+
+    /// Validate all operations in a proto operation list.
+    ///
+    /// Checks per-operation field limits (key/value size, character whitelist)
+    /// and aggregate limits (operations count, total payload size).
+    fn validate_operations(&self, operations: &[Operation]) -> Result<(), Status> {
+        let config = &self.validation_config;
+
+        validation::validate_operations_count(operations.len(), config)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let mut total_bytes: usize = 0;
+        for proto_op in operations {
+            let Some(ref op) = proto_op.op else {
+                return Err(Status::invalid_argument("Operation missing op field"));
+            };
+            match op {
+                crate::proto::operation::Op::SetEntity(se) => {
+                    validation::validate_key(&se.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_value(&se.value, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += se.key.len() + se.value.len();
+                },
+                crate::proto::operation::Op::DeleteEntity(de) => {
+                    validation::validate_key(&de.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += de.key.len();
+                },
+                crate::proto::operation::Op::ExpireEntity(ee) => {
+                    validation::validate_key(&ee.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += ee.key.len();
+                },
+                crate::proto::operation::Op::CreateRelationship(cr) => {
+                    validation::validate_relationship_string(&cr.resource, "resource", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&cr.relation, "relation", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&cr.subject, "subject", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += cr.resource.len() + cr.relation.len() + cr.subject.len();
+                },
+                crate::proto::operation::Op::DeleteRelationship(dr) => {
+                    validation::validate_relationship_string(&dr.resource, "resource", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&dr.relation, "relation", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&dr.subject, "subject", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += dr.resource.len() + dr.relation.len() + dr.subject.len();
+                },
+            }
+        }
+
+        validation::validate_batch_payload_bytes(total_bytes, config)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
         Ok(())
     }
 
@@ -176,66 +260,6 @@ impl MultiShardWriteService {
         }
     }
 
-    /// Convert a proto SetCondition to internal SetCondition.
-    fn convert_set_condition(
-        proto_condition: &crate::proto::SetCondition,
-    ) -> Option<inferadb_ledger_types::SetCondition> {
-        use crate::proto::set_condition::Condition;
-
-        proto_condition.condition.as_ref().map(|c| match c {
-            Condition::NotExists(true) => inferadb_ledger_types::SetCondition::MustNotExist,
-            Condition::NotExists(false) => inferadb_ledger_types::SetCondition::MustExist,
-            Condition::MustExists(true) => inferadb_ledger_types::SetCondition::MustExist,
-            Condition::MustExists(false) => inferadb_ledger_types::SetCondition::MustNotExist,
-            Condition::Version(v) => inferadb_ledger_types::SetCondition::VersionEquals(*v),
-            Condition::ValueEquals(v) => {
-                inferadb_ledger_types::SetCondition::ValueEquals(v.clone())
-            },
-        })
-    }
-
-    /// Convert a proto operation to internal operation.
-    fn convert_operation(op: &Operation) -> Result<inferadb_ledger_types::Operation, Status> {
-        use crate::proto::operation::Op;
-
-        let inner_op =
-            op.op.as_ref().ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
-
-        match inner_op {
-            Op::CreateRelationship(cr) => {
-                Ok(inferadb_ledger_types::Operation::CreateRelationship {
-                    resource: cr.resource.clone(),
-                    relation: cr.relation.clone(),
-                    subject: cr.subject.clone(),
-                })
-            },
-            Op::DeleteRelationship(dr) => {
-                Ok(inferadb_ledger_types::Operation::DeleteRelationship {
-                    resource: dr.resource.clone(),
-                    relation: dr.relation.clone(),
-                    subject: dr.subject.clone(),
-                })
-            },
-            Op::SetEntity(se) => {
-                let condition = se.condition.as_ref().and_then(Self::convert_set_condition);
-
-                Ok(inferadb_ledger_types::Operation::SetEntity {
-                    key: se.key.clone(),
-                    value: se.value.clone(),
-                    condition,
-                    expires_at: se.expires_at,
-                })
-            },
-            Op::DeleteEntity(de) => {
-                Ok(inferadb_ledger_types::Operation::DeleteEntity { key: de.key.clone() })
-            },
-            Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
-                key: ee.key.clone(),
-                expired_at: ee.expired_at,
-            }),
-        }
-    }
-
     /// Build a ledger request from operations.
     ///
     /// Server-assigned sequences: The transaction's sequence is set to 0 here;
@@ -248,8 +272,10 @@ impl MultiShardWriteService {
         client_id: &str,
         actor: &str,
     ) -> Result<LedgerRequest, Status> {
-        let internal_ops: Vec<inferadb_ledger_types::Operation> =
-            operations.iter().map(Self::convert_operation).collect::<Result<Vec<_>, Status>>()?;
+        let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
+            .iter()
+            .map(inferadb_ledger_types::Operation::try_from)
+            .collect::<Result<Vec<_>, Status>>()?;
 
         if internal_ops.is_empty() {
             return Err(Status::invalid_argument("No operations provided"));
@@ -277,8 +303,13 @@ impl WriteService for MultiShardWriteService {
         &self,
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         let start = Instant::now();
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let request_id = Uuid::new_v4();
         let req = request.into_inner();
 
         // Extract identifiers
@@ -299,6 +330,9 @@ impl WriteService for MultiShardWriteService {
             req.idempotency_key.as_slice().try_into().map_err(|_| {
                 Status::invalid_argument("idempotency_key must be exactly 16 bytes")
             })?;
+
+        // Validate all operations before any processing
+        self.validate_operations(&req.operations)?;
 
         // Compute request hash for payload comparison
         let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
@@ -321,26 +355,34 @@ impl WriteService for MultiShardWriteService {
                 debug!("Returning cached result for duplicate request");
                 metrics::record_idempotency_hit();
                 metrics::record_write(true, start.elapsed().as_secs_f64());
-                return Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Success(cached)),
-                }));
+                return Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Success(cached)),
+                    },
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ));
             },
             IdempotencyCheckResult::KeyReused => {
                 metrics::record_write(false, start.elapsed().as_secs_f64());
-                return Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Error(WriteError {
-                        code: WriteErrorCode::IdempotencyKeyReused.into(),
-                        key: String::new(),
-                        current_version: None,
-                        current_value: None,
-                        message:
-                            "Idempotency key was already used with a different request payload"
-                                .to_string(),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        assigned_sequence: None,
-                    })),
-                }));
+                return Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Error(WriteError {
+                            code: WriteErrorCode::IdempotencyKeyReused.into(),
+                            key: String::new(),
+                            current_version: None,
+                            current_value: None,
+                            message:
+                                "Idempotency key was already used with a different request payload"
+                                    .to_string(),
+                            committed_tx_id: None,
+                            committed_block_height: None,
+                            assigned_sequence: None,
+                        })),
+                    },
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ));
             },
             IdempotencyCheckResult::NewRequest => {
                 metrics::record_idempotency_miss();
@@ -348,7 +390,8 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(&client_id, namespace_id)?;
+        self.check_rate_limit(&client_id, namespace_id)
+            .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &req.operations);
@@ -362,13 +405,37 @@ impl WriteService for MultiShardWriteService {
         let ledger_request =
             self.build_request(&req.operations, namespace_id, vault_id, &client_id, &actor)?;
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         // Submit to the resolved shard's Raft
         metrics::record_raft_proposal();
-        let result = ctx.raft.client_write(ledger_request).await.map_err(|e| {
-            warn!(error = %e, "Raft write failed");
-            metrics::record_write(false, start.elapsed().as_secs_f64());
-            Status::internal(format!("Raft error: {}", e))
-        })?;
+        let result =
+            match tokio::time::timeout(timeout, ctx.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Raft write failed");
+                    metrics::record_write(false, start.elapsed().as_secs_f64());
+                    return Err(status_with_correlation(
+                        classify_raft_error(&e.to_string()),
+                        &request_id,
+                        &trace_ctx.trace_id,
+                    ));
+                },
+                Err(_elapsed) => {
+                    metrics::record_raft_proposal_timeout();
+                    metrics::record_write(false, start.elapsed().as_secs_f64());
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &request_id,
+                        &trace_ctx.trace_id,
+                    ));
+                },
+            };
 
         let response = result.data;
         let latency = start.elapsed().as_secs_f64();
@@ -409,14 +476,22 @@ impl WriteService for MultiShardWriteService {
                     "Write committed"
                 );
 
-                Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Success(success)),
-                }))
+                Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Success(success)),
+                    },
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ))
             },
             _ => {
                 warn!("Unexpected Raft response for write");
                 metrics::record_write(false, latency);
-                Err(Status::internal("Unexpected response type"))
+                Err(status_with_correlation(
+                    Status::internal("Unexpected response type"),
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ))
             },
         }
     }
@@ -429,8 +504,13 @@ impl WriteService for MultiShardWriteService {
         &self,
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         let start = Instant::now();
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let request_id = Uuid::new_v4();
         let req = request.into_inner();
 
         // Extract identifiers
@@ -453,6 +533,9 @@ impl WriteService for MultiShardWriteService {
         // Flatten all operations from all groups
         let all_operations: Vec<crate::proto::Operation> =
             req.operations.iter().flat_map(|group| group.operations.clone()).collect();
+
+        // Validate all operations before any processing
+        self.validate_operations(&all_operations)?;
 
         let batch_size = all_operations.len();
 
@@ -478,21 +561,25 @@ impl WriteService for MultiShardWriteService {
                 debug!("Returning cached result for duplicate batch request");
                 metrics::record_idempotency_hit();
                 metrics::record_batch_write(true, 0, start.elapsed().as_secs_f64());
-                return Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Success(
-                        BatchWriteSuccess {
-                            tx_id: cached.tx_id,
-                            block_height: cached.block_height,
-                            block_header: cached.block_header,
-                            tx_proof: cached.tx_proof,
-                            assigned_sequence: cached.assigned_sequence,
-                        },
-                    )),
-                }));
+                return Ok(response_with_correlation(
+                    BatchWriteResponse {
+                        result: Some(crate::proto::batch_write_response::Result::Success(
+                            BatchWriteSuccess {
+                                tx_id: cached.tx_id,
+                                block_height: cached.block_height,
+                                block_header: cached.block_header,
+                                tx_proof: cached.tx_proof,
+                                assigned_sequence: cached.assigned_sequence,
+                            },
+                        )),
+                    },
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ));
             },
             IdempotencyCheckResult::KeyReused => {
                 metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
-                return Ok(Response::new(BatchWriteResponse {
+                return Ok(response_with_correlation(BatchWriteResponse {
                     result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
                         code: WriteErrorCode::IdempotencyKeyReused.into(),
                         key: String::new(),
@@ -505,7 +592,7 @@ impl WriteService for MultiShardWriteService {
                         committed_block_height: None,
                         assigned_sequence: None,
                     })),
-                }));
+                }, &request_id, &trace_ctx.trace_id));
             },
             IdempotencyCheckResult::NewRequest => {
                 metrics::record_idempotency_miss();
@@ -513,7 +600,8 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(&client_id, namespace_id)?;
+        self.check_rate_limit(&client_id, namespace_id)
+            .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &all_operations);
@@ -525,13 +613,37 @@ impl WriteService for MultiShardWriteService {
         let ledger_request =
             self.build_request(&all_operations, namespace_id, vault_id, &client_id, "system")?;
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         // Submit to Raft
         metrics::record_raft_proposal();
-        let result = ctx.raft.client_write(ledger_request).await.map_err(|e| {
-            warn!(error = %e, "Raft batch write failed");
-            metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
-            Status::internal(format!("Raft error: {}", e))
-        })?;
+        let result =
+            match tokio::time::timeout(timeout, ctx.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Raft batch write failed");
+                    metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
+                    return Err(status_with_correlation(
+                        classify_raft_error(&e.to_string()),
+                        &request_id,
+                        &trace_ctx.trace_id,
+                    ));
+                },
+                Err(_elapsed) => {
+                    metrics::record_raft_proposal_timeout();
+                    metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &request_id,
+                        &trace_ctx.trace_id,
+                    ));
+                },
+            };
 
         let response = result.data;
         let latency = start.elapsed().as_secs_f64();
@@ -582,208 +694,34 @@ impl WriteService for MultiShardWriteService {
                     "Batch write committed"
                 );
 
-                Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Success(success)),
-                }))
+                Ok(response_with_correlation(
+                    BatchWriteResponse {
+                        result: Some(crate::proto::batch_write_response::Result::Success(success)),
+                    },
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ))
             },
             _ => {
                 warn!("Unexpected Raft response for batch write");
                 metrics::record_batch_write(false, batch_size, latency);
-                Err(Status::internal("Unexpected response type"))
+                Err(status_with_correlation(
+                    Status::internal("Unexpected response type"),
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ))
             },
         }
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_multi_shard_write_service_creation() {
         // Basic struct test - full testing requires Raft setup
     }
 
-    #[test]
-    fn test_convert_set_condition_not_exists() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition = SetCondition { condition: Some(Condition::NotExists(true)) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(matches!(result, Some(inferadb_ledger_types::SetCondition::MustNotExist)));
-    }
-
-    #[test]
-    fn test_convert_set_condition_must_exists() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition = SetCondition { condition: Some(Condition::MustExists(true)) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(matches!(result, Some(inferadb_ledger_types::SetCondition::MustExist)));
-    }
-
-    #[test]
-    fn test_convert_set_condition_version() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition = SetCondition { condition: Some(Condition::Version(42)) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(matches!(result, Some(inferadb_ledger_types::SetCondition::VersionEquals(42))));
-    }
-
-    #[test]
-    fn test_convert_set_condition_value_equals() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition =
-            SetCondition { condition: Some(Condition::ValueEquals(b"test_value".to_vec())) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        match result {
-            Some(inferadb_ledger_types::SetCondition::ValueEquals(v)) => {
-                assert_eq!(v, b"test_value");
-            },
-            _ => unreachable!("Expected ValueEquals condition"),
-        }
-    }
-
-    #[test]
-    fn test_convert_set_condition_none() {
-        use crate::proto::SetCondition;
-
-        let proto_condition = SetCondition { condition: None };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_convert_operation_create_relationship() {
-        use crate::proto::{CreateRelationship, Operation, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::CreateRelationship(CreateRelationship {
-                resource: "document:123".to_string(),
-                relation: "viewer".to_string(),
-                subject: "user:456".to_string(),
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::CreateRelationship {
-                resource,
-                relation,
-                subject,
-            } => {
-                assert_eq!(resource, "document:123");
-                assert_eq!(relation, "viewer");
-                assert_eq!(subject, "user:456");
-            },
-            _ => unreachable!("Expected CreateRelationship operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_delete_relationship() {
-        use crate::proto::{DeleteRelationship, Operation, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::DeleteRelationship(DeleteRelationship {
-                resource: "document:123".to_string(),
-                relation: "viewer".to_string(),
-                subject: "user:456".to_string(),
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::DeleteRelationship {
-                resource,
-                relation,
-                subject,
-            } => {
-                assert_eq!(resource, "document:123");
-                assert_eq!(relation, "viewer");
-                assert_eq!(subject, "user:456");
-            },
-            _ => unreachable!("Expected DeleteRelationship operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_set_entity() {
-        use crate::proto::{Operation, SetEntity, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::SetEntity(SetEntity {
-                key: "user:123".to_string(),
-                value: b"test_data".to_vec(),
-                condition: None,
-                expires_at: Some(1000),
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::SetEntity { key, value, condition, expires_at } => {
-                assert_eq!(key, "user:123");
-                assert_eq!(value, b"test_data");
-                assert!(condition.is_none());
-                assert_eq!(expires_at, Some(1000));
-            },
-            _ => unreachable!("Expected SetEntity operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_delete_entity() {
-        use crate::proto::{DeleteEntity, Operation, operation::Op};
-
-        let op =
-            Operation { op: Some(Op::DeleteEntity(DeleteEntity { key: "user:123".to_string() })) };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::DeleteEntity { key } => {
-                assert_eq!(key, "user:123");
-            },
-            _ => unreachable!("Expected DeleteEntity operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_expire_entity() {
-        use crate::proto::{ExpireEntity, Operation, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::ExpireEntity(ExpireEntity {
-                key: "user:123".to_string(),
-                expired_at: 2000,
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::ExpireEntity { key, expired_at } => {
-                assert_eq!(key, "user:123");
-                assert_eq!(expired_at, 2000);
-            },
-            _ => unreachable!("Expected ExpireEntity operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_missing_op() {
-        use crate::proto::Operation;
-
-        let op = Operation { op: None };
-
-        let result = MultiShardWriteService::convert_operation(&op);
-        assert!(result.is_err());
-    }
+    // Proto↔domain conversion tests (set_condition, operation variants) are in
+    // proto_convert.rs which owns the centralized From/TryFrom implementations.
 }

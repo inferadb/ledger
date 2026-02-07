@@ -68,12 +68,56 @@ pub struct BTree<P: PageProvider> {
     provider: P,
     /// Root page ID (0 = empty tree).
     root_page: PageId,
+    /// Number of page splits performed during this BTree's lifetime.
+    split_count: u64,
 }
 
 impl<P: PageProvider> BTree<P> {
     /// Create a new B-tree accessor.
     pub fn new(root_page: PageId, provider: P) -> Self {
-        Self { provider, root_page }
+        Self { provider, root_page, split_count: 0 }
+    }
+
+    /// Number of page splits performed during operations on this BTree instance.
+    pub fn split_count(&self) -> u64 {
+        self.split_count
+    }
+
+    /// Compute the depth of the B-tree (0 = empty, 1 = root is leaf, 2+ = branches + leaf).
+    ///
+    /// Walks the leftmost path from root to leaf.
+    pub fn depth(&self) -> Result<u32> {
+        if self.root_page == 0 {
+            return Ok(0);
+        }
+
+        let mut depth = 1u32;
+        let mut page_id = self.root_page;
+
+        loop {
+            let page = self.provider.read_page(page_id)?;
+            let page_type = page.page_type()?;
+
+            match page_type {
+                PageType::BTreeLeaf => return Ok(depth),
+                PageType::BTreeBranch => {
+                    let branch = node::BranchNodeRef::from_page(&page)?;
+                    // Follow leftmost child (child at index 0 or rightmost if no cells)
+                    page_id = if branch.cell_count() > 0 {
+                        branch.child(0)
+                    } else {
+                        branch.rightmost_child()
+                    };
+                    depth += 1;
+                },
+                _ => {
+                    return Err(Error::PageTypeMismatch {
+                        expected: PageType::BTreeLeaf,
+                        found: page_type,
+                    });
+                },
+            }
+        }
     }
 
     /// Check if the tree is empty.
@@ -244,10 +288,20 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Insert a key-value pair.
+    /// Insert a key-value pair into the B-tree.
     ///
-    /// If the key already exists, its value is updated.
-    /// Returns the previous value if the key existed.
+    /// If the key already exists, its value is updated in-place.
+    /// Returns the previous value if the key existed, or `None` for new keys.
+    ///
+    /// Keys and values are stored as byte slices. The B-tree maintains sorted
+    /// order by key, splitting leaf and branch pages as needed to accommodate
+    /// new entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The key+value exceeds the page capacity (determined by page size)
+    /// - A page read or write fails through the `PageProvider`
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {
         if self.root_page == 0 {
             // Create first leaf as root
@@ -407,6 +461,7 @@ impl<P: PageProvider> BTree<P> {
         value: &[u8],
         old_value: Option<Vec<u8>>,
     ) -> Result<(Option<(Vec<u8>, PageId)>, Option<Vec<u8>>)> {
+        self.split_count += 1;
         let mut new_page = self.new_leaf_page();
 
         // Use key-aware split that ensures the new key will fit
@@ -455,6 +510,7 @@ impl<P: PageProvider> BTree<P> {
         right_child: PageId,
         old_value: Option<Vec<u8>>,
     ) -> Result<(Option<(Vec<u8>, PageId)>, Option<Vec<u8>>)> {
+        self.split_count += 1;
         let mut new_page = self.new_branch_page(0);
 
         let split_result = split_branch(page, &mut new_page)?;
@@ -859,7 +915,13 @@ impl<P: PageProvider> BTree<P> {
     }
 }
 
-/// Iterator over B-tree entries.
+/// Iterator over B-tree entries in sorted key order.
+///
+/// Supports forward iteration over key-value pairs stored in the B-tree.
+/// Leaf pages are loaded on demand as the cursor advances, and sibling
+/// traversal uses branch-node backtracking (not next-leaf pointers).
+///
+/// Created by [`BTree::iter`].
 pub struct BTreeIterator<'a, P: PageProvider> {
     tree: &'a BTree<P>,
     state: RangeIterState<'a>,

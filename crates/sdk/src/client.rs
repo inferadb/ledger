@@ -1103,6 +1103,51 @@ impl Operation {
         }
     }
 
+    /// Validate this operation against the given validation configuration.
+    ///
+    /// Checks field sizes and character whitelists. Call this before
+    /// sending operations to the server for fast client-side validation.
+    pub fn validate(
+        &self,
+        config: &inferadb_ledger_types::config::ValidationConfig,
+    ) -> std::result::Result<(), inferadb_ledger_types::validation::ValidationError> {
+        use inferadb_ledger_types::validation;
+        match self {
+            Operation::SetEntity { key, value, .. } => {
+                validation::validate_key(key, config)?;
+                validation::validate_value(value, config)?;
+            },
+            Operation::DeleteEntity { key } => {
+                validation::validate_key(key, config)?;
+            },
+            Operation::CreateRelationship { resource, relation, subject } => {
+                validation::validate_relationship_string(resource, "resource", config)?;
+                validation::validate_relationship_string(relation, "relation", config)?;
+                validation::validate_relationship_string(subject, "subject", config)?;
+            },
+            Operation::DeleteRelationship { resource, relation, subject } => {
+                validation::validate_relationship_string(resource, "resource", config)?;
+                validation::validate_relationship_string(relation, "relation", config)?;
+                validation::validate_relationship_string(subject, "subject", config)?;
+            },
+        }
+        Ok(())
+    }
+
+    /// Returns the estimated wire size of this operation in bytes.
+    ///
+    /// Used for aggregate payload size validation before sending to the server.
+    fn estimated_size_bytes(&self) -> usize {
+        match self {
+            Operation::SetEntity { key, value, .. } => key.len() + value.len(),
+            Operation::DeleteEntity { key } => key.len(),
+            Operation::CreateRelationship { resource, relation, subject }
+            | Operation::DeleteRelationship { resource, relation, subject } => {
+                resource.len() + relation.len() + subject.len()
+            },
+        }
+    }
+
     /// Convert to proto operation.
     fn to_proto(&self) -> proto::Operation {
         let op = match self {
@@ -1511,9 +1556,29 @@ impl LedgerClient {
     }
 
     /// Creates a trace context interceptor based on the client's configuration.
+    ///
+    /// Includes request timeout propagation via the `grpc-timeout` header so
+    /// the server can extract the client's deadline and avoid processing
+    /// requests the client has already abandoned.
     #[inline]
     fn trace_interceptor(&self) -> TraceContextInterceptor {
-        TraceContextInterceptor::new(self.pool.config().trace())
+        TraceContextInterceptor::with_timeout(
+            self.pool.config().trace(),
+            self.pool.config().timeout(),
+        )
+    }
+
+    /// Executes a future and records request metrics (latency + success/error).
+    async fn with_metrics<T>(
+        &self,
+        method: &str,
+        fut: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let start = std::time::Instant::now();
+        let result = fut.await;
+        let duration = start.elapsed();
+        self.pool.metrics().record_request(method, duration, result.is_ok());
+        result
     }
 
     /// Creates a discovery service that shares this client's connection pool.
@@ -1829,25 +1894,31 @@ impl LedgerClient {
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &token, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "read",
+            with_retry_cancellable(&retry_policy, &token, Some(pool), "read", || async {
+                let channel = pool.get_channel().await?;
+                let mut client = Self::create_read_client(
+                    channel,
+                    pool.compression_enabled(),
+                    TraceContextInterceptor::with_timeout(
+                        pool.config().trace(),
+                        pool.config().timeout(),
+                    ),
+                );
 
-            let request = proto::ReadRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                vault_id: vault_id.map(|id| proto::VaultId { id }),
-                key: key.clone(),
-                consistency: consistency.to_proto() as i32,
-            };
+                let request = proto::ReadRequest {
+                    namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                    vault_id: vault_id.map(|id| proto::VaultId { id }),
+                    key: key.clone(),
+                    consistency: consistency.to_proto() as i32,
+                };
 
-            let response = client.read(tonic::Request::new(request)).await?.into_inner();
+                let response = client.read(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(response.value)
-        })
+                Ok(response.value)
+            }),
+        )
         .await
     }
 
@@ -1867,28 +1938,34 @@ impl LedgerClient {
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &token, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "batch_read",
+            with_retry_cancellable(&retry_policy, &token, Some(pool), "batch_read", || async {
+                let channel = pool.get_channel().await?;
+                let mut client = Self::create_read_client(
+                    channel,
+                    pool.compression_enabled(),
+                    TraceContextInterceptor::with_timeout(
+                        pool.config().trace(),
+                        pool.config().timeout(),
+                    ),
+                );
 
-            let request = proto::BatchReadRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                vault_id: vault_id.map(|id| proto::VaultId { id }),
-                keys: keys.clone(),
-                consistency: consistency.to_proto() as i32,
-            };
+                let request = proto::BatchReadRequest {
+                    namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                    vault_id: vault_id.map(|id| proto::VaultId { id }),
+                    keys: keys.clone(),
+                    consistency: consistency.to_proto() as i32,
+                };
 
-            let response = client.batch_read(tonic::Request::new(request)).await?.into_inner();
+                let response = client.batch_read(tonic::Request::new(request)).await?.into_inner();
 
-            // Convert results to (key, Option<value>) pairs
-            let results = response.results.into_iter().map(|r| (r.key, r.value)).collect();
+                // Convert results to (key, Option<value>) pairs
+                let results = response.results.into_iter().map(|r| (r.key, r.value)).collect();
 
-            Ok(results)
-        })
+                Ok(results)
+            }),
+        )
         .await
     }
 
@@ -1988,6 +2065,25 @@ impl LedgerClient {
         idempotency_key: uuid::Uuid,
         request_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
+        // Client-side validation: fast rejection before network round-trip
+        let validation_config = self.config().validation();
+        inferadb_ledger_types::validation::validate_operations_count(
+            operations.len(),
+            validation_config,
+        )
+        .map_err(|e| error::SdkError::Validation { message: e.to_string() })?;
+        let mut total_bytes: usize = 0;
+        for op in operations {
+            op.validate(validation_config)
+                .map_err(|e| error::SdkError::Validation { message: e.to_string() })?;
+            total_bytes += op.estimated_size_bytes();
+        }
+        inferadb_ledger_types::validation::validate_batch_payload_bytes(
+            total_bytes,
+            validation_config,
+        )
+        .map_err(|e| error::SdkError::Validation { message: e.to_string() })?;
+
         let token = self.effective_token(request_token);
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
@@ -2001,32 +2097,39 @@ impl LedgerClient {
         let idempotency_key_bytes = idempotency_key.as_bytes().to_vec();
 
         // Execute with retry for transient errors
-        with_retry_cancellable(&retry_policy, &token, || {
-            let proto_ops = proto_operations.clone();
-            let cid = client_id.clone();
-            let key_bytes = idempotency_key_bytes.clone();
-            async move {
-                let channel = pool.get_channel().await?;
-                let mut write_client = Self::create_write_client(
-                    channel,
-                    pool.compression_enabled(),
-                    TraceContextInterceptor::new(pool.config().trace()),
-                );
+        self.with_metrics(
+            "write",
+            with_retry_cancellable(&retry_policy, &token, Some(pool), "write", || {
+                let proto_ops = proto_operations.clone();
+                let cid = client_id.clone();
+                let key_bytes = idempotency_key_bytes.clone();
+                async move {
+                    let channel = pool.get_channel().await?;
+                    let mut write_client = Self::create_write_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-                let request = proto::WriteRequest {
-                    namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                    vault_id: vault_id.map(|id| proto::VaultId { id }),
-                    client_id: Some(proto::ClientId { id: cid }),
-                    idempotency_key: key_bytes,
-                    operations: proto_ops,
-                    include_tx_proof: false,
-                };
+                    let request = proto::WriteRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        vault_id: vault_id.map(|id| proto::VaultId { id }),
+                        client_id: Some(proto::ClientId { id: cid }),
+                        idempotency_key: key_bytes,
+                        operations: proto_ops,
+                        include_tx_proof: false,
+                    };
 
-                let response = write_client.write(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        write_client.write(tonic::Request::new(request)).await?.into_inner();
 
-                Self::process_write_response(response)
-            }
-        })
+                    Self::process_write_response(response)
+                }
+            }),
+        )
         .await
     }
 
@@ -2058,6 +2161,8 @@ impl LedgerClient {
                                 "Idempotency key reused with different payload: {}",
                                 error.message
                             ),
+                            conflict_key: None::<String>,
+                            original_tx_id: Some(Self::tx_id_to_hex(error.committed_tx_id.clone())),
                         }
                         .fail()
                     },
@@ -2066,6 +2171,8 @@ impl LedgerClient {
                         crate::error::RpcSnafu {
                             code: tonic::Code::FailedPrecondition,
                             message: error.message,
+                            request_id: None::<String>,
+                            trace_id: None::<String>,
                         }
                         .fail()
                     },
@@ -2074,6 +2181,8 @@ impl LedgerClient {
             None => crate::error::RpcSnafu {
                 code: tonic::Code::Internal,
                 message: "Empty write response".to_string(),
+                request_id: None::<String>,
+                trace_id: None::<String>,
             }
             .fail(),
         }
@@ -2204,6 +2313,25 @@ impl LedgerClient {
         idempotency_key: uuid::Uuid,
         request_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
+        // Client-side validation: fast rejection before network round-trip
+        let validation_config = self.config().validation();
+        let total_ops: usize = batches.iter().map(|b| b.len()).sum();
+        inferadb_ledger_types::validation::validate_operations_count(total_ops, validation_config)
+            .map_err(|e| error::SdkError::Validation { message: e.to_string() })?;
+        let mut total_bytes: usize = 0;
+        for batch in batches {
+            for op in batch {
+                op.validate(validation_config)
+                    .map_err(|e| error::SdkError::Validation { message: e.to_string() })?;
+                total_bytes += op.estimated_size_bytes();
+            }
+        }
+        inferadb_ledger_types::validation::validate_batch_payload_bytes(
+            total_bytes,
+            validation_config,
+        )
+        .map_err(|e| error::SdkError::Validation { message: e.to_string() })?;
+
         let token = self.effective_token(request_token);
         let pool = &self.pool;
         let retry_policy = self.config().retry_policy().clone();
@@ -2221,33 +2349,39 @@ impl LedgerClient {
         let idempotency_key_bytes = idempotency_key.as_bytes().to_vec();
 
         // Execute with retry for transient errors
-        with_retry_cancellable(&retry_policy, &token, || {
-            let batch_ops = proto_batches.clone();
-            let cid = client_id.clone();
-            let key_bytes = idempotency_key_bytes.clone();
-            async move {
-                let channel = pool.get_channel().await?;
-                let mut write_client = Self::create_write_client(
-                    channel,
-                    pool.compression_enabled(),
-                    TraceContextInterceptor::new(pool.config().trace()),
-                );
+        self.with_metrics(
+            "batch_write",
+            with_retry_cancellable(&retry_policy, &token, Some(pool), "batch_write", || {
+                let batch_ops = proto_batches.clone();
+                let cid = client_id.clone();
+                let key_bytes = idempotency_key_bytes.clone();
+                async move {
+                    let channel = pool.get_channel().await?;
+                    let mut write_client = Self::create_write_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-                let request = proto::BatchWriteRequest {
-                    namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                    vault_id: vault_id.map(|id| proto::VaultId { id }),
-                    client_id: Some(proto::ClientId { id: cid }),
-                    idempotency_key: key_bytes,
-                    operations: batch_ops,
-                    include_tx_proofs: false,
-                };
+                    let request = proto::BatchWriteRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        vault_id: vault_id.map(|id| proto::VaultId { id }),
+                        client_id: Some(proto::ClientId { id: cid }),
+                        idempotency_key: key_bytes,
+                        operations: batch_ops,
+                        include_tx_proofs: false,
+                    };
 
-                let response =
-                    write_client.batch_write(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        write_client.batch_write(tonic::Request::new(request)).await?.into_inner();
 
-                Self::process_batch_write_response(response)
-            }
-        })
+                    Self::process_batch_write_response(response)
+                }
+            }),
+        )
         .await
     }
 
@@ -2279,6 +2413,8 @@ impl LedgerClient {
                                 "Idempotency key reused with different payload: {}",
                                 error.message
                             ),
+                            conflict_key: None::<String>,
+                            original_tx_id: Some(Self::tx_id_to_hex(error.committed_tx_id.clone())),
                         }
                         .fail()
                     },
@@ -2287,6 +2423,8 @@ impl LedgerClient {
                         crate::error::RpcSnafu {
                             code: tonic::Code::FailedPrecondition,
                             message: error.message,
+                            request_id: None::<String>,
+                            trace_id: None::<String>,
                         }
                         .fail()
                     },
@@ -2295,6 +2433,8 @@ impl LedgerClient {
             None => crate::error::RpcSnafu {
                 code: tonic::Code::Internal,
                 message: "Empty batch write response".to_string(),
+                request_id: None::<String>,
+                trace_id: None::<String>,
             }
             .fail(),
         }
@@ -2474,24 +2614,36 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "create_namespace",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "create_namespace",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::CreateNamespaceRequest {
-                name: name.clone(),
-                shard_id: None, // Auto-assigned
-            };
+                    let request = proto::CreateNamespaceRequest {
+                        name: name.clone(),
+                        shard_id: None, // Auto-assigned
+                    };
 
-            let response =
-                client.create_namespace(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.create_namespace(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(response.namespace_id.map_or(0, |n| n.id))
-        })
+                    Ok(response.namespace_id.map_or(0, |n| n.id))
+                },
+            ),
+        )
         .await
     }
 
@@ -2529,24 +2681,37 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "get_namespace",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "get_namespace",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::GetNamespaceRequest {
-                lookup: Some(proto::get_namespace_request::Lookup::NamespaceId(
-                    proto::NamespaceId { id: namespace_id },
-                )),
-            };
+                    let request = proto::GetNamespaceRequest {
+                        lookup: Some(proto::get_namespace_request::Lookup::NamespaceId(
+                            proto::NamespaceId { id: namespace_id },
+                        )),
+                    };
 
-            let response = client.get_namespace(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.get_namespace(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(NamespaceInfo::from_proto(response))
-        })
+                    Ok(NamespaceInfo::from_proto(response))
+                },
+            ),
+        )
         .await
     }
 
@@ -2582,23 +2747,36 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "list_namespaces",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_namespaces",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::ListNamespacesRequest {
-                page_token: None,
-                page_size: 0, // Use default
-            };
+                    let request = proto::ListNamespacesRequest {
+                        page_token: None,
+                        page_size: 0, // Use default
+                    };
 
-            let response = client.list_namespaces(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.list_namespaces(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(response.namespaces.into_iter().map(NamespaceInfo::from_proto).collect())
-        })
+                    Ok(response.namespaces.into_iter().map(NamespaceInfo::from_proto).collect())
+                },
+            ),
+        )
         .await
     }
 
@@ -2639,35 +2817,48 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "create_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "create_vault",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::CreateVaultRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                replication_factor: 0,  // Use default
-                initial_nodes: vec![],  // Auto-assigned
-                retention_policy: None, // Default: FULL
-            };
+                    let request = proto::CreateVaultRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        replication_factor: 0,  // Use default
+                        initial_nodes: vec![],  // Auto-assigned
+                        retention_policy: None, // Default: FULL
+                    };
 
-            let response = client.create_vault(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.create_vault(tonic::Request::new(request)).await?.into_inner();
 
-            // Build VaultInfo from CreateVaultResponse
-            // Note: CreateVaultResponse has limited fields compared to GetVaultResponse
-            Ok(VaultInfo {
-                namespace_id,
-                vault_id: response.vault_id.map_or(0, |v| v.id),
-                height: 0,          // Genesis block
-                state_root: vec![], // Empty at genesis
-                nodes: vec![],      // Not returned in create response
-                leader: None,       // Not returned in create response
-                status: VaultStatus::Active,
-            })
-        })
+                    // Build VaultInfo from CreateVaultResponse
+                    // Note: CreateVaultResponse has limited fields compared to GetVaultResponse
+                    Ok(VaultInfo {
+                        namespace_id,
+                        vault_id: response.vault_id.map_or(0, |v| v.id),
+                        height: 0,          // Genesis block
+                        state_root: vec![], // Empty at genesis
+                        nodes: vec![],      // Not returned in create response
+                        leader: None,       // Not returned in create response
+                        status: VaultStatus::Active,
+                    })
+                },
+            ),
+        )
         .await
     }
 
@@ -2706,23 +2897,36 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "get_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "get_vault",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::GetVaultRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                vault_id: Some(proto::VaultId { id: vault_id }),
-            };
+                    let request = proto::GetVaultRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        vault_id: Some(proto::VaultId { id: vault_id }),
+                    };
 
-            let response = client.get_vault(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.get_vault(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(VaultInfo::from_proto(response))
-        })
+                    Ok(VaultInfo::from_proto(response))
+                },
+            ),
+        )
         .await
     }
 
@@ -2757,20 +2961,33 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_admin_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "list_vaults",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_vaults",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::ListVaultsRequest {};
+                    let request = proto::ListVaultsRequest {};
 
-            let response = client.list_vaults(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.list_vaults(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(response.vaults.into_iter().map(VaultInfo::from_proto).collect())
-        })
+                    Ok(response.vaults.into_iter().map(VaultInfo::from_proto).collect())
+                },
+            ),
+        )
         .await
     }
 
@@ -2851,20 +3068,32 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_health_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "health_check_detailed",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "health_check_detailed",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_health_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::HealthCheckRequest { namespace_id: None, vault_id: None };
+                    let request = proto::HealthCheckRequest { namespace_id: None, vault_id: None };
 
-            let response = client.check(tonic::Request::new(request)).await?.into_inner();
+                    let response = client.check(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(HealthCheckResult::from_proto(response))
-        })
+                    Ok(HealthCheckResult::from_proto(response))
+                },
+            ),
+        )
         .await
     }
 
@@ -2910,23 +3139,35 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_health_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "health_check_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "health_check_vault",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_health_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::HealthCheckRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                vault_id: Some(proto::VaultId { id: vault_id }),
-            };
+                    let request = proto::HealthCheckRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        vault_id: Some(proto::VaultId { id: vault_id }),
+                    };
 
-            let response = client.check(tonic::Request::new(request)).await?.into_inner();
+                    let response = client.check(tonic::Request::new(request)).await?.into_inner();
 
-            Ok(HealthCheckResult::from_proto(response))
-        })
+                    Ok(HealthCheckResult::from_proto(response))
+                },
+            ),
+        )
         .await
     }
 
@@ -2980,32 +3221,45 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "verified_read",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "verified_read",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_read_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::VerifiedReadRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                vault_id: vault_id.map(|id| proto::VaultId { id }),
-                key: key.clone(),
-                at_height: opts.at_height,
-                include_chain_proof: opts.include_chain_proof,
-                trusted_height: opts.trusted_height,
-            };
+                    let request = proto::VerifiedReadRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        vault_id: vault_id.map(|id| proto::VaultId { id }),
+                        key: key.clone(),
+                        at_height: opts.at_height,
+                        include_chain_proof: opts.include_chain_proof,
+                        trusted_height: opts.trusted_height,
+                    };
 
-            let response = client.verified_read(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.verified_read(tonic::Request::new(request)).await?.into_inner();
 
-            // If no value and no block header, key was not found
-            if response.value.is_none() && response.block_header.is_none() {
-                return Ok(None);
-            }
+                    // If no value and no block header, key was not found
+                    if response.value.is_none() && response.block_header.is_none() {
+                        return Ok(None);
+                    }
 
-            Ok(VerifiedValue::from_proto(response))
-        })
+                    Ok(VerifiedValue::from_proto(response))
+                },
+            ),
+        )
         .await
     }
 
@@ -3056,37 +3310,50 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "list_entities",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_entities",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_read_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::ListEntitiesRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                key_prefix: opts.key_prefix.clone(),
-                at_height: opts.at_height,
-                include_expired: opts.include_expired,
-                limit: opts.limit,
-                page_token: opts.page_token.clone().unwrap_or_default(),
-                consistency: opts.consistency.to_proto() as i32,
-                vault_id: opts.vault_id.map(|id| proto::VaultId { id }),
-            };
+                    let request = proto::ListEntitiesRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        key_prefix: opts.key_prefix.clone(),
+                        at_height: opts.at_height,
+                        include_expired: opts.include_expired,
+                        limit: opts.limit,
+                        page_token: opts.page_token.clone().unwrap_or_default(),
+                        consistency: opts.consistency.to_proto() as i32,
+                        vault_id: opts.vault_id.map(|id| proto::VaultId { id }),
+                    };
 
-            let response = client.list_entities(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.list_entities(tonic::Request::new(request)).await?.into_inner();
 
-            let items = response.entities.into_iter().map(Entity::from_proto).collect();
+                    let items = response.entities.into_iter().map(Entity::from_proto).collect();
 
-            let next_page_token = if response.next_page_token.is_empty() {
-                None
-            } else {
-                Some(response.next_page_token)
-            };
+                    let next_page_token = if response.next_page_token.is_empty() {
+                        None
+                    } else {
+                        Some(response.next_page_token)
+                    };
 
-            Ok(PagedResult { items, next_page_token, block_height: response.block_height })
-        })
+                    Ok(PagedResult { items, next_page_token, block_height: response.block_height })
+                },
+            ),
+        )
         .await
     }
 
@@ -3132,39 +3399,52 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "list_relationships",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_relationships",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_read_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::ListRelationshipsRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                vault_id: Some(proto::VaultId { id: vault_id }),
-                resource: opts.resource.clone(),
-                relation: opts.relation.clone(),
-                subject: opts.subject.clone(),
-                at_height: opts.at_height,
-                limit: opts.limit,
-                page_token: opts.page_token.clone().unwrap_or_default(),
-                consistency: opts.consistency.to_proto() as i32,
-            };
+                    let request = proto::ListRelationshipsRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        vault_id: Some(proto::VaultId { id: vault_id }),
+                        resource: opts.resource.clone(),
+                        relation: opts.relation.clone(),
+                        subject: opts.subject.clone(),
+                        at_height: opts.at_height,
+                        limit: opts.limit,
+                        page_token: opts.page_token.clone().unwrap_or_default(),
+                        consistency: opts.consistency.to_proto() as i32,
+                    };
 
-            let response =
-                client.list_relationships(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.list_relationships(tonic::Request::new(request)).await?.into_inner();
 
-            let items = response.relationships.into_iter().map(Relationship::from_proto).collect();
+                    let items =
+                        response.relationships.into_iter().map(Relationship::from_proto).collect();
 
-            let next_page_token = if response.next_page_token.is_empty() {
-                None
-            } else {
-                Some(response.next_page_token)
-            };
+                    let next_page_token = if response.next_page_token.is_empty() {
+                        None
+                    } else {
+                        Some(response.next_page_token)
+                    };
 
-            Ok(PagedResult { items, next_page_token, block_height: response.block_height })
-        })
+                    Ok(PagedResult { items, next_page_token, block_height: response.block_height })
+                },
+            ),
+        )
         .await
     }
 
@@ -3210,38 +3490,51 @@ impl LedgerClient {
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
-        with_retry_cancellable(&retry_policy, &self.cancellation, || async {
-            let channel = pool.get_channel().await?;
-            let mut client = Self::create_read_client(
-                channel,
-                pool.compression_enabled(),
-                TraceContextInterceptor::new(pool.config().trace()),
-            );
+        self.with_metrics(
+            "list_resources",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_resources",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_read_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
 
-            let request = proto::ListResourcesRequest {
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
-                vault_id: Some(proto::VaultId { id: vault_id }),
-                resource_type: opts.resource_type.clone(),
-                at_height: opts.at_height,
-                limit: opts.limit,
-                page_token: opts.page_token.clone().unwrap_or_default(),
-                consistency: opts.consistency.to_proto() as i32,
-            };
+                    let request = proto::ListResourcesRequest {
+                        namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                        vault_id: Some(proto::VaultId { id: vault_id }),
+                        resource_type: opts.resource_type.clone(),
+                        at_height: opts.at_height,
+                        limit: opts.limit,
+                        page_token: opts.page_token.clone().unwrap_or_default(),
+                        consistency: opts.consistency.to_proto() as i32,
+                    };
 
-            let response = client.list_resources(tonic::Request::new(request)).await?.into_inner();
+                    let response =
+                        client.list_resources(tonic::Request::new(request)).await?.into_inner();
 
-            let next_page_token = if response.next_page_token.is_empty() {
-                None
-            } else {
-                Some(response.next_page_token)
-            };
+                    let next_page_token = if response.next_page_token.is_empty() {
+                        None
+                    } else {
+                        Some(response.next_page_token)
+                    };
 
-            Ok(PagedResult {
-                items: response.resources,
-                next_page_token,
-                block_height: response.block_height,
-            })
-        })
+                    Ok(PagedResult {
+                        items: response.resources,
+                        next_page_token,
+                        block_height: response.block_height,
+                    })
+                },
+            ),
+        )
         .await
     }
 
@@ -5996,5 +6289,147 @@ mod tests {
         );
         // Should not wait for the full 10 attempts × 30s backoff
         assert!(elapsed < Duration::from_secs(5), "took {:?}", elapsed);
+    }
+
+    // =========================================================================
+    // Operation validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_operation_validate_set_entity_valid() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::set_entity("user:123", b"data".to_vec());
+        assert!(op.validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_operation_validate_set_entity_empty_key() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::SetEntity {
+            key: String::new(),
+            value: b"data".to_vec(),
+            expires_at: None,
+            condition: None,
+        };
+        let err = op.validate(&config).unwrap_err();
+        assert!(err.to_string().contains("key"), "Error should mention key: {err}");
+    }
+
+    #[test]
+    fn test_operation_validate_set_entity_invalid_key_chars() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::set_entity("user 123", b"data".to_vec());
+        assert!(op.validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_operation_validate_key_too_long() {
+        let config = inferadb_ledger_types::config::ValidationConfig::builder()
+            .max_key_bytes(10)
+            .build()
+            .unwrap();
+        let op = Operation::set_entity("a".repeat(11), b"data".to_vec());
+        assert!(op.validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_operation_validate_value_too_large() {
+        let config = inferadb_ledger_types::config::ValidationConfig::builder()
+            .max_value_bytes(4)
+            .build()
+            .unwrap();
+        let op = Operation::set_entity("key", vec![0u8; 5]);
+        assert!(op.validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_operation_validate_delete_entity_valid() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::delete_entity("user:123");
+        assert!(op.validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_operation_validate_delete_entity_empty_key() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::DeleteEntity { key: String::new() };
+        assert!(op.validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_operation_validate_create_relationship_valid() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::create_relationship("doc:456", "viewer", "user:123");
+        assert!(op.validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_operation_validate_relationship_with_hash() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::create_relationship("doc:456", "viewer", "user:123#member");
+        assert!(op.validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_operation_validate_relationship_empty_resource() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::CreateRelationship {
+            resource: String::new(),
+            relation: "viewer".to_string(),
+            subject: "user:123".to_string(),
+        };
+        assert!(op.validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_operation_validate_relationship_invalid_chars() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::create_relationship("doc 456", "viewer", "user:123");
+        assert!(op.validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_operation_validate_delete_relationship_valid() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let op = Operation::delete_relationship("doc:456", "viewer", "user:123");
+        assert!(op.validate(&config).is_ok());
+    }
+
+    // =========================================================================
+    // estimated_size_bytes tests
+    // =========================================================================
+
+    #[test]
+    fn test_estimated_size_set_entity() {
+        let op = Operation::set_entity("key", b"value".to_vec());
+        assert_eq!(op.estimated_size_bytes(), 3 + 5); // "key" + "value"
+    }
+
+    #[test]
+    fn test_estimated_size_delete_entity() {
+        let op = Operation::delete_entity("user:123");
+        assert_eq!(op.estimated_size_bytes(), 8); // "user:123"
+    }
+
+    #[test]
+    fn test_estimated_size_relationship() {
+        let op = Operation::create_relationship("doc:456", "viewer", "user:123");
+        assert_eq!(op.estimated_size_bytes(), 7 + 6 + 8); // "doc:456" + "viewer" + "user:123"
+    }
+
+    // =========================================================================
+    // SdkError::Validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_sdk_validation_error_not_retryable() {
+        let err = crate::error::SdkError::Validation { message: "key too long".to_string() };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_sdk_validation_error_display() {
+        let err = crate::error::SdkError::Validation { message: "key too long".to_string() };
+        assert!(err.to_string().contains("key too long"));
     }
 }

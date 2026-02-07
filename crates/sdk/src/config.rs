@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use bon::bon;
+use inferadb_ledger_types::config::ValidationConfig;
 use snafu::ensure;
 
 use crate::{
@@ -43,6 +44,15 @@ pub struct ClientConfig {
 
     /// Distributed tracing configuration.
     pub(crate) trace: TraceConfig,
+
+    /// Input validation configuration for client-side request validation.
+    pub(crate) validation: ValidationConfig,
+
+    /// Circuit breaker configuration for per-endpoint failure protection.
+    pub(crate) circuit_breaker: Option<crate::circuit_breaker::CircuitBreakerConfig>,
+
+    /// SDK-side metrics collector.
+    pub(crate) metrics: std::sync::Arc<dyn crate::metrics::SdkMetrics>,
 }
 
 #[bon]
@@ -99,6 +109,11 @@ impl ClientConfig {
         #[builder(default)] compression: bool,
         tls: Option<TlsConfig>,
         #[builder(default)] trace: TraceConfig,
+        #[builder(default)] validation: ValidationConfig,
+        circuit_breaker: Option<crate::circuit_breaker::CircuitBreakerConfig>,
+        #[builder(default = crate::metrics::default_metrics())] metrics: std::sync::Arc<
+            dyn crate::metrics::SdkMetrics,
+        >,
     ) -> Result<Self> {
         // Validate static endpoints
         if let ServerSource::Static(ref endpoints) = servers {
@@ -130,6 +145,9 @@ impl ClientConfig {
             compression,
             tls,
             trace,
+            validation,
+            circuit_breaker,
+            metrics,
         })
     }
 }
@@ -181,6 +199,24 @@ impl ClientConfig {
     #[must_use]
     pub fn trace(&self) -> &TraceConfig {
         &self.trace
+    }
+
+    /// Returns the validation configuration.
+    #[must_use]
+    pub fn validation(&self) -> &ValidationConfig {
+        &self.validation
+    }
+
+    /// Returns the circuit breaker configuration if enabled.
+    #[must_use]
+    pub fn circuit_breaker(&self) -> Option<&crate::circuit_breaker::CircuitBreakerConfig> {
+        self.circuit_breaker.as_ref()
+    }
+
+    /// Returns the SDK metrics collector.
+    #[must_use]
+    pub fn metrics(&self) -> &std::sync::Arc<dyn crate::metrics::SdkMetrics> {
+        &self.metrics
     }
 }
 

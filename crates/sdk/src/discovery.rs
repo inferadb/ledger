@@ -217,7 +217,13 @@ impl DiscoveryService {
 
             let request = proto::GetPeersRequest { max_peers };
             let response = client.get_peers(request).await.map_err(|status| {
-                RpcSnafu { code: status.code(), message: status.message().to_string() }.build()
+                RpcSnafu {
+                    code: status.code(),
+                    message: status.message().to_string(),
+                    request_id: None::<String>,
+                    trace_id: None::<String>,
+                }
+                .build()
             })?;
 
             let inner = response.into_inner();

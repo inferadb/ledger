@@ -2,14 +2,16 @@
 //!
 //! Handles namespace and vault management, cluster membership, snapshots, and integrity checks.
 
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
-use inferadb_ledger_state::{BlockArchive, StateLayer, system::NamespaceStatus};
+use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
     NamespaceId as DomainNamespaceId, ShardId as DomainShardId, VaultEntry,
     VaultId as DomainVaultId, ZERO_HASH,
     audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
+    config::ValidationConfig,
+    validation,
 };
 use openraft::{BasicNode, Raft};
 use sha2::{Digest, Sha256};
@@ -19,19 +21,22 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    error::ServiceError,
+    error::{ServiceError, classify_raft_error},
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     proto::{
-        BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
-        ClusterMemberRole, CreateNamespaceRequest, CreateNamespaceResponse, CreateSnapshotRequest,
-        CreateSnapshotResponse, CreateVaultRequest, CreateVaultResponse, DeleteNamespaceRequest,
-        DeleteNamespaceResponse, DeleteVaultRequest, DeleteVaultResponse, GetClusterInfoRequest,
-        GetClusterInfoResponse, GetNamespaceRequest, GetNamespaceResponse, GetNodeInfoRequest,
+        BackupInfo, BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
+        ClusterMemberRole, CreateBackupRequest, CreateBackupResponse, CreateNamespaceRequest,
+        CreateNamespaceResponse, CreateSnapshotRequest, CreateSnapshotResponse, CreateVaultRequest,
+        CreateVaultResponse, DeleteNamespaceRequest, DeleteNamespaceResponse, DeleteVaultRequest,
+        DeleteVaultResponse, GetClusterInfoRequest, GetClusterInfoResponse, GetConfigRequest,
+        GetConfigResponse, GetNamespaceRequest, GetNamespaceResponse, GetNodeInfoRequest,
         GetNodeInfoResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
         JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
-        ListNamespacesRequest, ListNamespacesResponse, ListVaultsRequest, ListVaultsResponse,
-        NamespaceId, NodeId, RecoverVaultRequest, RecoverVaultResponse, ShardId, VaultHealthProto,
-        VaultId, admin_service_server::AdminService,
+        ListBackupsRequest, ListBackupsResponse, ListNamespacesRequest, ListNamespacesResponse,
+        ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest,
+        RecoverVaultResponse, RestoreBackupRequest, RestoreBackupResponse, ShardId,
+        UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto, VaultId,
+        admin_service_server::AdminService,
     },
     trace_context,
     types::{
@@ -64,6 +69,29 @@ pub struct AdminServiceImpl {
     /// Audit logger for compliance-ready event tracking.
     #[builder(default)]
     audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
+    /// Input validation configuration for request field limits.
+    #[builder(default = Arc::new(ValidationConfig::default()))]
+    validation_config: Arc<ValidationConfig>,
+    /// Maximum time to wait for a Raft proposal to commit.
+    ///
+    /// If a gRPC deadline is shorter, the deadline takes precedence.
+    #[builder(default = Duration::from_secs(30))]
+    proposal_timeout: Duration,
+    /// Runtime configuration handle for hot-reloadable settings.
+    #[builder(default)]
+    runtime_config: Option<crate::runtime_config::RuntimeConfigHandle>,
+    /// Rate limiter for propagating config changes.
+    #[builder(default)]
+    rate_limiter: Option<Arc<crate::rate_limit::RateLimiter>>,
+    /// Hot key detector for propagating config changes.
+    #[builder(default)]
+    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    /// Backup manager for backup and restore operations.
+    #[builder(default)]
+    backup_manager: Option<Arc<crate::backup::BackupManager>>,
+    /// Snapshot manager for reading Raft snapshots during backup.
+    #[builder(default)]
+    snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
 }
 
 impl AdminServiceImpl {
@@ -71,6 +99,46 @@ impl AdminServiceImpl {
     #[must_use]
     pub fn with_audit_logger(mut self, logger: Arc<dyn crate::audit::AuditLogger>) -> Self {
         self.audit_logger = Some(logger);
+        self
+    }
+
+    /// Set input validation configuration for request field limits.
+    #[must_use]
+    pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
+        self.validation_config = config;
+        self
+    }
+
+    /// Set the maximum time to wait for Raft proposals.
+    #[must_use]
+    pub fn with_proposal_timeout(mut self, timeout: Duration) -> Self {
+        self.proposal_timeout = timeout;
+        self
+    }
+
+    /// Set the runtime configuration handle for hot-reloadable settings.
+    #[must_use]
+    pub fn with_runtime_config(
+        mut self,
+        handle: crate::runtime_config::RuntimeConfigHandle,
+        rate_limiter: Option<Arc<crate::rate_limit::RateLimiter>>,
+        hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    ) -> Self {
+        self.runtime_config = Some(handle);
+        self.rate_limiter = rate_limiter;
+        self.hot_key_detector = hot_key_detector;
+        self
+    }
+
+    /// Set the backup manager and snapshot manager for backup/restore operations.
+    #[must_use]
+    pub fn with_backup(
+        mut self,
+        backup_manager: Arc<crate::backup::BackupManager>,
+        snapshot_manager: Arc<inferadb_ledger_state::SnapshotManager>,
+    ) -> Self {
+        self.backup_manager = Some(backup_manager);
+        self.snapshot_manager = Some(snapshot_manager);
         self
     }
 
@@ -124,6 +192,9 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CreateNamespaceRequest>,
     ) -> Result<Response<CreateNamespaceResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -150,6 +221,10 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
+        // Validate namespace name
+        validation::validate_namespace_name(&req.name, &self.validation_config)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
         // Submit create namespace through Raft
         // Map proto ShardId to domain ShardId newtype
         let ledger_request = LedgerRequest::CreateNamespace {
@@ -157,13 +232,32 @@ impl AdminService for AdminServiceImpl {
             shard_id: req.shard_id.map(|s| DomainShardId::new(s.id)),
         };
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         ctx.start_raft_timer();
-        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
-            ctx.end_raft_timer();
-            ctx.set_error("RaftError", &e.to_string());
-            ServiceError::raft(e)
-        })?;
-        ctx.end_raft_timer();
+        let result =
+            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => {
+                    ctx.end_raft_timer();
+                    result
+                },
+                Ok(Err(e)) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    return Err(ServiceError::raft(e).into());
+                },
+                Err(_elapsed) => {
+                    ctx.end_raft_timer();
+                    crate::metrics::record_raft_proposal_timeout();
+                    ctx.set_error("Timeout", "Raft proposal timed out");
+                    return Err(Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                },
+            };
 
         match result.data {
             LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
@@ -209,6 +303,9 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DeleteNamespaceRequest>,
     ) -> Result<Response<DeleteNamespaceResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -245,13 +342,32 @@ impl AdminService for AdminServiceImpl {
         // Submit delete namespace through Raft
         let ledger_request = LedgerRequest::DeleteNamespace { namespace_id };
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         ctx.start_raft_timer();
-        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
-            ctx.end_raft_timer();
-            ctx.set_error("RaftError", &e.to_string());
-            ServiceError::raft(e)
-        })?;
-        ctx.end_raft_timer();
+        let result =
+            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => {
+                    ctx.end_raft_timer();
+                    result
+                },
+                Ok(Err(e)) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    return Err(ServiceError::raft(e).into());
+                },
+                Err(_elapsed) => {
+                    ctx.end_raft_timer();
+                    crate::metrics::record_raft_proposal_timeout();
+                    ctx.set_error("Timeout", "Raft proposal timed out");
+                    return Err(Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                },
+            };
 
         match result.data {
             LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
@@ -360,14 +476,7 @@ impl AdminService for AdminServiceImpl {
             Some(ns) => {
                 ctx.set_namespace_id(ns.namespace_id.value());
                 ctx.set_success();
-                // Map internal NamespaceStatus to proto NamespaceStatus
-                let status = match ns.status {
-                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
-                    NamespaceStatus::Migrating => crate::proto::NamespaceStatus::Migrating,
-                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
-                    NamespaceStatus::Deleting => crate::proto::NamespaceStatus::Deleting,
-                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
-                };
+                let status: crate::proto::NamespaceStatus = ns.status.into();
                 Ok(Response::new(GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,
@@ -405,14 +514,7 @@ impl AdminService for AdminServiceImpl {
             .list_namespaces()
             .into_iter()
             .map(|ns| {
-                // Map internal NamespaceStatus to proto NamespaceStatus
-                let status = match ns.status {
-                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
-                    NamespaceStatus::Migrating => crate::proto::NamespaceStatus::Migrating,
-                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
-                    NamespaceStatus::Deleting => crate::proto::NamespaceStatus::Deleting,
-                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
-                };
+                let status: crate::proto::NamespaceStatus = ns.status.into();
                 crate::proto::GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,
@@ -436,6 +538,9 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CreateVaultRequest>,
     ) -> Result<Response<CreateVaultResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -472,25 +577,12 @@ impl AdminService for AdminServiceImpl {
 
         // Convert proto retention policy to internal type
         let retention_policy = req.retention_policy.map(|proto_policy| {
-            use crate::proto::BlockRetentionMode as ProtoMode;
-            let mode = match proto_policy.mode() {
-                ProtoMode::Unspecified | ProtoMode::Full => {
-                    ctx.set_retention_mode("full");
-                    BlockRetentionMode::Full
-                },
-                ProtoMode::Compacted => {
-                    ctx.set_retention_mode("compacted");
-                    BlockRetentionMode::Compacted
-                },
-            };
-            BlockRetentionPolicy {
-                mode,
-                retention_blocks: if proto_policy.retention_blocks > 0 {
-                    proto_policy.retention_blocks
-                } else {
-                    10_000 // Default
-                },
+            let policy = BlockRetentionPolicy::from(&proto_policy);
+            match policy.mode {
+                BlockRetentionMode::Full => ctx.set_retention_mode("full"),
+                BlockRetentionMode::Compacted => ctx.set_retention_mode("compacted"),
             }
+            policy
         });
 
         // Submit create vault through Raft
@@ -500,13 +592,32 @@ impl AdminService for AdminServiceImpl {
             retention_policy,
         };
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         ctx.start_raft_timer();
-        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
-            ctx.end_raft_timer();
-            ctx.set_error("RaftError", &e.to_string());
-            Status::internal(format!("Raft error: {}", e))
-        })?;
-        ctx.end_raft_timer();
+        let result =
+            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => {
+                    ctx.end_raft_timer();
+                    result
+                },
+                Ok(Err(e)) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    return Err(classify_raft_error(&e.to_string()));
+                },
+                Err(_elapsed) => {
+                    ctx.end_raft_timer();
+                    crate::metrics::record_raft_proposal_timeout();
+                    ctx.set_error("Timeout", "Raft proposal timed out");
+                    return Err(Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                },
+            };
 
         match result.data {
             LedgerResponse::VaultCreated { vault_id } => {
@@ -568,6 +679,9 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DeleteVaultRequest>,
     ) -> Result<Response<DeleteVaultResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -610,13 +724,32 @@ impl AdminService for AdminServiceImpl {
         // Submit delete vault through Raft
         let ledger_request = LedgerRequest::DeleteVault { namespace_id, vault_id };
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         ctx.start_raft_timer();
-        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
-            ctx.end_raft_timer();
-            ctx.set_error("RaftError", &e.to_string());
-            Status::internal(format!("Raft error: {}", e))
-        })?;
-        ctx.end_raft_timer();
+        let result =
+            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => {
+                    ctx.end_raft_timer();
+                    result
+                },
+                Ok(Err(e)) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    return Err(classify_raft_error(&e.to_string()));
+                },
+                Err(_elapsed) => {
+                    ctx.end_raft_timer();
+                    crate::metrics::record_raft_proposal_timeout();
+                    ctx.set_error("Timeout", "Raft proposal timed out");
+                    return Err(Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                },
+            };
 
         match result.data {
             LedgerResponse::VaultDeleted { success } => {
@@ -817,7 +950,7 @@ impl AdminService for AdminServiceImpl {
         let _ = self.raft.trigger().snapshot().await.map_err(|e| {
             ctx.end_raft_timer();
             ctx.set_error("SnapshotError", &e.to_string());
-            Status::internal(format!("Snapshot error: {}", e))
+            Status::failed_precondition(format!("Snapshot error: {}", e))
         })?;
         ctx.end_raft_timer();
 
@@ -2158,6 +2291,315 @@ impl AdminService for AdminServiceImpl {
             ),
             expired_count: total_expired,
             vaults_scanned,
+        }))
+    }
+
+    async fn update_config(
+        &self,
+        request: Request<UpdateConfigRequest>,
+    ) -> Result<Response<UpdateConfigResponse>, Status> {
+        let inner = request.into_inner();
+
+        let runtime_config = self.runtime_config.as_ref().ok_or_else(|| {
+            Status::failed_precondition("Runtime configuration is not enabled on this node")
+        })?;
+
+        // Parse the JSON config.
+        let new_config: inferadb_ledger_types::config::RuntimeConfig =
+            serde_json::from_str(&inner.config_json)
+                .map_err(|e| Status::invalid_argument(format!("Invalid config JSON: {e}")))?;
+
+        // Validate before applying.
+        new_config
+            .validate()
+            .map_err(|e| Status::invalid_argument(format!("Config validation failed: {e}")))?;
+
+        // Compute diff for audit and response.
+        let current = runtime_config.load();
+        let changed = current.diff(&new_config);
+
+        if changed.is_empty() {
+            let current_json = serde_json::to_string_pretty(&*current).unwrap_or_default();
+            return Ok(Response::new(UpdateConfigResponse {
+                applied: false,
+                message: "No changes detected".to_string(),
+                current_config_json: current_json,
+                changed_fields: Vec::new(),
+            }));
+        }
+
+        if inner.dry_run {
+            let current_json = serde_json::to_string_pretty(&*current).unwrap_or_default();
+            return Ok(Response::new(UpdateConfigResponse {
+                applied: false,
+                message: format!("Dry run: would change {}", changed.join(", ")),
+                current_config_json: current_json,
+                changed_fields: changed,
+            }));
+        }
+
+        // Apply the update.
+        let changed = runtime_config
+            .update(new_config, self.rate_limiter.as_ref(), self.hot_key_detector.as_ref())
+            .map_err(|e| Status::invalid_argument(format!("Config update failed: {e}")))?;
+
+        // Audit the config change.
+        self.emit_audit_event(&self.build_audit_event(
+            AuditAction::UpdateConfig,
+            "admin",
+            AuditResource::cluster().with_detail(format!("changed:{}", changed.join(","))),
+            AuditOutcome::Success,
+            None,
+        ));
+
+        let updated = runtime_config.load();
+        let updated_json = serde_json::to_string_pretty(&*updated).unwrap_or_default();
+
+        Ok(Response::new(UpdateConfigResponse {
+            applied: true,
+            message: format!("Updated: {}", changed.join(", ")),
+            current_config_json: updated_json,
+            changed_fields: changed,
+        }))
+    }
+
+    async fn get_config(
+        &self,
+        _request: Request<GetConfigRequest>,
+    ) -> Result<Response<GetConfigResponse>, Status> {
+        let runtime_config = self.runtime_config.as_ref().ok_or_else(|| {
+            Status::failed_precondition("Runtime configuration is not enabled on this node")
+        })?;
+
+        let current = runtime_config.load();
+        let config_json = serde_json::to_string_pretty(&*current).unwrap_or_default();
+
+        Ok(Response::new(GetConfigResponse { config_json }))
+    }
+
+    async fn create_backup(
+        &self,
+        request: Request<CreateBackupRequest>,
+    ) -> Result<Response<CreateBackupResponse>, Status> {
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "create_backup");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("create_backup");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        let backup_manager = self
+            .backup_manager
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
+        let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition("Snapshot manager is not available on this node")
+        })?;
+
+        // Trigger Raft snapshot for consistent state
+        ctx.start_raft_timer();
+        let _ = self.raft.trigger().snapshot().await.map_err(|e| {
+            ctx.end_raft_timer();
+            ctx.set_error("SnapshotError", &e.to_string());
+            Status::failed_precondition(format!("Failed to trigger snapshot: {e}"))
+        })?;
+        ctx.end_raft_timer();
+
+        // Load the latest snapshot
+        let snapshot = snapshot_manager
+            .load_latest()
+            .map_err(|e| Status::internal(format!("Failed to load snapshot: {e}")))?
+            .ok_or_else(|| Status::failed_precondition("No snapshot available for backup"))?;
+
+        let tag = req.tag.unwrap_or_default();
+
+        // Create the backup
+        let meta = backup_manager.create_backup(&snapshot, &tag).map_err(|e| {
+            ctx.set_error("BackupError", &e.to_string());
+            Status::internal(format!("Failed to create backup: {e}"))
+        })?;
+
+        ctx.set_block_height(meta.shard_height);
+        ctx.set_success();
+
+        crate::backup::record_backup_created(meta.shard_height, meta.size_bytes);
+
+        self.emit_audit_event(
+            &self.build_audit_event(
+                AuditAction::CreateSnapshot,
+                "system",
+                AuditResource::cluster()
+                    .with_detail(format!("backup:{},height:{}", meta.backup_id, meta.shard_height)),
+                AuditOutcome::Success,
+                Some(&trace_ctx.trace_id),
+            ),
+        );
+
+        Ok(Response::new(CreateBackupResponse {
+            backup_id: meta.backup_id,
+            shard_height: meta.shard_height,
+            backup_path: meta.backup_path,
+            size_bytes: meta.size_bytes,
+            checksum: Some(Hash { value: meta.checksum.to_vec() }),
+        }))
+    }
+
+    async fn list_backups(
+        &self,
+        request: Request<ListBackupsRequest>,
+    ) -> Result<Response<ListBackupsResponse>, Status> {
+        let req = request.into_inner();
+
+        let backup_manager = self
+            .backup_manager
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
+
+        let backups = backup_manager
+            .list_backups(req.limit as usize)
+            .map_err(|e| Status::internal(format!("Failed to list backups: {e}")))?;
+
+        let backup_infos: Vec<BackupInfo> = backups
+            .into_iter()
+            .map(|meta| {
+                let created_at = prost_types::Timestamp {
+                    seconds: meta.created_at.timestamp(),
+                    nanos: meta.created_at.timestamp_subsec_nanos() as i32,
+                };
+
+                BackupInfo {
+                    backup_id: meta.backup_id,
+                    shard_height: meta.shard_height,
+                    backup_path: meta.backup_path,
+                    size_bytes: meta.size_bytes,
+                    created_at: Some(created_at),
+                    checksum: Some(Hash { value: meta.checksum.to_vec() }),
+                    chain_commitment_hash: Some(Hash {
+                        value: meta.chain_commitment_hash.to_vec(),
+                    }),
+                    schema_version: meta.schema_version,
+                    tag: meta.tag,
+                }
+            })
+            .collect();
+
+        Ok(Response::new(ListBackupsResponse { backups: backup_infos }))
+    }
+
+    async fn restore_backup(
+        &self,
+        request: Request<RestoreBackupRequest>,
+    ) -> Result<Response<RestoreBackupResponse>, Status> {
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "restore_backup");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("restore_backup");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        // Safety gate: require explicit confirmation
+        if !req.confirm {
+            return Err(Status::failed_precondition(
+                "Restore requires confirm=true. This operation will replace current shard state with the backup.",
+            ));
+        }
+
+        let backup_manager = self
+            .backup_manager
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
+
+        // Verify the backup exists and is valid
+        let meta = backup_manager.get_metadata(&req.backup_id).map_err(|e| {
+            ctx.set_error("BackupNotFound", &e.to_string());
+            Status::not_found(format!("Backup not found: {e}"))
+        })?;
+
+        // Load and verify the backup (checksum validation happens in read_from_file)
+        let snapshot = backup_manager.load_backup(&req.backup_id).map_err(|e| {
+            ctx.set_error("BackupLoadError", &e.to_string());
+            Status::internal(format!("Failed to load backup: {e}"))
+        })?;
+
+        // Verify schema version compatibility
+        let current_schema_version = 2_u32; // SNAPSHOT_VERSION from state crate
+        if snapshot.header.version != current_schema_version {
+            ctx.set_error(
+                "SchemaVersionMismatch",
+                &format!(
+                    "backup version {} != server version {}",
+                    snapshot.header.version, current_schema_version
+                ),
+            );
+            return Err(Status::failed_precondition(format!(
+                "Schema version mismatch: backup has version {}, server expects version {}. \
+                 Cannot restore from incompatible backup.",
+                snapshot.header.version, current_schema_version,
+            )));
+        }
+
+        // Save the backup as a snapshot so Raft will use it on restart.
+        // Full state restoration requires a node restart to re-initialize
+        // the Raft state machine from the restored snapshot.
+        let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition("Snapshot manager is not available on this node")
+        })?;
+
+        snapshot_manager.save(&snapshot).map_err(|e| {
+            ctx.set_error("RestoreError", &e.to_string());
+            Status::internal(format!("Failed to save backup as snapshot: {e}"))
+        })?;
+
+        let restored_height = snapshot.header.shard_height;
+        ctx.set_block_height(restored_height);
+        ctx.set_success();
+
+        self.emit_audit_event(
+            &self.build_audit_event(
+                AuditAction::CreateSnapshot,
+                "system",
+                AuditResource::cluster()
+                    .with_detail(format!("restore:{},height:{}", meta.backup_id, restored_height)),
+                AuditOutcome::Success,
+                Some(&trace_ctx.trace_id),
+            ),
+        );
+
+        Ok(Response::new(RestoreBackupResponse {
+            success: true,
+            message: format!(
+                "Backup {} (height {}) restored as snapshot. Restart the node to apply.",
+                meta.backup_id, restored_height
+            ),
+            restored_height,
         }))
     }
 }

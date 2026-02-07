@@ -125,6 +125,7 @@ doc-open:
 
 # Update pre-generated proto code for crates.io publishing
 proto:
+    cargo +{{rust}} clean -p inferadb-ledger-raft
     cargo +{{rust}} build -p inferadb-ledger-raft
     cp target/debug/build/inferadb-ledger-raft-*/out/ledger.v1.rs crates/raft/src/generated/
 

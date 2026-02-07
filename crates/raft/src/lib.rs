@@ -23,12 +23,16 @@
 // handling
 #![allow(clippy::result_large_err)]
 
+pub mod api_version;
 pub mod audit;
 mod auto_recovery;
+pub mod backup;
 
 pub mod batching;
 mod block_compaction;
 mod btree_compaction;
+pub mod deadline;
+pub mod dependency_health;
 pub mod error;
 mod file_lock;
 mod graceful_shutdown;
@@ -48,6 +52,8 @@ pub mod proof;
 pub mod proto_convert;
 mod raft_network;
 mod rate_limit;
+pub mod resource_metrics;
+pub mod runtime_config;
 mod saga_orchestrator;
 mod server;
 pub mod services;
@@ -73,11 +79,16 @@ pub mod proto {
 }
 
 pub use auto_recovery::{AutoRecoveryConfig, AutoRecoveryJob, RecoveryResult};
+pub use backup::{BackupJob, BackupManager, BackupMetadata};
 pub use batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle};
 pub use block_compaction::BlockCompactor;
 pub use btree_compaction::BTreeCompactor;
+pub use dependency_health::{DependencyCheckResult, DependencyHealth, DependencyHealthChecker};
 pub use file_lock::{DataDirLock, LockError};
-pub use graceful_shutdown::{GracefulShutdown, HealthState, NodePhase};
+pub use graceful_shutdown::{
+    BackgroundJobWatchdog, ConnectionTracker, ConnectionTrackingLayer, GracefulShutdown,
+    HealthState, NodePhase,
+};
 pub use hot_key_detector::{AccessResult, HotKeyDetector, HotKeyInfo};
 pub use idempotency::IdempotencyCache;
 pub use learner_refresh::{CachedSystemState, LearnerRefreshConfig, LearnerRefreshJob};
@@ -98,6 +109,8 @@ pub use rate_limit::{
     NamespaceRateLimiter, RateLimitExceeded, RateLimitLevel, RateLimitReason, RateLimitRejection,
     RateLimiter,
 };
+pub use resource_metrics::ResourceMetricsCollector;
+pub use runtime_config::RuntimeConfigHandle;
 pub use saga_orchestrator::SagaOrchestrator;
 pub use server::LedgerServer;
 // Re-export multi-shard service types

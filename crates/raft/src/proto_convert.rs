@@ -23,8 +23,12 @@
 
 use inferadb_ledger_types::merkle::MerkleProof as InternalMerkleProof;
 use openraft::Vote;
+use tonic::Status;
 
-use crate::{proto, types::LedgerNodeId};
+use crate::{
+    proto,
+    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId},
+};
 
 // =============================================================================
 // Vote conversions (openraft::Vote <-> proto::RaftVote)
@@ -144,6 +148,188 @@ impl From<&inferadb_ledger_types::SetCondition> for proto::SetCondition {
 impl From<inferadb_ledger_types::SetCondition> for proto::SetCondition {
     fn from(c: inferadb_ledger_types::SetCondition) -> Self {
         (&c).into()
+    }
+}
+
+// =============================================================================
+// SetCondition conversions (proto::SetCondition -> inferadb_ledger_types::SetCondition)
+// =============================================================================
+
+/// Convert a proto `SetCondition` to an optional domain `SetCondition`.
+///
+/// Returns `None` if the proto condition field is not set.
+/// The `NotExists(false)` and `MustExists(false)` cases map to their logical
+/// inverses for backward compatibility with proto3 default values.
+impl From<&proto::SetCondition> for Option<inferadb_ledger_types::SetCondition> {
+    fn from(proto: &proto::SetCondition) -> Self {
+        use proto::set_condition::Condition;
+
+        proto.condition.as_ref().map(|c| match c {
+            Condition::NotExists(true) => inferadb_ledger_types::SetCondition::MustNotExist,
+            Condition::NotExists(false) => inferadb_ledger_types::SetCondition::MustExist,
+            Condition::MustExists(true) => inferadb_ledger_types::SetCondition::MustExist,
+            Condition::MustExists(false) => inferadb_ledger_types::SetCondition::MustNotExist,
+            Condition::Version(v) => inferadb_ledger_types::SetCondition::VersionEquals(*v),
+            Condition::ValueEquals(v) => {
+                inferadb_ledger_types::SetCondition::ValueEquals(v.clone())
+            },
+        })
+    }
+}
+
+// =============================================================================
+// Operation conversions (proto::Operation -> inferadb_ledger_types::Operation)
+// =============================================================================
+
+impl TryFrom<&proto::Operation> for inferadb_ledger_types::Operation {
+    type Error = Status;
+
+    fn try_from(proto_op: &proto::Operation) -> Result<Self, Self::Error> {
+        use proto::operation::Op;
+
+        let op = proto_op
+            .op
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
+
+        match op {
+            Op::CreateRelationship(cr) => {
+                Ok(inferadb_ledger_types::Operation::CreateRelationship {
+                    resource: cr.resource.clone(),
+                    relation: cr.relation.clone(),
+                    subject: cr.subject.clone(),
+                })
+            },
+            Op::DeleteRelationship(dr) => {
+                Ok(inferadb_ledger_types::Operation::DeleteRelationship {
+                    resource: dr.resource.clone(),
+                    relation: dr.relation.clone(),
+                    subject: dr.subject.clone(),
+                })
+            },
+            Op::SetEntity(se) => {
+                let condition: Option<inferadb_ledger_types::SetCondition> =
+                    se.condition.as_ref().and_then(|c| c.into());
+
+                Ok(inferadb_ledger_types::Operation::SetEntity {
+                    key: se.key.clone(),
+                    value: se.value.clone(),
+                    condition,
+                    expires_at: se.expires_at,
+                })
+            },
+            Op::DeleteEntity(de) => {
+                Ok(inferadb_ledger_types::Operation::DeleteEntity { key: de.key.clone() })
+            },
+            Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
+                key: ee.key.clone(),
+                expired_at: ee.expired_at,
+            }),
+        }
+    }
+}
+
+impl TryFrom<proto::Operation> for inferadb_ledger_types::Operation {
+    type Error = Status;
+
+    fn try_from(proto_op: proto::Operation) -> Result<Self, Self::Error> {
+        Self::try_from(&proto_op)
+    }
+}
+
+// =============================================================================
+// NamespaceStatus conversions
+// =============================================================================
+
+impl From<inferadb_ledger_state::system::NamespaceStatus> for proto::NamespaceStatus {
+    fn from(status: inferadb_ledger_state::system::NamespaceStatus) -> Self {
+        use inferadb_ledger_state::system::NamespaceStatus;
+
+        match status {
+            NamespaceStatus::Active => proto::NamespaceStatus::Active,
+            NamespaceStatus::Migrating => proto::NamespaceStatus::Migrating,
+            NamespaceStatus::Suspended => proto::NamespaceStatus::Suspended,
+            NamespaceStatus::Deleting => proto::NamespaceStatus::Deleting,
+            NamespaceStatus::Deleted => proto::NamespaceStatus::Deleted,
+        }
+    }
+}
+
+// =============================================================================
+// Entity conversions (inferadb_ledger_types::Entity -> proto::Entity)
+// =============================================================================
+
+impl From<&inferadb_ledger_types::Entity> for proto::Entity {
+    fn from(e: &inferadb_ledger_types::Entity) -> Self {
+        proto::Entity {
+            key: String::from_utf8_lossy(&e.key).to_string(),
+            value: e.value.clone(),
+            version: e.version,
+            // Convert 0 (never expires) to None
+            expires_at: if e.expires_at == 0 { None } else { Some(e.expires_at) },
+        }
+    }
+}
+
+// =============================================================================
+// Relationship conversions (inferadb_ledger_types::Relationship -> proto::Relationship)
+// =============================================================================
+
+impl From<&inferadb_ledger_types::Relationship> for proto::Relationship {
+    fn from(r: &inferadb_ledger_types::Relationship) -> Self {
+        proto::Relationship {
+            resource: r.resource.clone(),
+            relation: r.relation.clone(),
+            subject: r.subject.clone(),
+        }
+    }
+}
+
+impl From<inferadb_ledger_types::Relationship> for proto::Relationship {
+    fn from(r: inferadb_ledger_types::Relationship) -> Self {
+        proto::Relationship { resource: r.resource, relation: r.relation, subject: r.subject }
+    }
+}
+
+// =============================================================================
+// BlockRetentionPolicy conversions
+// =============================================================================
+
+impl From<BlockRetentionMode> for proto::BlockRetentionMode {
+    fn from(mode: BlockRetentionMode) -> Self {
+        match mode {
+            BlockRetentionMode::Full => proto::BlockRetentionMode::Full,
+            BlockRetentionMode::Compacted => proto::BlockRetentionMode::Compacted,
+        }
+    }
+}
+
+impl From<&proto::BlockRetentionPolicy> for BlockRetentionPolicy {
+    fn from(proto_policy: &proto::BlockRetentionPolicy) -> Self {
+        let mode = match proto_policy.mode() {
+            proto::BlockRetentionMode::Unspecified | proto::BlockRetentionMode::Full => {
+                BlockRetentionMode::Full
+            },
+            proto::BlockRetentionMode::Compacted => BlockRetentionMode::Compacted,
+        };
+
+        BlockRetentionPolicy {
+            mode,
+            retention_blocks: if proto_policy.retention_blocks > 0 {
+                proto_policy.retention_blocks
+            } else {
+                10_000 // Default
+            },
+        }
+    }
+}
+
+impl From<BlockRetentionPolicy> for proto::BlockRetentionPolicy {
+    fn from(policy: BlockRetentionPolicy) -> Self {
+        proto::BlockRetentionPolicy {
+            mode: proto::BlockRetentionMode::from(policy.mode).into(),
+            retention_blocks: policy.retention_blocks,
+        }
     }
 }
 
@@ -616,5 +802,356 @@ mod tests {
         assert_eq!(proto_tx.client_id.as_ref().unwrap().id, "client-123");
         assert_eq!(proto_tx.sequence, 1);
         assert_eq!(proto_tx.operations.len(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Proto -> Domain SetCondition conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_proto_to_condition_not_exists() {
+        let proto = proto::SetCondition {
+            condition: Some(proto::set_condition::Condition::NotExists(true)),
+        };
+        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustNotExist));
+    }
+
+    #[test]
+    fn test_proto_to_condition_must_exists() {
+        let proto = proto::SetCondition {
+            condition: Some(proto::set_condition::Condition::MustExists(true)),
+        };
+        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustExist));
+    }
+
+    #[test]
+    fn test_proto_to_condition_version() {
+        let proto =
+            proto::SetCondition { condition: Some(proto::set_condition::Condition::Version(42)) };
+        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::VersionEquals(42)));
+    }
+
+    #[test]
+    fn test_proto_to_condition_value_equals() {
+        let proto = proto::SetCondition {
+            condition: Some(proto::set_condition::Condition::ValueEquals(vec![1, 2, 3])),
+        };
+        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::ValueEquals(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn test_proto_to_condition_none_returns_none() {
+        let proto = proto::SetCondition { condition: None };
+        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_proto_to_condition_inverted_booleans() {
+        // NotExists(false) should map to MustExist
+        let proto = proto::SetCondition {
+            condition: Some(proto::set_condition::Condition::NotExists(false)),
+        };
+        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustExist));
+
+        // MustExists(false) should map to MustNotExist
+        let proto = proto::SetCondition {
+            condition: Some(proto::set_condition::Condition::MustExists(false)),
+        };
+        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustNotExist));
+    }
+
+    // -------------------------------------------------------------------------
+    // Proto -> Domain Operation conversion tests (TryFrom)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_try_from_create_relationship() {
+        let proto_op = proto::Operation {
+            op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                resource: "doc:1".to_string(),
+                relation: "viewer".to_string(),
+                subject: "user:2".to_string(),
+            })),
+        };
+        let result = inferadb_ledger_types::Operation::try_from(&proto_op).unwrap();
+        assert_eq!(
+            result,
+            inferadb_ledger_types::Operation::CreateRelationship {
+                resource: "doc:1".to_string(),
+                relation: "viewer".to_string(),
+                subject: "user:2".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_try_from_set_entity_with_condition() {
+        let proto_op = proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "key:1".to_string(),
+                value: vec![1, 2, 3],
+                condition: Some(proto::SetCondition {
+                    condition: Some(proto::set_condition::Condition::Version(5)),
+                }),
+                expires_at: Some(1700000000),
+            })),
+        };
+        let result = inferadb_ledger_types::Operation::try_from(&proto_op).unwrap();
+        assert_eq!(
+            result,
+            inferadb_ledger_types::Operation::SetEntity {
+                key: "key:1".to_string(),
+                value: vec![1, 2, 3],
+                condition: Some(inferadb_ledger_types::SetCondition::VersionEquals(5)),
+                expires_at: Some(1700000000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_try_from_missing_op_field() {
+        let proto_op = proto::Operation { op: None };
+        let result = inferadb_ledger_types::Operation::try_from(&proto_op);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_try_from_delete_entity() {
+        let proto_op = proto::Operation {
+            op: Some(proto::operation::Op::DeleteEntity(proto::DeleteEntity {
+                key: "key:del".to_string(),
+            })),
+        };
+        let result = inferadb_ledger_types::Operation::try_from(&proto_op).unwrap();
+        assert_eq!(
+            result,
+            inferadb_ledger_types::Operation::DeleteEntity { key: "key:del".to_string() }
+        );
+    }
+
+    #[test]
+    fn test_try_from_expire_entity() {
+        let proto_op = proto::Operation {
+            op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
+                key: "key:exp".to_string(),
+                expired_at: 1699999999,
+            })),
+        };
+        let result = inferadb_ledger_types::Operation::try_from(&proto_op).unwrap();
+        assert_eq!(
+            result,
+            inferadb_ledger_types::Operation::ExpireEntity {
+                key: "key:exp".to_string(),
+                expired_at: 1699999999,
+            }
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // NamespaceStatus conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_namespace_status_all_variants() {
+        use inferadb_ledger_state::system::NamespaceStatus;
+
+        assert_eq!(
+            proto::NamespaceStatus::from(NamespaceStatus::Active),
+            proto::NamespaceStatus::Active
+        );
+        assert_eq!(
+            proto::NamespaceStatus::from(NamespaceStatus::Migrating),
+            proto::NamespaceStatus::Migrating
+        );
+        assert_eq!(
+            proto::NamespaceStatus::from(NamespaceStatus::Suspended),
+            proto::NamespaceStatus::Suspended
+        );
+        assert_eq!(
+            proto::NamespaceStatus::from(NamespaceStatus::Deleting),
+            proto::NamespaceStatus::Deleting
+        );
+        assert_eq!(
+            proto::NamespaceStatus::from(NamespaceStatus::Deleted),
+            proto::NamespaceStatus::Deleted
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_entity_to_proto() {
+        let entity = inferadb_ledger_types::Entity {
+            key: b"test-key".to_vec(),
+            value: vec![1, 2, 3],
+            expires_at: 1700000000,
+            version: 42,
+        };
+        let proto_entity: proto::Entity = (&entity).into();
+        assert_eq!(proto_entity.key, "test-key");
+        assert_eq!(proto_entity.value, vec![1, 2, 3]);
+        assert_eq!(proto_entity.version, 42);
+        assert_eq!(proto_entity.expires_at, Some(1700000000));
+    }
+
+    #[test]
+    fn test_entity_to_proto_never_expires() {
+        let entity = inferadb_ledger_types::Entity {
+            key: b"perm-key".to_vec(),
+            value: vec![],
+            expires_at: 0,
+            version: 1,
+        };
+        let proto_entity: proto::Entity = (&entity).into();
+        assert!(proto_entity.expires_at.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Relationship conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_relationship_to_proto() {
+        let rel = inferadb_ledger_types::Relationship {
+            resource: "doc:123".to_string(),
+            relation: "viewer".to_string(),
+            subject: "user:456".to_string(),
+        };
+        let proto_rel: proto::Relationship = (&rel).into();
+        assert_eq!(proto_rel.resource, "doc:123");
+        assert_eq!(proto_rel.relation, "viewer");
+        assert_eq!(proto_rel.subject, "user:456");
+    }
+
+    #[test]
+    fn test_relationship_to_proto_owned() {
+        let rel = inferadb_ledger_types::Relationship {
+            resource: "folder:abc".to_string(),
+            relation: "editor".to_string(),
+            subject: "team:xyz".to_string(),
+        };
+        let proto_rel: proto::Relationship = rel.into();
+        assert_eq!(proto_rel.resource, "folder:abc");
+        assert_eq!(proto_rel.relation, "editor");
+        assert_eq!(proto_rel.subject, "team:xyz");
+    }
+
+    // -------------------------------------------------------------------------
+    // BlockRetentionPolicy conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_retention_policy_full_roundtrip() {
+        let policy =
+            BlockRetentionPolicy { mode: BlockRetentionMode::Full, retention_blocks: 10_000 };
+        let proto_policy: proto::BlockRetentionPolicy = policy.into();
+        let recovered = BlockRetentionPolicy::from(&proto_policy);
+        assert_eq!(recovered.mode, BlockRetentionMode::Full);
+        assert_eq!(recovered.retention_blocks, 10_000);
+    }
+
+    #[test]
+    fn test_retention_policy_compacted_roundtrip() {
+        let policy =
+            BlockRetentionPolicy { mode: BlockRetentionMode::Compacted, retention_blocks: 5_000 };
+        let proto_policy: proto::BlockRetentionPolicy = policy.into();
+        let recovered = BlockRetentionPolicy::from(&proto_policy);
+        assert_eq!(recovered.mode, BlockRetentionMode::Compacted);
+        assert_eq!(recovered.retention_blocks, 5_000);
+    }
+
+    #[test]
+    fn test_retention_policy_zero_blocks_defaults() {
+        let proto_policy = proto::BlockRetentionPolicy {
+            mode: proto::BlockRetentionMode::Full.into(),
+            retention_blocks: 0,
+        };
+        let recovered = BlockRetentionPolicy::from(&proto_policy);
+        assert_eq!(recovered.retention_blocks, 10_000); // Default
+    }
+
+    #[test]
+    fn test_retention_mode_unspecified_defaults_to_full() {
+        let proto_policy = proto::BlockRetentionPolicy {
+            mode: proto::BlockRetentionMode::Unspecified.into(),
+            retention_blocks: 100,
+        };
+        let recovered = BlockRetentionPolicy::from(&proto_policy);
+        assert_eq!(recovered.mode, BlockRetentionMode::Full);
+    }
+
+    // -------------------------------------------------------------------------
+    // Property-based roundtrip tests
+    // -------------------------------------------------------------------------
+
+    mod proptests {
+        #![allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::disallowed_methods
+        )]
+
+        use inferadb_ledger_test_utils::strategies::{
+            arb_entity, arb_operation, arb_relationship, arb_set_condition,
+        };
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            /// Operation roundtrip: domain -> proto -> domain preserves all data.
+            #[test]
+            fn operation_roundtrip(op in arb_operation()) {
+                let proto: proto::Operation = (&op).into();
+                let recovered = inferadb_ledger_types::Operation::try_from(&proto).unwrap();
+                prop_assert_eq!(op, recovered);
+            }
+
+            /// SetCondition roundtrip: domain -> proto -> domain preserves all data.
+            #[test]
+            fn set_condition_roundtrip(cond in arb_set_condition()) {
+                let proto: proto::SetCondition = (&cond).into();
+                let recovered: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
+                prop_assert_eq!(Some(cond), recovered);
+            }
+
+            /// Relationship roundtrip: domain -> proto -> domain preserves fields.
+            #[test]
+            fn relationship_roundtrip(rel in arb_relationship()) {
+                let proto: proto::Relationship = (&rel).into();
+                let recovered = inferadb_ledger_types::Relationship {
+                    resource: proto.resource,
+                    relation: proto.relation,
+                    subject: proto.subject,
+                };
+                prop_assert_eq!(rel, recovered);
+            }
+
+            /// Entity roundtrip: domain -> proto -> domain preserves data
+            /// (key encoding may differ for non-UTF8 keys via lossy conversion).
+            #[test]
+            fn entity_to_proto_preserves_value(entity in arb_entity()) {
+                let proto: proto::Entity = (&entity).into();
+                prop_assert_eq!(&proto.value, &entity.value);
+                prop_assert_eq!(proto.version, entity.version);
+                if entity.expires_at == 0 {
+                    prop_assert!(proto.expires_at.is_none());
+                } else {
+                    prop_assert_eq!(proto.expires_at, Some(entity.expires_at));
+                }
+            }
+        }
     }
 }

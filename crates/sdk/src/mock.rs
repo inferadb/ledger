@@ -1360,6 +1360,46 @@ impl AdminService for MockAdminService {
             vaults_scanned: 1,
         }))
     }
+
+    async fn update_config(
+        &self,
+        _request: Request<proto::UpdateConfigRequest>,
+    ) -> Result<Response<proto::UpdateConfigResponse>, Status> {
+        Ok(Response::new(proto::UpdateConfigResponse {
+            applied: false,
+            message: "Not supported in mock".to_string(),
+            current_config_json: "{}".to_string(),
+            changed_fields: Vec::new(),
+        }))
+    }
+
+    async fn get_config(
+        &self,
+        _request: Request<proto::GetConfigRequest>,
+    ) -> Result<Response<proto::GetConfigResponse>, Status> {
+        Ok(Response::new(proto::GetConfigResponse { config_json: "{}".to_string() }))
+    }
+
+    async fn create_backup(
+        &self,
+        _request: Request<proto::CreateBackupRequest>,
+    ) -> Result<Response<proto::CreateBackupResponse>, Status> {
+        Err(Status::unimplemented("Backup not supported in mock"))
+    }
+
+    async fn list_backups(
+        &self,
+        _request: Request<proto::ListBackupsRequest>,
+    ) -> Result<Response<proto::ListBackupsResponse>, Status> {
+        Ok(Response::new(proto::ListBackupsResponse { backups: Vec::new() }))
+    }
+
+    async fn restore_backup(
+        &self,
+        _request: Request<proto::RestoreBackupRequest>,
+    ) -> Result<Response<proto::RestoreBackupResponse>, Status> {
+        Err(Status::unimplemented("Restore not supported in mock"))
+    }
 }
 
 // =============================================================================

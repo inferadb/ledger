@@ -70,6 +70,7 @@ jobs:
         run: cat store_bench.txt server_bench.txt raft_bench.txt > all_bench.txt
 
       - name: Store benchmark results
+        continue-on-error: true
         uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
           name: InferaDB Ledger Benchmarks

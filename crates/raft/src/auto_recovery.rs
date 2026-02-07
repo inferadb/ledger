@@ -108,6 +108,9 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     /// Configuration.
     #[builder(default)]
     config: AutoRecoveryConfig,
+    /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
+    #[builder(default)]
+    watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
@@ -500,6 +503,15 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    if let Some(ref handle) = self.watchdog_handle {
+                        handle.store(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     if !self.is_leader() {
                         debug!("Not leader, skipping recovery scan");
                         continue;

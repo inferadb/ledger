@@ -37,7 +37,10 @@ pub use inferadb_ledger_store::tables;
 pub use keys::{StorageKey, decode_storage_key, encode_storage_key};
 pub use relationship::RelationshipStore;
 pub use shard::ShardManager;
-pub use snapshot::{Snapshot, SnapshotManager};
+pub use snapshot::{
+    Snapshot, SnapshotChainParams, SnapshotError, SnapshotManager, SnapshotStateData,
+    VaultSnapshotMeta,
+};
 pub use state::{StateError, StateLayer};
 pub use tiered_storage::{
     LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredConfig,

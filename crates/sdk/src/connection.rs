@@ -66,6 +66,9 @@ pub struct ConnectionPool {
 
     /// Server selector for latency-based ordering.
     selector: ServerSelector,
+
+    /// Per-endpoint circuit breaker, if enabled.
+    circuit_breaker: Option<crate::circuit_breaker::CircuitBreaker>,
 }
 
 impl ConnectionPool {
@@ -75,11 +78,16 @@ impl ConnectionPool {
     /// is lazily created on the first call to [`get_channel`](Self::get_channel).
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
+        let circuit_breaker = config
+            .circuit_breaker()
+            .map(|cb_config| crate::circuit_breaker::CircuitBreaker::new(cb_config.clone()));
+
         Self {
             channel: Arc::new(RwLock::new(None)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
             selector: ServerSelector::new(),
+            circuit_breaker,
         }
     }
 
@@ -88,11 +96,16 @@ impl ConnectionPool {
     /// Use this when you want to share a selector across multiple pools.
     #[must_use]
     pub fn with_selector(config: ClientConfig, selector: ServerSelector) -> Self {
+        let circuit_breaker = config
+            .circuit_breaker()
+            .map(|cb_config| crate::circuit_breaker::CircuitBreaker::new(cb_config.clone()));
+
         Self {
             channel: Arc::new(RwLock::new(None)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
             selector,
+            circuit_breaker,
         }
     }
 
@@ -109,6 +122,12 @@ impl ConnectionPool {
     /// - The endpoint URL is invalid
     /// - Connection establishment fails
     pub async fn get_channel(&self) -> Result<Channel> {
+        // Check circuit breaker before attempting connection
+        if let Some(ref cb) = self.circuit_breaker {
+            let endpoint = self.current_endpoint();
+            cb.check(&endpoint)?;
+        }
+
         // Fast path: check if channel already exists
         {
             let guard = self.channel.read();
@@ -118,7 +137,21 @@ impl ConnectionPool {
         }
 
         // Slow path: need to establish connection
-        let new_channel = self.create_channel().await?;
+        let endpoint = self.current_endpoint();
+        let new_channel = match self.create_channel().await {
+            Ok(ch) => {
+                self.config
+                    .metrics()
+                    .record_connection(&endpoint, crate::metrics::ConnectionEvent::Connected);
+                ch
+            },
+            Err(e) => {
+                self.config
+                    .metrics()
+                    .record_connection(&endpoint, crate::metrics::ConnectionEvent::Failed);
+                return Err(e);
+            },
+        };
 
         // Store and return the channel
         {
@@ -258,7 +291,13 @@ impl ConnectionPool {
     /// indicates the connection should be reset.
     pub fn reset(&self) {
         let mut guard = self.channel.write();
-        *guard = None;
+        if guard.is_some() {
+            *guard = None;
+            self.config.metrics().record_connection(
+                &self.current_endpoint(),
+                crate::metrics::ConnectionEvent::Disconnected,
+            );
+        }
     }
 
     /// Updates the endpoints used for connections.
@@ -303,6 +342,84 @@ impl ConnectionPool {
     #[must_use]
     pub fn selector(&self) -> &ServerSelector {
         &self.selector
+    }
+
+    /// Returns a reference to the circuit breaker, if enabled.
+    #[must_use]
+    pub fn circuit_breaker(&self) -> Option<&crate::circuit_breaker::CircuitBreaker> {
+        self.circuit_breaker.as_ref()
+    }
+
+    /// Returns the SDK metrics collector.
+    #[must_use]
+    pub fn metrics(&self) -> &std::sync::Arc<dyn crate::metrics::SdkMetrics> {
+        self.config.metrics()
+    }
+
+    /// Returns the current primary endpoint URL.
+    ///
+    /// Used by the circuit breaker to track per-endpoint state.
+    fn current_endpoint(&self) -> String {
+        let dynamic = self.dynamic_endpoints.read();
+        if let Some(ref endpoints) = *dynamic {
+            endpoints.first().cloned().unwrap_or_else(|| String::from("unknown"))
+        } else {
+            match self.config.servers() {
+                ServerSource::Static(endpoints) => {
+                    endpoints.first().cloned().unwrap_or_else(|| String::from("unknown"))
+                },
+                ServerSource::Dns(_) | ServerSource::File(_) => String::from("unknown"),
+            }
+        }
+    }
+
+    /// Records a failed request on the circuit breaker.
+    ///
+    /// Should be called after a retryable RPC failure. When consecutive
+    /// failures exceed the threshold, the circuit opens and subsequent
+    /// requests fast-fail with [`SdkError::CircuitOpen`](crate::SdkError::CircuitOpen).
+    pub fn record_failure(&self) {
+        if let Some(ref cb) = self.circuit_breaker {
+            let endpoint = self.current_endpoint();
+            let prev_state = cb.state(&endpoint);
+            cb.record_failure(&endpoint);
+            let new_state = cb.state(&endpoint);
+
+            // Emit metrics on state transition
+            if prev_state != new_state {
+                self.config.metrics().record_circuit_state(&endpoint, &new_state.to_string());
+            }
+
+            // If the circuit just opened, mark unhealthy
+            if prev_state != crate::circuit_breaker::CircuitState::Open
+                && new_state == crate::circuit_breaker::CircuitState::Open
+            {
+                self.selector.mark_unhealthy(&endpoint);
+            }
+        }
+    }
+
+    /// Records a successful request on the circuit breaker and
+    /// syncs health status with the server selector.
+    pub fn record_success(&self) {
+        if let Some(ref cb) = self.circuit_breaker {
+            let endpoint = self.current_endpoint();
+            let prev_state = cb.state(&endpoint);
+            cb.record_success(&endpoint);
+            let new_state = cb.state(&endpoint);
+
+            // Emit metrics on state transition
+            if prev_state != new_state {
+                self.config.metrics().record_circuit_state(&endpoint, &new_state.to_string());
+            }
+
+            // If the circuit just closed (was half-open, now closed), mark healthy
+            if prev_state == crate::circuit_breaker::CircuitState::HalfOpen
+                && new_state == crate::circuit_breaker::CircuitState::Closed
+            {
+                self.selector.mark_healthy(&endpoint);
+            }
+        }
     }
 
     /// Clears dynamic endpoints, reverting to the original configuration.

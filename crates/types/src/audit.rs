@@ -90,6 +90,10 @@ pub enum AuditAction {
     StartMigration,
     /// Complete namespace migration.
     CompleteMigration,
+
+    // --- Configuration ---
+    /// Runtime configuration update.
+    UpdateConfig,
 }
 
 impl AuditAction {
@@ -112,6 +116,7 @@ impl AuditAction {
             Self::ForceGc => "force_gc",
             Self::StartMigration => "start_migration",
             Self::CompleteMigration => "complete_migration",
+            Self::UpdateConfig => "update_config",
         }
     }
 }

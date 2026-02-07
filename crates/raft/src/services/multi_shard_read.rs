@@ -946,7 +946,7 @@ impl ReadService for MultiShardReadService {
                         "Forwarding historical_read to remote shard"
                     );
                     let mut client = self.get_forward_client(&remote).await?;
-                    client.forward_historical_read(req, Some(&trace_ctx)).await
+                    client.forward_historical_read(req, Some(&trace_ctx), None).await
                 },
             }
         } else {
@@ -996,7 +996,7 @@ impl ReadService for MultiShardReadService {
                         "Forwarding watch_blocks to remote shard"
                     );
                     let mut client = self.get_forward_client(&remote).await?;
-                    let response = client.forward_watch_blocks(req, Some(&trace_ctx)).await?;
+                    let response = client.forward_watch_blocks(req, Some(&trace_ctx), None).await?;
 
                     // Convert the streaming response to our expected type
                     let stream = response.into_inner();

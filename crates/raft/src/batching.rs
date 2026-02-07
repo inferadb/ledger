@@ -273,6 +273,9 @@ where
             let (batch, is_eager) = {
                 let mut state = self.state.lock();
 
+                // Emit batch queue depth gauge for SLI monitoring
+                metrics::set_batch_queue_depth(state.pending.len());
+
                 // Track whether this is an eager commit (queue drained)
                 let is_eager = self.config.eager_commit
                     && !state.pending.is_empty()
