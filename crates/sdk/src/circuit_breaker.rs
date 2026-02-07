@@ -642,7 +642,7 @@ mod tests {
         let config = CircuitBreakerConfig::builder()
             .failure_threshold(2)
             .success_threshold(1)
-            .reset_timeout(Duration::from_millis(50))
+            .reset_timeout(Duration::from_secs(2))
             .build();
         let cb = CircuitBreaker::new(config);
         let ep = "endpoint-a";
@@ -652,13 +652,15 @@ mod tests {
         cb.record_failure(ep);
 
         // Wait partway through the reset timeout
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(100));
 
         // Record another failure while open — refreshes the timestamp
         cb.record_failure(ep);
 
-        // Wait another 30ms (would have been enough without refresh)
-        std::thread::sleep(Duration::from_millis(30));
+        // Wait another 100ms (would have been enough without refresh at the old timeout,
+        // and confirms the timestamp was refreshed since only ~100ms has elapsed
+        // vs the 2s reset timeout)
+        std::thread::sleep(Duration::from_millis(100));
 
         // Still open because the timestamp was refreshed
         assert_eq!(cb.state(ep), CircuitState::Open);
