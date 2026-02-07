@@ -6,6 +6,12 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/inferadb/ledger/gen/go/ledger/v1;ledgerv1";
 
+// API Version: 1
+// The server validates x-ledger-api-version headers on client-facing RPCs.
+// Fields planned for removal must be annotated with [deprecated = true] and a
+// comment specifying the removal version, e.g.:
+//   string old_field = 5 [deprecated = true]; // Removed in API v2
+
 // =============================================================================
 // Core Types
 // =============================================================================
@@ -749,6 +755,32 @@ service AdminService {
   // Useful for testing TTL behavior and operational debugging.
   // Only the leader can run GC; followers return an error.
   rpc ForceGc(ForceGcRequest) returns (ForceGcResponse);
+
+  // Update runtime-reconfigurable parameters without server restart.
+  // Supports rate limit thresholds, hot key detection, compaction intervals,
+  // and validation limits. Non-reconfigurable parameters (listen address,
+  // data directory, Raft topology) are rejected with INVALID_ARGUMENT.
+  // Set dry_run=true to validate without applying changes.
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+
+  // Get the current runtime configuration.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+
+  // ==========================================================================
+  // Backup & Restore
+  // ==========================================================================
+
+  // Create a backup of the current shard state.
+  // Triggers a consistent snapshot, compresses it, and writes to the configured
+  // backup destination. Includes chain commitment for integrity verification.
+  rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
+
+  // List available backups with metadata.
+  rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
+
+  // Restore from a backup. Stops the shard, restores state from backup,
+  // and resumes. Requires explicit confirmation via the confirm field.
+  rpc RestoreBackup(RestoreBackupRequest) returns (RestoreBackupResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -982,6 +1014,113 @@ enum VaultHealthProto {
   VAULT_HEALTH_PROTO_HEALTHY = 1;
   VAULT_HEALTH_PROTO_DIVERGED = 2;
   VAULT_HEALTH_PROTO_RECOVERING = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Runtime Configuration Messages
+// -----------------------------------------------------------------------------
+
+// Update runtime-reconfigurable configuration parameters.
+// Only fields that are set will be updated; unset fields retain current values.
+// Set dry_run=true to validate without applying.
+message UpdateConfigRequest {
+  // JSON-encoded RuntimeConfig (only reconfigurable fields).
+  // The JSON structure mirrors the TOML config file format for the
+  // reconfigurable subset: rate_limit, hot_key, compaction, validation.
+  string config_json = 1;
+  // If true, validate the config without applying changes.
+  bool dry_run = 2;
+}
+
+message UpdateConfigResponse {
+  // Whether the update was applied (false for dry_run or validation failure).
+  bool applied = 1;
+  // Human-readable summary: fields changed, or validation error details.
+  string message = 2;
+  // JSON-encoded current RuntimeConfig after the update (or before, for dry_run).
+  string current_config_json = 3;
+  // List of field paths that were changed (e.g., ["rate_limit", "hot_key"]).
+  repeated string changed_fields = 4;
+}
+
+// Get current runtime configuration.
+message GetConfigRequest {}
+
+message GetConfigResponse {
+  // JSON-encoded current RuntimeConfig.
+  string config_json = 1;
+}
+
+// -----------------------------------------------------------------------------
+// Backup & Restore Messages
+// -----------------------------------------------------------------------------
+
+// Create a consistent backup of shard state.
+message CreateBackupRequest {
+  // Optional tag for identifying this backup (e.g., "pre-migration").
+  optional string tag = 1;
+}
+
+message CreateBackupResponse {
+  // Unique backup identifier (timestamp-based).
+  string backup_id = 1;
+  // Shard height at backup time.
+  uint64 shard_height = 2;
+  // Path where the backup was written.
+  string backup_path = 3;
+  // Size of the backup in bytes.
+  uint64 size_bytes = 4;
+  // SHA-256 checksum of the backup file.
+  Hash checksum = 5;
+}
+
+// List available backups.
+message ListBackupsRequest {
+  // Maximum number of backups to return (0 = all).
+  uint32 limit = 1;
+}
+
+message ListBackupsResponse {
+  repeated BackupInfo backups = 1;
+}
+
+// Metadata about an available backup.
+message BackupInfo {
+  // Unique backup identifier.
+  string backup_id = 1;
+  // Shard height at backup time.
+  uint64 shard_height = 2;
+  // Path where the backup is stored.
+  string backup_path = 3;
+  // Size in bytes.
+  uint64 size_bytes = 4;
+  // When the backup was created.
+  google.protobuf.Timestamp created_at = 5;
+  // SHA-256 checksum for integrity verification.
+  Hash checksum = 6;
+  // Chain commitment at backup time (for integrity verification at restore).
+  Hash chain_commitment_hash = 7;
+  // Snapshot format version.
+  uint32 schema_version = 8;
+  // Optional user-provided tag.
+  string tag = 9;
+}
+
+// Restore state from a backup. Requires explicit confirmation.
+message RestoreBackupRequest {
+  // Backup identifier to restore from.
+  string backup_id = 1;
+  // Must be true to proceed. Safety gate to prevent accidental restores.
+  bool confirm = 2;
+}
+
+message RestoreBackupResponse {
+  // Whether the restore succeeded.
+  bool success = 1;
+  // Human-readable result message.
+  string message = 2;
+  // Shard height after restore.
+  uint64 restored_height = 3;
 }
 
 // -----------------------------------------------------------------------------

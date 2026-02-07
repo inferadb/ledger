@@ -75,14 +75,24 @@ impl ForwardClient {
         self.shard_id
     }
 
-    /// Create a gRPC request with trace context injection.
+    /// Create a gRPC request with trace context and deadline propagation.
     ///
     /// Injects W3C Trace Context headers (`traceparent`, `tracestate`) into
     /// the outgoing request metadata, enabling distributed trace continuity
     /// across shard boundaries.
-    fn make_request<T>(&self, message: T, trace_ctx: Option<&TraceContext>) -> Request<T> {
+    ///
+    /// If a gRPC deadline is provided (extracted from the original incoming
+    /// request), it is propagated as the forwarded request's timeout. Otherwise
+    /// the default forward timeout is used.
+    fn make_request<T>(
+        &self,
+        message: T,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Request<T> {
         let mut req = Request::new(message);
-        req.set_timeout(DEFAULT_FORWARD_TIMEOUT);
+        let timeout = crate::deadline::forwarding_timeout(grpc_deadline, DEFAULT_FORWARD_TIMEOUT);
+        req.set_timeout(timeout);
         if let Some(ctx) = trace_ctx {
             let child = ctx.child();
             trace_context::inject_into_metadata(req.metadata_mut(), &child);
@@ -99,9 +109,10 @@ impl ForwardClient {
         &mut self,
         request: ReadRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<ReadResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding read request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.read(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward read failed");
             e
@@ -113,9 +124,10 @@ impl ForwardClient {
         &mut self,
         request: VerifiedReadRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding verified_read request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.verified_read(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward verified_read failed");
             e
@@ -127,9 +139,10 @@ impl ForwardClient {
         &mut self,
         request: HistoricalReadRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding historical_read request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.historical_read(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward historical_read failed");
             e
@@ -143,9 +156,10 @@ impl ForwardClient {
         &mut self,
         request: WatchBlocksRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<tonic::Streaming<BlockAnnouncement>>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding watch_blocks request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.watch_blocks(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward watch_blocks failed");
             e
@@ -157,9 +171,10 @@ impl ForwardClient {
         &mut self,
         request: GetBlockRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetBlockResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding get_block request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_block(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_block failed");
             e
@@ -171,9 +186,10 @@ impl ForwardClient {
         &mut self,
         request: GetBlockRangeRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding get_block_range request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_block_range(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_block_range failed");
             e
@@ -185,9 +201,10 @@ impl ForwardClient {
         &mut self,
         request: GetTipRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetTipResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding get_tip request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_tip(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_tip failed");
             e
@@ -199,9 +216,10 @@ impl ForwardClient {
         &mut self,
         request: GetClientStateRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding get_client_state request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_client_state(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward get_client_state failed");
             e
@@ -213,9 +231,10 @@ impl ForwardClient {
         &mut self,
         request: ListRelationshipsRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding list_relationships request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.list_relationships(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward list_relationships failed");
             e
@@ -227,9 +246,10 @@ impl ForwardClient {
         &mut self,
         request: ListResourcesRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding list_resources request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.list_resources(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward list_resources failed");
             e
@@ -241,9 +261,10 @@ impl ForwardClient {
         &mut self,
         request: ListEntitiesRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding list_entities request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.list_entities(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward list_entities failed");
             e
@@ -259,9 +280,10 @@ impl ForwardClient {
         &mut self,
         request: WriteRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<WriteResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding write request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.write_client.write(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward write failed");
             e
@@ -273,9 +295,10 @@ impl ForwardClient {
         &mut self,
         request: BatchWriteRequest,
         trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
         debug!(shard_id = self.shard_id.value(), "Forwarding batch_write request");
-        let req = self.make_request(request, trace_ctx);
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.write_client.batch_write(req).await.map_err(|e| {
             warn!(shard_id = self.shard_id.value(), error = %e, "Forward batch_write failed");
             e

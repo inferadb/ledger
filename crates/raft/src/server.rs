@@ -18,7 +18,9 @@ use tower::ServiceBuilder;
 
 use crate::{
     IdempotencyCache,
+    api_version::{ApiVersionLayer, api_version_interceptor},
     batching::BatchConfig,
+    graceful_shutdown::ConnectionTrackingLayer,
     log_storage::AppliedStateAccessor,
     proto::{
         BlockAnnouncement, admin_service_server::AdminServiceServer,
@@ -81,6 +83,30 @@ pub struct LedgerServer {
     /// Shutdown signal receiver. When `true` is sent, the server stops.
     #[builder(default)]
     shutdown_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Maximum time to wait for Raft proposals to commit.
+    ///
+    /// Passed to write and admin services. If a client's gRPC deadline
+    /// is shorter, the deadline takes precedence.
+    #[builder(default = Duration::from_secs(30))]
+    proposal_timeout: Duration,
+    /// Runtime configuration handle for hot-reloadable settings.
+    ///
+    /// When provided, the `AdminService` exposes `UpdateConfig`/`GetConfig`
+    /// RPCs that atomically swap the live config via `ArcSwap`.
+    #[builder(default)]
+    runtime_config: Option<crate::runtime_config::RuntimeConfigHandle>,
+    /// Backup manager for `CreateBackup`/`ListBackups`/`RestoreBackup` RPCs.
+    #[builder(default)]
+    backup_manager: Option<Arc<crate::backup::BackupManager>>,
+    /// Snapshot manager for backup creation and restore operations.
+    #[builder(default)]
+    snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
+    /// Data directory for dependency health checks (disk writability).
+    #[builder(default)]
+    data_dir: Option<std::path::PathBuf>,
+    /// Health check configuration for dependency validation.
+    #[builder(default)]
+    health_check_config: Option<inferadb_ledger_types::config::HealthCheckConfig>,
 }
 
 impl LedgerServer {
@@ -152,19 +178,55 @@ impl LedgerServer {
             Some(detector) => write_service.with_hot_key_detector(detector.clone()),
             None => write_service,
         };
+        // Wire proposal_timeout into write service
+        let write_service = write_service.with_proposal_timeout(self.proposal_timeout);
         let admin_service = AdminServiceImpl::builder()
             .raft(self.raft.clone())
             .state(self.state.clone())
             .applied_state(self.applied_state.clone())
             .block_archive(self.block_archive.clone())
             .listen_addr(self.addr)
+            .proposal_timeout(self.proposal_timeout)
             .build();
+        // Wire runtime config handle into admin service for UpdateConfig/GetConfig RPCs.
+        // Pass the rate limiter and hot key detector so config changes propagate to them.
+        let admin_service = if let Some(handle) = self.runtime_config {
+            admin_service.with_runtime_config(
+                handle,
+                self.namespace_rate_limiter.clone(),
+                self.hot_key_detector.clone(),
+            )
+        } else {
+            admin_service
+        };
+        // Wire backup support into admin service for CreateBackup/ListBackups/RestoreBackup RPCs.
+        let admin_service = if let (Some(backup_mgr), Some(snap_mgr)) =
+            (self.backup_manager, self.snapshot_manager)
+        {
+            admin_service.with_backup(backup_mgr, snap_mgr)
+        } else {
+            admin_service
+        };
+        // Extract connection tracker before health_state is moved into HealthServiceImpl
+        let connection_tracker = self.health_state.connection_tracker().clone();
         let health_service = HealthServiceImpl::new(
             self.raft.clone(),
             self.state.clone(),
             self.applied_state.clone(),
             self.health_state,
         );
+        // Attach dependency health checker if data_dir is provided
+        let health_service = if let Some(data_dir) = self.data_dir {
+            let config = self.health_check_config.unwrap_or_default();
+            let checker = crate::dependency_health::DependencyHealthChecker::new(
+                self.raft.clone(),
+                data_dir,
+                config,
+            );
+            health_service.with_dependency_checker(checker)
+        } else {
+            health_service
+        };
         let discovery_service = DiscoveryServiceImpl::builder()
             .raft(self.raft.clone())
             .state(self.state.clone())
@@ -177,10 +239,25 @@ impl LedgerServer {
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 
         let router = Server::builder()
+            // Track in-flight requests for connection draining during shutdown.
+            // Outermost layer so it counts every request, including those rejected
+            // by concurrency limits or load shedding.
+            .layer(ConnectionTrackingLayer::new(connection_tracker))
             .layer(layer)
-            .add_service(ReadServiceServer::new(read_service))
-            .add_service(WriteServiceServer::new(write_service))
-            .add_service(AdminServiceServer::new(admin_service))
+            // API version response header on all responses
+            .layer(ApiVersionLayer)
+            // Client-facing services validate x-ledger-api-version request header.
+            // Health, Discovery, and Raft services are exempted — they are
+            // infrastructure endpoints used by probes and inter-node communication.
+            .add_service(ReadServiceServer::with_interceptor(read_service, api_version_interceptor))
+            .add_service(WriteServiceServer::with_interceptor(
+                write_service,
+                api_version_interceptor,
+            ))
+            .add_service(AdminServiceServer::with_interceptor(
+                admin_service,
+                api_version_interceptor,
+            ))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service));
@@ -233,5 +310,21 @@ impl LedgerServer {
     #[must_use]
     pub fn block_archive(&self) -> Option<&Arc<BlockArchive<FileBackend>>> {
         self.block_archive.as_ref()
+    }
+
+    /// Attach backup support (backup manager + snapshot manager).
+    ///
+    /// Enables `CreateBackup`, `ListBackups`, and `RestoreBackup` RPCs on the
+    /// admin service. Done post-construction because bon type-state builders
+    /// don't support conditional field setting.
+    #[must_use]
+    pub fn with_backup(
+        mut self,
+        backup_manager: Arc<crate::backup::BackupManager>,
+        snapshot_manager: Arc<inferadb_ledger_state::SnapshotManager>,
+    ) -> Self {
+        self.backup_manager = Some(backup_manager);
+        self.snapshot_manager = Some(snapshot_manager);
+        self
     }
 }

@@ -3,7 +3,10 @@
 //! The cache stores recently accessed pages to reduce I/O.
 //! It uses a simple LRU eviction policy.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use parking_lot::RwLock;
 
@@ -14,6 +17,7 @@ use crate::error::PageId;
 ///
 /// Caches recently accessed pages to reduce disk I/O.
 /// Uses clock algorithm (approximation of LRU) for eviction.
+/// Tracks hit/miss counters for observability.
 pub struct PageCache {
     /// Cached pages.
     pages: RwLock<HashMap<PageId, CacheEntry>>,
@@ -23,6 +27,10 @@ pub struct PageCache {
     clock_hand: RwLock<usize>,
     /// Order of pages for clock algorithm.
     page_order: RwLock<Vec<PageId>>,
+    /// Total cache hits since creation.
+    hits: AtomicU64,
+    /// Total cache misses since creation.
+    misses: AtomicU64,
 }
 
 /// Cache entry with access tracking.
@@ -41,6 +49,8 @@ impl PageCache {
             capacity,
             clock_hand: RwLock::new(0),
             page_order: RwLock::new(Vec::with_capacity(capacity)),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
@@ -51,8 +61,10 @@ impl PageCache {
         let mut pages = self.pages.write();
         if let Some(entry) = pages.get_mut(&page_id) {
             entry.accessed = true;
+            self.hits.fetch_add(1, Ordering::Relaxed);
             Some(entry.page.clone())
         } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
@@ -214,6 +226,8 @@ impl PageCache {
             size: pages.len(),
             capacity: self.capacity,
             dirty_count: pages.values().filter(|e| e.page.dirty).count(),
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
         }
     }
 }
@@ -227,6 +241,10 @@ pub struct CacheStats {
     pub capacity: usize,
     /// Number of dirty pages.
     pub dirty_count: usize,
+    /// Total cache hits since creation.
+    pub hits: u64,
+    /// Total cache misses since creation.
+    pub misses: u64,
 }
 
 #[cfg(test)]

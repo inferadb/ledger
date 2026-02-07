@@ -25,6 +25,8 @@ use tower::ServiceBuilder;
 
 use crate::{
     IdempotencyCache,
+    api_version::{ApiVersionLayer, api_version_interceptor},
+    graceful_shutdown::ConnectionTrackingLayer,
     multi_raft::MultiRaftManager,
     proto::{
         admin_service_server::AdminServiceServer, health_service_server::HealthServiceServer,
@@ -72,6 +74,12 @@ pub struct MultiShardLedgerServer {
     /// Shutdown signal receiver. When `true` is sent, the server stops.
     #[builder(default)]
     shutdown_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Maximum time to wait for Raft proposals to commit.
+    ///
+    /// Passed to write and admin services. If a client's gRPC deadline
+    /// is shorter, the deadline takes precedence.
+    #[builder(default = Duration::from_secs(30))]
+    proposal_timeout: Duration,
 }
 
 impl MultiShardLedgerServer {
@@ -107,6 +115,7 @@ impl MultiShardLedgerServer {
             .idempotency(self.idempotency.clone())
             .rate_limiter(self.namespace_rate_limiter.clone())
             .hot_key_detector(self.hot_key_detector.clone())
+            .proposal_timeout(self.proposal_timeout)
             .build();
 
         // Admin, Health, and Discovery services use the system shard
@@ -122,8 +131,11 @@ impl MultiShardLedgerServer {
             .applied_state(system_shard.applied_state().clone())
             .block_archive(Some(system_shard.block_archive().clone()))
             .listen_addr(self.addr)
+            .proposal_timeout(self.proposal_timeout)
             .build();
 
+        // Extract connection tracker before health_state is moved into HealthServiceImpl
+        let connection_tracker = self.health_state.connection_tracker().clone();
         let health_service = HealthServiceImpl::new(
             system_shard.raft().clone(),
             system_shard.state().clone(),
@@ -147,10 +159,23 @@ impl MultiShardLedgerServer {
         );
 
         let router = Server::builder()
+            // Track in-flight requests for connection draining during shutdown
+            .layer(ConnectionTrackingLayer::new(connection_tracker))
             .layer(layer)
-            .add_service(ReadServiceServer::new(read_service))
-            .add_service(WriteServiceServer::new(write_service))
-            .add_service(AdminServiceServer::new(admin_service))
+            // API version response header on all responses
+            .layer(ApiVersionLayer)
+            // Client-facing services validate x-ledger-api-version request header.
+            // Health, Discovery, and Raft services are exempted — they are
+            // infrastructure endpoints used by probes and inter-node communication.
+            .add_service(ReadServiceServer::with_interceptor(read_service, api_version_interceptor))
+            .add_service(WriteServiceServer::with_interceptor(
+                write_service,
+                api_version_interceptor,
+            ))
+            .add_service(AdminServiceServer::with_interceptor(
+                admin_service,
+                api_version_interceptor,
+            ))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service));

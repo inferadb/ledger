@@ -45,6 +45,9 @@ hickory-resolver = { workspace = true }
 # Concurrent data structures
 dashmap = { workspace = true }
 
+# Metrics facade
+metrics = { workspace = true }
+
 # Utilities
 tracing = { workspace = true }
 opentelemetry = { workspace = true }

@@ -20,6 +20,7 @@
 
 mod bootstrap;
 mod config;
+mod config_reload;
 mod coordinator;
 mod discovery;
 mod node_id;
@@ -98,7 +99,9 @@ async fn main() -> Result<(), ServerError> {
 
     // Set up graceful shutdown before bootstrap so we can wire the signal
     let shutdown_config = inferadb_ledger_types::config::ShutdownConfig::default();
-    let health_state = inferadb_ledger_raft::HealthState::new();
+    let watchdog =
+        inferadb_ledger_raft::BackgroundJobWatchdog::new(shutdown_config.watchdog_multiplier);
+    let health_state = inferadb_ledger_raft::HealthState::new().with_watchdog(watchdog);
     let (graceful_shutdown, shutdown_rx) =
         inferadb_ledger_raft::GracefulShutdown::new(shutdown_config, health_state.clone());
 
@@ -108,6 +111,18 @@ async fn main() -> Result<(), ServerError> {
 
     // Mark node as ready now that bootstrap is complete
     health_state.mark_ready();
+
+    // Spawn SIGHUP config reload handler if a config file is specified
+    #[cfg(unix)]
+    if let Some(ref config_path) = config.config_file {
+        config_reload::spawn_sighup_handler(
+            config_path.clone(),
+            node.runtime_config.clone(),
+            None, // rate_limiter propagated via RuntimeConfigHandle::update()
+            None, // hot_key_detector propagated via RuntimeConfigHandle::update()
+        );
+        tracing::info!(config_file = %config_path.display(), "SIGHUP config reload enabled");
+    }
 
     // Spawn shutdown handler
     let raft_for_shutdown = node.raft.clone();
@@ -196,8 +211,17 @@ fn init_otel(config: &Config) -> Result<(), ServerError> {
 /// Initialize the Prometheus metrics exporter.
 ///
 /// Starts an HTTP server that exposes metrics at `/metrics`.
+/// Configures histogram buckets aligned with SLI targets for latency tracking.
 fn init_metrics_exporter(addr: SocketAddr) -> Result<(), ServerError> {
-    let builder = PrometheusBuilder::new().with_http_listener(addr);
+    let builder = PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .set_buckets(&inferadb_ledger_raft::metrics::SLI_HISTOGRAM_BUCKETS)
+        .map_err(|e| {
+            ServerError::Server(Box::new(std::io::Error::other(format!(
+                "Failed to configure histogram buckets: {}",
+                e
+            ))))
+        })?;
 
     builder.install().map_err(|e| {
         ServerError::Server(Box::new(std::io::Error::other(format!(

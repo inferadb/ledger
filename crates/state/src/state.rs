@@ -9,7 +9,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use inferadb_ledger_store::{CompactionStats, Database, StorageBackend, tables};
+use inferadb_ledger_store::{CompactionStats, Database, DatabaseStats, StorageBackend, tables};
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
@@ -108,6 +108,18 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Create a new state layer backed by the given database.
     pub fn new(db: Arc<Database<B>>) -> Self {
         Self { db, vault_commitments: RwLock::new(HashMap::new()) }
+    }
+
+    /// Get database-level statistics for metrics collection.
+    pub fn database_stats(&self) -> DatabaseStats {
+        self.db.stats()
+    }
+
+    /// Get B-tree depths for all non-empty tables.
+    ///
+    /// Opens a read transaction internally to walk each table's B-tree.
+    pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
+        self.db.table_depths().context(StoreSnafu)
     }
 
     /// Execute a function with mutable access to a vault's commitment.

@@ -63,12 +63,14 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod circuit_breaker;
 mod client;
 mod config;
 mod connection;
 mod discovery;
 mod error;
 mod idempotency;
+mod metrics;
 pub mod mock;
 mod retry;
 pub mod server;
@@ -76,6 +78,7 @@ mod streaming;
 mod tracing;
 
 // Public API exports
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{
     BlockAnnouncement, BlockHeader, ChainProof, Direction, Entity, HealthCheckResult, HealthStatus,
     LedgerClient, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof,
@@ -91,6 +94,7 @@ pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{NamespaceId, VaultId};
+pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{
     DnsConfig, FileConfig, ResolvedServer, SelectorStats, ServerResolver, ServerSelector,

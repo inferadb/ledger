@@ -6,13 +6,15 @@
 //! write requests into single Raft proposals, improving throughput by reducing
 //! consensus round-trips.
 
-use std::{fmt::Write, sync::Arc};
+use std::{fmt::Write, sync::Arc, time::Duration};
 
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     NamespaceId, SetCondition, VaultId,
     audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
+    config::ValidationConfig,
+    validation,
 };
 use openraft::Raft;
 use tokio::sync::Mutex;
@@ -22,7 +24,8 @@ use uuid::Uuid;
 
 use crate::{
     IdempotencyCache,
-    batching::{BatchConfig, BatchWriter, BatchWriterHandle},
+    batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle},
+    error::classify_raft_error,
     log_storage::AppliedStateAccessor,
     metrics,
     proof::{self, ProofError},
@@ -35,6 +38,55 @@ use crate::{
     types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
 };
+
+/// Inject `x-request-id` and `x-trace-id` correlation metadata into a gRPC response.
+///
+/// Called on every successful response to propagate server-generated correlation IDs
+/// back to the SDK, where they are extracted and attached to `SdkError` variants.
+pub(crate) fn response_with_correlation<T>(
+    body: T,
+    request_id: &uuid::Uuid,
+    trace_id: &str,
+) -> Response<T> {
+    let mut response = Response::new(body);
+    if let Ok(val) = tonic::metadata::MetadataValue::try_from(&request_id.to_string()) {
+        response.metadata_mut().insert("x-request-id", val);
+    }
+    if let Ok(val) = tonic::metadata::MetadataValue::try_from(trace_id) {
+        response.metadata_mut().insert("x-trace-id", val);
+    }
+    response
+}
+
+/// Inject `x-request-id` and `x-trace-id` correlation metadata into a gRPC error `Status`.
+///
+/// Ensures that even error responses carry correlation IDs so the SDK can attach them
+/// to `SdkError::Rpc` and `SdkError::RateLimited` for debugging.
+pub(crate) fn status_with_correlation(
+    mut status: Status,
+    request_id: &uuid::Uuid,
+    trace_id: &str,
+) -> Status {
+    if let Ok(val) = tonic::metadata::MetadataValue::try_from(&request_id.to_string()) {
+        status.metadata_mut().insert("x-request-id", val);
+    }
+    if let Ok(val) = tonic::metadata::MetadataValue::try_from(trace_id) {
+        status.metadata_mut().insert("x-trace-id", val);
+    }
+    status
+}
+
+/// Classify a batch writer error into the appropriate `tonic::Status`.
+///
+/// `BatchError::RaftError` may contain leadership-related messages that
+/// should map to `UNAVAILABLE` (retryable) instead of `INTERNAL`.
+fn classify_batch_error(err: &BatchError) -> Status {
+    match err {
+        BatchError::RaftError(msg) => classify_raft_error(msg),
+        BatchError::Dropped => Status::unavailable("Batch writer dropped request"),
+        BatchError::Internal(msg) => Status::internal(format!("Batch error: {}", msg)),
+    }
+}
 
 /// Write service implementation.
 #[derive(bon::Builder)]
@@ -77,6 +129,14 @@ pub struct WriteServiceImpl {
     /// Hot key detector for identifying frequently accessed keys.
     #[builder(default)]
     hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    /// Input validation configuration for request field limits.
+    #[builder(default = Arc::new(ValidationConfig::default()))]
+    validation_config: Arc<ValidationConfig>,
+    /// Maximum time to wait for a Raft proposal to commit.
+    ///
+    /// If a gRPC deadline is shorter, the deadline takes precedence.
+    #[builder(default = Duration::from_secs(30))]
+    proposal_timeout: Duration,
 }
 
 #[allow(clippy::result_large_err)]
@@ -144,6 +204,8 @@ impl WriteServiceImpl {
             node_id: None,
             audit_logger: None,
             hot_key_detector: None,
+            validation_config: Arc::new(ValidationConfig::default()),
+            proposal_timeout: Duration::from_secs(30),
         };
 
         (service, run_future)
@@ -190,6 +252,80 @@ impl WriteServiceImpl {
     ) -> Self {
         self.hot_key_detector = Some(detector);
         self
+    }
+
+    /// Set input validation configuration for request field limits.
+    #[must_use]
+    pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
+        self.validation_config = config;
+        self
+    }
+
+    /// Set the maximum time to wait for a Raft proposal to commit.
+    #[must_use]
+    pub fn with_proposal_timeout(mut self, timeout: Duration) -> Self {
+        self.proposal_timeout = timeout;
+        self
+    }
+
+    /// Validate all operations in a proto operation list.
+    ///
+    /// Checks per-operation field limits (key/value size, character whitelist)
+    /// and aggregate limits (operations count, total payload size).
+    fn validate_operations(&self, operations: &[crate::proto::Operation]) -> Result<(), Status> {
+        let config = &self.validation_config;
+
+        validation::validate_operations_count(operations.len(), config)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let mut total_bytes: usize = 0;
+        for proto_op in operations {
+            let Some(ref op) = proto_op.op else {
+                return Err(Status::invalid_argument("Operation missing op field"));
+            };
+            match op {
+                crate::proto::operation::Op::SetEntity(se) => {
+                    validation::validate_key(&se.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_value(&se.value, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += se.key.len() + se.value.len();
+                },
+                crate::proto::operation::Op::DeleteEntity(de) => {
+                    validation::validate_key(&de.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += de.key.len();
+                },
+                crate::proto::operation::Op::ExpireEntity(ee) => {
+                    validation::validate_key(&ee.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += ee.key.len();
+                },
+                crate::proto::operation::Op::CreateRelationship(cr) => {
+                    validation::validate_relationship_string(&cr.resource, "resource", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&cr.relation, "relation", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&cr.subject, "subject", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += cr.resource.len() + cr.relation.len() + cr.subject.len();
+                },
+                crate::proto::operation::Op::DeleteRelationship(dr) => {
+                    validation::validate_relationship_string(&dr.resource, "resource", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&dr.relation, "relation", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&dr.subject, "subject", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += dr.resource.len() + dr.relation.len() + dr.subject.len();
+                },
+            }
+        }
+
+        validation::validate_batch_payload_bytes(total_bytes, config)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        Ok(())
     }
 
     /// Emit an audit event and record the corresponding Prometheus metric.
@@ -574,6 +710,9 @@ impl WriteService for WriteServiceImpl {
         &self,
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -617,6 +756,9 @@ impl WriteService for WriteServiceImpl {
                 Status::invalid_argument("idempotency_key must be exactly 16 bytes")
             })?;
 
+        // Validate all operations before any processing
+        self.validate_operations(&req.operations)?;
+
         // Compute request hash for payload comparison (detects key reuse with different payload)
         let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
 
@@ -649,9 +791,13 @@ impl WriteService for WriteServiceImpl {
                 ctx.set_block_height(cached.block_height);
                 metrics::record_idempotency_hit();
                 metrics::record_write(true, ctx.elapsed_secs());
-                return Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Success(cached)),
-                }));
+                return Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Success(cached)),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ));
             },
             IdempotencyCheckResult::KeyReused => {
                 ctx.set_error(
@@ -659,20 +805,24 @@ impl WriteService for WriteServiceImpl {
                     "Idempotency key reused with different payload",
                 );
                 metrics::record_write(false, ctx.elapsed_secs());
-                return Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Error(WriteError {
-                        code: WriteErrorCode::IdempotencyKeyReused.into(),
-                        key: String::new(),
-                        current_version: None,
-                        current_value: None,
-                        message:
-                            "Idempotency key was already used with a different request payload"
-                                .to_string(),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        assigned_sequence: None,
-                    })),
-                }));
+                return Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Error(WriteError {
+                            code: WriteErrorCode::IdempotencyKeyReused.into(),
+                            key: String::new(),
+                            current_version: None,
+                            current_value: None,
+                            message:
+                                "Idempotency key was already used with a different request payload"
+                                    .to_string(),
+                            committed_tx_id: None,
+                            committed_block_height: None,
+                            assigned_sequence: None,
+                        })),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ));
             },
             IdempotencyCheckResult::NewRequest => {
                 // Proceed with new request
@@ -692,7 +842,7 @@ impl WriteService for WriteServiceImpl {
                 Some(&trace_ctx.trace_id),
                 Some(req.operations.len()),
             ));
-            return Err(status);
+            return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
 
         // Track key access frequency for hot key detection.
@@ -704,6 +854,10 @@ impl WriteService for WriteServiceImpl {
         let ledger_request =
             self.operations_to_request(namespace_id, Some(vault_id), &req.operations, &client_id)?;
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         // Submit to Raft via batch writer (if enabled) or direct proposal
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
@@ -711,33 +865,79 @@ impl WriteService for WriteServiceImpl {
             ctx.set_batch_info(true, 1);
             // Submit through batch writer for coalesced proposals
             let rx = batch_handle.submit(ledger_request);
-            match rx.await {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(batch_err)) => {
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(resp))) => resp,
+                Ok(Ok(Err(batch_err))) => {
                     ctx.end_raft_timer();
                     ctx.set_error("BatchError", &batch_err.to_string());
                     metrics::record_write(false, ctx.elapsed_secs());
-                    return Err(Status::internal(format!("Batch error: {}", batch_err)));
+                    return Err(status_with_correlation(
+                        classify_batch_error(&batch_err),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
                 },
-                Err(_recv_err) => {
+                Ok(Err(_recv_err)) => {
                     ctx.end_raft_timer();
                     ctx.set_error("BatchChannelClosed", "Batch writer channel closed");
                     metrics::record_write(false, ctx.elapsed_secs());
-                    return Err(Status::internal("Batch writer unavailable"));
+                    return Err(status_with_correlation(
+                        Status::internal("Batch writer unavailable"),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
+                },
+                Err(_elapsed) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                    metrics::record_write(false, ctx.elapsed_secs());
+                    metrics::record_raft_proposal_timeout();
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
                 },
             }
         } else {
             ctx.set_batch_info(false, 1);
             // Fallback: direct Raft proposal with mutex serialization
             let _guard = self.proposal_mutex.lock().await;
-            let result = self.raft.client_write(ledger_request).await.map_err(|e| {
-                ctx.end_raft_timer();
-                ctx.set_error("RaftError", &e.to_string());
-                metrics::record_write(false, ctx.elapsed_secs());
-                Status::internal(format!("Raft error: {}", e))
-            })?;
-            drop(_guard);
-            result.data
+            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => {
+                    drop(_guard);
+                    result.data
+                },
+                Ok(Err(e)) => {
+                    drop(_guard);
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    metrics::record_write(false, ctx.elapsed_secs());
+                    return Err(status_with_correlation(
+                        classify_raft_error(&e.to_string()),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
+                },
+                Err(_elapsed) => {
+                    drop(_guard);
+                    ctx.end_raft_timer();
+                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                    metrics::record_write(false, ctx.elapsed_secs());
+                    metrics::record_raft_proposal_timeout();
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
+                },
+            }
         };
         ctx.end_raft_timer();
 
@@ -790,9 +990,13 @@ impl WriteService for WriteServiceImpl {
                     Some(req.operations.len()),
                 ));
 
-                Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Success(success)),
-                }))
+                Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Success(success)),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
@@ -810,18 +1014,22 @@ impl WriteService for WriteServiceImpl {
                     Some(req.operations.len()),
                 ));
 
-                Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Error(WriteError {
-                        code: WriteErrorCode::Unspecified.into(),
-                        key: String::new(),
-                        current_version: None,
-                        current_value: None,
-                        message,
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        assigned_sequence: None,
-                    })),
-                }))
+                Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Error(WriteError {
+                            code: WriteErrorCode::Unspecified.into(),
+                            key: String::new(),
+                            current_version: None,
+                            current_value: None,
+                            message,
+                            committed_tx_id: None,
+                            committed_block_height: None,
+                            assigned_sequence: None,
+                        })),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
             LedgerResponse::PreconditionFailed {
                 key,
@@ -851,23 +1059,31 @@ impl WriteService for WriteServiceImpl {
                     Some(req.operations.len()),
                 ));
 
-                Ok(Response::new(WriteResponse {
-                    result: Some(crate::proto::write_response::Result::Error(WriteError {
-                        code: error_code.into(),
-                        key,
-                        current_version,
-                        current_value,
-                        message: "Precondition failed".to_string(),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        assigned_sequence: None,
-                    })),
-                }))
+                Ok(response_with_correlation(
+                    WriteResponse {
+                        result: Some(crate::proto::write_response::Result::Error(WriteError {
+                            code: error_code.into(),
+                            key,
+                            current_version,
+                            current_value,
+                            message: "Precondition failed".to_string(),
+                            committed_tx_id: None,
+                            committed_block_height: None,
+                            assigned_sequence: None,
+                        })),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
                 metrics::record_write(false, ctx.elapsed_secs());
-                Err(Status::internal("Unexpected response type"))
+                Err(status_with_correlation(
+                    Status::internal("Unexpected response type"),
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
         }
     }
@@ -876,6 +1092,9 @@ impl WriteService for WriteServiceImpl {
         &self,
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -927,6 +1146,9 @@ impl WriteService for WriteServiceImpl {
         let all_operations: Vec<crate::proto::Operation> =
             req.operations.iter().flat_map(|group| group.operations.clone()).collect();
 
+        // Validate all operations before any processing
+        self.validate_operations(&all_operations)?;
+
         let batch_size = all_operations.len();
 
         // Compute request hash for payload comparison (detects key reuse with different payload)
@@ -958,17 +1180,21 @@ impl WriteService for WriteServiceImpl {
                 ctx.set_block_height(cached.block_height);
                 metrics::record_idempotency_hit();
                 metrics::record_batch_write(true, 0, ctx.elapsed_secs());
-                return Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Success(
-                        BatchWriteSuccess {
-                            tx_id: cached.tx_id,
-                            block_height: cached.block_height,
-                            block_header: cached.block_header,
-                            tx_proof: cached.tx_proof,
-                            assigned_sequence: cached.assigned_sequence,
-                        },
-                    )),
-                }));
+                return Ok(response_with_correlation(
+                    BatchWriteResponse {
+                        result: Some(crate::proto::batch_write_response::Result::Success(
+                            BatchWriteSuccess {
+                                tx_id: cached.tx_id,
+                                block_height: cached.block_height,
+                                block_header: cached.block_header,
+                                tx_proof: cached.tx_proof,
+                                assigned_sequence: cached.assigned_sequence,
+                            },
+                        )),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ));
             },
             IdempotencyCheckResult::KeyReused => {
                 ctx.set_error(
@@ -976,7 +1202,7 @@ impl WriteService for WriteServiceImpl {
                     "Idempotency key reused with different payload",
                 );
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-                return Ok(Response::new(BatchWriteResponse {
+                return Ok(response_with_correlation(BatchWriteResponse {
                     result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
                         code: WriteErrorCode::IdempotencyKeyReused.into(),
                         key: String::new(),
@@ -989,7 +1215,7 @@ impl WriteService for WriteServiceImpl {
                         committed_block_height: None,
                         assigned_sequence: None,
                     })),
-                }));
+                }, &ctx.request_id(), &trace_ctx.trace_id));
             },
             IdempotencyCheckResult::NewRequest => {
                 // Proceed with new request
@@ -1009,7 +1235,7 @@ impl WriteService for WriteServiceImpl {
                 Some(&trace_ctx.trace_id),
                 Some(batch_size),
             ));
-            return Err(status);
+            return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
 
         // Track key access frequency for hot key detection.
@@ -1021,21 +1247,48 @@ impl WriteService for WriteServiceImpl {
         let ledger_request =
             self.operations_to_request(namespace_id, Some(vault_id), &all_operations, &client_id)?;
 
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
         // Submit to Raft (serialized to prevent concurrent proposal race condition)
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
         let _guard = self.proposal_mutex.lock().await;
-        let result = self.raft.client_write(ledger_request).await.map_err(|e| {
-            ctx.end_raft_timer();
-            ctx.set_error("RaftError", &e.to_string());
-            metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-            Status::internal(format!("Raft error: {}", e))
-        })?;
-        drop(_guard);
+        let response =
+            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
+                Ok(Ok(result)) => {
+                    drop(_guard);
+                    result.data
+                },
+                Ok(Err(e)) => {
+                    drop(_guard);
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+                    return Err(status_with_correlation(
+                        classify_raft_error(&e.to_string()),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
+                },
+                Err(_elapsed) => {
+                    drop(_guard);
+                    ctx.end_raft_timer();
+                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                    metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+                    metrics::record_raft_proposal_timeout();
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
+                },
+            };
         ctx.end_raft_timer();
-
-        // Extract response
-        let response = result.data;
 
         match response {
             LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
@@ -1086,17 +1339,21 @@ impl WriteService for WriteServiceImpl {
                     Some(batch_size),
                 ));
 
-                Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Success(
-                        BatchWriteSuccess {
-                            tx_id: success.tx_id,
-                            block_height: success.block_height,
-                            block_header: success.block_header,
-                            tx_proof: success.tx_proof,
-                            assigned_sequence: success.assigned_sequence,
-                        },
-                    )),
-                }))
+                Ok(response_with_correlation(
+                    BatchWriteResponse {
+                        result: Some(crate::proto::batch_write_response::Result::Success(
+                            BatchWriteSuccess {
+                                tx_id: success.tx_id,
+                                block_height: success.block_height,
+                                block_header: success.block_header,
+                                tx_proof: success.tx_proof,
+                                assigned_sequence: success.assigned_sequence,
+                            },
+                        )),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
@@ -1114,18 +1371,24 @@ impl WriteService for WriteServiceImpl {
                     Some(batch_size),
                 ));
 
-                Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
-                        code: WriteErrorCode::Unspecified.into(),
-                        key: String::new(),
-                        current_version: None,
-                        current_value: None,
-                        message,
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        assigned_sequence: None,
-                    })),
-                }))
+                Ok(response_with_correlation(
+                    BatchWriteResponse {
+                        result: Some(crate::proto::batch_write_response::Result::Error(
+                            WriteError {
+                                code: WriteErrorCode::Unspecified.into(),
+                                key: String::new(),
+                                current_version: None,
+                                current_value: None,
+                                message,
+                                committed_tx_id: None,
+                                committed_block_height: None,
+                                assigned_sequence: None,
+                            },
+                        )),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
             LedgerResponse::PreconditionFailed {
                 key,
@@ -1155,24 +1418,278 @@ impl WriteService for WriteServiceImpl {
                     Some(batch_size),
                 ));
 
-                Ok(Response::new(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
-                        code: error_code.into(),
-                        key,
-                        current_version,
-                        current_value,
-                        message: "Precondition failed".to_string(),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        assigned_sequence: None,
-                    })),
-                }))
+                Ok(response_with_correlation(
+                    BatchWriteResponse {
+                        result: Some(crate::proto::batch_write_response::Result::Error(
+                            WriteError {
+                                code: error_code.into(),
+                                key,
+                                current_version,
+                                current_value,
+                                message: "Precondition failed".to_string(),
+                                committed_tx_id: None,
+                                committed_block_height: None,
+                                assigned_sequence: None,
+                            },
+                        )),
+                    },
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-                Err(Status::internal("Unexpected response type"))
+                Err(status_with_correlation(
+                    Status::internal("Unexpected response type"),
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ))
             },
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
+mod tests {
+    use inferadb_ledger_types::{config::ValidationConfig, validation};
+    use tonic::Status;
+
+    use crate::proto;
+
+    /// Helper: run the same validate-and-map-to-Status logic the service uses.
+    fn validate_proto_operations(
+        operations: &[proto::Operation],
+        config: &ValidationConfig,
+    ) -> Result<(), Status> {
+        validation::validate_operations_count(operations.len(), config)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let mut total_bytes: usize = 0;
+        for proto_op in operations {
+            let Some(ref op) = proto_op.op else {
+                return Err(Status::invalid_argument("Operation missing op field"));
+            };
+            match op {
+                proto::operation::Op::SetEntity(se) => {
+                    validation::validate_key(&se.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_value(&se.value, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += se.key.len() + se.value.len();
+                },
+                proto::operation::Op::DeleteEntity(de) => {
+                    validation::validate_key(&de.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += de.key.len();
+                },
+                proto::operation::Op::ExpireEntity(ee) => {
+                    validation::validate_key(&ee.key, config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += ee.key.len();
+                },
+                proto::operation::Op::CreateRelationship(cr) => {
+                    validation::validate_relationship_string(&cr.resource, "resource", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&cr.relation, "relation", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&cr.subject, "subject", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += cr.resource.len() + cr.relation.len() + cr.subject.len();
+                },
+                proto::operation::Op::DeleteRelationship(dr) => {
+                    validation::validate_relationship_string(&dr.resource, "resource", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&dr.relation, "relation", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    validation::validate_relationship_string(&dr.subject, "subject", config)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    total_bytes += dr.resource.len() + dr.relation.len() + dr.subject.len();
+                },
+            }
+        }
+
+        validation::validate_batch_payload_bytes(total_bytes, config)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn make_set_entity(key: &str, value: &[u8]) -> proto::Operation {
+        proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: key.to_string(),
+                value: value.to_vec(),
+                expires_at: None,
+                condition: None,
+            })),
+        }
+    }
+
+    fn make_delete_entity(key: &str) -> proto::Operation {
+        proto::Operation {
+            op: Some(proto::operation::Op::DeleteEntity(proto::DeleteEntity {
+                key: key.to_string(),
+            })),
+        }
+    }
+
+    fn make_create_relationship(resource: &str, relation: &str, subject: &str) -> proto::Operation {
+        proto::Operation {
+            op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                resource: resource.to_string(),
+                relation: relation.to_string(),
+                subject: subject.to_string(),
+            })),
+        }
+    }
+
+    // =========================================================================
+    // Validation → gRPC Status mapping tests
+    // =========================================================================
+
+    #[test]
+    fn test_valid_set_entity_passes_validation() {
+        let config = ValidationConfig::default();
+        let ops = vec![make_set_entity("user:123", b"data")];
+        assert!(validate_proto_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn test_valid_delete_entity_passes_validation() {
+        let config = ValidationConfig::default();
+        let ops = vec![make_delete_entity("user:123")];
+        assert!(validate_proto_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn test_valid_relationship_passes_validation() {
+        let config = ValidationConfig::default();
+        let ops = vec![make_create_relationship("doc:456", "viewer", "user:123")];
+        assert!(validate_proto_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn test_empty_key_returns_invalid_argument() {
+        let config = ValidationConfig::default();
+        let ops = vec![make_set_entity("", b"data")];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("key"), "Error should mention key: {}", err.message());
+    }
+
+    #[test]
+    fn test_key_with_invalid_chars_returns_invalid_argument() {
+        let config = ValidationConfig::default();
+        let ops = vec![make_set_entity("user 123", b"data")];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_key_exceeding_max_size_returns_invalid_argument() {
+        let config = ValidationConfig::builder().max_key_bytes(10).build().unwrap();
+        let ops = vec![make_set_entity(&"a".repeat(11), b"data")];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("key"), "Error should mention key: {}", err.message());
+    }
+
+    #[test]
+    fn test_value_exceeding_max_size_returns_invalid_argument() {
+        let config = ValidationConfig::builder().max_value_bytes(4).build().unwrap();
+        let ops = vec![make_set_entity("key", &[0u8; 5])];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("value"), "Error should mention value: {}", err.message());
+    }
+
+    #[test]
+    fn test_too_many_operations_returns_invalid_argument() {
+        let config = ValidationConfig::builder().max_operations_per_write(2).build().unwrap();
+        let ops = vec![
+            make_set_entity("a", b"1"),
+            make_set_entity("b", b"2"),
+            make_set_entity("c", b"3"),
+        ];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message().contains("operations"),
+            "Error should mention operations: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_zero_operations_returns_invalid_argument() {
+        let config = ValidationConfig::default();
+        let ops: Vec<proto::Operation> = vec![];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_payload_exceeding_max_bytes_returns_invalid_argument() {
+        let config = ValidationConfig::builder().max_batch_payload_bytes(10).build().unwrap();
+        let ops = vec![make_set_entity("key", &[0u8; 11])];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message().contains("payload"),
+            "Error should mention payload: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_missing_op_field_returns_invalid_argument() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation { op: None }];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message().contains("missing"),
+            "Error should mention missing: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_relationship_invalid_chars_returns_invalid_argument() {
+        let config = ValidationConfig::default();
+        let ops = vec![make_create_relationship("doc 456", "viewer", "user:123")];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_relationship_empty_field_returns_invalid_argument() {
+        let config = ValidationConfig::default();
+        let ops = vec![make_create_relationship("doc:456", "", "user:123")];
+        let err = validate_proto_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_key_at_exact_limit_passes() {
+        let config = ValidationConfig::builder().max_key_bytes(5).build().unwrap();
+        let ops = vec![make_set_entity("abcde", b"v")];
+        assert!(validate_proto_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn test_value_at_exact_limit_passes() {
+        let config = ValidationConfig::builder().max_value_bytes(5).build().unwrap();
+        let ops = vec![make_set_entity("k", &[0u8; 5])];
+        assert!(validate_proto_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn test_operations_at_exact_limit_passes() {
+        let config = ValidationConfig::builder().max_operations_per_write(2).build().unwrap();
+        let ops = vec![make_set_entity("a", b"1"), make_set_entity("b", b"2")];
+        assert!(validate_proto_operations(&ops, &config).is_ok());
     }
 }

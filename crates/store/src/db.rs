@@ -29,7 +29,10 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use arc_swap::ArcSwap;
@@ -104,6 +107,8 @@ pub struct Database<B: StorageBackend> {
     config: DatabaseConfig,
     /// Write lock to ensure only one write transaction at a time.
     write_lock: std::sync::Mutex<()>,
+    /// Total B-tree page splits since database creation.
+    page_splits: AtomicU64,
 }
 
 impl Database<FileBackend> {
@@ -198,6 +203,7 @@ impl<B: StorageBackend> Database<B> {
             pending_frees: Mutex::new(PendingFrees::new()),
             config,
             write_lock: std::sync::Mutex::new(()),
+            page_splits: AtomicU64::new(0),
         };
 
         // Restore free list: use persisted list if available, otherwise rebuild
@@ -587,7 +593,24 @@ impl<B: StorageBackend> Database<B> {
             cached_pages: cache_stats.size,
             dirty_pages: cache_stats.dirty_count,
             free_pages: allocator.free_page_count(),
+            cache_hits: cache_stats.hits,
+            cache_misses: cache_stats.misses,
+            page_splits: self.page_splits.load(Ordering::Relaxed),
         }
+    }
+
+    /// Record a B-tree page split event.
+    pub fn record_page_split(&self) {
+        self.page_splits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get B-tree depths for all non-empty tables.
+    ///
+    /// Opens a read transaction internally to walk each table's B-tree.
+    /// Returns `(table_name, depth)` pairs.
+    pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
+        let txn = self.read()?;
+        txn.table_depths()
     }
 
     /// Read a page from cache or backend.
@@ -682,6 +705,12 @@ pub struct DatabaseStats {
     pub dirty_pages: usize,
     /// Free pages available for reuse.
     pub free_pages: usize,
+    /// Total page cache hits since creation.
+    pub cache_hits: u64,
+    /// Total page cache misses since creation.
+    pub cache_misses: u64,
+    /// Total B-tree page splits since creation.
+    pub page_splits: u64,
 }
 
 /// A read-only transaction.
@@ -784,6 +813,27 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         });
         TableIterator::with_range(self.db, root, &self.page_cache, start_bytes, end_bytes)
     }
+
+    /// Get the B-tree depth for each table.
+    ///
+    /// Returns a list of `(table_name, depth)` pairs for all tables with
+    /// non-empty roots. Empty tables (root == 0) are skipped.
+    pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
+        let mut depths = Vec::new();
+
+        for table_id in TableId::all() {
+            let root = self.snapshot.table_roots[table_id as u8 as usize];
+            if root == 0 {
+                continue;
+            }
+            let provider = CachingReadPageProvider { db: self.db, page_cache: &self.page_cache };
+            let btree = BTree::new(root, provider);
+            let depth = btree.depth()?;
+            depths.push((table_id.name(), depth));
+        }
+
+        Ok(depths)
+    }
 }
 
 impl<B: StorageBackend> Drop for ReadTransaction<'_, B> {
@@ -868,6 +918,12 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
 
         let mut btree = BTree::new(root, provider);
         btree.insert(&key_bytes, &value_bytes)?;
+
+        // Track page splits for metrics
+        let splits = btree.split_count();
+        if splits > 0 {
+            self.db.page_splits.fetch_add(splits, Ordering::Relaxed);
+        }
 
         // Update root if it changed
         self.table_roots[T::ID as usize] = btree.root_page();

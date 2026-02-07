@@ -55,6 +55,9 @@ pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
     /// Maximum entities per cycle.
     #[builder(default = MAX_BATCH_SIZE)]
     max_batch_size: usize,
+    /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
+    #[builder(default)]
+    watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
@@ -187,6 +190,15 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
             loop {
                 ticker.tick().await;
+                if let Some(ref handle) = self.watchdog_handle {
+                    handle.store(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
                 self.run_cycle().await;
             }
         })

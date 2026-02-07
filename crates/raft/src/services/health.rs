@@ -1,8 +1,13 @@
 //! Health check service implementation.
 //!
-//! Provides health status for the node and individual vaults.
+//! Provides health status for the node and individual vaults, with
+//! dependency validation for disk writability, peer reachability,
+//! and Raft log lag detection.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -10,6 +15,7 @@ use openraft::Raft;
 use tonic::{Request, Response, Status};
 
 use crate::{
+    dependency_health::DependencyHealthChecker,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     proto::{
         HealthCheckRequest, HealthCheckResponse, HealthStatus, health_service_server::HealthService,
@@ -20,9 +26,12 @@ use crate::{
 /// Health service implementation.
 ///
 /// Provides three-probe health checking for Kubernetes orchestration:
-/// - **Startup**: passes once initialization is complete
+/// - **Startup**: passes once initialization is complete and data directory is valid
 /// - **Liveness**: passes when the event loop is responsive
-/// - **Readiness**: passes when the node can serve traffic
+/// - **Readiness**: passes when the node can serve traffic and dependencies are healthy
+///
+/// Dependency checks (disk, peer, Raft lag) are cached with a configurable TTL
+/// to prevent I/O storms from aggressive probe intervals.
 pub struct HealthServiceImpl {
     /// The Raft instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -32,6 +41,10 @@ pub struct HealthServiceImpl {
     applied_state: AppliedStateAccessor,
     /// Shared node health state for lifecycle probes.
     health_state: crate::graceful_shutdown::HealthState,
+    /// Last observed Raft term for leader election detection.
+    last_observed_term: AtomicU64,
+    /// Dependency health checker for disk/peer/raft-lag validation.
+    dependency_checker: Option<DependencyHealthChecker>,
 }
 
 impl HealthServiceImpl {
@@ -42,7 +55,21 @@ impl HealthServiceImpl {
         applied_state: AppliedStateAccessor,
         health_state: crate::graceful_shutdown::HealthState,
     ) -> Self {
-        Self { raft, state, applied_state, health_state }
+        Self {
+            raft,
+            state,
+            applied_state,
+            health_state,
+            last_observed_term: AtomicU64::new(0),
+            dependency_checker: None,
+        }
+    }
+
+    /// Attaches a dependency health checker for enhanced probe validation.
+    #[must_use]
+    pub fn with_dependency_checker(mut self, checker: DependencyHealthChecker) -> Self {
+        self.dependency_checker = Some(checker);
+        self
     }
 }
 
@@ -120,6 +147,19 @@ impl HealthService for HealthServiceImpl {
         let metrics = self.raft.metrics().borrow().clone();
         let mut details = std::collections::HashMap::new();
 
+        // Emit SLI metrics: quorum status and leader election detection
+        let has_quorum = metrics.current_leader.is_some();
+        crate::metrics::set_cluster_quorum_status(has_quorum);
+
+        // Detect leader elections by observing Raft term changes
+        let prev_term = self.last_observed_term.swap(metrics.current_term, Ordering::Relaxed);
+        if prev_term > 0 && metrics.current_term > prev_term {
+            // Term increased — a leader election occurred (possibly multiple)
+            for _ in 0..(metrics.current_term - prev_term) {
+                crate::metrics::record_leader_election();
+            }
+        }
+
         // Add Raft metrics to details
         details.insert("current_term".to_string(), metrics.current_term.to_string());
         if let Some(leader) = metrics.current_leader {
@@ -136,17 +176,51 @@ impl HealthService for HealthServiceImpl {
         details.insert("readiness".to_string(), self.health_state.readiness_check().to_string());
         details.insert("phase".to_string(), format!("{:?}", self.health_state.phase()));
 
-        // Determine health status based on node phase and Raft state
+        // Run dependency health checks if configured
+        let deps_healthy = if let Some(checker) = &self.dependency_checker {
+            let dep_health = checker.check_all().await;
+            for (name, result) in &dep_health.details {
+                details.insert(
+                    format!("dep:{name}"),
+                    if result.healthy {
+                        format!("ok: {}", result.detail)
+                    } else {
+                        format!("FAIL: {}", result.detail)
+                    },
+                );
+            }
+            dep_health.all_healthy
+        } else {
+            true
+        };
+
+        // Determine health status based on node phase, Raft state, and dependencies
         let phase = self.health_state.phase();
         let (status, message) = match phase {
             crate::graceful_shutdown::NodePhase::Starting => {
+                // Run startup validation if checker is available
+                if let Some(checker) = &self.dependency_checker {
+                    let startup_health = checker.check_startup();
+                    for (name, result) in &startup_health.details {
+                        details.insert(
+                            format!("startup:{name}"),
+                            if result.healthy {
+                                format!("ok: {}", result.detail)
+                            } else {
+                                format!("FAIL: {}", result.detail)
+                            },
+                        );
+                    }
+                }
                 (HealthStatus::Degraded, "Node is starting up")
             },
             crate::graceful_shutdown::NodePhase::ShuttingDown => {
                 (HealthStatus::Unavailable, "Node is shutting down")
             },
             crate::graceful_shutdown::NodePhase::Ready => {
-                if metrics.current_leader.is_some() {
+                if !deps_healthy {
+                    (HealthStatus::Degraded, "Dependencies unhealthy")
+                } else if metrics.current_leader.is_some() {
                     (HealthStatus::Healthy, "Node is healthy and has a leader")
                 } else {
                     (HealthStatus::Degraded, "No leader elected")

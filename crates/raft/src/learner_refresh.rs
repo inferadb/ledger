@@ -112,6 +112,9 @@ pub struct LearnerRefreshJob {
     /// Configuration.
     #[builder(default)]
     config: LearnerRefreshConfig,
+    /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
+    #[builder(default)]
+    watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl LearnerRefreshJob {
@@ -259,6 +262,15 @@ impl LearnerRefreshJob {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    if let Some(ref handle) = self.watchdog_handle {
+                        handle.store(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     // Only refresh if this node is a learner
                     if !self.is_learner() {
                         debug!("Node is a voter, skipping learner refresh");

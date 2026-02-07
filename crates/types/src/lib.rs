@@ -18,6 +18,7 @@ pub mod error;
 pub mod hash;
 pub mod merkle;
 pub mod types;
+pub mod validation;
 
 pub use audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource};
 pub use codec::{CodecError, decode, encode};

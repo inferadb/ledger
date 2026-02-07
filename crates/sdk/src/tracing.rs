@@ -31,6 +31,8 @@
 //! # }
 //! ```
 
+use std::time::Duration;
+
 use inferadb_ledger_raft::trace_context::{TraceContext, inject_into_metadata};
 use opentelemetry::trace::TraceContextExt;
 use tonic::service::Interceptor;
@@ -73,12 +75,24 @@ impl TraceConfig {
 #[derive(Debug, Clone)]
 pub struct TraceContextInterceptor {
     enabled: bool,
+    /// Request timeout to propagate as `grpc-timeout` header.
+    request_timeout: Option<Duration>,
 }
 
 impl TraceContextInterceptor {
-    /// Create a new interceptor from trace configuration.
+    /// Create a new interceptor from trace configuration (without timeout).
+    #[cfg(test)]
     pub fn new(config: &TraceConfig) -> Self {
-        Self { enabled: config.enabled }
+        Self { enabled: config.enabled, request_timeout: None }
+    }
+
+    /// Create a new interceptor with request timeout propagation.
+    ///
+    /// When set, every outgoing request will include a `grpc-timeout` header
+    /// so the server can extract the client's deadline and avoid processing
+    /// requests the client has already abandoned.
+    pub fn with_timeout(config: &TraceConfig, timeout: Duration) -> Self {
+        Self { enabled: config.enabled, request_timeout: Some(timeout) }
     }
 }
 
@@ -87,10 +101,22 @@ impl Interceptor for TraceContextInterceptor {
         &mut self,
         mut request: tonic::Request<()>,
     ) -> Result<tonic::Request<()>, tonic::Status> {
+        // Propagate request timeout as grpc-timeout header so servers can
+        // extract the client's deadline and avoid processing abandoned requests.
+        if let Some(timeout) = self.request_timeout {
+            request.set_timeout(timeout);
+        }
+
         // Always inject SDK version for canonical log line correlation
         if let Ok(val) = SDK_VERSION.parse() {
             request.metadata_mut().insert("x-sdk-version", val);
         }
+
+        // Always inject API version for server-side version negotiation
+        request.metadata_mut().insert(
+            API_VERSION_HEADER,
+            tonic::metadata::MetadataValue::from_static(API_VERSION_VALUE),
+        );
 
         if !self.enabled {
             return Ok(request);
@@ -107,6 +133,12 @@ impl Interceptor for TraceContextInterceptor {
 /// `x-sdk-version` metadata header. Enables server-side canonical log lines
 /// to correlate with specific SDK versions.
 const SDK_VERSION: &str = concat!("rust-sdk/", env!("CARGO_PKG_VERSION"));
+
+/// Header name for API version negotiation.
+const API_VERSION_HEADER: &str = "x-ledger-api-version";
+
+/// API version sent by this SDK. Must match server's supported range.
+const API_VERSION_VALUE: &str = "1";
 
 /// Extract trace context from the current tracing span, if OpenTelemetry context is present.
 ///
@@ -167,6 +199,34 @@ mod tests {
     }
 
     #[test]
+    fn test_interceptor_always_injects_api_version() {
+        let config = TraceConfig::default();
+        let mut interceptor = TraceContextInterceptor::new(&config);
+
+        let request = tonic::Request::new(());
+        let result = interceptor.call(request).expect("should succeed");
+
+        let version = result
+            .metadata()
+            .get(API_VERSION_HEADER)
+            .expect("x-ledger-api-version should be present");
+        assert_eq!(version.to_str().unwrap(), API_VERSION_VALUE);
+    }
+
+    #[test]
+    fn test_interceptor_always_injects_sdk_version() {
+        let config = TraceConfig::default();
+        let mut interceptor = TraceContextInterceptor::new(&config);
+
+        let request = tonic::Request::new(());
+        let result = interceptor.call(request).expect("should succeed");
+
+        let version =
+            result.metadata().get("x-sdk-version").expect("x-sdk-version should be present");
+        assert!(version.to_str().unwrap().starts_with("rust-sdk/"));
+    }
+
+    #[test]
     fn test_interceptor_injects_traceparent_when_enabled() {
         let config = TraceConfig::enabled();
         let mut interceptor = TraceContextInterceptor::new(&config);
@@ -208,5 +268,32 @@ mod tests {
         assert_eq!(parts[1].len(), 32); // trace_id (16 bytes = 32 hex)
         assert_eq!(parts[2].len(), 16); // span_id (8 bytes = 16 hex)
         assert!(parts[3] == "01" || parts[3] == "00", "flags should be 00 or 01");
+    }
+
+    #[test]
+    fn test_interceptor_injects_grpc_timeout_when_configured() {
+        let config = TraceConfig::default();
+        let mut interceptor =
+            TraceContextInterceptor::with_timeout(&config, Duration::from_secs(30));
+
+        let request = tonic::Request::new(());
+        let result = interceptor.call(request).expect("should succeed");
+
+        let timeout =
+            result.metadata().get("grpc-timeout").expect("grpc-timeout should be present");
+        // tonic encodes 30 seconds as "30000000u" (microseconds)
+        assert_eq!(timeout.to_str().unwrap(), "30000000u");
+    }
+
+    #[test]
+    fn test_interceptor_no_grpc_timeout_without_config() {
+        let config = TraceConfig::default();
+        let mut interceptor = TraceContextInterceptor::new(&config);
+
+        let request = tonic::Request::new(());
+        let result = interceptor.call(request).expect("should succeed");
+
+        // No grpc-timeout header when not configured
+        assert!(result.metadata().get("grpc-timeout").is_none());
     }
 }

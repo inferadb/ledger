@@ -32,6 +32,7 @@ const VERIFIED_READS_TOTAL: &str = "ledger_verified_reads_total";
 
 // Raft consensus metrics
 const RAFT_PROPOSALS_TOTAL: &str = "inferadb_ledger_raft_proposals_total";
+const RAFT_PROPOSAL_TIMEOUTS_TOTAL: &str = "inferadb_ledger_raft_proposal_timeouts_total";
 const RAFT_PROPOSALS_PENDING: &str = "inferadb_ledger_raft_proposals_pending";
 const RAFT_APPLY_LATENCY: &str = "inferadb_ledger_raft_apply_latency_seconds";
 const RAFT_COMMIT_INDEX: &str = "inferadb_ledger_raft_commit_index";
@@ -153,6 +154,12 @@ pub fn record_verified_read(success: bool, latency_secs: f64) {
 #[inline]
 pub fn record_raft_proposal() {
     counter!(RAFT_PROPOSALS_TOTAL).increment(1);
+}
+
+/// Record a Raft proposal that timed out before committing.
+#[inline]
+pub fn record_raft_proposal_timeout() {
+    counter!(RAFT_PROPOSAL_TIMEOUTS_TOTAL).increment(1);
 }
 
 /// Set the number of pending Raft proposals.
@@ -285,12 +292,23 @@ pub fn decrement_connections() {
 }
 
 /// Record a gRPC request.
+///
+/// The `error_class` label classifies errors by cause for error-budget tracking:
+/// `"timeout"`, `"unavailable"`, `"permission_denied"`, `"validation"`, `"internal"`,
+/// or `"none"` for successful requests.
 #[inline]
-pub fn record_grpc_request(service: &str, method: &str, status: &str, latency_secs: f64) {
+pub fn record_grpc_request(
+    service: &str,
+    method: &str,
+    status: &str,
+    error_class: &str,
+    latency_secs: f64,
+) {
     counter!(GRPC_REQUESTS_TOTAL,
         "service" => service.to_string(),
         "method" => method.to_string(),
-        "status" => status.to_string()
+        "status" => status.to_string(),
+        "error_class" => error_class.to_string()
     )
     .increment(1);
     histogram!(GRPC_REQUEST_LATENCY,
@@ -298,6 +316,26 @@ pub fn record_grpc_request(service: &str, method: &str, status: &str, latency_se
         "method" => method.to_string()
     )
     .record(latency_secs);
+}
+
+/// Classify a gRPC status code into an error class label for metrics.
+///
+/// Returns one of: `"none"`, `"timeout"`, `"unavailable"`, `"permission_denied"`,
+/// `"validation"`, `"rate_limited"`, `"internal"`.
+pub fn error_class_from_grpc_code(code: tonic::Code) -> &'static str {
+    match code {
+        tonic::Code::Ok => "none",
+        tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => "timeout",
+        tonic::Code::Unavailable => "unavailable",
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => "permission_denied",
+        tonic::Code::InvalidArgument
+        | tonic::Code::NotFound
+        | tonic::Code::AlreadyExists
+        | tonic::Code::FailedPrecondition
+        | tonic::Code::OutOfRange => "validation",
+        tonic::Code::ResourceExhausted => "rate_limited",
+        _ => "internal",
+    }
 }
 
 // =============================================================================
@@ -548,6 +586,147 @@ pub fn record_hot_key_detected(
     .increment(1);
 }
 
+// ─── SLI/SLO Metrics ──────────────────────────────────────────
+
+/// Batch writer queue depth gauge.
+const BATCH_QUEUE_DEPTH: &str = "ledger_batch_queue_depth";
+
+/// Rate limiter queue depth gauge (pending proposals tracked by backpressure tier).
+const RATE_LIMIT_QUEUE_DEPTH: &str = "ledger_rate_limit_queue_depth";
+
+/// Cluster quorum status gauge (1 = quorum, 0 = lost).
+const CLUSTER_QUORUM_STATUS: &str = "ledger_cluster_quorum_status";
+
+/// Leader election counter.
+const LEADER_ELECTIONS_TOTAL: &str = "ledger_leader_elections_total";
+
+/// Set the current batch writer queue depth.
+///
+/// Tracks how many write operations are pending in the batch writer,
+/// serving as a leading indicator of write saturation.
+#[inline]
+pub fn set_batch_queue_depth(depth: usize) {
+    gauge!(BATCH_QUEUE_DEPTH).set(depth as f64);
+}
+
+/// Set the current rate limiter queue depth.
+///
+/// Tracks the number of pending proposals seen by the rate limiter's
+/// backpressure tier, indicating write pipeline saturation.
+#[inline]
+pub fn set_rate_limit_queue_depth(depth: u64) {
+    gauge!(RATE_LIMIT_QUEUE_DEPTH).set(depth as f64);
+}
+
+/// Set the cluster quorum status.
+///
+/// - `1.0` — a leader is elected and the cluster has quorum
+/// - `0.0` — no leader, quorum lost
+#[inline]
+pub fn set_cluster_quorum_status(has_quorum: bool) {
+    gauge!(CLUSTER_QUORUM_STATUS).set(if has_quorum { 1.0 } else { 0.0 });
+}
+
+/// Record a leader election event.
+///
+/// Should be called when a Raft term change is detected, indicating
+/// a new leader election has occurred.
+#[inline]
+pub fn record_leader_election() {
+    counter!(LEADER_ELECTIONS_TOTAL).increment(1);
+}
+
+// ─── Resource Saturation Metrics ──────────────────────────────
+
+/// Disk space total bytes gauge.
+const DISK_BYTES_TOTAL: &str = "ledger_disk_bytes_total";
+
+/// Disk space free bytes gauge.
+const DISK_BYTES_FREE: &str = "ledger_disk_bytes_free";
+
+/// Disk space used bytes gauge.
+const DISK_BYTES_USED: &str = "ledger_disk_bytes_used";
+
+/// Page cache hit counter.
+const PAGE_CACHE_HITS_TOTAL: &str = "ledger_page_cache_hits_total";
+
+/// Page cache miss counter.
+const PAGE_CACHE_MISSES_TOTAL: &str = "ledger_page_cache_misses_total";
+
+/// Page cache current size gauge.
+const PAGE_CACHE_SIZE: &str = "ledger_page_cache_size";
+
+/// B-tree depth gauge (per-table label).
+const BTREE_DEPTH: &str = "ledger_btree_depth";
+
+/// B-tree page splits counter.
+const BTREE_PAGE_SPLITS_TOTAL: &str = "ledger_btree_page_splits_total";
+
+/// Compaction lag blocks gauge (free pages as a proxy for reclaimable space).
+const COMPACTION_LAG_BLOCKS: &str = "ledger_compaction_lag_blocks";
+
+/// Snapshot total disk bytes gauge.
+const SNAPSHOT_DISK_BYTES: &str = "ledger_snapshot_disk_bytes";
+
+/// Set disk space metrics.
+///
+/// Updates total, free, and used disk bytes for the data directory's filesystem.
+#[inline]
+pub fn set_disk_bytes(total: u64, free: u64) {
+    gauge!(DISK_BYTES_TOTAL).set(total as f64);
+    gauge!(DISK_BYTES_FREE).set(free as f64);
+    gauge!(DISK_BYTES_USED).set((total.saturating_sub(free)) as f64);
+}
+
+/// Set page cache counters.
+///
+/// Reports cumulative cache hit/miss totals and current cache size.
+#[inline]
+pub fn set_page_cache_metrics(hits: u64, misses: u64, size: usize) {
+    counter!(PAGE_CACHE_HITS_TOTAL).absolute(hits);
+    counter!(PAGE_CACHE_MISSES_TOTAL).absolute(misses);
+    gauge!(PAGE_CACHE_SIZE).set(size as f64);
+}
+
+/// Set B-tree depth for a given table.
+#[inline]
+pub fn set_btree_depth(table: &str, depth: u32) {
+    gauge!(BTREE_DEPTH, "table" => table.to_string()).set(f64::from(depth));
+}
+
+/// Set B-tree page splits total.
+#[inline]
+pub fn set_btree_page_splits(total: u64) {
+    counter!(BTREE_PAGE_SPLITS_TOTAL).absolute(total);
+}
+
+/// Set compaction lag blocks gauge.
+///
+/// Tracks the number of free pages (reclaimable space) as a proxy for
+/// compaction backlog. High values indicate that compaction is falling behind.
+#[inline]
+pub fn set_compaction_lag_blocks(blocks: usize) {
+    gauge!(COMPACTION_LAG_BLOCKS).set(blocks as f64);
+}
+
+/// Set snapshot total disk bytes.
+///
+/// Tracks the total disk space used by all snapshots in the snapshot directory.
+#[inline]
+pub fn set_snapshot_disk_bytes(bytes: u64) {
+    gauge!(SNAPSHOT_DISK_BYTES).set(bytes as f64);
+}
+
+/// SLI-aligned histogram bucket boundaries (in seconds).
+///
+/// These buckets are designed for latency SLI/SLO tracking:
+/// - Sub-millisecond: 1ms (p50 target for reads)
+/// - Low-latency: 5ms, 10ms, 25ms (p95/p99 read targets)
+/// - Medium-latency: 50ms, 100ms, 250ms (p95/p99 write targets)
+/// - High-latency: 500ms, 1s, 5s, 10s (tail latency / timeouts)
+pub const SLI_HISTOGRAM_BUCKETS: [f64; 11] =
+    [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 10.0];
+
 // =============================================================================
 // Timer Helper
 // =============================================================================
@@ -620,6 +799,55 @@ mod tests {
         set_raft_commit_index(100);
         set_is_leader(true);
         record_idempotency_hit();
-        record_grpc_request("WriteService", "write", "OK", 0.001);
+        record_grpc_request("WriteService", "write", "OK", "none", 0.001);
+    }
+
+    #[test]
+    fn test_sli_metrics_dont_panic() {
+        // SLI/SLO metrics should not panic without a recorder
+        set_batch_queue_depth(42);
+        set_rate_limit_queue_depth(10);
+        set_cluster_quorum_status(true);
+        set_cluster_quorum_status(false);
+        record_leader_election();
+        record_grpc_request("WriteService", "write", "Internal", "internal", 0.5);
+        record_grpc_request("ReadService", "read", "DeadlineExceeded", "timeout", 1.0);
+        record_grpc_request("AdminService", "create", "InvalidArgument", "validation", 0.01);
+        record_grpc_request("WriteService", "write", "ResourceExhausted", "rate_limited", 0.1);
+        record_grpc_request("WriteService", "write", "Unavailable", "unavailable", 0.05);
+    }
+
+    #[test]
+    fn test_error_class_from_grpc_code() {
+        assert_eq!(error_class_from_grpc_code(tonic::Code::Ok), "none");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::DeadlineExceeded), "timeout");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::Cancelled), "timeout");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::Unavailable), "unavailable");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::PermissionDenied), "permission_denied");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::Unauthenticated), "permission_denied");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::InvalidArgument), "validation");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::NotFound), "validation");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::AlreadyExists), "validation");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::FailedPrecondition), "validation");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::OutOfRange), "validation");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::ResourceExhausted), "rate_limited");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::Internal), "internal");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::DataLoss), "internal");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::Unknown), "internal");
+        assert_eq!(error_class_from_grpc_code(tonic::Code::Unimplemented), "internal");
+    }
+
+    #[test]
+    fn test_sli_histogram_buckets() {
+        // Verify bucket boundaries are sorted and within expected range
+        for window in SLI_HISTOGRAM_BUCKETS.windows(2) {
+            assert!(window[0] < window[1], "Buckets must be strictly increasing");
+        }
+        // First bucket is 1ms (p50 read target)
+        assert!((SLI_HISTOGRAM_BUCKETS[0] - 0.001).abs() < f64::EPSILON);
+        // Last bucket is 10s (timeout boundary)
+        assert!((SLI_HISTOGRAM_BUCKETS[10] - 10.0).abs() < f64::EPSILON);
+        // 11 buckets total
+        assert_eq!(SLI_HISTOGRAM_BUCKETS.len(), 11);
     }
 }

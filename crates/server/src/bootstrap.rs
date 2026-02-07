@@ -12,8 +12,9 @@ use std::{
 };
 
 use inferadb_ledger_raft::{
-    AutoRecoveryJob, BlockCompactor, GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId,
-    LedgerServer, LedgerTypeConfig, RaftLogStore, TtlGarbageCollector,
+    AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, GrpcRaftNetworkFactory,
+    LearnerRefreshJob, LedgerNodeId, LedgerServer, LedgerTypeConfig, RaftLogStore,
+    ResourceMetricsCollector, RuntimeConfigHandle, TtlGarbageCollector,
     proto::{BlockAnnouncement, JoinClusterRequest, admin_service_client::AdminServiceClient},
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
@@ -94,6 +95,14 @@ pub struct BootstrappedNode {
     /// Learner refresh background task handle (only active on learner nodes).
     #[allow(dead_code)] // retained to keep background task alive
     pub learner_refresh_handle: tokio::task::JoinHandle<()>,
+    /// Resource metrics collector background task handle.
+    #[allow(dead_code)] // retained to keep background task alive
+    pub resource_metrics_handle: tokio::task::JoinHandle<()>,
+    /// Automated backup background task handle (only active when backup is configured).
+    #[allow(dead_code)] // retained to keep background task alive
+    pub backup_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Runtime configuration handle for hot-reloadable settings.
+    pub runtime_config: RuntimeConfigHandle,
 }
 
 /// Bootstrap a new cluster, join an existing one, or resume from saved state.
@@ -250,6 +259,24 @@ pub async fn bootstrap_node(
     let block_archive_for_recovery = block_archive.clone();
     let snapshot_dir = data_dir.join("snapshots");
     let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir, 5));
+    let snapshot_manager_for_backup = snapshot_manager.clone();
+
+    // Create runtime config handle for hot-reloadable settings.
+    // Services read from this handle on every request via lock-free ArcSwap::load().
+    let runtime_config = RuntimeConfigHandle::default();
+
+    // Create backup manager if configured.
+    // The manager creates the destination directory and is shared between
+    // the admin service (on-demand RPCs) and the background job (automated backups).
+    let backup_manager = config
+        .backup
+        .as_ref()
+        .map(|backup_config| {
+            BackupManager::new(backup_config).map(Arc::new).map_err(|e| {
+                BootstrapError::Config(format!("failed to create backup manager: {e}"))
+            })
+        })
+        .transpose()?;
 
     let server = LedgerServer::builder()
         .raft(raft.clone())
@@ -262,49 +289,106 @@ pub async fn bootstrap_node(
         .timeout_secs(config.timeout_secs)
         .health_state(health_state.clone())
         .shutdown_rx(Some(shutdown_rx))
+        .runtime_config(Some(runtime_config.clone()))
+        .data_dir(Some(data_dir.to_path_buf()))
         .build();
+    // Wire backup support into server if configured.
+    // Done post-construction because bon type-state builders don't support
+    // conditional field setting (each setter changes the builder type).
+    let server = if let Some(ref mgr) = backup_manager {
+        server.with_backup(mgr.clone(), snapshot_manager_for_backup.clone())
+    } else {
+        server
+    };
 
-    let gc = TtlGarbageCollector::builder()
+    // Register background jobs with the watchdog (if attached to health state).
+    // Each job gets an AtomicU64 handle that it writes to on every cycle.
+    // The liveness probe detects stuck jobs by checking these heartbeats.
+    let watchdog = health_state.watchdog();
+
+    let gc_handle = TtlGarbageCollector::builder()
         .raft(raft.clone())
         .node_id(node_id)
         .state(state.clone())
         .applied_state(applied_state_accessor.clone())
-        .build();
-    let gc_handle = gc.start();
+        .watchdog_handle(watchdog.map(|w| w.register("ttl_gc", 60)))
+        .build()
+        .start();
     tracing::info!("Started TTL garbage collector");
 
     // Start block compactor for COMPACTED retention mode
-    let compactor = BlockCompactor::builder()
+    let compactor_handle = BlockCompactor::builder()
         .raft(raft.clone())
         .node_id(node_id)
         .block_archive(block_archive_for_compactor)
         .applied_state(applied_state_accessor.clone())
-        .build();
-    let compactor_handle = compactor.start();
+        .watchdog_handle(watchdog.map(|w| w.register("block_compactor", 300)))
+        .build()
+        .start();
     tracing::info!("Started block compactor");
 
     // Start auto-recovery job for detecting and recovering diverged vaults
     // Per DESIGN.md §8.2: Circuit breaker with bounded retries
-    let recovery = AutoRecoveryJob::builder()
+    let recovery_handle = AutoRecoveryJob::builder()
         .raft(raft.clone())
         .node_id(node_id)
         .applied_state(applied_state_accessor.clone())
         .state(state.clone())
         .block_archive(Some(block_archive_for_recovery))
         .snapshot_manager(Some(snapshot_manager))
-        .build();
-    let recovery_handle = recovery.start();
+        .watchdog_handle(watchdog.map(|w| w.register("auto_recovery", 30)))
+        .build()
+        .start();
     tracing::info!("Started auto-recovery job with snapshot support");
 
     // Start learner refresh job for keeping learner state synchronized
     // Per DESIGN.md §9.3: Background polling of voters for fresh state
-    let learner_refresh = LearnerRefreshJob::builder()
+    let learner_refresh_handle = LearnerRefreshJob::builder()
         .raft(raft.clone())
         .node_id(node_id)
         .applied_state(applied_state_accessor)
-        .build();
-    let learner_refresh_handle = learner_refresh.start();
+        .watchdog_handle(watchdog.map(|w| w.register("learner_refresh", 5)))
+        .build()
+        .start();
     tracing::info!("Started learner refresh job");
+
+    // Start resource saturation metrics collector
+    let snapshot_dir_for_metrics = data_dir.join("snapshots");
+    let resource_metrics_handle = ResourceMetricsCollector::builder()
+        .state(state.clone())
+        .data_dir(data_dir.to_path_buf())
+        .snapshot_dir(snapshot_dir_for_metrics)
+        .watchdog_handle(watchdog.map(|w| w.register("resource_metrics", 30)))
+        .build()
+        .start();
+    tracing::info!("Started resource metrics collector");
+
+    // Start automated backup job if configured and enabled
+    let backup_handle =
+        if let (Some(backup_config), Some(mgr)) = (config.backup.as_ref(), backup_manager) {
+            if backup_config.enabled {
+                let job = BackupJob::builder()
+                    .raft(raft.clone())
+                    .node_id(node_id)
+                    .snapshot_manager(snapshot_manager_for_backup)
+                    .backup_manager(mgr)
+                    .interval(Duration::from_secs(backup_config.interval_secs))
+                    .build();
+                let handle = job.start();
+                tracing::info!(
+                    interval_secs = backup_config.interval_secs,
+                    destination = %backup_config.destination,
+                    retention = backup_config.retention_count,
+                    "Started automated backup job"
+                );
+                Some(handle)
+            } else {
+                tracing::info!("Backup configured but not enabled, skipping automated backup job");
+                None
+            }
+        } else {
+            None
+        };
 
     Ok(BootstrappedNode {
         raft,
@@ -314,6 +398,9 @@ pub async fn bootstrap_node(
         compactor_handle,
         recovery_handle,
         learner_refresh_handle,
+        resource_metrics_handle,
+        backup_handle,
+        runtime_config,
     })
 }
 

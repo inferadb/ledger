@@ -45,6 +45,9 @@ pub struct BlockCompactor<B: StorageBackend + 'static> {
     /// Compaction interval.
     #[builder(default = COMPACTION_INTERVAL)]
     interval: Duration,
+    /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
+    #[builder(default)]
+    watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl<B: StorageBackend + 'static> BlockCompactor<B> {
@@ -158,6 +161,15 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
 
             loop {
                 ticker.tick().await;
+                if let Some(ref handle) = self.watchdog_handle {
+                    handle.store(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
                 self.run_cycle().await;
             }
         })

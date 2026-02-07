@@ -22,7 +22,10 @@
 use std::{
     collections::{BinaryHeap, HashMap},
     hash::{Hash, Hasher},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -158,10 +161,12 @@ struct DetectorState {
 /// Thread-safe: all mutable state is behind a `Mutex`. The mutex is held
 /// only for the duration of counter updates and heap maintenance, keeping
 /// critical section time minimal.
+///
+/// Threshold and window size use atomics for lock-free runtime reconfiguration.
 pub struct HotKeyDetector {
     state: Mutex<DetectorState>,
-    window_secs: u64,
-    threshold: u64,
+    window_secs: AtomicU64,
+    threshold: AtomicU64,
     top_k: usize,
 }
 
@@ -177,8 +182,8 @@ impl HotKeyDetector {
                 top_k_map: HashMap::new(),
                 last_warn: HashMap::new(),
             }),
-            window_secs: config.window_secs,
-            threshold: config.threshold,
+            window_secs: AtomicU64::new(config.window_secs),
+            threshold: AtomicU64::new(config.threshold),
             top_k: config.top_k,
         }
     }
@@ -193,7 +198,8 @@ impl HotKeyDetector {
 
         // Check if window has expired and rotate if needed.
         let elapsed = state.window_start.elapsed().as_secs();
-        if elapsed >= self.window_secs {
+        let window_secs = self.window_secs.load(Ordering::Relaxed);
+        if elapsed >= window_secs {
             // Rotate: previous takes current's data, current resets.
             // Destructure to avoid double mutable borrow through `state`.
             let DetectorState { current, previous, .. } = &mut *state;
@@ -207,7 +213,7 @@ impl HotKeyDetector {
 
         // Increment in current sketch and get estimated count for this window.
         let count = state.current.increment(key);
-        let ops_per_sec = if self.window_secs > 0 {
+        let ops_per_sec = if window_secs > 0 {
             // Use elapsed time in current window for rate calculation.
             let window_elapsed = state.window_start.elapsed().as_secs_f64().max(1.0);
             count as f64 / window_elapsed
@@ -215,7 +221,8 @@ impl HotKeyDetector {
             count as f64
         };
 
-        if ops_per_sec >= self.threshold as f64 {
+        let threshold = self.threshold.load(Ordering::Relaxed);
+        if ops_per_sec >= threshold as f64 {
             let info = HotKeyInfo { vault_id, key: key.to_string(), ops_per_sec };
 
             // Update top-k tracking.
@@ -246,7 +253,7 @@ impl HotKeyDetector {
                     vault_id = vault_id.value(),
                     key = key,
                     ops_per_sec = format!("{:.1}", ops_per_sec),
-                    threshold = self.threshold,
+                    threshold = threshold,
                     "Hot key detected: access rate exceeds threshold"
                 );
                 state.last_warn.insert(composite, Instant::now());
@@ -294,13 +301,23 @@ impl HotKeyDetector {
         state.last_warn.clear();
         state.window_start = Instant::now();
     }
+
+    /// Update detection thresholds at runtime.
+    ///
+    /// Changes take effect on the next `record_access` call. The CMS
+    /// structure (width, depth) and top-k size are not reconfigurable
+    /// because they require reallocating the sketch arrays.
+    pub fn update_thresholds(&self, threshold: u64, window_secs: u64) {
+        self.threshold.store(threshold, Ordering::Relaxed);
+        self.window_secs.store(window_secs, Ordering::Relaxed);
+    }
 }
 
 impl std::fmt::Debug for HotKeyDetector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HotKeyDetector")
-            .field("window_secs", &self.window_secs)
-            .field("threshold", &self.threshold)
+            .field("window_secs", &self.window_secs.load(Ordering::Relaxed))
+            .field("threshold", &self.threshold.load(Ordering::Relaxed))
             .field("top_k", &self.top_k)
             .finish()
     }

@@ -690,6 +690,26 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     pub wide_events: WideEventsConfig,
+
+    // === Runtime Config ===
+    /// Path to a TOML config file for hot-reloadable runtime settings.
+    ///
+    /// When set, the server re-reads this file on SIGHUP and applies
+    /// reconfigurable parameters (rate limits, hot key thresholds,
+    /// compaction intervals, validation limits) without restart.
+    #[arg(long = "config", env = "INFERADB__LEDGER__CONFIG")]
+    #[serde(default)]
+    pub config_file: Option<PathBuf>,
+
+    // === Backup ===
+    /// Backup configuration for automated and on-demand backups.
+    ///
+    /// When configured, enables `CreateBackup`, `ListBackups`, and
+    /// `RestoreBackup` RPCs on the admin service, plus an automated
+    /// backup job that runs on the leader node.
+    #[arg(skip)]
+    #[serde(default)]
+    pub backup: Option<inferadb_ledger_types::config::BackupConfig>,
 }
 
 // Default value functions
@@ -742,6 +762,8 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             wide_events: WideEventsConfig::default(),
+            config_file: None,
+            backup: None,
         }
     }
 }

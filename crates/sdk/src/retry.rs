@@ -93,7 +93,12 @@ where
             // Otherwise, return the original error (non-retryable)
             if e.is_retryable() {
                 let attempts = attempt_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                RetryExhaustedSnafu { attempts, last_error: e.to_string() }.build()
+                RetryExhaustedSnafu {
+                    attempts,
+                    last_error: e.to_string(),
+                    attempt_history: Vec::<(u32, String)>::new(),
+                }
+                .build()
             } else {
                 e
             }
@@ -115,6 +120,14 @@ where
 /// - If the token is cancelled during a backoff sleep, the sleep is interrupted and `Cancelled` is
 ///   returned.
 ///
+/// # Circuit Breaker Integration
+///
+/// When `pool` is provided and the pool has a circuit breaker configured,
+/// each attempt's result is recorded. Success resets the failure counter;
+/// retryable failures increment it. When the circuit opens, subsequent
+/// `pool.get_channel()` calls within the operation will return
+/// `SdkError::CircuitOpen` immediately.
+///
 /// # Example
 ///
 /// ```ignore
@@ -124,13 +137,15 @@ where
 /// let policy = RetryPolicy::default();
 /// let token = CancellationToken::new();
 ///
-/// let result = with_retry_cancellable(&policy, &token, || async {
+/// let result = with_retry_cancellable(&policy, &token, None, "read", || async {
 ///     Ok::<_, SdkError>("success")
 /// }).await;
 /// ```
 pub async fn with_retry_cancellable<F, Fut, T>(
     policy: &RetryPolicy,
     token: &tokio_util::sync::CancellationToken,
+    pool: Option<&crate::ConnectionPool>,
+    method: &str,
     mut operation: F,
 ) -> Result<T>
 where
@@ -144,6 +159,7 @@ where
 
     let mut attempt: u32 = 0;
     let mut backoff_duration = policy.initial_backoff;
+    let mut attempt_history: Vec<(u32, String)> = Vec::new();
 
     loop {
         attempt += 1;
@@ -158,18 +174,43 @@ where
         };
 
         match result {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                // Record success on the circuit breaker
+                if let Some(p) = pool {
+                    p.record_success();
+                }
+                return Ok(value);
+            },
             Err(err) => {
+                // Record retryable failures on the circuit breaker
+                if err.is_retryable()
+                    && let Some(p) = pool
+                {
+                    p.record_failure();
+                }
+
+                // Record this attempt in the history
+                attempt_history.push((attempt, err.to_string()));
+
+                // Classify the error for metrics
+                let error_type = err.error_type();
+
                 // Non-retryable or out of attempts — return immediately
                 if !err.is_retryable() || attempt >= policy.max_attempts {
                     if err.is_retryable() {
                         return Err(RetryExhaustedSnafu {
                             attempts: attempt,
                             last_error: err.to_string(),
+                            attempt_history: attempt_history.clone(),
                         }
                         .build());
                     }
                     return Err(err);
+                }
+
+                // Record the retry metric
+                if let Some(p) = pool {
+                    p.metrics().record_retry(method, attempt, &error_type);
                 }
 
                 // Apply jitter to backoff
@@ -284,6 +325,8 @@ mod tests {
                     Err(RpcSnafu {
                         code: Code::Unavailable,
                         message: "temporarily unavailable".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
                     }
                     .build())
                 } else {
@@ -310,8 +353,13 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Always fail with retryable error
                 Err::<String, _>(
-                    RpcSnafu { code: Code::Unavailable, message: "always unavailable".to_string() }
-                        .build(),
+                    RpcSnafu {
+                        code: Code::Unavailable,
+                        message: "always unavailable".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
+                    }
+                    .build(),
                 )
             }
         })
@@ -321,7 +369,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, SdkError::RetryExhausted { .. }));
 
-        if let SdkError::RetryExhausted { attempts, last_error } = err {
+        if let SdkError::RetryExhausted { attempts, last_error, .. } = err {
             assert_eq!(attempts, 3);
             assert!(last_error.contains("always unavailable"));
         }
@@ -341,8 +389,13 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Fail with non-retryable error
                 Err::<String, _>(
-                    RpcSnafu { code: Code::InvalidArgument, message: "bad request".to_string() }
-                        .build(),
+                    RpcSnafu {
+                        code: Code::InvalidArgument,
+                        message: "bad request".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
+                    }
+                    .build(),
                 )
             }
         })
@@ -379,8 +432,13 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(
-                    RpcSnafu { code: Code::Unavailable, message: "unavailable".to_string() }
-                        .build(),
+                    RpcSnafu {
+                        code: Code::Unavailable,
+                        message: "unavailable".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
+                    }
+                    .build(),
                 )
             }
         })
@@ -450,9 +508,10 @@ mod tests {
         let policy = test_policy();
         let token = tokio_util::sync::CancellationToken::new();
 
-        let result =
-            with_retry_cancellable(&policy, &token, || async { Ok::<_, SdkError>("success") })
-                .await;
+        let result = with_retry_cancellable(&policy, &token, None, "test", || async {
+            Ok::<_, SdkError>("success")
+        })
+        .await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "success");
@@ -464,7 +523,7 @@ mod tests {
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
 
-        let result = with_retry_cancellable(&policy, &token, || async {
+        let result = with_retry_cancellable(&policy, &token, None, "test", || async {
             Ok::<_, SdkError>("should not reach")
         })
         .await;
@@ -491,7 +550,7 @@ mod tests {
             token_clone.cancel();
         });
 
-        let result = with_retry_cancellable(&policy, &token, || async {
+        let result = with_retry_cancellable(&policy, &token, None, "test", || async {
             tokio::time::sleep(Duration::from_millis(200)).await;
             Ok::<_, SdkError>("too slow")
         })
@@ -522,12 +581,18 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = with_retry_cancellable(&policy, &token, || {
+        let result = with_retry_cancellable(&policy, &token, None, "test", || {
             let count = Arc::clone(&call_count_clone);
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(
-                    RpcSnafu { code: Code::Unavailable, message: "fail".to_string() }.build(),
+                    RpcSnafu {
+                        code: Code::Unavailable,
+                        message: "fail".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
+                    }
+                    .build(),
                 )
             }
         })
@@ -550,13 +615,18 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = Arc::clone(&call_count);
 
-        let result = with_retry_cancellable(&policy, &token, || {
+        let result = with_retry_cancellable(&policy, &token, None, "test", || {
             let count = Arc::clone(&call_count_clone);
             async move {
                 let current = count.fetch_add(1, Ordering::SeqCst);
                 if current == 0 {
-                    Err(RpcSnafu { code: Code::Unavailable, message: "transient".to_string() }
-                        .build())
+                    Err(RpcSnafu {
+                        code: Code::Unavailable,
+                        message: "transient".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
+                    }
+                    .build())
                 } else {
                     Ok::<_, SdkError>("success")
                 }
@@ -576,13 +646,18 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = Arc::clone(&call_count);
 
-        let result = with_retry_cancellable(&policy, &token, || {
+        let result = with_retry_cancellable(&policy, &token, None, "test", || {
             let count = Arc::clone(&call_count_clone);
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(
-                    RpcSnafu { code: Code::Unavailable, message: "always fails".to_string() }
-                        .build(),
+                    RpcSnafu {
+                        code: Code::Unavailable,
+                        message: "always fails".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
+                    }
+                    .build(),
                 )
             }
         })
@@ -600,12 +675,18 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = Arc::clone(&call_count);
 
-        let result = with_retry_cancellable(&policy, &token, || {
+        let result = with_retry_cancellable(&policy, &token, None, "test", || {
             let count = Arc::clone(&call_count_clone);
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(
-                    RpcSnafu { code: Code::InvalidArgument, message: "bad".to_string() }.build(),
+                    RpcSnafu {
+                        code: Code::InvalidArgument,
+                        message: "bad".to_string(),
+                        request_id: None::<String>,
+                        trace_id: None::<String>,
+                    }
+                    .build(),
                 )
             }
         })
@@ -782,6 +863,8 @@ mod proptest_tests {
                             Err(RpcSnafu {
                                 code: Code::Unavailable,
                                 message: "transient".to_string(),
+                                request_id: None::<String>,
+                                trace_id: None::<String>,
                             }
                             .build())
                         }
@@ -836,6 +919,8 @@ mod proptest_tests {
                             Err(RpcSnafu {
                                 code: Code::Unavailable,
                                 message: "transient".to_string(),
+                                request_id: None::<String>,
+                                trace_id: None::<String>,
                             }
                             .build())
                         } else {

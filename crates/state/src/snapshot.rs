@@ -29,23 +29,46 @@ const SNAPSHOT_VERSION: u32 = 2;
 /// Snapshot error types.
 #[derive(Debug, Snafu)]
 pub enum SnapshotError {
+    /// IO error during snapshot read or write.
     #[snafu(display("IO error: {source}"))]
-    Io { source: std::io::Error },
+    Io {
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
 
+    /// The snapshot file has invalid magic bytes (not a snapshot file).
     #[snafu(display("Invalid snapshot magic"))]
     InvalidMagic,
 
+    /// The snapshot format version is not supported by this server.
     #[snafu(display("Unsupported snapshot version: {version}"))]
-    UnsupportedVersion { version: u32 },
+    UnsupportedVersion {
+        /// The unsupported version number.
+        version: u32,
+    },
 
+    /// The snapshot data checksum does not match the header checksum.
     #[snafu(display("Checksum mismatch: expected {expected:?}, got {actual:?}"))]
-    ChecksumMismatch { expected: Hash, actual: Hash },
+    ChecksumMismatch {
+        /// The expected checksum from the header.
+        expected: Hash,
+        /// The actual checksum computed from the data.
+        actual: Hash,
+    },
 
+    /// Error encoding or decoding snapshot data.
     #[snafu(display("Codec error: {source}"))]
-    Codec { source: inferadb_ledger_types::CodecError },
+    Codec {
+        /// The underlying codec error.
+        source: inferadb_ledger_types::CodecError,
+    },
 
+    /// The requested snapshot file does not exist.
     #[snafu(display("Snapshot not found: {path}"))]
-    NotFound { path: String },
+    NotFound {
+        /// The path that was not found.
+        path: String,
+    },
 }
 
 /// Result type for snapshot operations.
