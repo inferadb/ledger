@@ -136,7 +136,30 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Apply a batch of operations to a vault's state.
     ///
-    /// Returns the status for each operation.
+    /// Executes all operations atomically within a single write transaction.
+    /// Returns a `WriteStatus` for each operation indicating whether it was
+    /// created, updated, deleted, or failed a precondition check.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use inferadb_ledger_store::Database;
+    /// # use inferadb_ledger_state::StateLayer;
+    /// use inferadb_ledger_types::types::{Operation, VaultId};
+    ///
+    /// # let db = Arc::new(Database::open_in_memory()?);
+    /// # let state = StateLayer::new(db);
+    /// let ops = vec![Operation::SetEntity {
+    ///     key: "user:alice".into(),
+    ///     value: b"data".to_vec(),
+    ///     condition: None,
+    ///     expires_at: None,
+    /// }];
+    ///
+    /// let statuses = state.apply_operations(VaultId::new(1), &ops, 1)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn apply_operations(
         &self,
         vault_id: VaultId,

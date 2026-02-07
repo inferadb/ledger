@@ -563,70 +563,6 @@ impl WriteServiceImpl {
         bytes
     }
 
-    /// Convert a proto SetCondition to internal SetCondition.
-    fn convert_set_condition(
-        proto_condition: &crate::proto::SetCondition,
-    ) -> Option<inferadb_ledger_types::SetCondition> {
-        use crate::proto::set_condition::Condition;
-
-        proto_condition.condition.as_ref().map(|c| match c {
-            Condition::NotExists(true) => inferadb_ledger_types::SetCondition::MustNotExist,
-            Condition::NotExists(false) => inferadb_ledger_types::SetCondition::MustExist,
-            Condition::MustExists(true) => inferadb_ledger_types::SetCondition::MustExist,
-            Condition::MustExists(false) => inferadb_ledger_types::SetCondition::MustNotExist,
-            Condition::Version(v) => inferadb_ledger_types::SetCondition::VersionEquals(*v),
-            Condition::ValueEquals(v) => {
-                inferadb_ledger_types::SetCondition::ValueEquals(v.clone())
-            },
-        })
-    }
-
-    /// Convert a proto Operation to internal Operation.
-    fn convert_operation(
-        proto_op: &crate::proto::Operation,
-    ) -> Result<inferadb_ledger_types::Operation, Status> {
-        use crate::proto::operation::Op;
-
-        let op = proto_op
-            .op
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
-
-        match op {
-            Op::CreateRelationship(cr) => {
-                Ok(inferadb_ledger_types::Operation::CreateRelationship {
-                    resource: cr.resource.clone(),
-                    relation: cr.relation.clone(),
-                    subject: cr.subject.clone(),
-                })
-            },
-            Op::DeleteRelationship(dr) => {
-                Ok(inferadb_ledger_types::Operation::DeleteRelationship {
-                    resource: dr.resource.clone(),
-                    relation: dr.relation.clone(),
-                    subject: dr.subject.clone(),
-                })
-            },
-            Op::SetEntity(se) => {
-                let condition = se.condition.as_ref().and_then(Self::convert_set_condition);
-
-                Ok(inferadb_ledger_types::Operation::SetEntity {
-                    key: se.key.clone(),
-                    value: se.value.clone(),
-                    condition,
-                    expires_at: se.expires_at,
-                })
-            },
-            Op::DeleteEntity(de) => {
-                Ok(inferadb_ledger_types::Operation::DeleteEntity { key: de.key.clone() })
-            },
-            Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
-                key: ee.key.clone(),
-                expired_at: ee.expired_at,
-            }),
-        }
-    }
-
     /// Generate block header and transaction proof for a committed write.
     ///
     /// Returns (block_header, tx_proof) if successful, (None, None) on error.
@@ -675,8 +611,10 @@ impl WriteServiceImpl {
         // Convert proto operations to internal Operations
         // Time the proto → internal type conversion
         let convert_start = std::time::Instant::now();
-        let internal_ops: Vec<inferadb_ledger_types::Operation> =
-            operations.iter().map(Self::convert_operation).collect::<Result<Vec<_>, Status>>()?;
+        let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
+            .iter()
+            .map(inferadb_ledger_types::Operation::try_from)
+            .collect::<Result<Vec<_>, Status>>()?;
         let convert_secs = convert_start.elapsed().as_secs_f64();
 
         // Record proto decode metrics (per operation average for consistency)

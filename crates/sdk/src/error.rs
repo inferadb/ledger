@@ -94,10 +94,35 @@ fn code_to_label(code: Code) -> &'static str {
 ///
 /// Each variant carries diagnostic context (correlation IDs, retry history)
 /// to help operators correlate SDK errors with server-side logs.
+///
+/// # Recovery Guide
+///
+/// | Variant              | Retryable | Recovery Action                                             |
+/// | -------------------- | --------- | ----------------------------------------------------------- |
+/// | `Connection`         | Yes       | Check network connectivity; server may be starting up       |
+/// | `Transport`          | Yes       | TLS or HTTP/2 failure; verify certificates and connectivity |
+/// | `Rpc`                | Depends   | Check `is_retryable()`; see gRPC code for details           |
+/// | `RateLimited`        | Yes       | Wait for `retry_after` duration before retrying             |
+/// | `RetryExhausted`     | No        | All retries failed; check `attempt_history` for root cause  |
+/// | `Config`             | No        | Fix configuration and recreate the client                   |
+/// | `Idempotency`        | No        | Generate a new idempotency key for the write                |
+/// | `AlreadyCommitted`   | No        | Idempotent success; original write was applied              |
+/// | `StreamDisconnected` | Yes       | Reconnect the stream; `ReconnectingStream` handles this     |
+/// | `Timeout`            | Yes       | Increase timeout or reduce request complexity               |
+/// | `Shutdown`           | No        | Client is shutting down; create a new client instance       |
+/// | `Cancelled`          | No        | Caller cancelled via `CancellationToken`                    |
+/// | `InvalidUrl`         | No        | Fix the server URL in configuration                         |
+/// | `Unavailable`        | Yes       | Server health check failed; retry after short delay         |
+/// | `ProofVerification`  | No        | Merkle proof is invalid; data may be tampered               |
+/// | `Validation`         | No        | Fix request parameters to conform to field limits           |
+/// | `CircuitOpen`        | No        | Wait for `retry_after`; circuit breaker will probe          |
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum SdkError {
-    /// Failed to establish connection.
+    /// Failed to establish connection to the server.
+    ///
+    /// **Recovery**: Retryable. Check that the server is running and reachable.
+    /// The SDK's built-in retry logic handles transient connection failures.
     #[snafu(display("Connection error at {location}: {message}"))]
     Connection {
         /// Error description.
@@ -107,7 +132,10 @@ pub enum SdkError {
         location: Location,
     },
 
-    /// Transport-level error (HTTP/2, TLS).
+    /// Transport-level error (HTTP/2 framing, TLS handshake).
+    ///
+    /// **Recovery**: Retryable. Verify TLS certificates are valid and the
+    /// server supports HTTP/2. Network issues typically resolve on retry.
     #[snafu(display("Transport error at {location}: {source}"))]
     Transport {
         /// Underlying transport error.
@@ -165,7 +193,10 @@ pub enum SdkError {
         attempt_history: Vec<(u32, String)>,
     },
 
-    /// Configuration validation error.
+    /// Configuration validation error (invalid URL, missing field, constraint violation).
+    ///
+    /// **Recovery**: Not retryable. Fix the `ClientConfig` parameters and
+    /// recreate the client. See [`ClientConfig`](crate::ClientConfig) for valid ranges.
     #[snafu(display("Configuration error: {message}"))]
     Config {
         /// Error description.
@@ -198,21 +229,30 @@ pub enum SdkError {
         block_height: u64,
     },
 
-    /// Streaming connection lost.
+    /// Streaming connection lost (server restart, network partition).
+    ///
+    /// **Recovery**: Retryable. Use [`ReconnectingStream`](crate::ReconnectingStream)
+    /// for automatic reconnection with position tracking.
     #[snafu(display("Stream disconnected: {message}"))]
     StreamDisconnected {
         /// Disconnect reason.
         message: String,
     },
 
-    /// Operation timed out.
+    /// Operation timed out (exceeded configured `ClientConfig::timeout`).
+    ///
+    /// **Recovery**: Retryable. Consider increasing the timeout for large
+    /// batch operations or during cluster leadership transitions.
     #[snafu(display("Operation timed out after {duration_ms}ms"))]
     Timeout {
         /// Timeout duration in milliseconds.
         duration_ms: u64,
     },
 
-    /// Client is shutting down.
+    /// Client is shutting down (global cancellation triggered).
+    ///
+    /// **Recovery**: Not retryable on this client instance. Create a new
+    /// `LedgerClient` if the application needs to continue operations.
     #[snafu(display("Client shutting down"))]
     Shutdown,
 
@@ -226,7 +266,10 @@ pub enum SdkError {
     #[snafu(display("Request cancelled"))]
     Cancelled,
 
-    /// URL parsing error.
+    /// URL parsing error (malformed server address).
+    ///
+    /// **Recovery**: Not retryable. Fix the URL format in the client
+    /// configuration. URLs must include the scheme (e.g., `http://` or `https://`).
     #[snafu(display("Invalid URL '{url}': {message}"))]
     InvalidUrl {
         /// The invalid URL.

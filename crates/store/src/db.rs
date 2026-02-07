@@ -130,7 +130,22 @@ impl Database<FileBackend> {
         Self::from_backend(backend, config)
     }
 
-    /// Create a new database at the given path.
+    /// Create a new database at the given path with default configuration.
+    ///
+    /// Uses 4KB pages, 1024-entry cache, and sync-on-commit.
+    /// For custom settings, use [`create_with_config`](Self::create_with_config).
+    ///
+    /// ```no_run
+    /// use inferadb_ledger_store::Database;
+    /// use inferadb_ledger_store::tables::Entities;
+    ///
+    /// let db = Database::create("/var/lib/ledger/new.db")?;
+    ///
+    /// let mut txn = db.write()?;
+    /// txn.insert::<Entities>(&b"key".to_vec(), &b"value".to_vec())?;
+    /// txn.commit()?;
+    /// # Ok::<(), inferadb_ledger_store::Error>(())
+    /// ```
     pub fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::create_with_config(path, DatabaseConfig::default())
     }

@@ -373,10 +373,11 @@ impl ConnectionPool {
         }
     }
 
-    /// Records a successful request on the circuit breaker.
     /// Records a failed request on the circuit breaker.
     ///
-    /// Should be called after a retryable RPC failure.
+    /// Should be called after a retryable RPC failure. When consecutive
+    /// failures exceed the threshold, the circuit opens and subsequent
+    /// requests fast-fail with [`SdkError::CircuitOpen`](crate::SdkError::CircuitOpen).
     pub fn record_failure(&self) {
         if let Some(ref cb) = self.circuit_breaker {
             let endpoint = self.current_endpoint();

@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
-use inferadb_ledger_state::{BlockArchive, StateLayer, system::NamespaceStatus};
+use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
     NamespaceId as DomainNamespaceId, ShardId as DomainShardId, VaultEntry,
@@ -476,14 +476,7 @@ impl AdminService for AdminServiceImpl {
             Some(ns) => {
                 ctx.set_namespace_id(ns.namespace_id.value());
                 ctx.set_success();
-                // Map internal NamespaceStatus to proto NamespaceStatus
-                let status = match ns.status {
-                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
-                    NamespaceStatus::Migrating => crate::proto::NamespaceStatus::Migrating,
-                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
-                    NamespaceStatus::Deleting => crate::proto::NamespaceStatus::Deleting,
-                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
-                };
+                let status: crate::proto::NamespaceStatus = ns.status.into();
                 Ok(Response::new(GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,
@@ -521,14 +514,7 @@ impl AdminService for AdminServiceImpl {
             .list_namespaces()
             .into_iter()
             .map(|ns| {
-                // Map internal NamespaceStatus to proto NamespaceStatus
-                let status = match ns.status {
-                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
-                    NamespaceStatus::Migrating => crate::proto::NamespaceStatus::Migrating,
-                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
-                    NamespaceStatus::Deleting => crate::proto::NamespaceStatus::Deleting,
-                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
-                };
+                let status: crate::proto::NamespaceStatus = ns.status.into();
                 crate::proto::GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,
@@ -591,25 +577,12 @@ impl AdminService for AdminServiceImpl {
 
         // Convert proto retention policy to internal type
         let retention_policy = req.retention_policy.map(|proto_policy| {
-            use crate::proto::BlockRetentionMode as ProtoMode;
-            let mode = match proto_policy.mode() {
-                ProtoMode::Unspecified | ProtoMode::Full => {
-                    ctx.set_retention_mode("full");
-                    BlockRetentionMode::Full
-                },
-                ProtoMode::Compacted => {
-                    ctx.set_retention_mode("compacted");
-                    BlockRetentionMode::Compacted
-                },
-            };
-            BlockRetentionPolicy {
-                mode,
-                retention_blocks: if proto_policy.retention_blocks > 0 {
-                    proto_policy.retention_blocks
-                } else {
-                    10_000 // Default
-                },
+            let policy = BlockRetentionPolicy::from(&proto_policy);
+            match policy.mode {
+                BlockRetentionMode::Full => ctx.set_retention_mode("full"),
+                BlockRetentionMode::Compacted => ctx.set_retention_mode("compacted"),
             }
+            policy
         });
 
         // Submit create vault through Raft

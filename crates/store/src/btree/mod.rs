@@ -288,10 +288,20 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Insert a key-value pair.
+    /// Insert a key-value pair into the B-tree.
     ///
-    /// If the key already exists, its value is updated.
-    /// Returns the previous value if the key existed.
+    /// If the key already exists, its value is updated in-place.
+    /// Returns the previous value if the key existed, or `None` for new keys.
+    ///
+    /// Keys and values are stored as byte slices. The B-tree maintains sorted
+    /// order by key, splitting leaf and branch pages as needed to accommodate
+    /// new entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The key+value exceeds the page capacity (determined by page size)
+    /// - A page read or write fails through the `PageProvider`
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {
         if self.root_page == 0 {
             // Create first leaf as root
@@ -905,7 +915,13 @@ impl<P: PageProvider> BTree<P> {
     }
 }
 
-/// Iterator over B-tree entries.
+/// Iterator over B-tree entries in sorted key order.
+///
+/// Supports forward iteration over key-value pairs stored in the B-tree.
+/// Leaf pages are loaded on demand as the cursor advances, and sibling
+/// traversal uses branch-node backtracking (not next-leaf pointers).
+///
+/// Created by [`BTree::iter`].
 pub struct BTreeIterator<'a, P: PageProvider> {
     tree: &'a BTree<P>,
     state: RangeIterState<'a>,

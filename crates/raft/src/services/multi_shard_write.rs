@@ -260,66 +260,6 @@ impl MultiShardWriteService {
         }
     }
 
-    /// Convert a proto SetCondition to internal SetCondition.
-    fn convert_set_condition(
-        proto_condition: &crate::proto::SetCondition,
-    ) -> Option<inferadb_ledger_types::SetCondition> {
-        use crate::proto::set_condition::Condition;
-
-        proto_condition.condition.as_ref().map(|c| match c {
-            Condition::NotExists(true) => inferadb_ledger_types::SetCondition::MustNotExist,
-            Condition::NotExists(false) => inferadb_ledger_types::SetCondition::MustExist,
-            Condition::MustExists(true) => inferadb_ledger_types::SetCondition::MustExist,
-            Condition::MustExists(false) => inferadb_ledger_types::SetCondition::MustNotExist,
-            Condition::Version(v) => inferadb_ledger_types::SetCondition::VersionEquals(*v),
-            Condition::ValueEquals(v) => {
-                inferadb_ledger_types::SetCondition::ValueEquals(v.clone())
-            },
-        })
-    }
-
-    /// Convert a proto operation to internal operation.
-    fn convert_operation(op: &Operation) -> Result<inferadb_ledger_types::Operation, Status> {
-        use crate::proto::operation::Op;
-
-        let inner_op =
-            op.op.as_ref().ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
-
-        match inner_op {
-            Op::CreateRelationship(cr) => {
-                Ok(inferadb_ledger_types::Operation::CreateRelationship {
-                    resource: cr.resource.clone(),
-                    relation: cr.relation.clone(),
-                    subject: cr.subject.clone(),
-                })
-            },
-            Op::DeleteRelationship(dr) => {
-                Ok(inferadb_ledger_types::Operation::DeleteRelationship {
-                    resource: dr.resource.clone(),
-                    relation: dr.relation.clone(),
-                    subject: dr.subject.clone(),
-                })
-            },
-            Op::SetEntity(se) => {
-                let condition = se.condition.as_ref().and_then(Self::convert_set_condition);
-
-                Ok(inferadb_ledger_types::Operation::SetEntity {
-                    key: se.key.clone(),
-                    value: se.value.clone(),
-                    condition,
-                    expires_at: se.expires_at,
-                })
-            },
-            Op::DeleteEntity(de) => {
-                Ok(inferadb_ledger_types::Operation::DeleteEntity { key: de.key.clone() })
-            },
-            Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
-                key: ee.key.clone(),
-                expired_at: ee.expired_at,
-            }),
-        }
-    }
-
     /// Build a ledger request from operations.
     ///
     /// Server-assigned sequences: The transaction's sequence is set to 0 here;
@@ -332,8 +272,10 @@ impl MultiShardWriteService {
         client_id: &str,
         actor: &str,
     ) -> Result<LedgerRequest, Status> {
-        let internal_ops: Vec<inferadb_ledger_types::Operation> =
-            operations.iter().map(Self::convert_operation).collect::<Result<Vec<_>, Status>>()?;
+        let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
+            .iter()
+            .map(inferadb_ledger_types::Operation::try_from)
+            .collect::<Result<Vec<_>, Status>>()?;
 
         if internal_ops.is_empty() {
             return Err(Status::invalid_argument("No operations provided"));
@@ -774,194 +716,12 @@ impl WriteService for MultiShardWriteService {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_multi_shard_write_service_creation() {
         // Basic struct test - full testing requires Raft setup
     }
 
-    #[test]
-    fn test_convert_set_condition_not_exists() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition = SetCondition { condition: Some(Condition::NotExists(true)) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(matches!(result, Some(inferadb_ledger_types::SetCondition::MustNotExist)));
-    }
-
-    #[test]
-    fn test_convert_set_condition_must_exists() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition = SetCondition { condition: Some(Condition::MustExists(true)) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(matches!(result, Some(inferadb_ledger_types::SetCondition::MustExist)));
-    }
-
-    #[test]
-    fn test_convert_set_condition_version() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition = SetCondition { condition: Some(Condition::Version(42)) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(matches!(result, Some(inferadb_ledger_types::SetCondition::VersionEquals(42))));
-    }
-
-    #[test]
-    fn test_convert_set_condition_value_equals() {
-        use crate::proto::{SetCondition, set_condition::Condition};
-
-        let proto_condition =
-            SetCondition { condition: Some(Condition::ValueEquals(b"test_value".to_vec())) };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        match result {
-            Some(inferadb_ledger_types::SetCondition::ValueEquals(v)) => {
-                assert_eq!(v, b"test_value");
-            },
-            _ => unreachable!("Expected ValueEquals condition"),
-        }
-    }
-
-    #[test]
-    fn test_convert_set_condition_none() {
-        use crate::proto::SetCondition;
-
-        let proto_condition = SetCondition { condition: None };
-
-        let result = MultiShardWriteService::convert_set_condition(&proto_condition);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_convert_operation_create_relationship() {
-        use crate::proto::{CreateRelationship, Operation, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::CreateRelationship(CreateRelationship {
-                resource: "document:123".to_string(),
-                relation: "viewer".to_string(),
-                subject: "user:456".to_string(),
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::CreateRelationship {
-                resource,
-                relation,
-                subject,
-            } => {
-                assert_eq!(resource, "document:123");
-                assert_eq!(relation, "viewer");
-                assert_eq!(subject, "user:456");
-            },
-            _ => unreachable!("Expected CreateRelationship operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_delete_relationship() {
-        use crate::proto::{DeleteRelationship, Operation, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::DeleteRelationship(DeleteRelationship {
-                resource: "document:123".to_string(),
-                relation: "viewer".to_string(),
-                subject: "user:456".to_string(),
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::DeleteRelationship {
-                resource,
-                relation,
-                subject,
-            } => {
-                assert_eq!(resource, "document:123");
-                assert_eq!(relation, "viewer");
-                assert_eq!(subject, "user:456");
-            },
-            _ => unreachable!("Expected DeleteRelationship operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_set_entity() {
-        use crate::proto::{Operation, SetEntity, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::SetEntity(SetEntity {
-                key: "user:123".to_string(),
-                value: b"test_data".to_vec(),
-                condition: None,
-                expires_at: Some(1000),
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::SetEntity { key, value, condition, expires_at } => {
-                assert_eq!(key, "user:123");
-                assert_eq!(value, b"test_data");
-                assert!(condition.is_none());
-                assert_eq!(expires_at, Some(1000));
-            },
-            _ => unreachable!("Expected SetEntity operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_delete_entity() {
-        use crate::proto::{DeleteEntity, Operation, operation::Op};
-
-        let op =
-            Operation { op: Some(Op::DeleteEntity(DeleteEntity { key: "user:123".to_string() })) };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::DeleteEntity { key } => {
-                assert_eq!(key, "user:123");
-            },
-            _ => unreachable!("Expected DeleteEntity operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_expire_entity() {
-        use crate::proto::{ExpireEntity, Operation, operation::Op};
-
-        let op = Operation {
-            op: Some(Op::ExpireEntity(ExpireEntity {
-                key: "user:123".to_string(),
-                expired_at: 2000,
-            })),
-        };
-
-        let result = MultiShardWriteService::convert_operation(&op).unwrap();
-        match result {
-            inferadb_ledger_types::Operation::ExpireEntity { key, expired_at } => {
-                assert_eq!(key, "user:123");
-                assert_eq!(expired_at, 2000);
-            },
-            _ => unreachable!("Expected ExpireEntity operation"),
-        }
-    }
-
-    #[test]
-    fn test_convert_operation_missing_op() {
-        use crate::proto::Operation;
-
-        let op = Operation { op: None };
-
-        let result = MultiShardWriteService::convert_operation(&op);
-        assert!(result.is_err());
-    }
+    // Proto↔domain conversion tests (set_condition, operation variants) are in
+    // proto_convert.rs which owns the centralized From/TryFrom implementations.
 }
