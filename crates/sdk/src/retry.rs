@@ -10,7 +10,7 @@ use rand::Rng;
 
 use crate::{
     config::RetryPolicy,
-    error::{Result, RetryExhaustedSnafu, SdkError},
+    error::{Result, SdkError},
 };
 
 /// Execute an async operation with retry using exponential backoff.
@@ -93,12 +93,11 @@ where
             // Otherwise, return the original error (non-retryable)
             if e.is_retryable() {
                 let attempts = attempt_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                RetryExhaustedSnafu {
+                SdkError::RetryExhausted {
                     attempts,
                     last_error: e.to_string(),
-                    attempt_history: Vec::<(u32, String)>::new(),
+                    attempt_history: Vec::new(),
                 }
-                .build()
             } else {
                 e
             }
@@ -198,12 +197,11 @@ where
                 // Non-retryable or out of attempts — return immediately
                 if !err.is_retryable() || attempt >= policy.max_attempts {
                     if err.is_retryable() {
-                        return Err(RetryExhaustedSnafu {
+                        return Err(SdkError::RetryExhausted {
                             attempts: attempt,
                             last_error: err.to_string(),
                             attempt_history: attempt_history.clone(),
-                        }
-                        .build());
+                        });
                     }
                     return Err(err);
                 }
@@ -278,7 +276,7 @@ mod tests {
     use tonic::Code;
 
     use super::*;
-    use crate::error::RpcSnafu;
+    use crate::error::SdkError;
 
     fn test_policy() -> RetryPolicy {
         RetryPolicy {
@@ -322,13 +320,12 @@ mod tests {
                 let current = count.fetch_add(1, Ordering::SeqCst);
                 if current == 0 {
                     // First attempt fails with retryable error
-                    Err(RpcSnafu {
+                    Err(SdkError::Rpc {
                         code: Code::Unavailable,
                         message: "temporarily unavailable".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build())
+                        request_id: None,
+                        trace_id: None,
+                    })
                 } else {
                     Ok::<_, SdkError>("success")
                 }
@@ -352,15 +349,12 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Always fail with retryable error
-                Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::Unavailable,
-                        message: "always unavailable".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build(),
-                )
+                Err::<String, _>(SdkError::Rpc {
+                    code: Code::Unavailable,
+                    message: "always unavailable".to_string(),
+                    request_id: None,
+                    trace_id: None,
+                })
             }
         })
         .await;
@@ -388,15 +382,12 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Fail with non-retryable error
-                Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::InvalidArgument,
-                        message: "bad request".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build(),
-                )
+                Err::<String, _>(SdkError::Rpc {
+                    code: Code::InvalidArgument,
+                    message: "bad request".to_string(),
+                    request_id: None,
+                    trace_id: None,
+                })
             }
         })
         .await;
@@ -431,15 +422,12 @@ mod tests {
             let count = Arc::clone(&call_count_clone);
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::Unavailable,
-                        message: "unavailable".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build(),
-                )
+                Err::<String, _>(SdkError::Rpc {
+                    code: Code::Unavailable,
+                    message: "unavailable".to_string(),
+                    request_id: None,
+                    trace_id: None,
+                })
             }
         })
         .await;
@@ -585,15 +573,12 @@ mod tests {
             let count = Arc::clone(&call_count_clone);
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::Unavailable,
-                        message: "fail".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build(),
-                )
+                Err::<String, _>(SdkError::Rpc {
+                    code: Code::Unavailable,
+                    message: "fail".to_string(),
+                    request_id: None,
+                    trace_id: None,
+                })
             }
         })
         .await;
@@ -620,13 +605,12 @@ mod tests {
             async move {
                 let current = count.fetch_add(1, Ordering::SeqCst);
                 if current == 0 {
-                    Err(RpcSnafu {
+                    Err(SdkError::Rpc {
                         code: Code::Unavailable,
                         message: "transient".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build())
+                        request_id: None,
+                        trace_id: None,
+                    })
                 } else {
                     Ok::<_, SdkError>("success")
                 }
@@ -650,15 +634,12 @@ mod tests {
             let count = Arc::clone(&call_count_clone);
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::Unavailable,
-                        message: "always fails".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build(),
-                )
+                Err::<String, _>(SdkError::Rpc {
+                    code: Code::Unavailable,
+                    message: "always fails".to_string(),
+                    request_id: None,
+                    trace_id: None,
+                })
             }
         })
         .await;
@@ -679,15 +660,12 @@ mod tests {
             let count = Arc::clone(&call_count_clone);
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
-                Err::<String, _>(
-                    RpcSnafu {
-                        code: Code::InvalidArgument,
-                        message: "bad".to_string(),
-                        request_id: None::<String>,
-                        trace_id: None::<String>,
-                    }
-                    .build(),
-                )
+                Err::<String, _>(SdkError::Rpc {
+                    code: Code::InvalidArgument,
+                    message: "bad".to_string(),
+                    request_id: None,
+                    trace_id: None,
+                })
             }
         })
         .await;
@@ -717,7 +695,7 @@ mod proptest_tests {
     use tonic::Code;
 
     use super::*;
-    use crate::error::RpcSnafu;
+    use crate::error::SdkError;
 
     proptest! {
         /// Property: Jittered duration never exceeds base * (1 + factor)
@@ -860,13 +838,12 @@ mod proptest_tests {
                         if current >= succeed_on {
                             Ok::<_, SdkError>("success")
                         } else {
-                            Err(RpcSnafu {
+                            Err(SdkError::Rpc {
                                 code: Code::Unavailable,
                                 message: "transient".to_string(),
-                                request_id: None::<String>,
-                                trace_id: None::<String>,
-                            }
-                            .build())
+                                request_id: None,
+                                trace_id: None,
+                            })
                         }
                     }
                 })
@@ -916,13 +893,12 @@ mod proptest_tests {
                     async move {
                         let current = count.fetch_add(1, Ordering::SeqCst);
                         if current == 0 {
-                            Err(RpcSnafu {
+                            Err(SdkError::Rpc {
                                 code: Code::Unavailable,
                                 message: "transient".to_string(),
-                                request_id: None::<String>,
-                                trace_id: None::<String>,
-                            }
-                            .build())
+                                request_id: None,
+                                trace_id: None,
+                            })
                         } else {
                             Ok::<_, SdkError>(value)
                         }

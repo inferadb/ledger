@@ -215,16 +215,15 @@ impl MockLedgerServer {
 
         // Bind to localhost with specified port
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().map_err(|e| {
-            crate::error::ConfigSnafu { message: format!("Invalid port: {}", e) }.build()
+            crate::error::SdkError::Config { message: format!("Invalid port: {e}") }
         })?;
 
         // Get the actual bound address (important for ephemeral ports)
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-            crate::error::ConnectionSnafu { message: format!("Failed to bind: {}", e) }.build()
+            crate::error::SdkError::Connection { message: format!("Failed to bind: {e}") }
         })?;
-        let local_addr = listener.local_addr().map_err(|e| {
-            crate::error::ConnectionSnafu { message: format!("Failed to get local addr: {}", e) }
-                .build()
+        let local_addr = listener.local_addr().map_err(|e| crate::error::SdkError::Connection {
+            message: format!("Failed to get local addr: {e}"),
         })?;
 
         let endpoint = format!("http://{}", local_addr);

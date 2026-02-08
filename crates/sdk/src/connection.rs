@@ -28,12 +28,11 @@
 use std::{sync::Arc, time::Duration};
 
 use parking_lot::RwLock;
-use snafu::ResultExt;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use crate::{
     config::ClientConfig,
-    error::{ConnectionSnafu, InvalidUrlSnafu, Result, TransportSnafu},
+    error::{Result, SdkError},
     server::{ServerSelector, ServerSource},
 };
 
@@ -186,28 +185,25 @@ impl ConnectionPool {
         };
 
         let Some(endpoint_url) = endpoint_url else {
-            return ConnectionSnafu {
+            return Err(SdkError::Connection {
                 message:
                     "No endpoints available. For DNS/File sources, ensure the resolver has run."
-                        .to_string(),
-            }
-            .fail();
+                        .to_owned(),
+            });
         };
 
         // Parse the endpoint URL
-        let endpoint = Endpoint::try_from(endpoint_url.clone()).map_err(|_| {
-            InvalidUrlSnafu {
+        let endpoint =
+            Endpoint::try_from(endpoint_url.clone()).map_err(|_| SdkError::InvalidUrl {
                 url: endpoint_url.clone(),
-                message: "Failed to parse as tonic endpoint".to_string(),
-            }
-            .build()
-        })?;
+                message: "Failed to parse as tonic endpoint".to_owned(),
+            })?;
 
         // Apply connection settings (including TLS if configured)
         let endpoint = self.configure_endpoint(endpoint)?;
 
         // Establish the connection
-        let channel = endpoint.connect().await.context(TransportSnafu)?;
+        let channel = endpoint.connect().await?;
 
         Ok(channel)
     }
@@ -230,8 +226,8 @@ impl ConnectionPool {
         // Apply TLS configuration if present
         let endpoint = if let Some(ref tls_config) = self.config.tls {
             let tls = self.build_tls_config(tls_config)?;
-            endpoint.tls_config(tls).map_err(|e| {
-                ConnectionSnafu { message: format!("TLS configuration error: {e}") }.build()
+            endpoint.tls_config(tls).map_err(|e| SdkError::Connection {
+                message: format!("TLS configuration error: {e}"),
             })?
         } else {
             endpoint

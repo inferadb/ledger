@@ -6,7 +6,6 @@
 //!
 //! Errors include retryability classification and recovery context.
 
-use snafu::{Location, Snafu};
 use tonic::Code;
 
 /// Result type alias for SDK operations.
@@ -116,33 +115,26 @@ fn code_to_label(code: Code) -> &'static str {
 /// | `ProofVerification`  | No        | Merkle proof is invalid; data may be tampered               |
 /// | `Validation`         | No        | Fix request parameters to conform to field limits           |
 /// | `CircuitOpen`        | No        | Wait for `retry_after`; circuit breaker will probe          |
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
+#[derive(Debug, thiserror::Error)]
 pub enum SdkError {
     /// Failed to establish connection to the server.
     ///
     /// **Recovery**: Retryable. Check that the server is running and reachable.
     /// The SDK's built-in retry logic handles transient connection failures.
-    #[snafu(display("Connection error at {location}: {message}"))]
+    #[error("Connection error: {message}")]
     Connection {
         /// Error description.
         message: String,
-        /// Source location.
-        #[snafu(implicit)]
-        location: Location,
     },
 
     /// Transport-level error (HTTP/2 framing, TLS handshake).
     ///
     /// **Recovery**: Retryable. Verify TLS certificates are valid and the
     /// server supports HTTP/2. Network issues typically resolve on retry.
-    #[snafu(display("Transport error at {location}: {source}"))]
+    #[error("Transport error: {source}")]
     Transport {
         /// Underlying transport error.
         source: tonic::transport::Error,
-        /// Source location.
-        #[snafu(implicit)]
-        location: Location,
     },
 
     /// gRPC RPC error with status code and optional correlation IDs.
@@ -150,7 +142,7 @@ pub enum SdkError {
     /// When the server populates `x-request-id` and `x-trace-id` in response
     /// metadata, these fields are extracted automatically by `From<tonic::Status>`.
     /// Operators can use them to correlate SDK errors with server-side wide event logs.
-    #[snafu(display("{}", format_rpc_error(code, message, request_id, trace_id)))]
+    #[error("{}", format_rpc_error(code, message, request_id, trace_id))]
     Rpc {
         /// gRPC status code.
         code: Code,
@@ -167,7 +159,7 @@ pub enum SdkError {
     /// Returned when the server responds with `RESOURCE_EXHAUSTED` and includes
     /// a `retry-after-ms` trailing metadata value. The `retry_after` duration
     /// tells the caller how long to wait before retrying.
-    #[snafu(display("{}", format_rate_limited(message, retry_after, request_id, trace_id)))]
+    #[error("{}", format_rate_limited(message, retry_after, request_id, trace_id))]
     RateLimited {
         /// Human-readable rate limit message from server.
         message: String,
@@ -183,7 +175,7 @@ pub enum SdkError {
     ///
     /// Contains per-attempt error history for diagnosing intermittent failures.
     /// Each entry is `(attempt_number, error_description)`.
-    #[snafu(display("Retry exhausted after {attempts} attempts: {last_error}"))]
+    #[error("Retry exhausted after {attempts} attempts: {last_error}")]
     RetryExhausted {
         /// Number of attempts made.
         attempts: u32,
@@ -197,7 +189,7 @@ pub enum SdkError {
     ///
     /// **Recovery**: Not retryable. Fix the `ClientConfig` parameters and
     /// recreate the client. See [`ClientConfig`](crate::ClientConfig) for valid ranges.
-    #[snafu(display("Configuration error: {message}"))]
+    #[error("Configuration error: {message}")]
     Config {
         /// Error description.
         message: String,
@@ -207,7 +199,7 @@ pub enum SdkError {
     ///
     /// Returned when an idempotency key is reused with a different payload.
     /// This is not retryable - the client must generate a new idempotency key.
-    #[snafu(display("{}", format_idempotency(message, conflict_key, original_tx_id)))]
+    #[error("{}", format_idempotency(message, conflict_key, original_tx_id))]
     Idempotency {
         /// Error description.
         message: String,
@@ -221,7 +213,7 @@ pub enum SdkError {
     ///
     /// This is not an error - the original write succeeded. The SDK returns
     /// success with the original transaction details when this is detected.
-    #[snafu(display("Already committed: tx_id={tx_id} at block_height={block_height}"))]
+    #[error("Already committed: tx_id={tx_id} at block_height={block_height}")]
     AlreadyCommitted {
         /// Transaction ID from the original commit.
         tx_id: String,
@@ -233,7 +225,7 @@ pub enum SdkError {
     ///
     /// **Recovery**: Retryable. Use [`ReconnectingStream`](crate::ReconnectingStream)
     /// for automatic reconnection with position tracking.
-    #[snafu(display("Stream disconnected: {message}"))]
+    #[error("Stream disconnected: {message}")]
     StreamDisconnected {
         /// Disconnect reason.
         message: String,
@@ -243,7 +235,7 @@ pub enum SdkError {
     ///
     /// **Recovery**: Retryable. Consider increasing the timeout for large
     /// batch operations or during cluster leadership transitions.
-    #[snafu(display("Operation timed out after {duration_ms}ms"))]
+    #[error("Operation timed out after {duration_ms}ms")]
     Timeout {
         /// Timeout duration in milliseconds.
         duration_ms: u64,
@@ -253,7 +245,7 @@ pub enum SdkError {
     ///
     /// **Recovery**: Not retryable on this client instance. Create a new
     /// `LedgerClient` if the application needs to continue operations.
-    #[snafu(display("Client shutting down"))]
+    #[error("Client shutting down")]
     Shutdown,
 
     /// Request was cancelled via cancellation token.
@@ -263,14 +255,14 @@ pub enum SdkError {
     /// by the caller. Unlike `Shutdown`, which cancels all requests globally,
     /// `Cancelled` applies to a single request or a group of requests sharing
     /// a token.
-    #[snafu(display("Request cancelled"))]
+    #[error("Request cancelled")]
     Cancelled,
 
     /// URL parsing error (malformed server address).
     ///
     /// **Recovery**: Not retryable. Fix the URL format in the client
     /// configuration. URLs must include the scheme (e.g., `http://` or `https://`).
-    #[snafu(display("Invalid URL '{url}': {message}"))]
+    #[error("Invalid URL '{url}': {message}")]
     InvalidUrl {
         /// The invalid URL.
         url: String,
@@ -281,7 +273,7 @@ pub enum SdkError {
     /// Service is unavailable.
     ///
     /// Returned when a health check indicates the service is not available.
-    #[snafu(display("Service unavailable: {message}"))]
+    #[error("Service unavailable: {message}")]
     Unavailable {
         /// Unavailable reason.
         message: String,
@@ -290,7 +282,7 @@ pub enum SdkError {
     /// Proof verification failed.
     ///
     /// Returned when a Merkle proof or chain proof fails verification.
-    #[snafu(display("Proof verification failed: {reason}"))]
+    #[error("Proof verification failed: {reason}")]
     ProofVerification {
         /// Reason for verification failure.
         reason: &'static str,
@@ -301,7 +293,7 @@ pub enum SdkError {
     /// Returned when an operation violates configured field limits (key size,
     /// value size, character whitelist, batch size). This is a client-side
     /// check that prevents invalid requests from reaching the server.
-    #[snafu(display("Validation error: {message}"))]
+    #[error("Validation error: {message}")]
     Validation {
         /// Description of the validation failure.
         message: String,
@@ -312,7 +304,7 @@ pub enum SdkError {
     /// Returned when the circuit breaker has tripped due to consecutive
     /// failures against an endpoint. The request is rejected immediately
     /// without network I/O to prevent cascading failures.
-    #[snafu(display("Circuit open for {endpoint}, retry after {retry_after:?}"))]
+    #[error("Circuit open for {endpoint}, retry after {retry_after:?}")]
     CircuitOpen {
         /// The endpoint whose circuit is open.
         endpoint: String,
@@ -426,7 +418,7 @@ impl SdkError {
 
 impl From<tonic::transport::Error> for SdkError {
     fn from(source: tonic::transport::Error) -> Self {
-        Self::Transport { source, location: Location::default() }
+        Self::Transport { source }
     }
 }
 
@@ -542,10 +534,7 @@ mod tests {
 
     #[test]
     fn test_transport_error_is_retryable() {
-        let err = SdkError::Connection {
-            message: "connection refused".to_owned(),
-            location: Location::default(),
-        };
+        let err = SdkError::Connection { message: "connection refused".to_owned() };
         assert!(err.is_retryable());
     }
 

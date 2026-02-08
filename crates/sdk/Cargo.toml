@@ -31,7 +31,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Error handling
-snafu = { workspace = true }
+thiserror = { workspace = true }
 
 # Concurrency
 parking_lot = { workspace = true }

@@ -4,10 +4,9 @@ use std::time::Duration;
 
 use bon::bon;
 use inferadb_ledger_types::config::ValidationConfig;
-use snafu::ensure;
 
 use crate::{
-    error::{ConfigSnafu, InvalidUrlSnafu, Result},
+    error::{Result, SdkError},
     server::ServerSource,
     tracing::TraceConfig,
 };
@@ -117,24 +116,27 @@ impl ClientConfig {
     ) -> Result<Self> {
         // Validate static endpoints
         if let ServerSource::Static(ref endpoints) = servers {
-            ensure!(
-                !endpoints.is_empty(),
-                ConfigSnafu {
+            if endpoints.is_empty() {
+                return Err(SdkError::Config {
                     message: "at least one endpoint is required for static server source"
-                }
-            );
+                        .to_owned(),
+                });
+            }
 
             for endpoint in endpoints {
                 validate_url(endpoint)?;
             }
         }
 
-        ensure!(!client_id.is_empty(), ConfigSnafu { message: "client_id cannot be empty" });
-        ensure!(!timeout.is_zero(), ConfigSnafu { message: "timeout cannot be zero" });
-        ensure!(
-            !connect_timeout.is_zero(),
-            ConfigSnafu { message: "connect_timeout cannot be zero" }
-        );
+        if client_id.is_empty() {
+            return Err(SdkError::Config { message: "client_id cannot be empty".to_owned() });
+        }
+        if timeout.is_zero() {
+            return Err(SdkError::Config { message: "timeout cannot be zero".to_owned() });
+        }
+        if connect_timeout.is_zero() {
+            return Err(SdkError::Config { message: "connect_timeout cannot be zero".to_owned() });
+        }
 
         Ok(Self {
             servers,
@@ -285,19 +287,28 @@ impl RetryPolicy {
 fn validate_url(url: &str) -> Result<()> {
     // Basic validation - must start with http:// or https://
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return InvalidUrlSnafu { url, message: "URL must start with http:// or https://" }.fail();
+        return Err(SdkError::InvalidUrl {
+            url: url.to_owned(),
+            message: "URL must start with http:// or https://".to_owned(),
+        });
     }
 
     // Check there's something after the scheme
     let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or("");
 
     if rest.is_empty() {
-        return InvalidUrlSnafu { url, message: "URL must have a host" }.fail();
+        return Err(SdkError::InvalidUrl {
+            url: url.to_owned(),
+            message: "URL must have a host".to_owned(),
+        });
     }
 
     // Check for invalid characters
     if rest.contains(char::is_whitespace) {
-        return InvalidUrlSnafu { url, message: "URL cannot contain whitespace" }.fail();
+        return Err(SdkError::InvalidUrl {
+            url: url.to_owned(),
+            message: "URL cannot contain whitespace".to_owned(),
+        });
     }
 
     Ok(())
@@ -501,13 +512,16 @@ impl TlsConfig {
     ) -> Result<Self> {
         // If client cert is set, key must also be set
         if client_cert.is_some() && client_key.is_none() {
-            return ConfigSnafu { message: "client certificate requires a private key" }.fail();
+            return Err(SdkError::Config {
+                message: "client certificate requires a private key".to_owned(),
+            });
         }
 
         // Must have some way to verify server certificate
         if ca_cert.is_none() && !use_native_roots {
-            return ConfigSnafu { message: "TLS requires either a CA certificate or native roots" }
-                .fail();
+            return Err(SdkError::Config {
+                message: "TLS requires either a CA certificate or native roots".to_owned(),
+            });
         }
 
         Ok(Self { ca_cert, client_cert, client_key, domain_name, use_native_roots })

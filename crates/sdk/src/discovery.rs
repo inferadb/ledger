@@ -57,7 +57,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::DiscoveryConfig,
     connection::ConnectionPool,
-    error::{Result, RpcSnafu},
+    error::{Result, SdkError},
     retry::with_retry,
 };
 
@@ -216,14 +216,11 @@ impl DiscoveryService {
             let mut client = Self::create_discovery_client(channel, compression);
 
             let request = proto::GetPeersRequest { max_peers };
-            let response = client.get_peers(request).await.map_err(|status| {
-                RpcSnafu {
-                    code: status.code(),
-                    message: status.message().to_string(),
-                    request_id: None::<String>,
-                    trace_id: None::<String>,
-                }
-                .build()
+            let response = client.get_peers(request).await.map_err(|status| SdkError::Rpc {
+                code: status.code(),
+                message: status.message().to_owned(),
+                request_id: None,
+                trace_id: None,
             })?;
 
             let inner = response.into_inner();

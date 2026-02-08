@@ -58,6 +58,7 @@ postcard = { version = "1", features = ["alloc"] }
 
 # Error handling
 snafu = { version = "0.8", features = ["backtrace"] }
+thiserror = "2"
 
 # Concurrency
 parking_lot = "0.12"

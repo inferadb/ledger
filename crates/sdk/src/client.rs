@@ -949,10 +949,9 @@ impl VerifiedValue {
     pub fn verify(&self) -> Result<bool> {
         // Verify the Merkle proof against the block header's state root
         if !self.merkle_proof.verify(&self.block_header.state_root) {
-            return Err(error::ProofVerificationSnafu {
+            return Err(error::SdkError::ProofVerification {
                 reason: "Merkle proof does not match state root",
-            }
-            .build());
+            });
         }
 
         // If we have a chain proof, that would be verified by the caller
@@ -1316,8 +1315,8 @@ impl LedgerClient {
                 let resolver = Arc::new(ServerResolver::new(source.clone()));
 
                 // Perform initial resolution
-                let servers = resolver.resolve().await.map_err(|e| {
-                    error::ConfigSnafu { message: format!("Server discovery failed: {e}") }.build()
+                let servers = resolver.resolve().await.map_err(|e| error::SdkError::Config {
+                    message: format!("Server discovery failed: {e}"),
                 })?;
 
                 // Convert to endpoint URLs
@@ -2156,35 +2155,32 @@ impl LedgerClient {
                     },
                     proto::WriteErrorCode::IdempotencyKeyReused => {
                         // Client reused idempotency key with different payload
-                        crate::error::IdempotencySnafu {
+                        Err(crate::error::SdkError::Idempotency {
                             message: format!(
                                 "Idempotency key reused with different payload: {}",
                                 error.message
                             ),
-                            conflict_key: None::<String>,
+                            conflict_key: None,
                             original_tx_id: Some(Self::tx_id_to_hex(error.committed_tx_id.clone())),
-                        }
-                        .fail()
+                        })
                     },
                     _ => {
                         // Other write errors (CAS failures, etc.)
-                        crate::error::RpcSnafu {
+                        Err(crate::error::SdkError::Rpc {
                             code: tonic::Code::FailedPrecondition,
                             message: error.message,
-                            request_id: None::<String>,
-                            trace_id: None::<String>,
-                        }
-                        .fail()
+                            request_id: None,
+                            trace_id: None,
+                        })
                     },
                 }
             },
-            None => crate::error::RpcSnafu {
+            None => Err(crate::error::SdkError::Rpc {
                 code: tonic::Code::Internal,
-                message: "Empty write response".to_string(),
-                request_id: None::<String>,
-                trace_id: None::<String>,
-            }
-            .fail(),
+                message: "Empty write response".to_owned(),
+                request_id: None,
+                trace_id: None,
+            }),
         }
     }
 
@@ -2408,35 +2404,32 @@ impl LedgerClient {
                     },
                     proto::WriteErrorCode::IdempotencyKeyReused => {
                         // Client reused idempotency key with different payload
-                        crate::error::IdempotencySnafu {
+                        Err(crate::error::SdkError::Idempotency {
                             message: format!(
                                 "Idempotency key reused with different payload: {}",
                                 error.message
                             ),
-                            conflict_key: None::<String>,
+                            conflict_key: None,
                             original_tx_id: Some(Self::tx_id_to_hex(error.committed_tx_id.clone())),
-                        }
-                        .fail()
+                        })
                     },
                     _ => {
                         // Other write errors (CAS failures, etc.)
-                        crate::error::RpcSnafu {
+                        Err(crate::error::SdkError::Rpc {
                             code: tonic::Code::FailedPrecondition,
                             message: error.message,
-                            request_id: None::<String>,
-                            trace_id: None::<String>,
-                        }
-                        .fail()
+                            request_id: None,
+                            trace_id: None,
+                        })
                     },
                 }
             },
-            None => crate::error::RpcSnafu {
+            None => Err(crate::error::SdkError::Rpc {
                 code: tonic::Code::Internal,
-                message: "Empty batch write response".to_string(),
-                request_id: None::<String>,
-                trace_id: None::<String>,
-            }
-            .fail(),
+                message: "Empty batch write response".to_owned(),
+                request_id: None,
+                trace_id: None,
+            }),
         }
     }
 
@@ -3030,7 +3023,9 @@ impl LedgerClient {
         match result.status {
             HealthStatus::Healthy => Ok(true),
             HealthStatus::Degraded => Ok(false),
-            HealthStatus::Unavailable => error::UnavailableSnafu { message: result.message }.fail(),
+            HealthStatus::Unavailable => {
+                Err(error::SdkError::Unavailable { message: result.message })
+            },
             HealthStatus::Unspecified => Ok(false),
         }
     }

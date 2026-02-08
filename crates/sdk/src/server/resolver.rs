@@ -4,7 +4,6 @@ use std::{net::IpAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use hickory_resolver::{Resolver, config::ResolverConfig, name_server::TokioConnectionProvider};
 use parking_lot::RwLock;
-use snafu::{ResultExt, Snafu};
 use tokio::sync::Notify;
 
 /// Default DNS refresh interval (30 seconds).
@@ -17,22 +16,22 @@ const DEFAULT_FILE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_PORT: u16 = 50051;
 
 /// Errors that can occur during server resolution.
-#[derive(Debug, Snafu)]
+#[derive(Debug, thiserror::Error)]
 pub enum ResolverError {
     /// DNS resolution failed.
-    #[snafu(display("DNS resolution failed for {domain}: {source}"))]
+    #[error("DNS resolution failed for {domain}: {source}")]
     DnsResolution { domain: String, source: hickory_resolver::ResolveError },
 
     /// File manifest read failed.
-    #[snafu(display("Failed to read server manifest from {}: {source}", path.display()))]
+    #[error("Failed to read server manifest from {}: {source}", path.display())]
     FileRead { path: PathBuf, source: std::io::Error },
 
     /// File manifest parse failed.
-    #[snafu(display("Failed to parse server manifest from {}: {source}", path.display()))]
+    #[error("Failed to parse server manifest from {}: {source}", path.display())]
     FileParse { path: PathBuf, source: serde_json::Error },
 
     /// No servers found.
-    #[snafu(display("No servers found from {source_description}"))]
+    #[error("No servers found from {source_description}")]
     NoServers { source_description: String },
 }
 
@@ -271,7 +270,7 @@ impl ServerResolver {
         };
 
         if servers.is_empty() {
-            return NoServersSnafu { source_description: self.source_description() }.fail();
+            return Err(ResolverError::NoServers { source_description: self.source_description() });
         }
 
         // Update cache
@@ -300,10 +299,9 @@ impl ServerResolver {
     async fn resolve_dns(&self, config: &DnsConfig) -> Result<Vec<ResolvedServer>> {
         let resolver = self.get_or_create_dns_resolver().await;
 
-        let lookup = resolver
-            .lookup_ip(&config.domain)
-            .await
-            .context(DnsResolutionSnafu { domain: config.domain.clone() })?;
+        let lookup = resolver.lookup_ip(&config.domain).await.map_err(|source| {
+            ResolverError::DnsResolution { domain: config.domain.clone(), source }
+        })?;
 
         let servers = lookup
             .iter()
@@ -320,10 +318,10 @@ impl ServerResolver {
     async fn resolve_file(&self, config: &FileConfig) -> Result<Vec<ResolvedServer>> {
         let content = tokio::fs::read_to_string(&config.path)
             .await
-            .context(FileReadSnafu { path: config.path.clone() })?;
+            .map_err(|source| ResolverError::FileRead { path: config.path.clone(), source })?;
 
-        let manifest: ServerManifest =
-            serde_json::from_str(&content).context(FileParseSnafu { path: config.path.clone() })?;
+        let manifest: ServerManifest = serde_json::from_str(&content)
+            .map_err(|source| ResolverError::FileParse { path: config.path.clone(), source })?;
 
         let servers =
             manifest.servers.into_iter().map(|e| ResolvedServer::new(e.address, e.tls)).collect();

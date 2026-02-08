@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use crate::{
     config::RetryPolicy,
-    error::{Result, StreamDisconnectedSnafu},
+    error::{Result, SdkError},
 };
 
 /// Position tracker for stream resumption.
@@ -238,10 +238,9 @@ where
                             }
                             // Non-retryable or exhausted
                             self.state = StreamState::Exhausted;
-                            return Poll::Ready(Some(Err(StreamDisconnectedSnafu {
+                            return Poll::Ready(Some(Err(SdkError::StreamDisconnected {
                                 message: status.to_string(),
-                            }
-                            .build())));
+                            })));
                         },
                         Poll::Ready(None) => {
                             // Stream ended - attempt reconnection
@@ -329,10 +328,9 @@ where
                 StreamState::Transitioning => {
                     // This should never happen - indicates a bug
                     self.state = StreamState::Exhausted;
-                    return Poll::Ready(Some(Err(StreamDisconnectedSnafu {
-                        message: "internal state error".to_string(),
-                    }
-                    .build())));
+                    return Poll::Ready(Some(Err(SdkError::StreamDisconnected {
+                        message: "internal state error".to_owned(),
+                    })));
                 },
             }
         }
