@@ -1555,6 +1555,107 @@ impl BackupConfig {
     }
 }
 
+/// Default scrub interval in seconds (1 hour).
+const fn default_scrub_interval_secs() -> u64 {
+    3600
+}
+
+/// Default percentage of pages to scrub per cycle.
+const fn default_pages_per_cycle_percent() -> f64 {
+    1.0
+}
+
+/// Default full scan period in seconds (4 days).
+const fn default_full_scan_period_secs() -> u64 {
+    345_600
+}
+
+/// Configuration for the background integrity scrubber.
+///
+/// The integrity scrubber periodically verifies page checksums and B-tree
+/// structural invariants to detect silent data corruption (bit rot). Each
+/// cycle scrubs a percentage of total pages, progressing through the entire
+/// database over `full_scan_period_secs`.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::IntegrityConfig;
+/// let config = IntegrityConfig::builder()
+///     .scrub_interval_secs(1800)
+///     .pages_per_cycle_percent(2.0)
+///     .build()
+///     .expect("valid integrity config");
+/// assert_eq!(config.full_scan_period_secs, 345_600);
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntegrityConfig {
+    /// Interval between scrub cycles in seconds.
+    ///
+    /// Must be >= 60. Default: 3600 (1 hour).
+    #[serde(default = "default_scrub_interval_secs")]
+    pub scrub_interval_secs: u64,
+
+    /// Percentage of total pages to check per cycle (0.0–100.0).
+    ///
+    /// Must be > 0.0 and <= 100.0. Default: 1.0.
+    #[serde(default = "default_pages_per_cycle_percent")]
+    pub pages_per_cycle_percent: f64,
+
+    /// Target period for a full database scan in seconds.
+    ///
+    /// Used for progress tracking and alerting (stale scan detection).
+    /// Must be >= scrub_interval_secs. Default: 345600 (4 days).
+    #[serde(default = "default_full_scan_period_secs")]
+    pub full_scan_period_secs: u64,
+}
+
+impl Default for IntegrityConfig {
+    fn default() -> Self {
+        Self {
+            scrub_interval_secs: default_scrub_interval_secs(),
+            pages_per_cycle_percent: default_pages_per_cycle_percent(),
+            full_scan_period_secs: default_full_scan_period_secs(),
+        }
+    }
+}
+
+#[bon::bon]
+impl IntegrityConfig {
+    /// Create a new integrity scrubber configuration with validation.
+    #[builder]
+    pub fn new(
+        #[builder(default = default_scrub_interval_secs())] scrub_interval_secs: u64,
+        #[builder(default = default_pages_per_cycle_percent())] pages_per_cycle_percent: f64,
+        #[builder(default = default_full_scan_period_secs())] full_scan_period_secs: u64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { scrub_interval_secs, pages_per_cycle_percent, full_scan_period_secs };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate an existing configuration (e.g., after deserialization).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.scrub_interval_secs < 60 {
+            return Err(ConfigError::Validation {
+                message: "integrity scrub_interval_secs must be >= 60".to_string(),
+            });
+        }
+        if self.pages_per_cycle_percent <= 0.0 || self.pages_per_cycle_percent > 100.0 {
+            return Err(ConfigError::Validation {
+                message: "integrity pages_per_cycle_percent must be > 0.0 and <= 100.0".to_string(),
+            });
+        }
+        if self.full_scan_period_secs < self.scrub_interval_secs {
+            return Err(ConfigError::Validation {
+                message: "integrity full_scan_period_secs must be >= scrub_interval_secs"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Default maximum storage bytes per namespace (10 GiB).
 const fn default_max_storage_bytes() -> u64 {
     10 * 1024 * 1024 * 1024
@@ -1709,6 +1810,9 @@ pub struct RuntimeConfig {
     /// Default namespace quota applied to new namespaces without explicit quotas.
     #[serde(default)]
     pub default_quota: Option<NamespaceQuota>,
+    /// Integrity scrubber parameters.
+    #[serde(default)]
+    pub integrity: Option<IntegrityConfig>,
 }
 
 /// Identifies a non-reconfigurable parameter that was included in an update request.
@@ -1741,6 +1845,9 @@ impl RuntimeConfig {
         if let Some(ref q) = self.default_quota {
             q.validate()?;
         }
+        if let Some(ref i) = self.integrity {
+            i.validate()?;
+        }
         Ok(())
     }
 
@@ -1765,6 +1872,9 @@ impl RuntimeConfig {
         }
         if self.default_quota != other.default_quota {
             changes.push("default_quota".to_string());
+        }
+        if self.integrity != other.integrity {
+            changes.push("integrity".to_string());
         }
         changes
     }
@@ -2878,5 +2988,102 @@ mod tests {
         let config = ValidationConfig { max_key_bytes: 0, ..ValidationConfig::default() };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("max_key_bytes"));
+    }
+
+    // =========================================================================
+    // IntegrityConfig tests
+    // =========================================================================
+
+    #[test]
+    fn test_integrity_config_defaults_are_valid() {
+        let config = IntegrityConfig::default();
+        config.validate().unwrap();
+        assert_eq!(config.scrub_interval_secs, 3600);
+        assert!((config.pages_per_cycle_percent - 1.0).abs() < f64::EPSILON);
+        assert_eq!(config.full_scan_period_secs, 345_600);
+    }
+
+    #[test]
+    fn test_integrity_config_builder_with_custom_values() {
+        let config = IntegrityConfig::builder()
+            .scrub_interval_secs(1800)
+            .pages_per_cycle_percent(5.0)
+            .full_scan_period_secs(86400)
+            .build()
+            .unwrap();
+        assert_eq!(config.scrub_interval_secs, 1800);
+        assert!((config.pages_per_cycle_percent - 5.0).abs() < f64::EPSILON);
+        assert_eq!(config.full_scan_period_secs, 86400);
+    }
+
+    #[test]
+    fn test_integrity_config_scrub_interval_too_low() {
+        let err = IntegrityConfig::builder().scrub_interval_secs(30).build().unwrap_err();
+        assert!(err.to_string().contains("scrub_interval_secs"));
+    }
+
+    #[test]
+    fn test_integrity_config_pages_percent_zero() {
+        let err = IntegrityConfig::builder().pages_per_cycle_percent(0.0).build().unwrap_err();
+        assert!(err.to_string().contains("pages_per_cycle_percent"));
+    }
+
+    #[test]
+    fn test_integrity_config_pages_percent_over_100() {
+        let err = IntegrityConfig::builder().pages_per_cycle_percent(101.0).build().unwrap_err();
+        assert!(err.to_string().contains("pages_per_cycle_percent"));
+    }
+
+    #[test]
+    fn test_integrity_config_full_scan_less_than_interval() {
+        let err = IntegrityConfig::builder()
+            .scrub_interval_secs(7200)
+            .full_scan_period_secs(3600)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("full_scan_period_secs"));
+    }
+
+    #[test]
+    fn test_integrity_config_serde_defaults() {
+        let json = "{}";
+        let config: IntegrityConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config, IntegrityConfig::default());
+    }
+
+    #[test]
+    fn test_integrity_config_validate_method() {
+        let config = IntegrityConfig { scrub_interval_secs: 10, ..IntegrityConfig::default() };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("scrub_interval_secs"));
+    }
+
+    #[test]
+    fn test_integrity_config_pages_percent_negative() {
+        let err = IntegrityConfig::builder().pages_per_cycle_percent(-1.0).build().unwrap_err();
+        assert!(err.to_string().contains("pages_per_cycle_percent"));
+    }
+
+    #[test]
+    fn test_runtime_config_integrity_validation() {
+        let config = RuntimeConfig {
+            integrity: Some(IntegrityConfig {
+                scrub_interval_secs: 10,
+                ..IntegrityConfig::default()
+            }),
+            ..RuntimeConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_runtime_config_integrity_diff() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            integrity: Some(IntegrityConfig::default()),
+            ..RuntimeConfig::default()
+        };
+        let changes = a.diff(&b);
+        assert!(changes.contains(&"integrity".to_string()));
     }
 }

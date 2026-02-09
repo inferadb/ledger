@@ -82,6 +82,8 @@ pub mod hot_key_detector;
 #[doc(hidden)]
 pub mod idempotency;
 #[doc(hidden)]
+pub mod integrity_scrubber;
+#[doc(hidden)]
 pub mod log_storage;
 #[doc(hidden)]
 pub mod multi_raft;
@@ -162,6 +164,8 @@ pub use block_compaction::BlockCompactor;
 pub use graceful_shutdown::{BackgroundJobWatchdog, GracefulShutdown, HealthState};
 #[doc(hidden)]
 pub use hot_key_detector::HotKeyDetector;
+#[doc(hidden)]
+pub use integrity_scrubber::IntegrityScrubberJob;
 #[doc(hidden)]
 pub use learner_refresh::LearnerRefreshJob;
 #[doc(hidden)]

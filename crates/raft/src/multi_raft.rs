@@ -61,6 +61,7 @@ use crate::{
     auto_recovery::AutoRecoveryJob,
     block_compaction::BlockCompactor,
     btree_compaction::BTreeCompactor,
+    integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
     proto::BlockAnnouncement,
     raft_network::GrpcRaftNetworkFactory,
@@ -211,6 +212,8 @@ pub struct ShardBackgroundJobs {
     recovery_handle: Option<JoinHandle<()>>,
     /// B+ tree compactor handle.
     btree_compactor_handle: Option<JoinHandle<()>>,
+    /// Integrity scrubber handle.
+    integrity_scrubber_handle: Option<JoinHandle<()>>,
 }
 
 impl ShardBackgroundJobs {
@@ -221,6 +224,7 @@ impl ShardBackgroundJobs {
             compactor_handle: None,
             recovery_handle: None,
             btree_compactor_handle: None,
+            integrity_scrubber_handle: None,
         }
     }
 
@@ -236,6 +240,9 @@ impl ShardBackgroundJobs {
             handle.abort();
         }
         if let Some(handle) = self.btree_compactor_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.integrity_scrubber_handle.take() {
             handle.abort();
         }
     }
@@ -575,16 +582,29 @@ impl MultiRaftManager {
         info!(shard_id = shard_id.value(), "Started auto recovery job");
 
         // B+ Tree Compactor
-        let btree_compactor =
-            BTreeCompactor::builder().raft(raft).node_id(self.config.node_id).state(state).build();
+        let btree_compactor = BTreeCompactor::builder()
+            .raft(raft.clone())
+            .node_id(self.config.node_id)
+            .state(state.clone())
+            .build();
         let btree_compactor_handle = btree_compactor.start();
         info!(shard_id = shard_id.value(), "Started B+ tree compactor");
+
+        // Integrity Scrubber
+        let integrity_scrubber = IntegrityScrubberJob::builder()
+            .raft(raft)
+            .node_id(self.config.node_id)
+            .state(state)
+            .build();
+        let integrity_scrubber_handle = integrity_scrubber.start();
+        info!(shard_id = shard_id.value(), "Started integrity scrubber");
 
         ShardBackgroundJobs {
             gc_handle: Some(gc_handle),
             compactor_handle: Some(compactor_handle),
             recovery_handle: Some(recovery_handle),
             btree_compactor_handle: Some(btree_compactor_handle),
+            integrity_scrubber_handle: Some(integrity_scrubber_handle),
         }
     }
 

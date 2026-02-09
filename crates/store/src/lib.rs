@@ -79,6 +79,7 @@ pub mod backend;
 pub mod btree;
 pub mod db;
 pub mod error;
+pub mod integrity;
 pub mod page;
 pub mod tables;
 pub mod transaction;
@@ -94,6 +95,7 @@ pub use db::{
     Database, DatabaseConfig, DatabaseStats, ReadTransaction, TableIterator, WriteTransaction,
 };
 pub use error::{Error, PageId, PageType, Result};
+pub use integrity::{IntegrityScrubber, ScrubError, ScrubResult};
 pub use page::{PAGE_HEADER_SIZE, Page, PageAllocator, PageCache};
 pub use tables::{Table, TableEntry, TableId};
 pub use types::{Key, KeyType, Value};

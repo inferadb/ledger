@@ -628,6 +628,55 @@ impl<B: StorageBackend> Database<B> {
         txn.table_depths()
     }
 
+    /// Read a raw page bypassing cache, for integrity verification.
+    ///
+    /// Returns the page without caching it. The caller is responsible for
+    /// checksum verification via [`Page::verify_checksum()`].
+    pub fn read_raw_page(&self, page_id: PageId) -> Result<Page> {
+        let backend = self.backend.read();
+        let data = backend.read_page(page_id)?;
+
+        if data.iter().all(|&b| b == 0) {
+            return Err(Error::PageNotFound { page_id });
+        }
+
+        Ok(Page::from_bytes(page_id, data))
+    }
+
+    /// Total number of pages allocated (including free pages).
+    pub fn total_page_count(&self) -> PageId {
+        self.allocator.lock().next_page_id()
+    }
+
+    /// IDs of pages currently on the free list.
+    pub fn free_page_ids(&self) -> Vec<PageId> {
+        self.allocator.lock().get_free_list()
+    }
+
+    /// Root page IDs for each table, indexed by `TableId`.
+    ///
+    /// A root of 0 indicates an empty table.
+    pub fn table_root_pages(&self) -> [PageId; TableId::COUNT] {
+        self.committed_state.load().table_roots
+    }
+
+    /// Configured page size in bytes.
+    pub fn page_size(&self) -> usize {
+        self.config.page_size
+    }
+
+    /// Write raw page data directly to the backend, bypassing cache and checksums.
+    ///
+    /// Intended for testing only — allows injecting corruption for integrity
+    /// scrubber verification. Not hidden from docs since test-utils crate needs it.
+    pub fn write_raw_page_for_test(&self, page_id: PageId, data: &[u8]) -> Result<()> {
+        let backend = self.backend.read();
+        backend.write_page(page_id, data)?;
+        // Evict from cache so raw reads see the corrupted data
+        self.cache.remove(page_id);
+        Ok(())
+    }
+
     /// Read a page from cache or backend.
     fn read_page(&self, page_id: PageId) -> Result<Page> {
         if let Some(page) = self.cache.get(page_id) {

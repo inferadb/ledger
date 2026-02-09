@@ -115,6 +115,11 @@ impl<B: StorageBackend> StateLayer<B> {
         self.db.stats()
     }
 
+    /// Access the underlying database for integrity scrubbing and diagnostics.
+    pub fn database(&self) -> &Arc<Database<B>> {
+        &self.db
+    }
+
     /// Get B-tree depths for all non-empty tables.
     ///
     /// Opens a read transaction internally to walk each table's B-tree.

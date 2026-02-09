@@ -84,6 +84,11 @@ const DETERMINISM_BUG_TOTAL: &str = "ledger_determinism_bug_total";
 const RECOVERY_ATTEMPTS_TOTAL: &str = "ledger_divergence_recovery_attempts_total";
 const VAULT_HEALTH: &str = "ledger_vault_health";
 
+// Integrity scrubber metrics
+const INTEGRITY_PAGES_CHECKED: &str = "ledger_integrity_pages_checked_total";
+const INTEGRITY_ERRORS: &str = "ledger_integrity_errors_total";
+const INTEGRITY_SCAN_DURATION: &str = "ledger_integrity_scan_duration_seconds";
+
 // Learner refresh metrics
 const LEARNER_REFRESH_TOTAL: &str = "ledger_learner_refresh_total";
 const LEARNER_REFRESH_LATENCY: &str = "ledger_learner_refresh_latency_seconds";
@@ -761,6 +766,29 @@ impl Drop for Timer {
             record_fn(self.elapsed_secs());
         }
     }
+}
+
+// ─── Integrity Scrubber Metrics ──────────────────────────────
+
+/// Record the number of pages checked in a scrub cycle.
+#[inline]
+pub fn record_integrity_pages_checked(count: u64) {
+    counter!(INTEGRITY_PAGES_CHECKED).increment(count);
+}
+
+/// Record the number of integrity errors detected in a scrub cycle.
+///
+/// Labels by error type: "checksum" for data corruption, "structural" for
+/// B-tree invariant violations.
+#[inline]
+pub fn record_integrity_errors(error_type: &str, count: u64) {
+    counter!(INTEGRITY_ERRORS, "error_type" => error_type.to_string()).increment(count);
+}
+
+/// Record the duration of a scrub cycle in seconds.
+#[inline]
+pub fn record_integrity_scan_duration(duration_secs: f64) {
+    histogram!(INTEGRITY_SCAN_DURATION).record(duration_secs);
 }
 
 // ─── Namespace Resource Accounting Metrics ───────────────────
