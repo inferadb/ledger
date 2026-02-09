@@ -41,6 +41,7 @@
 
 use super::node::{BranchNode, BranchNodeRef, LeafNode, LeafNodeRef};
 use crate::{
+    bloom::BLOOM_FILTER_SIZE,
     error::{Error, PageId, Result},
     page::Page,
 };
@@ -393,8 +394,8 @@ pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
     }
 
     // Total usable space = page size - page header - node header (cell_count + free_start +
-    // free_end = 6 bytes)
-    let total_content = page.size() - crate::page::PAGE_HEADER_SIZE - 6;
+    // free_end = 6 bytes) - bloom filter region
+    let total_content = page.size() - crate::page::PAGE_HEADER_SIZE - 6 - BLOOM_FILTER_SIZE;
 
     Ok(live_bytes as f64 / total_content as f64)
 }
@@ -430,8 +431,8 @@ pub fn can_merge_leaves(left: &Page, right: &Page) -> Result<bool> {
         total_live += 2 + 2 + 2 + key.len() + value.len();
     }
 
-    // Total usable space in one page (page_header + node_header overhead)
-    let total_content = left.size() - crate::page::PAGE_HEADER_SIZE - 6;
+    // Total usable space in one page (page_header + node_header + bloom_filter overhead)
+    let total_content = left.size() - crate::page::PAGE_HEADER_SIZE - 6 - BLOOM_FILTER_SIZE;
 
     Ok(total_live <= total_content)
 }

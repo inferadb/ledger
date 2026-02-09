@@ -9,6 +9,7 @@
 //! [Free Space Start: 2 bytes]
 //! [Free Space End: 2 bytes]
 //! [Reserved: 2 bytes]
+//! [Bloom Filter: 256 bytes]
 //! [Cell Pointers: 2 bytes each, pointing to cells from end of page]
 //! ... free space ...
 //! [Cells: (key_len:2, val_len:2, key_bytes, val_bytes)]
@@ -29,6 +30,7 @@
 use std::cmp::Ordering;
 
 use crate::{
+    bloom::{BLOOM_FILTER_SIZE, BloomFilter},
     error::{Error, PageId, PageType, Result},
     page::{PAGE_HEADER_SIZE, Page},
 };
@@ -48,8 +50,11 @@ const FREE_END_OFFSET: usize = PAGE_HEADER_SIZE + 4;
 /// Offset of rightmost child (branch nodes only).
 const RIGHTMOST_CHILD_OFFSET: usize = PAGE_HEADER_SIZE + 6;
 
-/// Offset where cell pointers begin (leaf nodes).
-const LEAF_CELL_PTRS_OFFSET: usize = PAGE_HEADER_SIZE + NODE_HEADER_SIZE;
+/// Offset where the bloom filter region begins (leaf nodes only).
+const LEAF_BLOOM_OFFSET: usize = PAGE_HEADER_SIZE + NODE_HEADER_SIZE;
+
+/// Offset where cell pointers begin (leaf nodes, after bloom filter).
+const LEAF_CELL_PTRS_OFFSET: usize = LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE;
 
 /// Offset where cell pointers begin (branch nodes, after rightmost child).
 const BRANCH_CELL_PTRS_OFFSET: usize = PAGE_HEADER_SIZE + 6 + 8; // +8 for rightmost child
@@ -112,7 +117,7 @@ impl<'a> LeafNode<'a> {
 
         page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].copy_from_slice(&0u16.to_le_bytes());
 
-        // Free space starts right after node header
+        // Free space starts right after bloom filter region
         let free_start = LEAF_CELL_PTRS_OFFSET as u16;
         page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2]
             .copy_from_slice(&free_start.to_le_bytes());
@@ -120,8 +125,39 @@ impl<'a> LeafNode<'a> {
         let free_end = page_size as u16;
         page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].copy_from_slice(&free_end.to_le_bytes());
 
+        // Zero the bloom filter region
+        page.data[LEAF_BLOOM_OFFSET..LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE].fill(0);
+
         page.dirty = true;
         Self { page }
+    }
+
+    /// Read the bloom filter embedded in this leaf page.
+    pub fn bloom_filter(&self) -> BloomFilter {
+        // Safety: slice length is guaranteed by constant expression (same pattern as
+        // u16::from_le_bytes elsewhere in this crate — see lib.rs allow(disallowed_methods))
+        BloomFilter::from_array(
+            self.page.data[LEAF_BLOOM_OFFSET..LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    /// Write a bloom filter into the leaf page.
+    pub fn set_bloom_filter(&mut self, filter: &BloomFilter) {
+        self.page.data[LEAF_BLOOM_OFFSET..LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE]
+            .copy_from_slice(filter.to_bytes());
+        self.page.dirty = true;
+    }
+
+    /// Rebuild the bloom filter from all keys currently in this leaf.
+    pub fn rebuild_bloom_filter(&mut self) {
+        let count = self.cell_count() as usize;
+        let mut filter = BloomFilter::new();
+        for i in 0..count {
+            filter.insert(self.key(i));
+        }
+        self.set_bloom_filter(&filter);
     }
 
     /// Get the number of cells in this node.
@@ -265,6 +301,11 @@ impl<'a> LeafNode<'a> {
         self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
             .copy_from_slice(&new_count.to_le_bytes());
 
+        // Add the key to the bloom filter (incremental — no need to rebuild)
+        let mut filter = self.bloom_filter();
+        filter.insert(key);
+        self.set_bloom_filter(&filter);
+
         self.page.dirty = true;
     }
 
@@ -327,6 +368,9 @@ impl<'a> LeafNode<'a> {
         let new_count = (count - 1) as u16;
         self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2]
             .copy_from_slice(&new_count.to_le_bytes());
+
+        // Rebuild bloom filter since we can't remove individual key bits
+        self.rebuild_bloom_filter();
 
         // Note: Cell data becomes dead space (would need compaction to reclaim)
         self.page.dirty = true;
@@ -595,6 +639,15 @@ impl<'a> LeafNodeRef<'a> {
         Ok(Self { data: &page.data })
     }
 
+    /// Read the bloom filter embedded in this leaf page.
+    pub fn bloom_filter(&self) -> BloomFilter {
+        BloomFilter::from_array(
+            self.data[LEAF_BLOOM_OFFSET..LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
     /// Get the number of cells.
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes(self.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap())
@@ -775,7 +828,7 @@ mod tests {
         let mut node = LeafNode::init(&mut page);
 
         assert_eq!(node.cell_count(), 0);
-        assert!(node.free_space() > 4000); // Most of 4KB should be free
+        assert!(node.free_space() > 3700); // Most of 4KB minus bloom filter should be free
 
         // Insert some data
         node.insert(0, b"key1", b"value1");

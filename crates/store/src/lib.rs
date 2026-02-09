@@ -76,6 +76,7 @@
 #![allow(clippy::implicit_saturating_sub)]
 
 pub mod backend;
+pub(crate) mod bloom;
 pub mod btree;
 pub mod db;
 pub mod dirty_bitmap;

@@ -150,15 +150,22 @@ impl<P: PageProvider> BTree<P> {
     }
 
     /// Get a value by key.
+    ///
+    /// Uses the leaf page's embedded bloom filter for fast negative lookups:
+    /// if the bloom filter says "definitely absent," the binary search is skipped.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if self.root_page == 0 {
             return Ok(None);
         }
 
         let leaf_page = self.find_leaf(key)?;
+        let page = self.provider.read_page(leaf_page)?;
+        let leaf = LeafNodeRef::from_page(&page)?;
 
-        let mut page = self.provider.read_page(leaf_page)?;
-        let leaf = LeafNode::from_page(&mut page)?;
+        // Fast path: bloom filter says key is definitely absent
+        if !leaf.bloom_filter().may_contain(key) {
+            return Ok(None);
+        }
 
         match leaf.search(key) {
             SearchResult::Found(idx) => Ok(Some(leaf.value(idx).to_vec())),
