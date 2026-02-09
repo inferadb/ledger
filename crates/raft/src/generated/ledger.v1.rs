@@ -1300,6 +1300,11 @@ pub struct CreateBackupRequest {
     /// Optional tag for identifying this backup (e.g., "pre-migration").
     #[prost(string, optional, tag = "1")]
     pub tag: ::core::option::Option<::prost::alloc::string::String>,
+    /// For incremental backup: ID of the base (full) backup.
+    /// When provided, only pages changed since the base are included.
+    /// Omit for a full backup.
+    #[prost(string, optional, tag = "2")]
+    pub base_backup_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateBackupResponse {
@@ -1361,6 +1366,15 @@ pub struct BackupInfo {
     /// Optional user-provided tag.
     #[prost(string, tag = "9")]
     pub tag: ::prost::alloc::string::String,
+    /// Backup type (full or incremental).
+    #[prost(enumeration = "BackupType", tag = "10")]
+    pub backup_type: i32,
+    /// For incremental backups, the ID of the base (full) backup.
+    #[prost(string, optional, tag = "11")]
+    pub base_backup_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Number of pages in this backup.
+    #[prost(uint64, optional, tag = "12")]
+    pub page_count: ::core::option::Option<u64>,
 }
 /// Restore state from a backup. Requires explicit confirmation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2029,6 +2043,35 @@ impl VaultHealthProto {
             "VAULT_HEALTH_PROTO_HEALTHY" => Some(Self::Healthy),
             "VAULT_HEALTH_PROTO_DIVERGED" => Some(Self::Diverged),
             "VAULT_HEALTH_PROTO_RECOVERING" => Some(Self::Recovering),
+            _ => None,
+        }
+    }
+}
+/// Backup type indicator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum BackupType {
+    /// Full backup containing all database pages.
+    Full = 0,
+    /// Incremental backup containing only pages changed since the base backup.
+    Incremental = 1,
+}
+impl BackupType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Full => "BACKUP_TYPE_FULL",
+            Self::Incremental => "BACKUP_TYPE_INCREMENTAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "BACKUP_TYPE_FULL" => Some(Self::Full),
+            "BACKUP_TYPE_INCREMENTAL" => Some(Self::Incremental),
             _ => None,
         }
     }

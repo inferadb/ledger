@@ -78,6 +78,7 @@
 pub mod backend;
 pub mod btree;
 pub mod db;
+pub mod dirty_bitmap;
 pub mod error;
 pub mod integrity;
 pub mod page;
@@ -94,6 +95,7 @@ pub use btree::{BTree, CompactionStats, PageProvider};
 pub use db::{
     Database, DatabaseConfig, DatabaseStats, ReadTransaction, TableIterator, WriteTransaction,
 };
+pub use dirty_bitmap::DirtyBitmap;
 pub use error::{Error, PageId, PageType, Result};
 pub use integrity::{IntegrityScrubber, ScrubError, ScrubResult};
 pub use page::{PAGE_HEADER_SIZE, Page, PageAllocator, PageCache};

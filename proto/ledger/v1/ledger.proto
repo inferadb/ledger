@@ -1089,10 +1089,22 @@ message GetConfigResponse {
 // Backup & Restore Messages
 // -----------------------------------------------------------------------------
 
+// Backup type indicator.
+enum BackupType {
+  // Full backup containing all database pages.
+  BACKUP_TYPE_FULL = 0;
+  // Incremental backup containing only pages changed since the base backup.
+  BACKUP_TYPE_INCREMENTAL = 1;
+}
+
 // Create a consistent backup of shard state.
 message CreateBackupRequest {
   // Optional tag for identifying this backup (e.g., "pre-migration").
   optional string tag = 1;
+  // For incremental backup: ID of the base (full) backup.
+  // When provided, only pages changed since the base are included.
+  // Omit for a full backup.
+  optional string base_backup_id = 2;
 }
 
 message CreateBackupResponse {
@@ -1138,6 +1150,12 @@ message BackupInfo {
   uint32 schema_version = 8;
   // Optional user-provided tag.
   string tag = 9;
+  // Backup type (full or incremental).
+  BackupType backup_type = 10;
+  // For incremental backups, the ID of the base (full) backup.
+  optional string base_backup_id = 11;
+  // Number of pages in this backup.
+  optional uint64 page_count = 12;
 }
 
 // Restore state from a backup. Requires explicit confirmation.

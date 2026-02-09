@@ -44,6 +44,7 @@ use crate::{
         StorageBackend,
     },
     btree::{BTree, CompactionStats, PageProvider},
+    dirty_bitmap::DirtyBitmap,
     error::{Error, PageId, PageType, Result},
     page::{Page, PageAllocator, PageCache},
     tables::{Table, TableEntry, TableId},
@@ -109,6 +110,11 @@ pub struct Database<B: StorageBackend> {
     write_lock: std::sync::Mutex<()>,
     /// Total B-tree page splits since database creation.
     page_splits: AtomicU64,
+    /// Pages modified since the last backup checkpoint.
+    ///
+    /// Used by incremental backup to track which pages need to be included
+    /// in the delta. Reset when a backup completes successfully.
+    dirty_bitmap: Mutex<DirtyBitmap>,
 }
 
 impl Database<FileBackend> {
@@ -219,6 +225,7 @@ impl<B: StorageBackend> Database<B> {
             config,
             write_lock: std::sync::Mutex::new(()),
             page_splits: AtomicU64::new(0),
+            dirty_bitmap: Mutex::new(DirtyBitmap::new()),
         };
 
         // Restore free list: use persisted list if available, otherwise rebuild
@@ -677,6 +684,84 @@ impl<B: StorageBackend> Database<B> {
         Ok(())
     }
 
+    /// Page IDs modified since the last backup checkpoint.
+    ///
+    /// Returns dirty page IDs in ascending order. Used by incremental backup
+    /// to determine which pages to include in the delta.
+    pub fn dirty_page_ids(&self) -> Vec<PageId> {
+        self.dirty_bitmap.lock().dirty_ids()
+    }
+
+    /// Number of pages marked dirty since the last backup.
+    pub fn dirty_page_count(&self) -> usize {
+        self.dirty_bitmap.lock().count()
+    }
+
+    /// Clear the dirty bitmap after a successful backup.
+    ///
+    /// Called by the backup system after writing all dirty pages to a backup
+    /// file. Subsequent writes will be tracked for the next incremental backup.
+    pub fn clear_dirty_bitmap(&self) {
+        self.dirty_bitmap.lock().clear();
+    }
+
+    /// Serialize the dirty bitmap for persistence.
+    ///
+    /// The bitmap can be stored alongside the database and reloaded on restart
+    /// to maintain incremental backup state across server restarts.
+    pub fn dirty_bitmap_bytes(&self) -> Vec<u8> {
+        self.dirty_bitmap.lock().to_bytes()
+    }
+
+    /// Restore the dirty bitmap from previously serialized bytes.
+    ///
+    /// Call during database open to resume incremental backup tracking.
+    /// Invalid data is silently ignored (bitmap stays empty).
+    pub fn load_dirty_bitmap(&self, data: &[u8]) {
+        if let Some(bitmap) = DirtyBitmap::from_bytes(data) {
+            *self.dirty_bitmap.lock() = bitmap;
+        }
+    }
+
+    /// Export raw page data for the specified page IDs.
+    ///
+    /// Reads pages directly from the backend (bypassing cache) to capture
+    /// the on-disk state. Returns `(page_id, page_data)` pairs for all
+    /// valid pages. Free or unwritten pages are skipped.
+    pub fn export_pages(&self, page_ids: &[PageId]) -> Vec<(PageId, Vec<u8>)> {
+        let backend = self.backend.read();
+        let free_pages: HashSet<PageId> = self.free_page_ids().into_iter().collect();
+        let total = self.total_page_count();
+
+        let mut pages = Vec::with_capacity(page_ids.len());
+        for &page_id in page_ids {
+            if page_id >= total || free_pages.contains(&page_id) {
+                continue;
+            }
+            if let Ok(data) = backend.read_page(page_id) {
+                // Skip unwritten pages (all zeros)
+                if !data.iter().all(|&b| b == 0) {
+                    pages.push((page_id, data));
+                }
+            }
+        }
+        pages
+    }
+
+    /// Import raw page data, writing directly to the backend.
+    ///
+    /// Used during backup restore to apply page-level patches.
+    /// Evicts each page from cache to ensure subsequent reads see the
+    /// imported data.
+    pub fn import_pages(&self, pages: &[(PageId, &[u8])]) -> Result<()> {
+        let backend = self.backend.read();
+        for &(page_id, data) in pages {
+            backend.write_page(page_id, data)?;
+            self.cache.remove(page_id);
+        }
+        Ok(())
+    }
+
     /// Read a page from cache or backend.
     fn read_page(&self, page_id: PageId) -> Result<Page> {
         if let Some(page) = self.cache.get(page_id) {
@@ -1094,6 +1179,15 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// The dual-slot commit ensures there's ALWAYS one valid commit slot to
     /// recover from, even if a crash occurs during the commit sequence.
     pub fn commit(mut self) -> Result<()> {
+        // Record modified page IDs in the backup dirty bitmap before draining.
+        // This enables incremental backups to capture exactly which pages changed.
+        {
+            let mut bitmap = self.db.dirty_bitmap.lock();
+            for &page_id in self.dirty_pages.keys() {
+                bitmap.mark(page_id);
+            }
+        }
+
         // Move all buffered dirty pages into the shared cache
         for (_, page) in self.dirty_pages.drain() {
             self.db.cache.insert(page);

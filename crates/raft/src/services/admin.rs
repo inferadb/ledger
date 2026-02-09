@@ -2441,32 +2441,62 @@ impl AdminService for AdminServiceImpl {
             .backup_manager
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
-        let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Snapshot manager is not available on this node")
-        })?;
-
-        // Trigger Raft snapshot for consistent state
-        ctx.start_raft_timer();
-        let _ = self.raft.trigger().snapshot().await.map_err(|e| {
-            ctx.end_raft_timer();
-            ctx.set_error("SnapshotError", &e.to_string());
-            Status::failed_precondition(format!("Failed to trigger snapshot: {e}"))
-        })?;
-        ctx.end_raft_timer();
-
-        // Load the latest snapshot
-        let snapshot = snapshot_manager
-            .load_latest()
-            .map_err(|e| Status::internal(format!("Failed to load snapshot: {e}")))?
-            .ok_or_else(|| Status::failed_precondition("No snapshot available for backup"))?;
 
         let tag = req.tag.unwrap_or_default();
 
-        // Create the backup
-        let meta = backup_manager.create_backup(&snapshot, &tag).map_err(|e| {
-            ctx.set_error("BackupError", &e.to_string());
-            Status::internal(format!("Failed to create backup: {e}"))
-        })?;
+        let meta = if let Some(base_backup_id) = req.base_backup_id {
+            // Incremental backup: capture only pages changed since the base backup.
+            let base_meta = backup_manager.get_metadata(&base_backup_id).map_err(|e| {
+                ctx.set_error("BaseBackupNotFound", &e.to_string());
+                Status::not_found(format!("Base backup not found: {e}"))
+            })?;
+
+            let shard_height = self.applied_state.shard_height();
+            let db = self.state.database();
+
+            let meta = backup_manager
+                .create_incremental_backup(
+                    db.as_ref(),
+                    &base_backup_id,
+                    base_meta.shard_id,
+                    shard_height,
+                    &tag,
+                )
+                .map_err(|e| {
+                    ctx.set_error("BackupError", &e.to_string());
+                    Status::internal(format!("Failed to create incremental backup: {e}"))
+                })?;
+
+            // Clear dirty bitmap after successful incremental backup
+            db.clear_dirty_bitmap();
+
+            meta
+        } else {
+            // Full snapshot-based backup (existing behavior)
+            let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
+                Status::failed_precondition("Snapshot manager is not available on this node")
+            })?;
+
+            // Trigger Raft snapshot for consistent state
+            ctx.start_raft_timer();
+            let _ = self.raft.trigger().snapshot().await.map_err(|e| {
+                ctx.end_raft_timer();
+                ctx.set_error("SnapshotError", &e.to_string());
+                Status::failed_precondition(format!("Failed to trigger snapshot: {e}"))
+            })?;
+            ctx.end_raft_timer();
+
+            // Load the latest snapshot
+            let snapshot = snapshot_manager
+                .load_latest()
+                .map_err(|e| Status::internal(format!("Failed to load snapshot: {e}")))?
+                .ok_or_else(|| Status::failed_precondition("No snapshot available for backup"))?;
+
+            backup_manager.create_backup(&snapshot, &tag).map_err(|e| {
+                ctx.set_error("BackupError", &e.to_string());
+                Status::internal(format!("Failed to create backup: {e}"))
+            })?
+        };
 
         ctx.set_block_height(meta.shard_height);
         ctx.set_success();
@@ -2516,6 +2546,11 @@ impl AdminService for AdminServiceImpl {
                     nanos: meta.created_at.timestamp_subsec_nanos() as i32,
                 };
 
+                let backup_type = match meta.backup_type {
+                    crate::backup::BackupType::Full => 0,
+                    crate::backup::BackupType::Incremental => 1,
+                };
+
                 BackupInfo {
                     backup_id: meta.backup_id,
                     shard_height: meta.shard_height,
@@ -2528,6 +2563,9 @@ impl AdminService for AdminServiceImpl {
                     }),
                     schema_version: meta.schema_version,
                     tag: meta.tag,
+                    backup_type,
+                    base_backup_id: meta.base_backup_id,
+                    page_count: meta.page_count,
                 }
             })
             .collect();
@@ -2578,42 +2616,67 @@ impl AdminService for AdminServiceImpl {
             Status::not_found(format!("Backup not found: {e}"))
         })?;
 
-        // Load and verify the backup (checksum validation happens in read_from_file)
-        let snapshot = backup_manager.load_backup(&req.backup_id).map_err(|e| {
-            ctx.set_error("BackupLoadError", &e.to_string());
-            Status::internal(format!("Failed to load backup: {e}"))
-        })?;
+        let (restored_height, message) = if meta.page_count.is_some() {
+            // Page-level backup (full page or incremental): resolve chain and restore pages
+            let chain = backup_manager.resolve_backup_chain(&req.backup_id).map_err(|e| {
+                ctx.set_error("ChainResolutionError", &e.to_string());
+                Status::internal(format!("Failed to resolve backup chain: {e}"))
+            })?;
 
-        // Verify schema version compatibility
-        let current_schema_version = 2_u32; // SNAPSHOT_VERSION from state crate
-        if snapshot.header.version != current_schema_version {
-            ctx.set_error(
-                "SchemaVersionMismatch",
-                &format!(
-                    "backup version {} != server version {}",
-                    snapshot.header.version, current_schema_version
-                ),
+            let db = self.state.database();
+            let height = backup_manager.restore_page_chain(&chain, db.as_ref()).map_err(|e| {
+                ctx.set_error("RestoreError", &e.to_string());
+                Status::internal(format!("Failed to restore page backup chain: {e}"))
+            })?;
+
+            let msg = format!(
+                "Page backup {} (chain length {}, height {}) restored. Restart the node to apply.",
+                meta.backup_id,
+                chain.len(),
+                height
             );
-            return Err(Status::failed_precondition(format!(
-                "Schema version mismatch: backup has version {}, server expects version {}. \
-                 Cannot restore from incompatible backup.",
-                snapshot.header.version, current_schema_version,
-            )));
-        }
+            (height, msg)
+        } else {
+            // Snapshot-based backup (existing behavior)
+            let snapshot = backup_manager.load_backup(&req.backup_id).map_err(|e| {
+                ctx.set_error("BackupLoadError", &e.to_string());
+                Status::internal(format!("Failed to load backup: {e}"))
+            })?;
 
-        // Save the backup as a snapshot so Raft will use it on restart.
-        // Full state restoration requires a node restart to re-initialize
-        // the Raft state machine from the restored snapshot.
-        let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Snapshot manager is not available on this node")
-        })?;
+            // Verify schema version compatibility
+            let current_schema_version = 2_u32; // SNAPSHOT_VERSION from state crate
+            if snapshot.header.version != current_schema_version {
+                ctx.set_error(
+                    "SchemaVersionMismatch",
+                    &format!(
+                        "backup version {} != server version {}",
+                        snapshot.header.version, current_schema_version
+                    ),
+                );
+                return Err(Status::failed_precondition(format!(
+                    "Schema version mismatch: backup has version {}, server expects version {}. \
+                     Cannot restore from incompatible backup.",
+                    snapshot.header.version, current_schema_version,
+                )));
+            }
 
-        snapshot_manager.save(&snapshot).map_err(|e| {
-            ctx.set_error("RestoreError", &e.to_string());
-            Status::internal(format!("Failed to save backup as snapshot: {e}"))
-        })?;
+            let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
+                Status::failed_precondition("Snapshot manager is not available on this node")
+            })?;
 
-        let restored_height = snapshot.header.shard_height;
+            snapshot_manager.save(&snapshot).map_err(|e| {
+                ctx.set_error("RestoreError", &e.to_string());
+                Status::internal(format!("Failed to save backup as snapshot: {e}"))
+            })?;
+
+            let height = snapshot.header.shard_height;
+            let msg = format!(
+                "Backup {} (height {}) restored as snapshot. Restart the node to apply.",
+                meta.backup_id, height
+            );
+            (height, msg)
+        };
+
         ctx.set_block_height(restored_height);
         ctx.set_success();
 
@@ -2628,14 +2691,7 @@ impl AdminService for AdminServiceImpl {
             ),
         );
 
-        Ok(Response::new(RestoreBackupResponse {
-            success: true,
-            message: format!(
-                "Backup {} (height {}) restored as snapshot. Restart the node to apply.",
-                meta.backup_id, restored_height
-            ),
-            restored_height,
-        }))
+        Ok(Response::new(RestoreBackupResponse { success: true, message, restored_height }))
     }
 }
 
