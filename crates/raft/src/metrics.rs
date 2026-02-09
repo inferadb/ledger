@@ -894,6 +894,25 @@ pub fn record_background_job_items(job: &str, count: u64) {
     .increment(count);
 }
 
+// ─── Metric Cardinality Budget Metrics ────────────────────────
+
+/// Total metric observations dropped due to cardinality budget overflow (counter).
+///
+/// Labels: `metric_name` — the metric family that exceeded `max_cardinality`.
+/// Cardinality of this meta-metric is bounded by the number of distinct metric
+/// families in the application (typically < 100).
+const CARDINALITY_OVERFLOW_TOTAL: &str = "ledger_metrics_cardinality_overflow_total";
+
+/// Record that a metric observation was dropped due to cardinality overflow.
+#[inline]
+pub fn record_cardinality_overflow(metric_name: &str) {
+    counter!(
+        CARDINALITY_OVERFLOW_TOTAL,
+        "metric_name" => metric_name.to_string()
+    )
+    .increment(1);
+}
+
 /// Create a timer for write operations.
 pub fn write_timer() -> Timer {
     Timer::new(|secs| record_write(true, secs))
@@ -1003,5 +1022,17 @@ mod tests {
         assert!(BACKGROUND_JOB_RUNS_TOTAL.ends_with("_total"));
         assert!(BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL.starts_with("ledger_"));
         assert!(BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL.ends_with("_total"));
+    }
+
+    #[test]
+    fn test_cardinality_overflow_doesnt_panic() {
+        record_cardinality_overflow("test_metric");
+        record_cardinality_overflow("another_metric");
+    }
+
+    #[test]
+    fn test_cardinality_overflow_metric_name() {
+        assert!(CARDINALITY_OVERFLOW_TOTAL.starts_with("ledger_"));
+        assert!(CARDINALITY_OVERFLOW_TOTAL.ends_with("_total"));
     }
 }

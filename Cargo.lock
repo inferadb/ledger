@@ -1465,6 +1465,7 @@ dependencies = [
  "bytes",
  "chrono",
  "criterion",
+ "dashmap",
  "fs2",
  "futures",
  "hmac",

@@ -1773,6 +1773,95 @@ impl NamespaceQuota {
     }
 }
 
+/// Default warning threshold for metric cardinality per family.
+const fn default_warn_cardinality() -> u32 {
+    5000
+}
+
+/// Default maximum cardinality before metric observations are dropped.
+const fn default_max_cardinality() -> u32 {
+    10_000
+}
+
+/// Controls cardinality limits for Prometheus metrics.
+///
+/// Tracks distinct label combinations per metric family using HyperLogLog
+/// estimation. When a metric family's estimated cardinality exceeds
+/// `warn_cardinality`, a warning is emitted. When it exceeds
+/// `max_cardinality`, new observations are dropped and an overflow
+/// counter increments.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::MetricsCardinalityConfig;
+/// let config = MetricsCardinalityConfig::builder()
+///     .warn_cardinality(3000)
+///     .max_cardinality(8000)
+///     .build()
+///     .expect("valid config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsCardinalityConfig {
+    /// Emit a WARN log when estimated distinct label combinations reach this count.
+    #[serde(default = "default_warn_cardinality")]
+    pub warn_cardinality: u32,
+    /// Drop metric observations when estimated cardinality exceeds this count.
+    #[serde(default = "default_max_cardinality")]
+    pub max_cardinality: u32,
+}
+
+impl Default for MetricsCardinalityConfig {
+    fn default() -> Self {
+        Self {
+            warn_cardinality: default_warn_cardinality(),
+            max_cardinality: default_max_cardinality(),
+        }
+    }
+}
+
+#[bon::bon]
+impl MetricsCardinalityConfig {
+    /// Create a new cardinality config with validation.
+    ///
+    /// Returns [`ConfigError::Validation`] if `warn_cardinality >= max_cardinality`
+    /// or either value is zero.
+    #[builder]
+    pub fn new(
+        #[builder(default = default_warn_cardinality())] warn_cardinality: u32,
+        #[builder(default = default_max_cardinality())] max_cardinality: u32,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { warn_cardinality, max_cardinality };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl MetricsCardinalityConfig {
+    /// Validate an existing configuration (e.g., after deserialization).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.warn_cardinality == 0 {
+            return Err(ConfigError::Validation {
+                message: "warn_cardinality must be > 0".to_string(),
+            });
+        }
+        if self.max_cardinality == 0 {
+            return Err(ConfigError::Validation {
+                message: "max_cardinality must be > 0".to_string(),
+            });
+        }
+        if self.warn_cardinality >= self.max_cardinality {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "warn_cardinality ({}) must be less than max_cardinality ({})",
+                    self.warn_cardinality, self.max_cardinality
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Runtime-reconfigurable configuration subset.
 ///
 /// Contains only parameters that can be safely changed without a server restart.
@@ -1813,6 +1902,9 @@ pub struct RuntimeConfig {
     /// Integrity scrubber parameters.
     #[serde(default)]
     pub integrity: Option<IntegrityConfig>,
+    /// Metric cardinality budgets. `None` disables cardinality tracking.
+    #[serde(default)]
+    pub metrics_cardinality: Option<MetricsCardinalityConfig>,
 }
 
 /// Identifies a non-reconfigurable parameter that was included in an update request.
@@ -1848,6 +1940,9 @@ impl RuntimeConfig {
         if let Some(ref i) = self.integrity {
             i.validate()?;
         }
+        if let Some(ref mc) = self.metrics_cardinality {
+            mc.validate()?;
+        }
         Ok(())
     }
 
@@ -1875,6 +1970,9 @@ impl RuntimeConfig {
         }
         if self.integrity != other.integrity {
             changes.push("integrity".to_string());
+        }
+        if self.metrics_cardinality != other.metrics_cardinality {
+            changes.push("metrics_cardinality".to_string());
         }
         changes
     }
@@ -3085,5 +3183,103 @@ mod tests {
         };
         let changes = a.diff(&b);
         assert!(changes.contains(&"integrity".to_string()));
+    }
+
+    // =========================================================================
+    // MetricsCardinalityConfig tests
+    // =========================================================================
+
+    #[test]
+    fn test_metrics_cardinality_config_defaults_are_valid() {
+        let config = MetricsCardinalityConfig::builder().build().expect("defaults should be valid");
+        assert_eq!(config.warn_cardinality, 5000);
+        assert_eq!(config.max_cardinality, 10_000);
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_builder_custom() {
+        let config = MetricsCardinalityConfig::builder()
+            .warn_cardinality(3000)
+            .max_cardinality(8000)
+            .build()
+            .expect("valid config");
+        assert_eq!(config.warn_cardinality, 3000);
+        assert_eq!(config.max_cardinality, 8000);
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_warn_zero() {
+        let result = MetricsCardinalityConfig::builder().warn_cardinality(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_max_zero() {
+        let result = MetricsCardinalityConfig::builder().max_cardinality(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_warn_equals_max() {
+        let result = MetricsCardinalityConfig::builder()
+            .warn_cardinality(5000)
+            .max_cardinality(5000)
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_warn_exceeds_max() {
+        let result = MetricsCardinalityConfig::builder()
+            .warn_cardinality(10_000)
+            .max_cardinality(5000)
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_serde_roundtrip() {
+        let config = MetricsCardinalityConfig::builder().build().expect("defaults should be valid");
+        let json = serde_json::to_string(&config).expect("serialize");
+        let deserialized: MetricsCardinalityConfig =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_serde_defaults() {
+        let json = "{}";
+        let config: MetricsCardinalityConfig = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(config.warn_cardinality, 5000);
+        assert_eq!(config.max_cardinality, 10_000);
+    }
+
+    #[test]
+    fn test_metrics_cardinality_config_validate_method() {
+        let config = MetricsCardinalityConfig { warn_cardinality: 100, max_cardinality: 200 };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_runtime_config_metrics_cardinality_validation() {
+        let config = RuntimeConfig {
+            metrics_cardinality: Some(MetricsCardinalityConfig {
+                warn_cardinality: 0,
+                max_cardinality: 100,
+            }),
+            ..RuntimeConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_runtime_config_metrics_cardinality_diff() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            metrics_cardinality: Some(MetricsCardinalityConfig::default()),
+            ..RuntimeConfig::default()
+        };
+        let changes = a.diff(&b);
+        assert!(changes.contains(&"metrics_cardinality".to_string()));
     }
 }

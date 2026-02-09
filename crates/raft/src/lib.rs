@@ -70,6 +70,8 @@ pub mod backup;
 #[doc(hidden)]
 pub mod batching;
 #[doc(hidden)]
+pub mod cardinality;
+#[doc(hidden)]
 pub mod deadline;
 #[doc(hidden)]
 pub mod dependency_health;
@@ -160,6 +162,8 @@ pub use auto_recovery::AutoRecoveryJob;
 pub use backup::{BackupJob, BackupManager};
 #[doc(hidden)]
 pub use block_compaction::BlockCompactor;
+#[doc(hidden)]
+pub use cardinality::CardinalityBudget;
 #[doc(hidden)]
 pub use graceful_shutdown::{BackgroundJobWatchdog, GracefulShutdown, HealthState};
 #[doc(hidden)]

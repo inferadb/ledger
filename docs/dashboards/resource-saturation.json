@@ -1,0 +1,368 @@
+{
+  "uid": "inferadb-resource-saturation",
+  "title": "InferaDB Ledger — Resource Saturation",
+  "description": "Batch queue depth, rate limit queue depth, connection pool utilization, and background job health.",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["inferadb", "saturation", "capacity", "background-jobs"],
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "10s",
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "node_id",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_active_connections, node_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "shard_id",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_batch_queue_depth, shard_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Determinism Bug",
+        "datasource": { "uid": "${datasource}" },
+        "enable": true,
+        "expr": "increase(ledger_determinism_bug_total[1m]) > 0",
+        "tagKeys": "severity",
+        "textFormat": "Determinism bug detected",
+        "iconColor": "red"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Batch Queue Depth",
+      "description": "Warning: > 500, Critical: > 900. Leading indicator of write saturation.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "red", "value": 900 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_batch_queue_depth",
+          "legendFormat": "Queue Depth {{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Rate Limit Queue Depth",
+      "description": "Warning: > 40, Critical: > 80. Pending Raft proposals (backpressure).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 40 },
+              { "color": "red", "value": 80 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_rate_limit_queue_depth",
+          "legendFormat": "Queue Depth {{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Active Connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_active_connections",
+          "legendFormat": "Connections {{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Pending Raft Proposals",
+      "description": "Warning: > 100, Critical: > 500.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "inferadb_ledger_raft_proposals_pending",
+          "legendFormat": "Pending {{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Background Job Health",
+      "description": "Success rate per job over the last hour.",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.8 },
+              { "color": "green", "value": 0.9 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      },
+      "targets": [
+        {
+          "expr": "sum by (job) (rate(ledger_background_job_runs_total{result=\"success\"}[1h])) / sum by (job) (rate(ledger_background_job_runs_total[1h]))",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "title": "Background Job Duration — p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (job, le) (rate(ledger_background_job_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{job}} p99"
+        }
+      ]
+    },
+    {
+      "title": "Background Job Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job) (rate(ledger_background_job_items_processed_total[5m]))",
+          "legendFormat": "{{job}} items/s"
+        }
+      ]
+    },
+    {
+      "title": "Background Job Runs",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, result) (increase(ledger_background_job_runs_total[$__rate_interval]))",
+          "legendFormat": "{{job}} — {{result}}"
+        }
+      ]
+    },
+    {
+      "title": "Batch Writer — Eager vs Timeout Commits",
+      "description": "Healthy: mostly eager commits. High timeout ratio indicates slow consumption.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(ledger_batch_eager_commits_total[$__rate_interval])",
+          "legendFormat": "Eager Commits/s"
+        },
+        {
+          "expr": "rate(ledger_batch_timeout_commits_total[$__rate_interval])",
+          "legendFormat": "Timeout Commits/s"
+        }
+      ]
+    },
+    {
+      "title": "Batch Coalesce Size",
+      "description": "Average operations coalesced per batch. Higher = more efficient batching.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_batch_coalesce_size_bucket[$__rate_interval])))",
+          "legendFormat": "p50 Batch Size"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_batch_coalesce_size_bucket[$__rate_interval])))",
+          "legendFormat": "p99 Batch Size"
+        }
+      ]
+    },
+    {
+      "title": "Rate Limit Events",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (level) (rate(ledger_rate_limit_rejected_total[$__rate_interval]))",
+          "legendFormat": "Rejected ({{level}})"
+        },
+        {
+          "expr": "sum(rate(ledger_rate_limit_exceeded_total[$__rate_interval]))",
+          "legendFormat": "Exceeded (legacy)"
+        }
+      ]
+    },
+    {
+      "title": "Hot Key Detections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (vault_id) (increase(ledger_hot_key_detected_total[$__rate_interval]))",
+          "legendFormat": "vault:{{vault_id}}"
+        }
+      ]
+    },
+    {
+      "title": "Audit Events",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (action, outcome) (rate(ledger_audit_events_total[$__rate_interval]))",
+          "legendFormat": "{{action}} — {{outcome}}"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "SLO Reference",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/operations/slo.md",
+      "type": "link",
+      "icon": "doc",
+      "tooltip": "SLI/SLO thresholds and alert definitions"
+    },
+    {
+      "title": "Background Jobs",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/operations/background-jobs.md",
+      "type": "link",
+      "icon": "doc",
+      "tooltip": "Background job metric reference and alerting queries"
+    }
+  ]
+}
