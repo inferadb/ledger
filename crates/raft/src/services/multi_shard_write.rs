@@ -9,14 +9,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_types::{config::ValidationConfig, validation};
+use inferadb_ledger_types::config::ValidationConfig;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
-    IdempotencyCache,
     error::classify_raft_error,
+    idempotency::IdempotencyCache,
     metrics,
     proof::{self, ProofError},
     proto::{
@@ -26,8 +26,8 @@ use crate::{
     },
     rate_limit::RateLimiter,
     services::{
+        metadata::{response_with_correlation, status_with_correlation},
         shard_resolver::ShardResolver,
-        write::{response_with_correlation, status_with_correlation},
     },
     trace_context,
     types::{LedgerRequest, LedgerResponse},
@@ -59,6 +59,9 @@ pub struct MultiShardWriteService {
     /// If a gRPC deadline is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
     proposal_timeout: Duration,
+    /// Per-namespace resource quota checker.
+    #[builder(default)]
+    quota_checker: Option<crate::quota::QuotaChecker>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -69,28 +72,7 @@ impl MultiShardWriteService {
         client_id: &str,
         namespace_id: inferadb_ledger_types::NamespaceId,
     ) -> Result<(), Status> {
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.check(client_id, namespace_id).map_err(|rejection| {
-                warn!(
-                    namespace_id = namespace_id.value(),
-                    level = rejection.level.as_str(),
-                    reason = rejection.reason.as_str(),
-                    "Rate limit exceeded"
-                );
-                crate::metrics::record_rate_limit_rejected(
-                    rejection.level.as_str(),
-                    rejection.reason.as_str(),
-                );
-                let mut status = Status::resource_exhausted(rejection.to_string());
-                if let Ok(val) =
-                    tonic::metadata::MetadataValue::try_from(rejection.retry_after_ms.to_string())
-                {
-                    status.metadata_mut().insert("retry-after-ms", val);
-                }
-                status
-            })?;
-        }
-        Ok(())
+        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, namespace_id)
     }
 
     /// Set input validation configuration for request field limits.
@@ -101,128 +83,18 @@ impl MultiShardWriteService {
     }
 
     /// Validate all operations in a proto operation list.
-    ///
-    /// Checks per-operation field limits (key/value size, character whitelist)
-    /// and aggregate limits (operations count, total payload size).
     fn validate_operations(&self, operations: &[Operation]) -> Result<(), Status> {
-        let config = &self.validation_config;
-
-        validation::validate_operations_count(operations.len(), config)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        let mut total_bytes: usize = 0;
-        for proto_op in operations {
-            let Some(ref op) = proto_op.op else {
-                return Err(Status::invalid_argument("Operation missing op field"));
-            };
-            match op {
-                crate::proto::operation::Op::SetEntity(se) => {
-                    validation::validate_key(&se.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_value(&se.value, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += se.key.len() + se.value.len();
-                },
-                crate::proto::operation::Op::DeleteEntity(de) => {
-                    validation::validate_key(&de.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += de.key.len();
-                },
-                crate::proto::operation::Op::ExpireEntity(ee) => {
-                    validation::validate_key(&ee.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += ee.key.len();
-                },
-                crate::proto::operation::Op::CreateRelationship(cr) => {
-                    validation::validate_relationship_string(&cr.resource, "resource", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&cr.relation, "relation", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&cr.subject, "subject", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += cr.resource.len() + cr.relation.len() + cr.subject.len();
-                },
-                crate::proto::operation::Op::DeleteRelationship(dr) => {
-                    validation::validate_relationship_string(&dr.resource, "resource", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&dr.relation, "relation", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&dr.subject, "subject", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += dr.resource.len() + dr.relation.len() + dr.subject.len();
-                },
-            }
-        }
-
-        validation::validate_batch_payload_bytes(total_bytes, config)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        Ok(())
+        super::helpers::validate_operations(operations, &self.validation_config)
     }
 
     /// Record key accesses from operations for hot key detection.
     fn record_hot_keys(&self, vault_id: inferadb_ledger_types::VaultId, operations: &[Operation]) {
-        if let Some(ref detector) = self.hot_key_detector {
-            use crate::proto::operation::Op;
-            for op in operations {
-                if let Some(ref inner) = op.op {
-                    let key = match inner {
-                        Op::SetEntity(se) => &se.key,
-                        Op::DeleteEntity(de) => &de.key,
-                        Op::CreateRelationship(cr) => &cr.resource,
-                        Op::DeleteRelationship(dr) => &dr.resource,
-                        Op::ExpireEntity(ee) => &ee.key,
-                    };
-                    detector.record_access(vault_id, key);
-                }
-            }
-        }
+        super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault_id, operations);
     }
 
     /// Compute a hash of operations for idempotency payload comparison.
     fn hash_operations(operations: &[Operation]) -> Vec<u8> {
-        use crate::proto::operation::Op;
-
-        let mut bytes = Vec::new();
-        for op in operations {
-            if let Some(inner) = &op.op {
-                match inner {
-                    Op::CreateRelationship(cr) => {
-                        bytes.extend_from_slice(b"CR");
-                        bytes.extend_from_slice(cr.resource.as_bytes());
-                        bytes.extend_from_slice(cr.relation.as_bytes());
-                        bytes.extend_from_slice(cr.subject.as_bytes());
-                    },
-                    Op::DeleteRelationship(dr) => {
-                        bytes.extend_from_slice(b"DR");
-                        bytes.extend_from_slice(dr.resource.as_bytes());
-                        bytes.extend_from_slice(dr.relation.as_bytes());
-                        bytes.extend_from_slice(dr.subject.as_bytes());
-                    },
-                    Op::SetEntity(se) => {
-                        bytes.extend_from_slice(b"SE");
-                        bytes.extend_from_slice(se.key.as_bytes());
-                        bytes.extend_from_slice(&se.value);
-                        if let Some(cond) = &se.condition {
-                            bytes.extend_from_slice(&format!("{:?}", cond).into_bytes());
-                        }
-                        if let Some(exp) = se.expires_at {
-                            bytes.extend_from_slice(&exp.to_le_bytes());
-                        }
-                    },
-                    Op::DeleteEntity(de) => {
-                        bytes.extend_from_slice(b"DE");
-                        bytes.extend_from_slice(de.key.as_bytes());
-                    },
-                    Op::ExpireEntity(ee) => {
-                        bytes.extend_from_slice(b"EE");
-                        bytes.extend_from_slice(ee.key.as_bytes());
-                        bytes.extend_from_slice(&ee.expired_at.to_le_bytes());
-                    },
-                }
-            }
-        }
-        bytes
+        super::helpers::hash_operations(operations)
     }
 
     /// Generate inclusion proof for a write.
@@ -392,6 +264,15 @@ impl WriteService for MultiShardWriteService {
         // Check rate limit
         self.check_rate_limit(&client_id, namespace_id)
             .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
+
+        // Check storage quota (estimated from operation payload size)
+        let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
+        super::helpers::check_storage_quota(
+            self.quota_checker.as_ref(),
+            namespace_id,
+            estimated_bytes,
+        )
+        .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &req.operations);
@@ -602,6 +483,15 @@ impl WriteService for MultiShardWriteService {
         // Check rate limit
         self.check_rate_limit(&client_id, namespace_id)
             .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
+
+        // Check storage quota (estimated from operation payload size)
+        let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
+        super::helpers::check_storage_quota(
+            self.quota_checker.as_ref(),
+            namespace_id,
+            estimated_bytes,
+        )
+        .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &all_operations);

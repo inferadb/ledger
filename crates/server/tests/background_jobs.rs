@@ -54,6 +54,7 @@ async fn test_vault_health_tracking() {
         .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: "test_health_ns".to_string(),
             shard_id: None,
+            quota: None,
         })
         .await
         .unwrap();
@@ -139,6 +140,7 @@ async fn test_learner_cache_initialization() {
         .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: "test_cache_ns".to_string(),
             shard_id: None,
+            quota: None,
         })
         .await
         .unwrap();
@@ -173,6 +175,7 @@ async fn test_concurrent_background_jobs() {
         .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: "concurrent_test_ns".to_string(),
             shard_id: None,
+            quota: None,
         })
         .await
         .unwrap();

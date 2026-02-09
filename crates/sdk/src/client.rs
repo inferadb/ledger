@@ -2171,6 +2171,7 @@ impl LedgerClient {
                             message: error.message,
                             request_id: None,
                             trace_id: None,
+                            error_details: None,
                         })
                     },
                 }
@@ -2180,6 +2181,7 @@ impl LedgerClient {
                 message: "Empty write response".to_owned(),
                 request_id: None,
                 trace_id: None,
+                error_details: None,
             }),
         }
     }
@@ -2420,6 +2422,7 @@ impl LedgerClient {
                             message: error.message,
                             request_id: None,
                             trace_id: None,
+                            error_details: None,
                         })
                     },
                 }
@@ -2429,6 +2432,7 @@ impl LedgerClient {
                 message: "Empty batch write response".to_owned(),
                 request_id: None,
                 trace_id: None,
+                error_details: None,
             }),
         }
     }
@@ -2628,6 +2632,7 @@ impl LedgerClient {
                     let request = proto::CreateNamespaceRequest {
                         name: name.clone(),
                         shard_id: None, // Auto-assigned
+                        quota: None,
                     };
 
                     let response =

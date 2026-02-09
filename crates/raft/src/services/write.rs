@@ -14,7 +14,6 @@ use inferadb_ledger_types::{
     NamespaceId, SetCondition, VaultId,
     audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
     config::ValidationConfig,
-    validation,
 };
 use openraft::Raft;
 use tokio::sync::Mutex;
@@ -22,10 +21,11 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use crate::{
-    IdempotencyCache,
     batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle},
     error::classify_raft_error,
+    idempotency::IdempotencyCache,
     log_storage::AppliedStateAccessor,
     metrics,
     proof::{self, ProofError},
@@ -38,43 +38,6 @@ use crate::{
     types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
 };
-
-/// Inject `x-request-id` and `x-trace-id` correlation metadata into a gRPC response.
-///
-/// Called on every successful response to propagate server-generated correlation IDs
-/// back to the SDK, where they are extracted and attached to `SdkError` variants.
-pub(crate) fn response_with_correlation<T>(
-    body: T,
-    request_id: &uuid::Uuid,
-    trace_id: &str,
-) -> Response<T> {
-    let mut response = Response::new(body);
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(&request_id.to_string()) {
-        response.metadata_mut().insert("x-request-id", val);
-    }
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(trace_id) {
-        response.metadata_mut().insert("x-trace-id", val);
-    }
-    response
-}
-
-/// Inject `x-request-id` and `x-trace-id` correlation metadata into a gRPC error `Status`.
-///
-/// Ensures that even error responses carry correlation IDs so the SDK can attach them
-/// to `SdkError::Rpc` and `SdkError::RateLimited` for debugging.
-pub(crate) fn status_with_correlation(
-    mut status: Status,
-    request_id: &uuid::Uuid,
-    trace_id: &str,
-) -> Status {
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(&request_id.to_string()) {
-        status.metadata_mut().insert("x-request-id", val);
-    }
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(trace_id) {
-        status.metadata_mut().insert("x-trace-id", val);
-    }
-    status
-}
 
 /// Classify a batch writer error into the appropriate `tonic::Status`.
 ///
@@ -137,6 +100,9 @@ pub struct WriteServiceImpl {
     /// If a gRPC deadline is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
     proposal_timeout: Duration,
+    /// Per-namespace resource quota checker.
+    #[builder(default)]
+    quota_checker: Option<crate::quota::QuotaChecker>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -206,6 +172,7 @@ impl WriteServiceImpl {
             hot_key_detector: None,
             validation_config: Arc::new(ValidationConfig::default()),
             proposal_timeout: Duration::from_secs(30),
+            quota_checker: None,
         };
 
         (service, run_future)
@@ -268,89 +235,21 @@ impl WriteServiceImpl {
         self
     }
 
+    /// Set the per-namespace resource quota checker.
+    #[must_use]
+    pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
+        self.quota_checker = Some(checker);
+        self
+    }
+
     /// Validate all operations in a proto operation list.
-    ///
-    /// Checks per-operation field limits (key/value size, character whitelist)
-    /// and aggregate limits (operations count, total payload size).
     fn validate_operations(&self, operations: &[crate::proto::Operation]) -> Result<(), Status> {
-        let config = &self.validation_config;
-
-        validation::validate_operations_count(operations.len(), config)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        let mut total_bytes: usize = 0;
-        for proto_op in operations {
-            let Some(ref op) = proto_op.op else {
-                return Err(Status::invalid_argument("Operation missing op field"));
-            };
-            match op {
-                crate::proto::operation::Op::SetEntity(se) => {
-                    validation::validate_key(&se.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_value(&se.value, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += se.key.len() + se.value.len();
-                },
-                crate::proto::operation::Op::DeleteEntity(de) => {
-                    validation::validate_key(&de.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += de.key.len();
-                },
-                crate::proto::operation::Op::ExpireEntity(ee) => {
-                    validation::validate_key(&ee.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += ee.key.len();
-                },
-                crate::proto::operation::Op::CreateRelationship(cr) => {
-                    validation::validate_relationship_string(&cr.resource, "resource", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&cr.relation, "relation", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&cr.subject, "subject", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += cr.resource.len() + cr.relation.len() + cr.subject.len();
-                },
-                crate::proto::operation::Op::DeleteRelationship(dr) => {
-                    validation::validate_relationship_string(&dr.resource, "resource", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&dr.relation, "relation", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&dr.subject, "subject", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += dr.resource.len() + dr.relation.len() + dr.subject.len();
-                },
-            }
-        }
-
-        validation::validate_batch_payload_bytes(total_bytes, config)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        Ok(())
+        super::helpers::validate_operations(operations, &self.validation_config)
     }
 
     /// Emit an audit event and record the corresponding Prometheus metric.
-    ///
-    /// If the audit logger is not configured, this is a no-op (only metrics recorded).
-    /// If the audit log write fails, logs a warning but does not propagate the error —
-    /// the primary operation's durability takes precedence over audit logging.
     fn emit_audit_event(&self, event: &AuditEvent) {
-        let outcome_str = match &event.outcome {
-            AuditOutcome::Success => "success",
-            AuditOutcome::Failed { .. } => "failed",
-            AuditOutcome::Denied { .. } => "denied",
-        };
-        metrics::record_audit_event(event.action.as_str(), outcome_str);
-
-        if let Some(ref logger) = self.audit_logger
-            && let Err(e) = logger.log(event)
-        {
-            warn!(
-                event_id = %event.event_id,
-                action = %event.action.as_str(),
-                error = %e,
-                "Failed to write audit log event"
-            );
-        }
+        super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
     }
 
     /// Build an audit event for a write-path operation.
@@ -363,63 +262,25 @@ impl WriteServiceImpl {
         trace_id: Option<&str>,
         operations_count: Option<usize>,
     ) -> AuditEvent {
-        AuditEvent {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            event_id: Uuid::new_v4().to_string(),
-            principal: principal.to_string(),
+        super::helpers::build_audit_event(
             action,
+            principal,
             resource,
             outcome,
-            node_id: self.node_id,
-            trace_id: trace_id.map(String::from),
+            self.node_id,
+            trace_id,
             operations_count,
-        }
+        )
     }
 
     /// Check all rate limit tiers (backpressure, namespace, client).
-    ///
-    /// Returns `Status::resource_exhausted` with `retry-after-ms` metadata if rejected.
     fn check_rate_limit(&self, client_id: &str, namespace_id: NamespaceId) -> Result<(), Status> {
-        if let Some(ref limiter) = self.rate_limiter {
-            limiter.check(client_id, namespace_id).map_err(|rejection| {
-                metrics::record_rate_limit_rejected(
-                    rejection.level.as_str(),
-                    rejection.reason.as_str(),
-                );
-                let mut status = Status::resource_exhausted(rejection.to_string());
-                // Attach retry-after-ms as gRPC trailing metadata
-                if let Ok(val) =
-                    tonic::metadata::MetadataValue::try_from(rejection.retry_after_ms.to_string())
-                {
-                    status.metadata_mut().insert("retry-after-ms", val);
-                }
-                status
-            })?;
-        }
-        Ok(())
+        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, namespace_id)
     }
 
     /// Record key accesses from operations for hot key detection.
-    ///
-    /// Extracts entity/relationship keys from each operation and feeds them
-    /// to the hot key detector. This runs after rate limiting but before
-    /// Raft proposal, tracking all non-duplicate, non-rate-limited accesses.
     fn record_hot_keys(&self, vault_id: VaultId, operations: &[crate::proto::Operation]) {
-        if let Some(ref detector) = self.hot_key_detector {
-            use crate::proto::operation::Op;
-            for op in operations {
-                if let Some(ref inner) = op.op {
-                    let key = match inner {
-                        Op::SetEntity(set) => &set.key,
-                        Op::DeleteEntity(del) => &del.key,
-                        Op::CreateRelationship(rel) => &rel.resource,
-                        Op::DeleteRelationship(rel) => &rel.resource,
-                        Op::ExpireEntity(exp) => &exp.key,
-                    };
-                    detector.record_access(vault_id, key);
-                }
-            }
-        }
+        super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault_id, operations);
     }
 
     /// Map a failed SetCondition to the appropriate WriteErrorCode.
@@ -515,52 +376,8 @@ impl WriteServiceImpl {
     }
 
     /// Compute a hash of operations for idempotency payload comparison.
-    ///
-    /// Uses a simple concatenation of operation fields to create a deterministic
-    /// byte sequence that can be hashed with seahash.
     fn hash_operations(operations: &[crate::proto::Operation]) -> Vec<u8> {
-        use crate::proto::operation::Op;
-
-        let mut bytes = Vec::new();
-        for op in operations {
-            if let Some(inner) = &op.op {
-                match inner {
-                    Op::CreateRelationship(cr) => {
-                        bytes.extend_from_slice(b"CR");
-                        bytes.extend_from_slice(cr.resource.as_bytes());
-                        bytes.extend_from_slice(cr.relation.as_bytes());
-                        bytes.extend_from_slice(cr.subject.as_bytes());
-                    },
-                    Op::DeleteRelationship(dr) => {
-                        bytes.extend_from_slice(b"DR");
-                        bytes.extend_from_slice(dr.resource.as_bytes());
-                        bytes.extend_from_slice(dr.relation.as_bytes());
-                        bytes.extend_from_slice(dr.subject.as_bytes());
-                    },
-                    Op::SetEntity(se) => {
-                        bytes.extend_from_slice(b"SE");
-                        bytes.extend_from_slice(se.key.as_bytes());
-                        bytes.extend_from_slice(&se.value);
-                        if let Some(cond) = &se.condition {
-                            bytes.extend_from_slice(&format!("{:?}", cond).into_bytes());
-                        }
-                        if let Some(exp) = se.expires_at {
-                            bytes.extend_from_slice(&exp.to_le_bytes());
-                        }
-                    },
-                    Op::DeleteEntity(de) => {
-                        bytes.extend_from_slice(b"DE");
-                        bytes.extend_from_slice(de.key.as_bytes());
-                    },
-                    Op::ExpireEntity(ee) => {
-                        bytes.extend_from_slice(b"EE");
-                        bytes.extend_from_slice(ee.key.as_bytes());
-                        bytes.extend_from_slice(&ee.expired_at.to_le_bytes());
-                    },
-                }
-            }
-        }
-        bytes
+        super::helpers::hash_operations(operations)
     }
 
     /// Generate block header and transaction proof for a committed write.
@@ -782,6 +599,17 @@ impl WriteService for WriteServiceImpl {
             ));
             return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
+
+        // Check storage quota (estimated from operation payload size)
+        let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
+        super::helpers::check_storage_quota(
+            self.quota_checker.as_ref(),
+            namespace_id,
+            estimated_bytes,
+        )
+        .map_err(|status| {
+            status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id)
+        })?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &req.operations);
@@ -1175,6 +1003,17 @@ impl WriteService for WriteServiceImpl {
             ));
             return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
+
+        // Check storage quota (estimated from operation payload size)
+        let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
+        super::helpers::check_storage_quota(
+            self.quota_checker.as_ref(),
+            namespace_id,
+            estimated_bytes,
+        )
+        .map_err(|status| {
+            status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id)
+        })?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &all_operations);

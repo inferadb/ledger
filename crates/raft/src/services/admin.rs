@@ -17,8 +17,6 @@ use openraft::{BasicNode, Raft};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tonic::{Request, Response, Status};
-use tracing::warn;
-use uuid::Uuid;
 
 use crate::{
     error::{ServiceError, classify_raft_error},
@@ -92,6 +90,9 @@ pub struct AdminServiceImpl {
     /// Snapshot manager for reading Raft snapshots during backup.
     #[builder(default)]
     snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
+    /// Per-namespace resource quota checker.
+    #[builder(default)]
+    quota_checker: Option<crate::quota::QuotaChecker>,
 }
 
 impl AdminServiceImpl {
@@ -142,6 +143,13 @@ impl AdminServiceImpl {
         self
     }
 
+    /// Set the per-namespace resource quota checker.
+    #[must_use]
+    pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
+        self.quota_checker = Some(checker);
+        self
+    }
+
     /// Build an audit event for an admin operation.
     fn build_audit_event(
         &self,
@@ -151,38 +159,20 @@ impl AdminServiceImpl {
         outcome: AuditOutcome,
         trace_id: Option<&str>,
     ) -> AuditEvent {
-        AuditEvent {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            event_id: Uuid::new_v4().to_string(),
-            principal: principal.to_string(),
+        super::helpers::build_audit_event(
             action,
+            principal,
             resource,
             outcome,
-            node_id: self.node_id,
-            trace_id: trace_id.map(String::from),
-            operations_count: None,
-        }
+            self.node_id,
+            trace_id,
+            None,
+        )
     }
 
     /// Emit an audit event and record the corresponding Prometheus metric.
     fn emit_audit_event(&self, event: &AuditEvent) {
-        let outcome_str = match &event.outcome {
-            AuditOutcome::Success => "success",
-            AuditOutcome::Failed { .. } => "failed",
-            AuditOutcome::Denied { .. } => "denied",
-        };
-        crate::metrics::record_audit_event(event.action.as_str(), outcome_str);
-
-        if let Some(ref logger) = self.audit_logger
-            && let Err(e) = logger.log(event)
-        {
-            warn!(
-                event_id = %event.event_id,
-                action = %event.action.as_str(),
-                error = %e,
-                "Failed to write audit log event"
-            );
-        }
+        super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
     }
 }
 
@@ -227,9 +217,18 @@ impl AdminService for AdminServiceImpl {
 
         // Submit create namespace through Raft
         // Map proto ShardId to domain ShardId newtype
+        // Convert proto quota to domain type
+        let quota = req.quota.map(|q| inferadb_ledger_types::config::NamespaceQuota {
+            max_storage_bytes: q.max_storage_bytes,
+            max_vaults: q.max_vaults,
+            max_write_ops_per_sec: q.max_write_ops_per_sec,
+            max_read_ops_per_sec: q.max_read_ops_per_sec,
+        });
+
         let ledger_request = LedgerRequest::CreateNamespace {
             name: req.name,
             shard_id: req.shard_id.map(|s| DomainShardId::new(s.id)),
+            quota,
         };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
@@ -574,6 +573,17 @@ impl AdminService for AdminServiceImpl {
             })?;
 
         ctx.set_namespace_id(namespace_id.value());
+
+        // Check vault count quota before submitting to Raft
+        super::helpers::check_vault_quota(self.quota_checker.as_ref(), namespace_id).map_err(
+            |status| {
+                super::metadata::status_with_correlation(
+                    status,
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                )
+            },
+        )?;
 
         // Convert proto retention policy to internal type
         let retention_policy = req.retention_policy.map(|proto_policy| {

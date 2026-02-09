@@ -325,6 +325,7 @@ mod tests {
                         message: "temporarily unavailable".to_string(),
                         request_id: None,
                         trace_id: None,
+                        error_details: None,
                     })
                 } else {
                     Ok::<_, SdkError>("success")
@@ -354,6 +355,7 @@ mod tests {
                     message: "always unavailable".to_string(),
                     request_id: None,
                     trace_id: None,
+                    error_details: None,
                 })
             }
         })
@@ -387,6 +389,7 @@ mod tests {
                     message: "bad request".to_string(),
                     request_id: None,
                     trace_id: None,
+                    error_details: None,
                 })
             }
         })
@@ -427,6 +430,7 @@ mod tests {
                     message: "unavailable".to_string(),
                     request_id: None,
                     trace_id: None,
+                    error_details: None,
                 })
             }
         })
@@ -578,6 +582,7 @@ mod tests {
                     message: "fail".to_string(),
                     request_id: None,
                     trace_id: None,
+                    error_details: None,
                 })
             }
         })
@@ -610,6 +615,7 @@ mod tests {
                         message: "transient".to_string(),
                         request_id: None,
                         trace_id: None,
+                        error_details: None,
                     })
                 } else {
                     Ok::<_, SdkError>("success")
@@ -639,6 +645,7 @@ mod tests {
                     message: "always fails".to_string(),
                     request_id: None,
                     trace_id: None,
+                    error_details: None,
                 })
             }
         })
@@ -665,6 +672,7 @@ mod tests {
                     message: "bad".to_string(),
                     request_id: None,
                     trace_id: None,
+                    error_details: None,
                 })
             }
         })
@@ -843,6 +851,7 @@ mod proptest_tests {
                                 message: "transient".to_string(),
                                 request_id: None,
                                 trace_id: None,
+                                error_details: None,
                             })
                         }
                     }
@@ -898,6 +907,7 @@ mod proptest_tests {
                                 message: "transient".to_string(),
                                 request_id: None,
                                 trace_id: None,
+                                error_details: None,
                             })
                         } else {
                             Ok::<_, SdkError>(value)

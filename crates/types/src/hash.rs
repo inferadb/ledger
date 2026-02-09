@@ -48,6 +48,7 @@ pub fn sha256_concat(hashes: &[Hash]) -> Hash {
 /// Constant-time hash comparison to prevent timing attacks.
 ///
 /// Use this for all security-critical hash comparisons.
+#[allow(dead_code)]
 #[inline]
 pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
     a.ct_eq(b).into()

@@ -89,6 +89,40 @@ fn code_to_label(code: Code) -> &'static str {
     }
 }
 
+/// Structured error details decoded from gRPC `Status.details` bytes.
+///
+/// When the server attaches an `ErrorDetails` proto message to a gRPC error,
+/// the SDK decodes it and makes it available on `SdkError::Rpc` and
+/// `SdkError::RateLimited` variants.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_sdk::SdkError;
+/// fn handle_error(err: &SdkError) {
+///     if let Some(details) = err.server_error_details() {
+///         println!("Error code: {}", details.error_code);
+///         println!("Retryable: {}", details.is_retryable);
+///         if let Some(action) = &details.suggested_action {
+///             println!("Suggested: {action}");
+///         }
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ServerErrorDetails {
+    /// Machine-readable error code (numeric string, e.g., "3203").
+    pub error_code: String,
+    /// Whether the server considers this error retryable.
+    pub is_retryable: bool,
+    /// Suggested delay before retrying (milliseconds).
+    pub retry_after_ms: Option<i32>,
+    /// Structured key-value context from the server.
+    pub context: std::collections::HashMap<String, String>,
+    /// Human-readable recovery guidance from the server.
+    pub suggested_action: Option<String>,
+}
+
 /// SDK error types with context-rich error messages.
 ///
 /// Each variant carries diagnostic context (correlation IDs, retry history)
@@ -152,6 +186,8 @@ pub enum SdkError {
         request_id: Option<String>,
         /// Distributed trace ID for cross-service correlation.
         trace_id: Option<String>,
+        /// Structured error details decoded from gRPC `Status.details`.
+        error_details: Option<Box<ServerErrorDetails>>,
     },
 
     /// Rate limit exceeded.
@@ -169,6 +205,8 @@ pub enum SdkError {
         request_id: Option<String>,
         /// Distributed trace ID for cross-service correlation.
         trace_id: Option<String>,
+        /// Structured error details decoded from gRPC `Status.details`.
+        error_details: Option<Box<ServerErrorDetails>>,
     },
 
     /// Retry attempts exhausted.
@@ -414,6 +452,22 @@ impl SdkError {
             _ => None,
         }
     }
+
+    /// Returns structured error details from the server, if available.
+    ///
+    /// Error details are decoded from gRPC `Status.details` bytes. They
+    /// contain the server's error code, retryability hint, and optional
+    /// recovery guidance. Returns `None` for non-RPC errors or when the
+    /// server didn't attach details.
+    #[must_use]
+    pub fn server_error_details(&self) -> Option<&ServerErrorDetails> {
+        match self {
+            Self::Rpc { error_details, .. } | Self::RateLimited { error_details, .. } => {
+                error_details.as_deref()
+            },
+            _ => None,
+        }
+    }
 }
 
 impl From<tonic::transport::Error> for SdkError {
@@ -428,6 +482,9 @@ impl From<tonic::Status> for SdkError {
         let request_id = extract_metadata(metadata, "x-request-id");
         let trace_id = extract_metadata(metadata, "x-trace-id");
 
+        // Decode structured error details from Status.details bytes
+        let error_details = decode_error_details(status.details()).map(Box::new);
+
         // Check for rate limiting: RESOURCE_EXHAUSTED + retry-after-ms metadata
         if status.code() == Code::ResourceExhausted
             && let Some(retry_after_str) = extract_metadata(metadata, "retry-after-ms")
@@ -438,6 +495,7 @@ impl From<tonic::Status> for SdkError {
                 retry_after: std::time::Duration::from_millis(ms),
                 request_id,
                 trace_id,
+                error_details,
             };
         }
 
@@ -446,8 +504,30 @@ impl From<tonic::Status> for SdkError {
             message: status.message().to_owned(),
             request_id,
             trace_id,
+            error_details,
         }
     }
+}
+
+/// Decode [`ServerErrorDetails`] from gRPC `Status.details` bytes.
+///
+/// Returns `None` if the bytes are empty or cannot be decoded as an
+/// `ErrorDetails` proto message.
+fn decode_error_details(details: &[u8]) -> Option<ServerErrorDetails> {
+    if details.is_empty() {
+        return None;
+    }
+    use inferadb_ledger_raft::proto::ErrorDetails;
+    use prost::Message;
+
+    let decoded = ErrorDetails::decode(details).ok()?;
+    Some(ServerErrorDetails {
+        error_code: decoded.error_code,
+        is_retryable: decoded.is_retryable,
+        retry_after_ms: decoded.retry_after_ms,
+        context: decoded.context,
+        suggested_action: decoded.suggested_action,
+    })
 }
 
 #[cfg(test)]
@@ -462,6 +542,7 @@ mod tests {
             message: "server unavailable".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert!(err.is_retryable());
     }
@@ -473,6 +554,7 @@ mod tests {
             message: "timeout".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert!(err.is_retryable());
     }
@@ -484,6 +566,7 @@ mod tests {
             message: "rate limited".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert!(err.is_retryable());
     }
@@ -495,6 +578,7 @@ mod tests {
             message: "transaction conflict".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert!(err.is_retryable());
     }
@@ -506,6 +590,7 @@ mod tests {
             message: "bad request".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert!(!err.is_retryable());
     }
@@ -517,6 +602,7 @@ mod tests {
             message: "access denied".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert!(!err.is_retryable());
     }
@@ -528,6 +614,7 @@ mod tests {
             message: "not authenticated".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert!(!err.is_retryable());
     }
@@ -569,6 +656,7 @@ mod tests {
             message: "not found".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert_eq!(err.code(), Some(Code::NotFound));
 
@@ -779,6 +867,7 @@ mod tests {
             message: "server error".to_owned(),
             request_id: Some("req-123".to_owned()),
             trace_id: Some("trace-abc".to_owned()),
+            error_details: None,
         };
         assert_eq!(err.request_id(), Some("req-123"));
         assert_eq!(err.trace_id(), Some("trace-abc"));
@@ -794,6 +883,7 @@ mod tests {
             message: "server error".to_owned(),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert_eq!(err.request_id(), None);
         assert_eq!(err.trace_id(), None);
@@ -921,6 +1011,7 @@ mod tests {
             retry_after: std::time::Duration::from_millis(2500),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         let display = format!("{err}");
         assert!(display.contains("Rate limited"));
@@ -934,6 +1025,7 @@ mod tests {
             retry_after: std::time::Duration::from_secs(1),
             request_id: None,
             trace_id: None,
+            error_details: None,
         };
         assert_eq!(err.code(), Some(Code::ResourceExhausted));
     }
@@ -943,5 +1035,170 @@ mod tests {
         let err = SdkError::Timeout { duration_ms: 1000 };
         assert_eq!(err.request_id(), None);
         assert_eq!(err.trace_id(), None);
+    }
+
+    // --- ErrorDetails decoding tests ---
+
+    /// Build a tonic::Status with binary-encoded ErrorDetails in its details field.
+    fn status_with_error_details(
+        code: Code,
+        message: &str,
+        error_code: &str,
+        is_retryable: bool,
+        retry_after_ms: Option<i32>,
+        context: std::collections::HashMap<String, String>,
+        suggested_action: Option<&str>,
+    ) -> tonic::Status {
+        use inferadb_ledger_raft::proto::ErrorDetails;
+        use prost::Message;
+
+        let details = ErrorDetails {
+            error_code: error_code.to_owned(),
+            is_retryable,
+            retry_after_ms,
+            context,
+            suggested_action: suggested_action.map(String::from),
+        };
+        let encoded = details.encode_to_vec();
+        tonic::Status::with_details(tonic::Code::from(code as i32), message, encoded.into())
+    }
+
+    #[test]
+    fn test_decode_error_details_from_rpc_status() {
+        let status = status_with_error_details(
+            Code::InvalidArgument,
+            "key too long",
+            "3203",
+            false,
+            None,
+            std::collections::HashMap::new(),
+            Some("Fix the request parameters"),
+        );
+        let err: SdkError = status.into();
+        let details = err.server_error_details().expect("should have details");
+        assert_eq!(details.error_code, "3203");
+        assert!(!details.is_retryable);
+        assert_eq!(details.retry_after_ms, None);
+        assert!(details.context.is_empty());
+        assert_eq!(details.suggested_action.as_deref(), Some("Fix the request parameters"));
+    }
+
+    #[test]
+    fn test_decode_error_details_with_retry_and_context() {
+        let mut context = std::collections::HashMap::new();
+        context.insert("namespace_id".to_owned(), "42".to_owned());
+        context.insert("level".to_owned(), "backpressure".to_owned());
+
+        let mut status = status_with_error_details(
+            Code::ResourceExhausted,
+            "rate limit exceeded",
+            "3204",
+            true,
+            Some(500),
+            context,
+            Some("Reduce request rate"),
+        );
+        // Add retry-after-ms metadata to trigger RateLimited variant
+        status.metadata_mut().insert("retry-after-ms", "500".parse().unwrap());
+
+        let err: SdkError = status.into();
+        assert!(matches!(err, SdkError::RateLimited { .. }));
+
+        let details = err.server_error_details().expect("should have details");
+        assert_eq!(details.error_code, "3204");
+        assert!(details.is_retryable);
+        assert_eq!(details.retry_after_ms, Some(500));
+        assert_eq!(details.context.get("namespace_id").unwrap(), "42");
+        assert_eq!(details.context.get("level").unwrap(), "backpressure");
+        assert_eq!(details.suggested_action.as_deref(), Some("Reduce request rate"));
+    }
+
+    #[test]
+    fn test_decode_error_details_consensus_unavailable() {
+        let status = status_with_error_details(
+            Code::Unavailable,
+            "not leader",
+            "2000",
+            true,
+            None,
+            std::collections::HashMap::new(),
+            Some("Retry against a different node"),
+        );
+        let err: SdkError = status.into();
+        let details = err.server_error_details().expect("should have details");
+        assert_eq!(details.error_code, "2000");
+        assert!(details.is_retryable);
+        assert_eq!(details.suggested_action.as_deref(), Some("Retry against a different node"));
+    }
+
+    #[test]
+    fn test_no_error_details_when_status_has_no_details() {
+        let status = tonic::Status::internal("plain error");
+        let err: SdkError = status.into();
+        assert!(err.server_error_details().is_none());
+    }
+
+    #[test]
+    fn test_no_error_details_on_non_rpc_errors() {
+        let err = SdkError::Timeout { duration_ms: 5000 };
+        assert!(err.server_error_details().is_none());
+
+        let err = SdkError::Config { message: "bad config".to_owned() };
+        assert!(err.server_error_details().is_none());
+
+        let err = SdkError::Cancelled;
+        assert!(err.server_error_details().is_none());
+    }
+
+    #[test]
+    fn test_decode_error_details_invalid_bytes_returns_none() {
+        // Status with garbage details bytes — use Vec<u8>.into() to get Bytes
+        let garbage: Vec<u8> = b"not a valid proto".to_vec();
+        let status =
+            tonic::Status::with_details(tonic::Code::Internal, "corrupted", garbage.into());
+        let err: SdkError = status.into();
+        // prost may partially decode garbage — the point is it doesn't panic.
+        // The result may be Some (partial decode) or None (decode error).
+        // Either way, the conversion must not panic.
+        let _ = err.server_error_details();
+    }
+
+    #[test]
+    fn test_error_details_roundtrip_all_fields() {
+        use inferadb_ledger_raft::proto::ErrorDetails;
+        use prost::Message;
+
+        // Build server-side details
+        let mut context = std::collections::HashMap::new();
+        context.insert("key1".to_owned(), "val1".to_owned());
+        context.insert("key2".to_owned(), "val2".to_owned());
+
+        let server_details = ErrorDetails {
+            error_code: "3204".to_owned(),
+            is_retryable: true,
+            retry_after_ms: Some(1500),
+            context,
+            suggested_action: Some("Wait and retry".to_owned()),
+        };
+
+        // Encode into Status
+        let encoded = server_details.encode_to_vec();
+        let status = tonic::Status::with_details(
+            tonic::Code::ResourceExhausted,
+            "throttled",
+            encoded.into(),
+        );
+
+        // SDK decodes
+        let err: SdkError = status.into();
+        let decoded = err.server_error_details().expect("should decode");
+
+        assert_eq!(decoded.error_code, "3204");
+        assert!(decoded.is_retryable);
+        assert_eq!(decoded.retry_after_ms, Some(1500));
+        assert_eq!(decoded.context.len(), 2);
+        assert_eq!(decoded.context.get("key1").unwrap(), "val1");
+        assert_eq!(decoded.context.get("key2").unwrap(), "val2");
+        assert_eq!(decoded.suggested_action.as_deref(), Some("Wait and retry"));
     }
 }

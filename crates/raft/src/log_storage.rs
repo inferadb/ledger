@@ -30,8 +30,8 @@ use inferadb_ledger_state::system::{
 use inferadb_ledger_state::{BlockArchive, StateError, StateLayer};
 use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
 use inferadb_ledger_types::{
-    Hash, NamespaceId, Operation, ShardBlock, ShardId, VaultEntry, VaultId, compute_tx_merkle_root,
-    decode, encode,
+    Hash, NamespaceId, Operation, ShardBlock, ShardId, Transaction, VaultEntry, VaultId,
+    compute_tx_merkle_root, decode, encode,
 };
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
@@ -111,6 +111,15 @@ pub struct AppliedState {
     /// Key: (namespace_id, vault_id, client_id), Value: last committed sequence.
     #[serde(default)]
     pub client_sequences: HashMap<(NamespaceId, VaultId, String), u64>,
+    /// Cumulative estimated storage bytes per namespace.
+    ///
+    /// Updated on every write (increment by key+value sizes) and delete
+    /// (decrement by key size). This is an estimate — not exact byte-level
+    /// accounting — but sufficient for quota enforcement and capacity planning.
+    ///
+    /// Replicated via Raft consensus and survives restarts via snapshot.
+    #[serde(default)]
+    pub namespace_storage_bytes: HashMap<NamespaceId, u64>,
 }
 
 /// Combined snapshot containing both metadata and entity state.
@@ -142,6 +151,9 @@ pub struct NamespaceMeta {
     /// Target shard for pending migration (only set when status is Migrating).
     #[serde(default)]
     pub pending_shard_id: Option<ShardId>,
+    /// Per-namespace resource quota (None means use server default).
+    #[serde(default)]
+    pub quota: Option<inferadb_ledger_types::config::NamespaceQuota>,
 }
 
 /// Metadata for a vault.
@@ -402,6 +414,43 @@ impl AppliedStateAccessor {
             .filter(|(_, v)| !v.deleted)
             .map(|(k, v)| (*k, v.clone()))
             .collect()
+    }
+
+    /// Get the number of active (non-deleted) vaults in a namespace.
+    pub fn vault_count(&self, namespace_id: NamespaceId) -> u32 {
+        let count = self
+            .state
+            .read()
+            .vaults
+            .values()
+            .filter(|v| v.namespace_id == namespace_id && !v.deleted)
+            .count();
+        // Safe: vault count is bounded by u32::MAX in practice
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            count as u32
+        }
+    }
+
+    /// Get cumulative estimated storage bytes for a namespace.
+    ///
+    /// Returns 0 if no data has been written to the namespace.
+    pub fn namespace_storage_bytes(&self, namespace_id: NamespaceId) -> u64 {
+        self.state.read().namespace_storage_bytes.get(&namespace_id).copied().unwrap_or(0)
+    }
+
+    /// Get the namespace quota (per-namespace override or None for server default).
+    pub fn namespace_quota(
+        &self,
+        namespace_id: NamespaceId,
+    ) -> Option<inferadb_ledger_types::config::NamespaceQuota> {
+        self.state.read().namespaces.get(&namespace_id).and_then(|ns| ns.quota.clone())
+    }
+
+    /// Create an accessor from a pre-built state (for testing).
+    #[cfg(test)]
+    pub fn new_for_test(state: Arc<RwLock<AppliedState>>) -> Self {
+        Self { state }
     }
 }
 
@@ -798,6 +847,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     state_root,
                 };
 
+                // Update namespace storage accounting.
+                // Increment for sets/creates, decrement for deletes.
+                let storage_delta = estimate_write_storage_delta(transactions);
+                let entry = state.namespace_storage_bytes.entry(*namespace_id).or_insert(0);
+                if storage_delta >= 0 {
+                    *entry = entry.saturating_add(storage_delta as u64);
+                } else {
+                    *entry = entry.saturating_sub(storage_delta.unsigned_abs());
+                }
+                crate::metrics::set_namespace_storage_bytes(namespace_id.value(), *entry);
+                crate::metrics::record_namespace_operation(namespace_id.value(), "write");
+
                 // Compute block hash from vault entry (for response)
                 // We temporarily build a BlockHeader to compute the hash
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
@@ -812,7 +873,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 )
             },
 
-            LedgerRequest::CreateNamespace { name, shard_id } => {
+            LedgerRequest::CreateNamespace { name, shard_id, quota } => {
                 let namespace_id = state.sequences.next_namespace();
                 // Use provided shard_id or select least-loaded shard
                 let assigned_shard =
@@ -825,6 +886,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         shard_id: assigned_shard,
                         status: NamespaceStatus::Active,
                         pending_shard_id: None,
+                        quota: quota.clone(),
                     },
                 );
 
@@ -2025,8 +2087,11 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        let request =
-            LedgerRequest::CreateNamespace { name: "test-ns".to_string(), shard_id: None };
+        let request = LedgerRequest::CreateNamespace {
+            name: "test-ns".to_string(),
+            shard_id: None,
+            quota: None,
+        };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
@@ -2055,6 +2120,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2065,6 +2131,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         // Only shard 0 exists, so it should be selected
@@ -2083,6 +2150,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2093,6 +2161,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         // Shard 1: 2 namespaces (equal load)
@@ -2104,6 +2173,7 @@ mod tests {
                 shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2114,6 +2184,7 @@ mod tests {
                 shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         // Tie-breaker: lower shard_id wins
@@ -2132,6 +2203,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2142,6 +2214,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2152,6 +2225,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         // Shard 1: 1 namespace (lighter)
@@ -2163,6 +2237,7 @@ mod tests {
                 shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         // Shard 1 has fewer namespaces
@@ -2181,6 +2256,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2191,6 +2267,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Deleted,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2201,6 +2278,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Deleted,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         // Shard 1: 2 active
@@ -2212,6 +2290,7 @@ mod tests {
                 shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         namespaces.insert(
@@ -2222,6 +2301,7 @@ mod tests {
                 shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         // Shard 0 has only 1 active namespace (deleted don't count)
@@ -2241,6 +2321,7 @@ mod tests {
                     shard_id: ShardId::new(0),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
+                    quota: None,
                 },
             );
         }
@@ -2254,6 +2335,7 @@ mod tests {
                     shard_id: ShardId::new(1),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
+                    quota: None,
                 },
             );
         }
@@ -2267,6 +2349,7 @@ mod tests {
                     shard_id: ShardId::new(2),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
+                    quota: None,
                 },
             );
         }
@@ -2293,6 +2376,7 @@ mod tests {
                     shard_id: ShardId::new(0),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
+                    quota: None,
                 },
             );
         }
@@ -2305,6 +2389,7 @@ mod tests {
                 shard_id: ShardId::new(1),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         state.sequences.namespace = NamespaceId::new(5); // Next ID is 5
@@ -2312,7 +2397,11 @@ mod tests {
         drop(state);
 
         let mut state = store.applied_state.write();
-        let request = LedgerRequest::CreateNamespace { name: "new-ns".to_string(), shard_id: None };
+        let request = LedgerRequest::CreateNamespace {
+            name: "new-ns".to_string(),
+            shard_id: None,
+            quota: None,
+        };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
@@ -2343,6 +2432,7 @@ mod tests {
                 shard_id: ShardId::new(0),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         state.sequences.namespace = NamespaceId::new(2);
@@ -2351,6 +2441,7 @@ mod tests {
         let request = LedgerRequest::CreateNamespace {
             name: "new-ns".to_string(),
             shard_id: Some(ShardId::new(5)),
+            quota: None,
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -2606,6 +2697,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -2666,6 +2758,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -2721,6 +2814,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "empty-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -2774,6 +2868,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -2851,6 +2946,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -2928,6 +3024,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "deleted-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -2974,6 +3071,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3012,6 +3110,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3060,6 +3159,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "migrating-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3133,6 +3233,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3175,6 +3276,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3221,6 +3323,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3282,6 +3385,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3320,6 +3424,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3355,6 +3460,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3403,6 +3509,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3434,6 +3541,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3481,6 +3589,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3525,6 +3634,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3586,6 +3696,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3632,6 +3743,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3678,6 +3790,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3729,6 +3842,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3773,6 +3887,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3817,6 +3932,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3848,6 +3964,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3929,6 +4046,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test-ns".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let namespace_id = match response {
@@ -3987,8 +4105,16 @@ mod tests {
 
         // Same sequence of requests to apply
         let requests = vec![
-            LedgerRequest::CreateNamespace { name: "acme-corp".to_string(), shard_id: None },
-            LedgerRequest::CreateNamespace { name: "startup-inc".to_string(), shard_id: None },
+            LedgerRequest::CreateNamespace {
+                name: "acme-corp".to_string(),
+                shard_id: None,
+                quota: None,
+            },
+            LedgerRequest::CreateNamespace {
+                name: "startup-inc".to_string(),
+                shard_id: None,
+                quota: None,
+            },
             LedgerRequest::CreateVault {
                 namespace_id: NamespaceId::new(1),
                 name: Some("production".to_string()),
@@ -4206,7 +4332,7 @@ mod tests {
 
         // Create namespace and vaults
         let requests: Vec<LedgerRequest> = vec![
-            LedgerRequest::CreateNamespace { name: "ns1".to_string(), shard_id: None },
+            LedgerRequest::CreateNamespace { name: "ns1".to_string(), shard_id: None, quota: None },
             LedgerRequest::CreateVault {
                 namespace_id: NamespaceId::new(1),
                 name: Some("vault-a".to_string()),
@@ -4340,7 +4466,11 @@ mod tests {
 
         // Setup: create namespace and vault
         store.apply_request(
-            &LedgerRequest::CreateNamespace { name: "test".to_string(), shard_id: None },
+            &LedgerRequest::CreateNamespace {
+                name: "test".to_string(),
+                shard_id: None,
+                quota: None,
+            },
             &mut state,
         );
         store.apply_request(
@@ -4428,6 +4558,7 @@ mod tests {
             shard_height: 42,
             previous_shard_hash: [0xAB; 32],
             client_sequences: HashMap::new(),
+            namespace_storage_bytes: HashMap::new(),
         };
 
         // Add some data
@@ -4448,6 +4579,7 @@ mod tests {
                 name: "test-ns".to_string(),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         original.vaults.insert(
@@ -4506,6 +4638,7 @@ mod tests {
                     name: "test".to_string(),
                     status: NamespaceStatus::Active,
                     pending_shard_id: None,
+                    quota: None,
                 },
             );
         }
@@ -4554,6 +4687,7 @@ mod tests {
             shard_height: 55,
             previous_shard_hash: [0xBE; 32],
             client_sequences: HashMap::new(),
+            namespace_storage_bytes: HashMap::new(),
         };
 
         // Add state data
@@ -4570,6 +4704,7 @@ mod tests {
                 name: "production".to_string(),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         applied_state.namespaces.insert(
@@ -4580,6 +4715,7 @@ mod tests {
                 name: "staging".to_string(),
                 status: NamespaceStatus::Active,
                 pending_shard_id: None,
+                quota: None,
             },
         );
         applied_state.vaults.insert(
@@ -4689,6 +4825,7 @@ mod tests {
                 shard_height: 30,
                 previous_shard_hash: [0xAA; 32],
                 client_sequences: HashMap::new(),
+                namespace_storage_bytes: HashMap::new(),
             },
             vault_entities: HashMap::new(),
         };
@@ -4778,6 +4915,7 @@ mod tests {
                 payload: EntryPayload::Normal(LedgerRequest::CreateNamespace {
                     name: format!("ns-{}", i),
                     shard_id: None,
+                    quota: None,
                 }),
             })
             .collect();
@@ -4835,6 +4973,7 @@ mod tests {
             let create_ns = LedgerRequest::CreateNamespace {
                 name: "test-ns".to_string(),
                 shard_id: Some(ShardId::new(0)),
+                quota: None,
             };
             let (response, _) = store.apply_request(&create_ns, &mut state);
             let namespace_id = match response {
@@ -4921,6 +5060,7 @@ mod tests {
             let create_ns = LedgerRequest::CreateNamespace {
                 name: "test-ns".to_string(),
                 shard_id: Some(ShardId::new(0)),
+                quota: None,
             };
             store.apply_request(&create_ns, &mut state);
 
@@ -5138,6 +5278,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateNamespace {
             name: "test".to_string(),
             shard_id: Some(ShardId::new(0)),
+            quota: None,
         };
         store.apply_request(&create_ns, &mut state);
         let create_vault = LedgerRequest::CreateVault {

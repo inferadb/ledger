@@ -763,6 +763,53 @@ impl Drop for Timer {
     }
 }
 
+// ─── Namespace Resource Accounting Metrics ───────────────────
+
+/// Per-namespace cumulative storage bytes (gauge).
+const NAMESPACE_STORAGE_BYTES: &str = "ledger_namespace_storage_bytes";
+
+/// Per-namespace operation counter.
+const NAMESPACE_OPERATIONS_TOTAL: &str = "ledger_namespace_operations_total";
+
+/// Per-namespace operation latency histogram.
+const NAMESPACE_LATENCY_SECONDS: &str = "ledger_namespace_latency_seconds";
+
+/// Set the current cumulative storage bytes for a namespace.
+///
+/// Cardinality is bounded by the number of namespaces, which is
+/// operator-controlled (typically < 100 in production).
+#[inline]
+pub fn set_namespace_storage_bytes(namespace_id: i64, bytes: u64) {
+    gauge!(NAMESPACE_STORAGE_BYTES, "namespace_id" => namespace_id.to_string())
+        .set(bytes as f64);
+}
+
+/// Record a namespace-level operation (read, write, or admin).
+///
+/// Increments `ledger_namespace_operations_total{namespace_id, operation}`.
+#[inline]
+pub fn record_namespace_operation(namespace_id: i64, operation: &str) {
+    counter!(
+        NAMESPACE_OPERATIONS_TOTAL,
+        "namespace_id" => namespace_id.to_string(),
+        "operation" => operation.to_string()
+    )
+    .increment(1);
+}
+
+/// Record per-namespace operation latency.
+///
+/// Records into `ledger_namespace_latency_seconds{namespace_id, operation}`.
+#[inline]
+pub fn record_namespace_latency(namespace_id: i64, operation: &str, latency_secs: f64) {
+    histogram!(
+        NAMESPACE_LATENCY_SECONDS,
+        "namespace_id" => namespace_id.to_string(),
+        "operation" => operation.to_string()
+    )
+    .record(latency_secs);
+}
+
 /// Create a timer for write operations.
 pub fn write_timer() -> Timer {
     Timer::new(|secs| record_write(true, secs))

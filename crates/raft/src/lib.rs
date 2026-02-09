@@ -5,6 +5,17 @@
 //! - Combined RaftStorage implementation (log + state machine)
 //! - gRPC services (Read, Write, Admin, Health, Discovery)
 //! - Inter-node Raft network transport
+//!
+//! # Public API
+//!
+//! The stable public API surface consists of:
+//! - [`proto`] — generated protobuf types and gRPC service traits
+//! - [`trace_context`] — distributed tracing propagation helpers
+//! - [`metrics`] — Prometheus metric constants and recording helpers
+//! - [`LedgerTypeConfig`] — OpenRaft type configuration
+//!
+//! All other modules and re-exports are server-internal infrastructure
+//! hidden from documentation. They may change without notice.
 
 #![deny(unsafe_code)]
 
@@ -23,46 +34,12 @@
 // handling
 #![allow(clippy::result_large_err)]
 
-pub mod api_version;
-pub mod audit;
-mod auto_recovery;
-pub mod backup;
+// ---------------------------------------------------------------------------
+// Public modules — stable API surface for SDK and external consumers
+// ---------------------------------------------------------------------------
 
-pub mod batching;
-mod block_compaction;
-mod btree_compaction;
-pub mod deadline;
-pub mod dependency_health;
-pub mod error;
-mod file_lock;
-mod graceful_shutdown;
-mod hot_key_detector;
-mod idempotency;
-mod learner_refresh;
-mod log_storage;
 pub mod metrics;
-mod multi_raft;
-mod multi_shard_server;
-mod orphan_cleanup;
-pub mod otel;
-pub mod pagination;
-pub mod peer_maintenance;
-pub mod peer_tracker;
-pub mod proof;
-pub mod proto_convert;
-mod raft_network;
-mod rate_limit;
-pub mod resource_metrics;
-pub mod runtime_config;
-mod saga_orchestrator;
-mod server;
-pub mod services;
-mod shard_router;
 pub mod trace_context;
-mod ttl_gc;
-mod types;
-pub mod vip_cache;
-pub mod wide_events;
 
 /// Generated protobuf types and service traits.
 pub mod proto {
@@ -78,51 +55,133 @@ pub mod proto {
     tonic::include_proto!("ledger.v1");
 }
 
-pub use auto_recovery::{AutoRecoveryConfig, AutoRecoveryJob, RecoveryResult};
-pub use backup::{BackupJob, BackupManager, BackupMetadata};
-pub use batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle};
+// ---------------------------------------------------------------------------
+// Server-internal modules — implementation details hidden from `cargo doc`.
+// These are `pub` so the server crate can access them, but `#[doc(hidden)]`
+// keeps the documentation focused on SDK-facing types.
+// ---------------------------------------------------------------------------
+
+#[doc(hidden)]
+pub mod api_version;
+#[doc(hidden)]
+pub mod audit;
+#[doc(hidden)]
+pub mod backup;
+#[doc(hidden)]
+pub mod batching;
+#[doc(hidden)]
+pub mod deadline;
+#[doc(hidden)]
+pub mod dependency_health;
+#[doc(hidden)]
+pub mod error;
+#[doc(hidden)]
+pub mod graceful_shutdown;
+#[doc(hidden)]
+pub mod hot_key_detector;
+#[doc(hidden)]
+pub mod idempotency;
+#[doc(hidden)]
+pub mod log_storage;
+#[doc(hidden)]
+pub mod multi_raft;
+#[doc(hidden)]
+pub mod multi_shard_server;
+#[doc(hidden)]
+pub mod otel;
+#[doc(hidden)]
+pub mod pagination;
+#[doc(hidden)]
+pub mod peer_maintenance;
+#[doc(hidden)]
+pub mod peer_tracker;
+#[doc(hidden)]
+pub mod proof;
+#[doc(hidden)]
+pub mod proto_convert;
+#[doc(hidden)]
+pub mod quota;
+#[doc(hidden)]
+pub mod resource_metrics;
+#[doc(hidden)]
+pub mod runtime_config;
+#[doc(hidden)]
+pub mod services;
+#[doc(hidden)]
+pub mod vip_cache;
+#[doc(hidden)]
+pub mod wide_events;
+
+#[doc(hidden)]
+pub mod auto_recovery;
+#[doc(hidden)]
+pub mod block_compaction;
+#[doc(hidden)]
+pub mod btree_compaction;
+#[doc(hidden)]
+pub mod file_lock;
+#[doc(hidden)]
+pub mod learner_refresh;
+#[doc(hidden)]
+pub mod orphan_cleanup;
+#[doc(hidden)]
+pub mod raft_network;
+#[doc(hidden)]
+pub mod rate_limit;
+#[doc(hidden)]
+pub mod saga_orchestrator;
+#[doc(hidden)]
+pub mod server;
+#[doc(hidden)]
+pub mod shard_router;
+#[doc(hidden)]
+pub mod ttl_gc;
+#[doc(hidden)]
+pub mod types;
+
+// ---------------------------------------------------------------------------
+// Public API — consumed by SDK
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Server infrastructure re-exports — consumed by the server crate for
+// bootstrapping, configuration, and background job management.
+//
+// These are `#[doc(hidden)]` to keep `cargo doc` focused on SDK types.
+// Server code should prefer direct module paths (e.g.
+// `inferadb_ledger_raft::graceful_shutdown::HealthState`) over these
+// convenience re-exports.
+// ---------------------------------------------------------------------------
+#[doc(hidden)]
+pub use auto_recovery::AutoRecoveryJob;
+#[doc(hidden)]
+pub use backup::{BackupJob, BackupManager};
+#[doc(hidden)]
 pub use block_compaction::BlockCompactor;
-pub use btree_compaction::BTreeCompactor;
-pub use dependency_health::{DependencyCheckResult, DependencyHealth, DependencyHealthChecker};
-pub use file_lock::{DataDirLock, LockError};
-pub use graceful_shutdown::{
-    BackgroundJobWatchdog, ConnectionTracker, ConnectionTrackingLayer, GracefulShutdown,
-    HealthState, NodePhase,
-};
-pub use hot_key_detector::{AccessResult, HotKeyDetector, HotKeyInfo};
-pub use idempotency::IdempotencyCache;
-pub use learner_refresh::{CachedSystemState, LearnerRefreshConfig, LearnerRefreshJob};
-pub use log_storage::{
-    AppliedState, AppliedStateAccessor, NamespaceMeta, RaftLogStore, SequenceCounters,
-    VaultHealthStatus, VaultMeta,
-};
-pub use multi_raft::{
-    MultiRaftConfig, MultiRaftError, MultiRaftManager, MultiRaftStats, ShardConfig, ShardGroup,
-};
+#[doc(hidden)]
+pub use graceful_shutdown::{BackgroundJobWatchdog, GracefulShutdown, HealthState};
+#[doc(hidden)]
+pub use hot_key_detector::HotKeyDetector;
+#[doc(hidden)]
+pub use learner_refresh::LearnerRefreshJob;
+#[doc(hidden)]
+pub use log_storage::RaftLogStore;
+#[doc(hidden)]
+pub use multi_raft::{MultiRaftConfig, MultiRaftManager, ShardConfig, ShardGroup};
+#[doc(hidden)]
 pub use multi_shard_server::MultiShardLedgerServer;
-pub use orphan_cleanup::OrphanCleanupJob;
-pub use pagination::{PageToken, PageTokenCodec, PageTokenError};
-pub use peer_maintenance::PeerMaintenance;
-pub use peer_tracker::{PeerTracker, PeerTrackerConfig};
-pub use raft_network::{GrpcRaftNetwork, GrpcRaftNetworkFactory};
-pub use rate_limit::{
-    NamespaceRateLimiter, RateLimitExceeded, RateLimitLevel, RateLimitReason, RateLimitRejection,
-    RateLimiter,
-};
+#[doc(hidden)]
+pub use raft_network::GrpcRaftNetworkFactory;
+#[doc(hidden)]
+pub use rate_limit::RateLimiter;
+#[doc(hidden)]
 pub use resource_metrics::ResourceMetricsCollector;
+#[doc(hidden)]
 pub use runtime_config::RuntimeConfigHandle;
-pub use saga_orchestrator::SagaOrchestrator;
+#[doc(hidden)]
 pub use server::LedgerServer;
-// Re-export multi-shard service types
-pub use services::{
-    ForwardClient, MultiShardReadService, MultiShardResolver, MultiShardWriteService,
-    RemoteShardInfo, ResolveResult, ShardContext, ShardResolver, SingleShardResolver,
-};
-pub use shard_router::{
-    RouterConfig, RouterStats, RoutingError, RoutingInfo, ShardConnection, ShardRouter,
-};
+#[doc(hidden)]
 pub use ttl_gc::TtlGarbageCollector;
-pub use types::{
-    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse,
-    LedgerTypeConfig, SystemRequest,
-};
+#[doc(hidden)]
+pub use types::LedgerNodeId;
+pub use types::LedgerTypeConfig;

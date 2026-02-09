@@ -15,13 +15,16 @@
 
 mod admin;
 mod discovery;
+pub(crate) mod error_details;
 mod forward_client;
 mod health;
+pub(crate) mod helpers;
+pub(crate) mod metadata;
 mod multi_shard_read;
 mod multi_shard_write;
 mod raft;
 mod read;
-mod shard_resolver;
+pub mod shard_resolver;
 mod write;
 
 pub use admin::AdminServiceImpl;
@@ -32,8 +35,5 @@ pub use multi_shard_read::MultiShardReadService;
 pub use multi_shard_write::MultiShardWriteService;
 pub use raft::{MultiShardRaftService, RaftServiceImpl};
 pub use read::ReadServiceImpl;
-pub use shard_resolver::{
-    MultiShardResolver, RemoteShardInfo, ResolveResult, ShardContext, ShardResolver,
-    SingleShardResolver,
-};
+pub use shard_resolver::{MultiShardResolver, ShardResolver};
 pub use write::WriteServiceImpl;

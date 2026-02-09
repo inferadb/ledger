@@ -845,6 +845,7 @@ async fn test_idempotency_survives_leader_failover() {
         .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: "failover-test-ns".to_string(),
             shard_id: None,
+            quota: None,
         })
         .await
         .expect("create namespace");

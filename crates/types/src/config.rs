@@ -1555,6 +1555,123 @@ impl BackupConfig {
     }
 }
 
+/// Default maximum storage bytes per namespace (10 GiB).
+const fn default_max_storage_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+/// Default maximum vault count per namespace.
+const fn default_max_vaults() -> u32 {
+    1000
+}
+
+/// Default maximum write operations per second per namespace.
+const fn default_max_write_ops_per_sec() -> u32 {
+    10_000
+}
+
+/// Default maximum read operations per second per namespace.
+const fn default_max_read_ops_per_sec() -> u32 {
+    50_000
+}
+
+/// Per-namespace resource quota configuration.
+///
+/// Enforces hard resource limits per namespace to prevent any single tenant
+/// from exhausting shared infrastructure. Quotas are checked at the service
+/// layer before operations reach the storage engine.
+///
+/// # Fields
+///
+/// - `max_storage_bytes`: Maximum cumulative storage bytes (estimated from payload sizes).
+/// - `max_vaults`: Maximum number of vaults within the namespace.
+/// - `max_write_ops_per_sec`: Maximum write operations per second (separate from global rate
+///   limits).
+/// - `max_read_ops_per_sec`: Maximum read operations per second (separate from global rate limits).
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::NamespaceQuota;
+/// let quota = NamespaceQuota::builder()
+///     .max_storage_bytes(1024 * 1024 * 1024) // 1 GiB
+///     .max_vaults(100)
+///     .build()
+///     .expect("valid quota");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceQuota {
+    /// Maximum cumulative storage bytes for the namespace.
+    #[serde(default = "default_max_storage_bytes")]
+    pub max_storage_bytes: u64,
+    /// Maximum number of vaults within the namespace.
+    #[serde(default = "default_max_vaults")]
+    pub max_vaults: u32,
+    /// Maximum write operations per second (namespace-level rate).
+    #[serde(default = "default_max_write_ops_per_sec")]
+    pub max_write_ops_per_sec: u32,
+    /// Maximum read operations per second (namespace-level rate).
+    #[serde(default = "default_max_read_ops_per_sec")]
+    pub max_read_ops_per_sec: u32,
+}
+
+impl Default for NamespaceQuota {
+    fn default() -> Self {
+        Self {
+            max_storage_bytes: default_max_storage_bytes(),
+            max_vaults: default_max_vaults(),
+            max_write_ops_per_sec: default_max_write_ops_per_sec(),
+            max_read_ops_per_sec: default_max_read_ops_per_sec(),
+        }
+    }
+}
+
+#[bon::bon]
+impl NamespaceQuota {
+    /// Creates a new namespace quota with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is zero.
+    #[builder]
+    pub fn new(
+        #[builder(default = default_max_storage_bytes())] max_storage_bytes: u64,
+        #[builder(default = default_max_vaults())] max_vaults: u32,
+        #[builder(default = default_max_write_ops_per_sec())] max_write_ops_per_sec: u32,
+        #[builder(default = default_max_read_ops_per_sec())] max_read_ops_per_sec: u32,
+    ) -> Result<Self, ConfigError> {
+        let config =
+            Self { max_storage_bytes, max_vaults, max_write_ops_per_sec, max_read_ops_per_sec };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl NamespaceQuota {
+    /// Validate an existing quota configuration (e.g., after deserialization).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_storage_bytes == 0 {
+            return Err(ConfigError::Validation {
+                message: "max_storage_bytes must be > 0".to_string(),
+            });
+        }
+        if self.max_vaults == 0 {
+            return Err(ConfigError::Validation { message: "max_vaults must be > 0".to_string() });
+        }
+        if self.max_write_ops_per_sec == 0 {
+            return Err(ConfigError::Validation {
+                message: "max_write_ops_per_sec must be > 0".to_string(),
+            });
+        }
+        if self.max_read_ops_per_sec == 0 {
+            return Err(ConfigError::Validation {
+                message: "max_read_ops_per_sec must be > 0".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Runtime-reconfigurable configuration subset.
 ///
 /// Contains only parameters that can be safely changed without a server restart.
@@ -1589,6 +1706,9 @@ pub struct RuntimeConfig {
     /// Input validation limits.
     #[serde(default)]
     pub validation: Option<ValidationConfig>,
+    /// Default namespace quota applied to new namespaces without explicit quotas.
+    #[serde(default)]
+    pub default_quota: Option<NamespaceQuota>,
 }
 
 /// Identifies a non-reconfigurable parameter that was included in an update request.
@@ -1618,6 +1738,9 @@ impl RuntimeConfig {
         if let Some(ref v) = self.validation {
             v.validate()?;
         }
+        if let Some(ref q) = self.default_quota {
+            q.validate()?;
+        }
         Ok(())
     }
 
@@ -1639,6 +1762,9 @@ impl RuntimeConfig {
         }
         if self.validation != other.validation {
             changes.push("validation".to_string());
+        }
+        if self.default_quota != other.default_quota {
+            changes.push("default_quota".to_string());
         }
         changes
     }

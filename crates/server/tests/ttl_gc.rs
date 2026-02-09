@@ -29,6 +29,7 @@ async fn create_namespace(
         .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: name.to_string(),
             shard_id: None,
+            quota: None,
         })
         .await?;
 

@@ -221,6 +221,7 @@ impl DiscoveryService {
                 message: status.message().to_owned(),
                 request_id: None,
                 trace_id: None,
+                error_details: None,
             })?;
 
             let inner = response.into_inner();

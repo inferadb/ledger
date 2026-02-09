@@ -834,6 +834,38 @@ pub struct WriteError {
     #[prost(uint64, optional, tag = "8")]
     pub assigned_sequence: ::core::option::Option<u64>,
 }
+/// Structured error details attached to gRPC `Status.details` for machine-readable
+/// error handling. SDK clients decode this to populate `SdkError` fields without
+/// parsing error message strings.
+///
+/// Encoding: `prost::Message::encode_to_vec()` → `Status::with_details(bytes)`.
+/// Decoding: `ErrorDetails::decode(status.details())`.
+///
+/// Backward-compatible: clients that don't parse details continue working
+/// unchanged — they still see the human-readable `Status.message`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ErrorDetails {
+    /// Machine-readable error code (numeric string, e.g., "3203").
+    /// Maps to `ErrorCode::as_u16()` from the types crate.
+    #[prost(string, tag = "1")]
+    pub error_code: ::prost::alloc::string::String,
+    /// Whether the client should retry this operation.
+    #[prost(bool, tag = "2")]
+    pub is_retryable: bool,
+    /// Suggested delay before retrying (milliseconds). Present only for
+    /// rate-limited or backpressure errors.
+    #[prost(int32, optional, tag = "3")]
+    pub retry_after_ms: ::core::option::Option<i32>,
+    /// Structured key-value context (e.g., {"namespace_id": "42", "field": "key"}).
+    #[prost(map = "string, string", tag = "4")]
+    pub context: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    /// Human-readable recovery guidance (e.g., "Reduce request rate").
+    #[prost(string, optional, tag = "5")]
+    pub suggested_action: ::core::option::Option<::prost::alloc::string::String>,
+}
 /// Batch write with all-or-nothing atomicity.
 ///
 /// Semantics:
@@ -922,6 +954,23 @@ pub struct BatchWriteSuccess {
 }
 /// Create a new namespace. NamespaceId is leader-assigned from \_meta:seq:namespace.
 /// The namespace is assigned to the shard with lowest load, or to the specified shard.
+/// Per-namespace resource quota limits.
+/// Applied to new namespaces; defaults from server config if not specified.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct NamespaceQuota {
+    /// Maximum cumulative storage bytes
+    #[prost(uint64, tag = "1")]
+    pub max_storage_bytes: u64,
+    /// Maximum number of vaults
+    #[prost(uint32, tag = "2")]
+    pub max_vaults: u32,
+    /// Maximum write ops/sec
+    #[prost(uint32, tag = "3")]
+    pub max_write_ops_per_sec: u32,
+    /// Maximum read ops/sec
+    #[prost(uint32, tag = "4")]
+    pub max_read_ops_per_sec: u32,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateNamespaceRequest {
     /// Human-readable name (e.g., "acme_corp")
@@ -930,6 +979,9 @@ pub struct CreateNamespaceRequest {
     /// Target shard (auto-assigned if not specified)
     #[prost(message, optional, tag = "2")]
     pub shard_id: ::core::option::Option<ShardId>,
+    /// Resource quota (server default if not specified)
+    #[prost(message, optional, tag = "3")]
+    pub quota: ::core::option::Option<NamespaceQuota>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateNamespaceResponse {

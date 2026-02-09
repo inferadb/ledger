@@ -4,7 +4,7 @@
 
 use rs_merkle::{MerkleTree as RsMerkleTree, algorithms::Sha256 as RsSha256};
 
-use crate::hash::{EMPTY_HASH, Hash, sha256};
+use crate::hash::{EMPTY_HASH, Hash};
 
 /// Merkle tree using SHA-256.
 pub struct MerkleTree {
@@ -115,14 +115,6 @@ pub fn merkle_root(leaves: &[Hash]) -> Hash {
         return EMPTY_HASH;
     }
     MerkleTree::from_leaves(leaves).root()
-}
-
-/// Hash data to create a leaf for the merkle tree.
-///
-/// This is a convenience wrapper around sha256.
-#[inline]
-pub fn leaf_hash(data: &[u8]) -> Hash {
-    sha256(data)
 }
 
 #[cfg(test)]

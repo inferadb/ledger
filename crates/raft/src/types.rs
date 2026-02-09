@@ -113,6 +113,9 @@ pub enum LedgerRequest {
         name: String,
         /// Target shard ID (None = auto-assign to shard 0).
         shard_id: Option<ShardId>,
+        /// Optional resource quota for this namespace.
+        /// When `None`, server-wide default quota applies.
+        quota: Option<inferadb_ledger_types::config::NamespaceQuota>,
     },
 
     /// Create a new vault within a namespace.
@@ -467,13 +470,14 @@ mod tests {
         let request = LedgerRequest::CreateNamespace {
             name: "test-namespace".to_string(),
             shard_id: Some(ShardId::new(1)),
+            quota: None,
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateNamespace { name, shard_id } => {
+            LedgerRequest::CreateNamespace { name, shard_id, quota: _ } => {
                 assert_eq!(name, "test-namespace");
                 assert_eq!(shard_id, Some(ShardId::new(1)));
             },
@@ -659,6 +663,7 @@ mod tests {
                     0 => LedgerRequest::CreateNamespace {
                         name: name.clone(),
                         shard_id: Some(shard_id),
+                        quota: None,
                     },
                     1 => LedgerRequest::CreateVault {
                         namespace_id,

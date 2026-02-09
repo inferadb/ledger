@@ -623,6 +623,30 @@ enum ReadErrorCode {
   READ_ERROR_CODE_HEIGHT_UNAVAILABLE = 1;
 }
 
+// Structured error details attached to gRPC `Status.details` for machine-readable
+// error handling. SDK clients decode this to populate `SdkError` fields without
+// parsing error message strings.
+//
+// Encoding: `prost::Message::encode_to_vec()` → `Status::with_details(bytes)`.
+// Decoding: `ErrorDetails::decode(status.details())`.
+//
+// Backward-compatible: clients that don't parse details continue working
+// unchanged — they still see the human-readable `Status.message`.
+message ErrorDetails {
+  // Machine-readable error code (numeric string, e.g., "3203").
+  // Maps to `ErrorCode::as_u16()` from the types crate.
+  string error_code = 1;
+  // Whether the client should retry this operation.
+  bool is_retryable = 2;
+  // Suggested delay before retrying (milliseconds). Present only for
+  // rate-limited or backpressure errors.
+  optional int32 retry_after_ms = 3;
+  // Structured key-value context (e.g., {"namespace_id": "42", "field": "key"}).
+  map<string, string> context = 4;
+  // Human-readable recovery guidance (e.g., "Reduce request rate").
+  optional string suggested_action = 5;
+}
+
 // Batch write with all-or-nothing atomicity.
 //
 // Semantics:
@@ -789,9 +813,19 @@ service AdminService {
 
 // Create a new namespace. NamespaceId is leader-assigned from _meta:seq:namespace.
 // The namespace is assigned to the shard with lowest load, or to the specified shard.
+// Per-namespace resource quota limits.
+// Applied to new namespaces; defaults from server config if not specified.
+message NamespaceQuota {
+  uint64 max_storage_bytes = 1; // Maximum cumulative storage bytes
+  uint32 max_vaults = 2; // Maximum number of vaults
+  uint32 max_write_ops_per_sec = 3; // Maximum write ops/sec
+  uint32 max_read_ops_per_sec = 4; // Maximum read ops/sec
+}
+
 message CreateNamespaceRequest {
   string name = 1; // Human-readable name (e.g., "acme_corp")
   optional ShardId shard_id = 2; // Target shard (auto-assigned if not specified)
+  optional NamespaceQuota quota = 3; // Resource quota (server default if not specified)
 }
 
 message CreateNamespaceResponse {

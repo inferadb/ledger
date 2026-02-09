@@ -17,10 +17,10 @@ use tonic::transport::Server;
 use tower::ServiceBuilder;
 
 use crate::{
-    IdempotencyCache,
     api_version::{ApiVersionLayer, api_version_interceptor},
     batching::BatchConfig,
     graceful_shutdown::ConnectionTrackingLayer,
+    idempotency::IdempotencyCache,
     log_storage::AppliedStateAccessor,
     proto::{
         BlockAnnouncement, admin_service_server::AdminServiceServer,

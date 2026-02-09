@@ -183,6 +183,7 @@ async fn setup_namespace_and_vault(
         let ns_request = inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: format!("stress-ns-{}", config.namespace_id),
             shard_id: None,
+            quota: None,
         };
         admin_client
             .create_namespace(ns_request)
@@ -241,6 +242,7 @@ async fn setup_multi_shard_namespaces(
         let ns_request = inferadb_ledger_raft::proto::CreateNamespaceRequest {
             name: format!("stress-shard-{}-ns", shard_id),
             shard_id: Some(inferadb_ledger_raft::proto::ShardId { id: shard_id_u32 }),
+            quota: None,
         };
 
         let ns_response = admin_client
