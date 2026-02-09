@@ -658,4 +658,123 @@ mod tests {
 
         assert_eq!(router.stats().cached_namespaces, 0);
     }
+
+    #[test]
+    fn test_routing_after_namespace_registration() {
+        let (router, state, _temp) = create_test_router();
+
+        // Register a namespace in _system
+        let registry = inferadb_ledger_state::system::NamespaceRegistry {
+            namespace_id: NamespaceId::new(42),
+            name: "test-ns".to_string(),
+            shard_id: ShardId::new(3),
+            member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
+            status: inferadb_ledger_state::system::NamespaceStatus::Active,
+            config_version: 1,
+            created_at: chrono::Utc::now(),
+        };
+        let system = SystemNamespaceService::new(Arc::clone(&state));
+        system.register_namespace(&registry).expect("register namespace");
+
+        // Router should resolve the namespace to shard 3
+        let info = router.get_routing(NamespaceId::new(42)).expect("get routing");
+        assert_eq!(info.shard_id, ShardId::new(3));
+        assert_eq!(info.member_nodes.len(), 2);
+        assert!(info.leader_hint.is_some(), "should have a leader hint");
+
+        // Should be cached now
+        assert_eq!(router.stats().cached_namespaces, 1);
+    }
+
+    #[test]
+    fn test_routing_cache_populated_on_lookup() {
+        let (router, state, _temp) = create_test_router();
+
+        // Register two namespaces on different shards
+        let system = SystemNamespaceService::new(Arc::clone(&state));
+
+        for (ns_id, shard_id) in [(10, 1), (20, 2)] {
+            let registry = inferadb_ledger_state::system::NamespaceRegistry {
+                namespace_id: NamespaceId::new(ns_id),
+                name: format!("ns-{}", ns_id),
+                shard_id: ShardId::new(shard_id),
+                member_nodes: vec![format!("node-{}:50051", shard_id)],
+                status: inferadb_ledger_state::system::NamespaceStatus::Active,
+                config_version: 1,
+                created_at: chrono::Utc::now(),
+            };
+            system.register_namespace(&registry).expect("register");
+        }
+
+        // Look up both — should independently resolve
+        let info1 = router.get_routing(NamespaceId::new(10)).expect("ns 10");
+        let info2 = router.get_routing(NamespaceId::new(20)).expect("ns 20");
+
+        assert_eq!(info1.shard_id, ShardId::new(1));
+        assert_eq!(info2.shard_id, ShardId::new(2));
+
+        // Both should be cached
+        assert_eq!(router.stats().cached_namespaces, 2);
+    }
+
+    #[test]
+    fn test_update_leader_hint_changes_cached_hint() {
+        let (router, state, _temp) = create_test_router();
+
+        // Register namespace
+        let system = SystemNamespaceService::new(Arc::clone(&state));
+        let registry = inferadb_ledger_state::system::NamespaceRegistry {
+            namespace_id: NamespaceId::new(5),
+            name: "hint-test".to_string(),
+            shard_id: ShardId::new(1),
+            member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
+            status: inferadb_ledger_state::system::NamespaceStatus::Active,
+            config_version: 1,
+            created_at: chrono::Utc::now(),
+        };
+        system.register_namespace(&registry).expect("register");
+
+        // Populate cache by doing a lookup
+        let info = router.get_routing(NamespaceId::new(5)).expect("initial routing");
+        assert_eq!(info.leader_hint.as_deref(), Some("node-a:50051"));
+
+        // Update leader hint
+        router.update_leader_hint(NamespaceId::new(5), "node-b:50051");
+
+        // Re-read from cache (should use updated hint)
+        let info2 = router.get_routing(NamespaceId::new(5)).expect("updated routing");
+        assert_eq!(info2.leader_hint.as_deref(), Some("node-b:50051"));
+    }
+
+    #[test]
+    fn test_routing_unavailable_namespace_status() {
+        let (router, state, _temp) = create_test_router();
+
+        // Register a namespace with Suspended status
+        let system = SystemNamespaceService::new(Arc::clone(&state));
+        let registry = inferadb_ledger_state::system::NamespaceRegistry {
+            namespace_id: NamespaceId::new(77),
+            name: "suspended-ns".to_string(),
+            shard_id: ShardId::new(1),
+            member_nodes: vec!["node-1:50051".to_string()],
+            status: inferadb_ledger_state::system::NamespaceStatus::Suspended,
+            config_version: 1,
+            created_at: chrono::Utc::now(),
+        };
+        system.register_namespace(&registry).expect("register");
+
+        // Routing should fail with NamespaceUnavailable
+        let result = router.get_routing(NamespaceId::new(77));
+        assert!(
+            matches!(
+                result,
+                Err(RoutingError::NamespaceUnavailable {
+                    namespace_id,
+                    status: inferadb_ledger_state::system::NamespaceStatus::Suspended
+                }) if namespace_id == NamespaceId::new(77)
+            ),
+            "expected NamespaceUnavailable, got: {:?}",
+            result
+        );
+    }
 }

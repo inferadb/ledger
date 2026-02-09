@@ -637,4 +637,151 @@ mod tests {
         assert_eq!(loaded.header.chain_commitment.from_height, 501);
         assert_eq!(loaded.header.chain_commitment.to_height, 1000);
     }
+
+    /// Test that consecutive snapshots form a valid chain.
+    ///
+    /// Snapshot N+1 references snapshot N's height and hash, creating a
+    /// verifiable chain of state commitments.
+    #[test]
+    fn test_snapshot_chain_continuity() {
+        let temp = TempDir::new().expect("create temp dir");
+        let manager = SnapshotManager::new(temp.path().to_path_buf(), 10);
+
+        let vault_states = vec![VaultSnapshotMeta {
+            vault_id: VaultId::new(1),
+            vault_height: 50,
+            state_root: [10u8; 32],
+            bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+            key_count: 3,
+        }];
+
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+
+        // Create first snapshot (genesis — no previous)
+        let chain_params_1 = SnapshotChainParams {
+            genesis_hash: [0xAA; 32],
+            previous_snapshot_height: None,
+            previous_snapshot_hash: None,
+            chain_commitment: ChainCommitment {
+                accumulated_header_hash: [0xBB; 32],
+                state_root_accumulator: [0xCC; 32],
+                from_height: 1,
+                to_height: 500,
+            },
+        };
+
+        let snap1 = Snapshot::new(
+            ShardId::new(1),
+            500,
+            vault_states.clone(),
+            state.clone(),
+            chain_params_1,
+        )
+        .expect("create snapshot 1");
+
+        let path1 = manager.save(&snap1).expect("save snapshot 1");
+        let snap1_loaded = Snapshot::read_from_file(&path1).expect("load snapshot 1");
+
+        // Create second snapshot referencing the first
+        let chain_params_2 = SnapshotChainParams {
+            genesis_hash: [0xAA; 32], // Same genesis
+            previous_snapshot_height: Some(500),
+            previous_snapshot_hash: Some(snap1_loaded.header.checksum),
+            chain_commitment: ChainCommitment {
+                accumulated_header_hash: [0xDD; 32],
+                state_root_accumulator: [0xEE; 32],
+                from_height: 501,
+                to_height: 1000,
+            },
+        };
+
+        let snap2 = Snapshot::new(ShardId::new(1), 1000, vault_states, state, chain_params_2)
+            .expect("create snapshot 2");
+
+        let path2 = manager.save(&snap2).expect("save snapshot 2");
+        let snap2_loaded = Snapshot::read_from_file(&path2).expect("load snapshot 2");
+
+        // Verify chain linkage
+        assert_eq!(
+            snap2_loaded.header.previous_snapshot_height,
+            Some(500),
+            "snapshot 2 should reference snapshot 1's height"
+        );
+        assert_eq!(
+            snap2_loaded.header.previous_snapshot_hash,
+            Some(snap1_loaded.header.checksum),
+            "snapshot 2 should reference snapshot 1's checksum"
+        );
+        assert_eq!(
+            snap2_loaded.header.genesis_hash, snap1_loaded.header.genesis_hash,
+            "both snapshots should share the same genesis hash"
+        );
+        assert_eq!(
+            snap2_loaded.header.chain_commitment.from_height, 501,
+            "snapshot 2 commitment should start after snapshot 1"
+        );
+    }
+
+    /// Test that vault state roots are preserved across snapshot roundtrips
+    /// with multiple vaults.
+    ///
+    /// Each vault maintains an independent state root in the snapshot, which
+    /// must survive serialization. Verifiers use these roots to validate
+    /// individual vault states without processing the entire shard.
+    #[test]
+    fn test_snapshot_preserves_multiple_vault_state_roots() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("multi_vault.snap");
+
+        let vault_states = vec![
+            VaultSnapshotMeta {
+                vault_id: VaultId::new(1),
+                vault_height: 100,
+                state_root: [0x11; 32],
+                bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+                key_count: 10,
+            },
+            VaultSnapshotMeta {
+                vault_id: VaultId::new(2),
+                vault_height: 200,
+                state_root: [0x22; 32],
+                bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+                key_count: 20,
+            },
+            VaultSnapshotMeta {
+                vault_id: VaultId::new(3),
+                vault_height: 300,
+                state_root: [0x33; 32],
+                bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+                key_count: 30,
+            },
+        ];
+
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+
+        let snapshot = Snapshot::new_simple(ShardId::new(1), 5000, vault_states, state)
+            .expect("create snapshot");
+
+        snapshot.write_to_file(&path).expect("write");
+        let loaded = Snapshot::read_from_file(&path).expect("read");
+
+        // Verify each vault's state root survived the roundtrip
+        assert_eq!(loaded.header.vault_states.len(), 3);
+
+        let v1 = loaded.get_vault_meta(VaultId::new(1)).expect("vault 1 meta");
+        let v2 = loaded.get_vault_meta(VaultId::new(2)).expect("vault 2 meta");
+        let v3 = loaded.get_vault_meta(VaultId::new(3)).expect("vault 3 meta");
+
+        assert_eq!(v1.state_root, [0x11; 32], "vault 1 state root");
+        assert_eq!(v1.vault_height, 100);
+        assert_eq!(v1.key_count, 10);
+
+        assert_eq!(v2.state_root, [0x22; 32], "vault 2 state root");
+        assert_eq!(v2.vault_height, 200);
+        assert_eq!(v2.key_count, 20);
+
+        assert_eq!(v3.state_root, [0x33; 32], "vault 3 state root");
+        assert_eq!(v3.vault_height, 300);
+        assert_eq!(v3.key_count, 30);
+    }
 }

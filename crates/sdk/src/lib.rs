@@ -63,6 +63,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod builders;
 mod circuit_breaker;
 mod client;
 mod config;
@@ -78,6 +79,7 @@ mod streaming;
 mod tracing;
 
 // Public API exports
+pub use builders::{BatchReadBuilder, RelationshipQueryBuilder, WriteBuilder};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{
     BlockAnnouncement, BlockHeader, ChainProof, Direction, Entity, HealthCheckResult, HealthStatus,

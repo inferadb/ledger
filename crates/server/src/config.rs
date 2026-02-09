@@ -3,10 +3,14 @@
 //! Configuration is loaded from command-line arguments or environment variables.
 //! CLI arguments take precedence over environment variables.
 
+// The schemars `JsonSchema` derive macro internally uses `.unwrap()`.
+#![allow(clippy::disallowed_methods)]
+
 use std::{net::SocketAddr, path::PathBuf};
 
 use bon::Builder;
 use clap::Parser;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use snafu::Snafu;
 
@@ -16,7 +20,7 @@ use crate::node_id;
 ///
 /// Controls tail sampling behavior: which events are logged based on
 /// outcome, latency, and namespace priority.
-#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct WideEventsSamplingConfig {
     /// Sample rate for error outcomes (0.0-1.0). Default: 1.0 (100%).
@@ -150,7 +154,7 @@ impl WideEventsSamplingConfig {
 }
 
 /// OTLP transport protocol.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OtelTransport {
     /// gRPC transport (default, recommended for high-throughput).
@@ -172,7 +176,7 @@ pub enum OtelTransport {
 /// INFERADB__LEDGER__WIDE_EVENTS__OTEL__ENDPOINT=http://localhost:4317
 /// INFERADB__LEDGER__WIDE_EVENTS__OTEL__TRANSPORT=grpc
 /// ```
-#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct OtelConfig {
     /// Whether OTLP export is enabled. Default: false.
@@ -309,7 +313,7 @@ fn default_trace_raft_rpcs() -> bool {
 /// INFERADB__LEDGER__WIDE_EVENTS__VIP__CACHE_TTL_SECS=60
 /// INFERADB__LEDGER__WIDE_EVENTS__VIP__TAG_NAME=vip
 /// ```
-#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct VipConfig {
     /// Whether dynamic VIP discovery from `_system` is enabled. Default: true.
@@ -396,7 +400,7 @@ fn default_vip_tag_name() -> String {
 /// INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__WRITE_RATE=0.1
 /// INFERADB__LEDGER__WIDE_EVENTS__VIP_NAMESPACES=1,2,3
 /// ```
-#[derive(Debug, Clone, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct WideEventsConfig {
     /// Whether wide events logging is enabled. Default: true.
@@ -490,7 +494,7 @@ fn default_wide_events_enabled() -> bool {
 }
 
 /// Log output format.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
     /// Human-readable text format (default for development).
@@ -552,10 +556,7 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 ///     .cluster(3)
 ///     .build();
 /// ```
-#[derive(Debug, Clone, Deserialize, Builder, Parser)]
-#[command(name = "inferadb-ledger")]
-#[command(about = "InferaDB Ledger - Distributed consensus ledger")]
-#[command(version)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, Builder, Parser)]
 #[builder(derive(Debug))]
 pub struct Config {
     /// Address to listen on for gRPC.
@@ -769,14 +770,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Parse configuration from command-line arguments and environment variables.
-    ///
-    /// CLI arguments take precedence over environment variables.
-    /// Fields not set via either use their default values.
-    pub fn parse_args() -> Self {
-        Self::parse()
-    }
-
     /// Create a configuration for testing.
     ///
     /// Uses single-node mode by default for simple test scenarios.
@@ -957,6 +950,220 @@ pub enum ConfigError {
         /// Error description.
         message: String,
     },
+}
+
+/// InferaDB Ledger - Distributed consensus ledger.
+#[derive(Debug, Parser)]
+#[command(name = "inferadb-ledger")]
+#[command(version)]
+pub struct Cli {
+    /// Subcommand to run. If omitted, starts the server.
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
+    /// Server configuration (flattened for backward compatibility).
+    #[command(flatten)]
+    pub config: Config,
+}
+
+/// CLI subcommands for configuration management.
+#[derive(Debug, clap::Subcommand)]
+pub enum CliCommand {
+    /// Configuration management utilities.
+    Config {
+        /// Configuration action to perform.
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// Configuration subcommand actions.
+#[derive(Debug, clap::Subcommand)]
+pub enum ConfigAction {
+    /// Output JSON Schema for the runtime configuration file.
+    ///
+    /// The schema describes the structure of the TOML config file
+    /// used with `--config` for hot-reloadable settings. Use this
+    /// schema for IDE autocomplete and external validation.
+    Schema,
+    /// Output a fully-commented example TOML configuration file.
+    ///
+    /// All fields are shown with their default values and descriptions.
+    Example,
+}
+
+/// Generate JSON Schema for the runtime configuration.
+///
+/// Uses schemars to derive the schema from `RuntimeConfig` and its
+/// nested types. All fields that derive `JsonSchema` are included.
+#[must_use]
+pub fn generate_runtime_config_schema() -> String {
+    let schema = schemars::schema_for!(inferadb_ledger_types::config::RuntimeConfig);
+    serde_json::to_string_pretty(&schema).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+}
+
+/// Generate a fully-commented example TOML configuration file.
+///
+/// Serializes `RuntimeConfig::default()` to TOML and prepends each
+/// section with descriptive comments.
+#[must_use]
+pub fn generate_runtime_config_example() -> String {
+    let mut output = String::new();
+    output.push_str("# InferaDB Ledger Runtime Configuration\n");
+    output.push_str("#\n");
+    output.push_str("# This file configures hot-reloadable runtime parameters.\n");
+    output.push_str("# Apply changes via SIGHUP or the UpdateConfig RPC.\n");
+    output
+        .push_str("# All sections are optional — omitted sections retain their current values.\n");
+    output.push_str("#\n");
+    output.push_str("# Usage:\n");
+    output.push_str("#   inferadb-ledger --config /etc/inferadb/runtime.toml\n");
+    output.push('\n');
+
+    output.push_str("# Rate limiting thresholds.\n");
+    output.push_str("# Controls per-client and per-namespace request rate limits.\n");
+    output.push_str("[rate_limit]\n");
+    let rl = inferadb_ledger_types::config::RateLimitConfig::default();
+    output.push_str(&format!(
+        "client_burst = {}           # Max burst per client\n",
+        rl.client_burst
+    ));
+    output.push_str(&format!(
+        "client_rate = {:.1}          # Sustained rate per client (req/sec)\n",
+        rl.client_rate
+    ));
+    output.push_str(&format!(
+        "namespace_burst = {}        # Max burst per namespace\n",
+        rl.namespace_burst
+    ));
+    output.push_str(&format!(
+        "namespace_rate = {:.1}       # Sustained rate per namespace (req/sec)\n",
+        rl.namespace_rate
+    ));
+    output.push_str(&format!(
+        "backpressure_threshold = {} # Pending proposals before backpressure\n",
+        rl.backpressure_threshold
+    ));
+    output.push('\n');
+
+    output.push_str("# Hot key detection thresholds.\n");
+    output.push_str("# Identifies frequently accessed keys for operator alerting.\n");
+    output.push_str("[hot_key]\n");
+    let hk = inferadb_ledger_types::config::HotKeyConfig::default();
+    output.push_str(&format!(
+        "window_secs = {}            # Sliding window duration (seconds)\n",
+        hk.window_secs
+    ));
+    output.push_str(&format!(
+        "threshold = {}              # Access count to classify as hot\n",
+        hk.threshold
+    ));
+    output.push_str(&format!("cms_width = {}            # Count-Min Sketch width\n", hk.cms_width));
+    output.push_str(&format!(
+        "cms_depth = {}               # Count-Min Sketch depth\n",
+        hk.cms_depth
+    ));
+    output.push_str(&format!("top_k = {}                 # Track top-k hottest keys\n", hk.top_k));
+    output.push('\n');
+
+    output.push_str("# B+ tree compaction parameters.\n");
+    output.push_str("# Controls when and how aggressively leaf pages are merged.\n");
+    output.push_str("[compaction]\n");
+    let c = inferadb_ledger_types::config::BTreeCompactionConfig::default();
+    output.push_str(&format!(
+        "min_fill_factor = {:.1}      # Minimum leaf fill ratio before merge\n",
+        c.min_fill_factor
+    ));
+    output.push_str(&format!(
+        "interval_secs = {}           # Seconds between compaction cycles\n",
+        c.interval_secs
+    ));
+    output.push('\n');
+
+    output.push_str("# Input validation limits.\n");
+    output.push_str("# Constrains request payload sizes to prevent abuse.\n");
+    output.push_str("[validation]\n");
+    let v = inferadb_ledger_types::config::ValidationConfig::default();
+    output.push_str(&format!(
+        "max_key_bytes = {}          # Maximum entity key size\n",
+        v.max_key_bytes
+    ));
+    output.push_str(&format!(
+        "max_value_bytes = {}      # Maximum entity value size\n",
+        v.max_value_bytes
+    ));
+    output.push_str(&format!(
+        "max_operations_per_write = {} # Maximum operations per write request\n",
+        v.max_operations_per_write
+    ));
+    output.push_str(&format!(
+        "max_batch_payload_bytes = {} # Maximum total batch payload\n",
+        v.max_batch_payload_bytes
+    ));
+    output.push_str(&format!(
+        "max_namespace_name_bytes = {} # Maximum namespace name length\n",
+        v.max_namespace_name_bytes
+    ));
+    output.push_str(&format!(
+        "max_relationship_string_bytes = {} # Maximum relationship string length\n",
+        v.max_relationship_string_bytes
+    ));
+    output.push('\n');
+
+    output
+        .push_str("# Default namespace quota applied to new namespaces without explicit quotas.\n");
+    output.push_str("[default_quota]\n");
+    let q = inferadb_ledger_types::config::NamespaceQuota::default();
+    output.push_str(&format!(
+        "max_storage_bytes = {}  # Maximum storage per namespace (bytes)\n",
+        q.max_storage_bytes
+    ));
+    output.push_str(&format!(
+        "max_vaults = {}           # Maximum vaults per namespace\n",
+        q.max_vaults
+    ));
+    output.push_str(&format!(
+        "max_write_ops_per_sec = {} # Maximum write operations per second\n",
+        q.max_write_ops_per_sec
+    ));
+    output.push_str(&format!(
+        "max_read_ops_per_sec = {} # Maximum read operations per second\n",
+        q.max_read_ops_per_sec
+    ));
+    output.push('\n');
+
+    output.push_str("# Integrity scrubber parameters.\n");
+    output.push_str("# Controls background page checksum and B-tree invariant verification.\n");
+    output.push_str("[integrity]\n");
+    let i = inferadb_ledger_types::config::IntegrityConfig::default();
+    output.push_str(&format!(
+        "scrub_interval_secs = {}  # Seconds between scrub cycles\n",
+        i.scrub_interval_secs
+    ));
+    output.push_str(&format!(
+        "pages_per_cycle_percent = {:.1} # Percentage of pages per cycle\n",
+        i.pages_per_cycle_percent
+    ));
+    output.push_str(&format!(
+        "full_scan_period_secs = {} # Seconds for a complete scan\n",
+        i.full_scan_period_secs
+    ));
+    output.push('\n');
+
+    output.push_str("# Metric cardinality budgets.\n");
+    output.push_str("# Limits label cardinality to prevent Prometheus OOM.\n");
+    output.push_str("[metrics_cardinality]\n");
+    let mc = inferadb_ledger_types::config::MetricsCardinalityConfig::default();
+    output.push_str(&format!(
+        "warn_cardinality = {}     # Warn when estimated distinct label sets exceed this\n",
+        mc.warn_cardinality
+    ));
+    output.push_str(&format!(
+        "max_cardinality = {}    # Drop observations above this cardinality\n",
+        mc.max_cardinality
+    ));
+
+    output
 }
 
 #[cfg(test)]
@@ -1596,5 +1803,61 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("cache_ttl_secs"));
+    }
+
+    // =========================================================================
+    // Schema & example generation tests
+    // =========================================================================
+
+    #[test]
+    fn test_generate_runtime_config_schema_is_valid_json() {
+        let schema_json = generate_runtime_config_schema();
+        let value: serde_json::Value = serde_json::from_str(&schema_json).unwrap();
+        assert!(value.get("$schema").is_some());
+        assert_eq!(value.get("title").and_then(|v| v.as_str()), Some("RuntimeConfig"));
+    }
+
+    #[test]
+    fn test_generate_runtime_config_schema_has_definitions() {
+        let schema_json = generate_runtime_config_schema();
+        let value: serde_json::Value = serde_json::from_str(&schema_json).unwrap();
+        // Should have $defs for nested config types.
+        let defs = value.get("$defs").and_then(|v| v.as_object()).unwrap();
+        assert!(defs.contains_key("RateLimitConfig"), "Missing RateLimitConfig definition");
+        assert!(defs.contains_key("HotKeyConfig"), "Missing HotKeyConfig definition");
+        assert!(defs.contains_key("ValidationConfig"), "Missing ValidationConfig definition");
+    }
+
+    #[test]
+    fn test_generate_runtime_config_example_is_valid_toml() {
+        let example = generate_runtime_config_example();
+        // Parse the example as TOML (comments are ignored by TOML parser).
+        let parsed: toml::Value = toml::from_str(&example).unwrap();
+        let table = parsed.as_table().unwrap();
+        assert!(table.contains_key("rate_limit"), "Missing rate_limit section");
+        assert!(table.contains_key("hot_key"), "Missing hot_key section");
+        assert!(table.contains_key("compaction"), "Missing compaction section");
+        assert!(table.contains_key("validation"), "Missing validation section");
+        assert!(table.contains_key("default_quota"), "Missing default_quota section");
+        assert!(table.contains_key("integrity"), "Missing integrity section");
+        assert!(table.contains_key("metrics_cardinality"), "Missing metrics_cardinality section");
+    }
+
+    #[test]
+    fn test_generate_runtime_config_example_roundtrips_through_runtime_config() {
+        let example = generate_runtime_config_example();
+        // The example should parse as a valid RuntimeConfig.
+        let parsed: inferadb_ledger_types::config::RuntimeConfig =
+            toml::from_str(&example).unwrap();
+        // All sections present.
+        assert!(parsed.rate_limit.is_some());
+        assert!(parsed.hot_key.is_some());
+        assert!(parsed.compaction.is_some());
+        assert!(parsed.validation.is_some());
+        assert!(parsed.default_quota.is_some());
+        assert!(parsed.integrity.is_some());
+        assert!(parsed.metrics_cardinality.is_some());
+        // Validation should pass.
+        parsed.validate().unwrap();
     }
 }

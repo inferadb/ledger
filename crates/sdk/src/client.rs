@@ -1401,6 +1401,87 @@ impl LedgerClient {
         &self.pool
     }
 
+    // =========================================================================
+    // Fluent Builders
+    // =========================================================================
+
+    /// Create a fluent write builder for the given namespace and optional vault.
+    ///
+    /// Chain operations and then call `.execute()` to submit:
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
+    /// let result = client
+    ///     .write_builder(1, Some(1))
+    ///     .set("user:123", b"data".to_vec())
+    ///     .create_relationship("doc:1", "viewer", "user:123")
+    ///     .execute()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn write_builder(
+        &self,
+        namespace_id: i64,
+        vault_id: Option<i64>,
+    ) -> crate::builders::WriteBuilder<'_> {
+        crate::builders::WriteBuilder::new(self, namespace_id, vault_id)
+    }
+
+    /// Create a fluent batch read builder for the given namespace and optional vault.
+    ///
+    /// Add keys and then call `.execute()`:
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
+    /// let results = client
+    ///     .batch_read_builder(1, Some(1))
+    ///     .key("user:123")
+    ///     .key("user:456")
+    ///     .linearizable()
+    ///     .execute()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn batch_read_builder(
+        &self,
+        namespace_id: i64,
+        vault_id: Option<i64>,
+    ) -> crate::builders::BatchReadBuilder<'_> {
+        crate::builders::BatchReadBuilder::new(self, namespace_id, vault_id)
+    }
+
+    /// Create a fluent relationship query builder for the given namespace and vault.
+    ///
+    /// Add filters and then call `.execute()`:
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
+    /// let page = client
+    ///     .relationship_query(1, 1)
+    ///     .resource("document:report")
+    ///     .relation("viewer")
+    ///     .limit(50)
+    ///     .execute()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn relationship_query(
+        &self,
+        namespace_id: i64,
+        vault_id: i64,
+    ) -> crate::builders::RelationshipQueryBuilder<'_> {
+        crate::builders::RelationshipQueryBuilder::new(self, namespace_id, vault_id)
+    }
+
     /// Returns the client's cancellation token.
     ///
     /// The token can be used to:

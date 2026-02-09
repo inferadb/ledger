@@ -661,4 +661,172 @@ mod tests {
         assert_eq!(RateLimitReason::TokensExhausted.as_str(), "tokens_exhausted");
         assert_eq!(RateLimitReason::QueueDepth.as_str(), "queue_depth");
     }
+
+    // ── Concurrency Stress Tests ────────────────────────────────────────
+
+    /// Stress test: concurrent check() calls during config update via AtomicU64.
+    ///
+    /// Verifies that concurrent rate limit checks observe consistent config
+    /// even as atomics are being updated. The key invariant is that no thread
+    /// panics or observes a partially-updated config (e.g., client capacity
+    /// from the old config with refill rate from the new config).
+    #[test]
+    fn stress_concurrent_check_during_config_update() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering as AOrdering},
+            },
+            thread,
+        };
+
+        // Start with generous limits so initial checks pass
+        let limiter = Arc::new(RateLimiter::new(
+            10_000, 5_000.0, // per-client: high burst, high refill
+            50_000, 20_000.0, // per-namespace: very high
+            1000,     // backpressure threshold
+        ));
+
+        let running = Arc::new(AtomicBool::new(true));
+        let mut handles = Vec::new();
+
+        // Spawn 20 checker threads
+        for thread_id in 0..20 {
+            let limiter = Arc::clone(&limiter);
+            let running = Arc::clone(&running);
+            handles.push(thread::spawn(move || {
+                let client_id = format!("client-{}", thread_id);
+                let namespace_id = NamespaceId::new((thread_id % 5 + 1) as i64);
+                let mut ok_count = 0u64;
+                let mut reject_count = 0u64;
+
+                while running.load(AOrdering::Relaxed) {
+                    match limiter.check(&client_id, namespace_id) {
+                        Ok(()) => ok_count += 1,
+                        Err(_) => reject_count += 1,
+                    }
+                    // Brief yield to avoid pure spin
+                    if (ok_count + reject_count).is_multiple_of(100) {
+                        thread::yield_now();
+                    }
+                }
+
+                (ok_count, reject_count)
+            }));
+        }
+
+        // Spawn 2 config updater threads that oscillate between configs
+        for updater_id in 0..2 {
+            let limiter = Arc::clone(&limiter);
+            let running = Arc::clone(&running);
+            handles.push(thread::spawn(move || {
+                let mut iteration = 0u64;
+                while running.load(AOrdering::Relaxed) {
+                    if iteration % 2 == updater_id {
+                        // Tighten limits
+                        limiter.update_config(100, 50.0, 500, 200.0, 10);
+                    } else {
+                        // Loosen limits
+                        limiter.update_config(10_000, 5_000.0, 50_000, 20_000.0, 1000);
+                    }
+                    iteration += 1;
+                    thread::yield_now();
+                }
+                (0u64, iteration)
+            }));
+        }
+
+        // Let it run for a short duration
+        thread::sleep(std::time::Duration::from_millis(200));
+        running.store(false, AOrdering::Relaxed);
+
+        let mut total_ok = 0u64;
+        let mut total_reject = 0u64;
+
+        for handle in handles {
+            let (ok, reject) = handle.join().expect("Thread panicked");
+            total_ok += ok;
+            total_reject += reject;
+        }
+
+        // The test passes if no thread panicked. Additionally verify some
+        // operations occurred.
+        assert!(total_ok + total_reject > 0, "Expected some rate limit checks to execute");
+    }
+
+    /// Stress test: concurrent requests at exactly the rate limit boundary.
+    ///
+    /// Creates a limiter with a small burst capacity and sends exactly that many
+    /// concurrent requests. Verifies that the total allowed never exceeds burst
+    /// capacity (no double-spend of tokens).
+    #[test]
+    fn stress_concurrent_boundary_rate_limit() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicU64, Ordering as AOrdering},
+            },
+            thread,
+        };
+
+        let burst_capacity = 50u64;
+        let limiter = Arc::new(RateLimiter::new(
+            burst_capacity,
+            0.0, // Zero refill — tokens don't regenerate during test
+            100_000,
+            100_000.0, // Namespace limits are generous
+            10_000,    // No backpressure
+        ));
+
+        let allowed = Arc::new(AtomicU64::new(0));
+        let rejected = Arc::new(AtomicU64::new(0));
+        let num_threads = 100;
+        let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+
+        let mut handles = Vec::new();
+
+        for _ in 0..num_threads {
+            let limiter = Arc::clone(&limiter);
+            let allowed = Arc::clone(&allowed);
+            let rejected = Arc::clone(&rejected);
+            let barrier = Arc::clone(&barrier);
+
+            handles.push(thread::spawn(move || {
+                // Synchronize all threads to start at the same time
+                barrier.wait();
+
+                // All use the same client_id to contend on one bucket
+                match limiter.check("shared-client", NamespaceId::new(1)) {
+                    Ok(()) => {
+                        allowed.fetch_add(1, AOrdering::Relaxed);
+                    },
+                    Err(_) => {
+                        rejected.fetch_add(1, AOrdering::Relaxed);
+                    },
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        let total_allowed = allowed.load(AOrdering::Relaxed);
+        let total_rejected = rejected.load(AOrdering::Relaxed);
+
+        assert_eq!(
+            total_allowed + total_rejected,
+            num_threads as u64,
+            "All requests must be accounted for"
+        );
+
+        // Token bucket should never allow more than burst capacity
+        assert!(
+            total_allowed <= burst_capacity,
+            "Allowed {total_allowed} requests but burst capacity is {burst_capacity} — token double-spend detected"
+        );
+
+        // At least some must have been rejected (100 threads, 50 capacity)
+        assert!(total_rejected > 0, "Expected some rejections with 100 threads and capacity 50");
+    }
 }

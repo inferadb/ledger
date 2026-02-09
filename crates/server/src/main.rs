@@ -28,7 +28,8 @@ mod shutdown;
 
 use std::{io::IsTerminal, net::SocketAddr};
 
-use config::{Config, LogFormat, OtelTransport};
+use clap::Parser;
+use config::{Cli, CliCommand, Config, ConfigAction, LogFormat, OtelTransport};
 use inferadb_ledger_raft::otel::{self, OtelConfig};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -54,7 +55,25 @@ impl std::error::Error for ServerError {}
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
     // Parse CLI args and env vars (clap handles --help and --version)
-    let config = Config::parse_args();
+    let cli = Cli::parse();
+
+    // Handle subcommands before starting the server.
+    if let Some(command) = cli.command {
+        match command {
+            CliCommand::Config { action } => match action {
+                ConfigAction::Schema => {
+                    print!("{}", config::generate_runtime_config_schema());
+                    return Ok(());
+                },
+                ConfigAction::Example => {
+                    print!("{}", config::generate_runtime_config_example());
+                    return Ok(());
+                },
+            },
+        }
+    }
+
+    let config = cli.config;
 
     // Initialize logging based on config
     init_logging(&config);

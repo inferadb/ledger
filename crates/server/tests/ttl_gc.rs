@@ -309,6 +309,136 @@ async fn test_force_gc_all_vaults() {
     assert!(vaults_scanned >= 2, "should have scanned at least 2 vaults");
 }
 
+/// Test that multiple entities with different TTLs are handled correctly.
+///
+/// Only entities whose TTL has passed should be collected; entities with
+/// future TTLs should remain in storage.
+#[serial]
+#[tokio::test]
+async fn test_force_gc_multiple_ttl_timings() {
+    let cluster = TestCluster::new(1).await;
+    let _leader_id = cluster.wait_for_leader().await;
+    let leader = cluster.leader().expect("should have leader");
+
+    let ns_id = create_namespace(leader.addr, "multi-ttl-test").await.expect("create namespace");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    // Write 5 entities: 3 expired at different times in the past, 2 with future TTL
+    let expired_1h = now - 3600;
+    let expired_1m = now - 60;
+    let expired_1s = now - 1;
+    let future_1h = now + 3600;
+    let future_1d = now + 86400;
+
+    for (key, ttl) in [
+        ("expired-1h", Some(expired_1h)),
+        ("expired-1m", Some(expired_1m)),
+        ("expired-1s", Some(expired_1s)),
+        ("future-1h", Some(future_1h)),
+        ("future-1d", Some(future_1d)),
+    ] {
+        write_entity_with_ttl(leader.addr, ns_id, vault_id, key, b"data", ttl, "ttl-client")
+            .await
+            .expect("write entity");
+    }
+
+    // Run GC
+    let (expired_count, vaults_scanned) =
+        force_gc(leader.addr, Some(ns_id), Some(vault_id)).await.expect("force gc");
+
+    assert_eq!(expired_count, 3, "should expire exactly 3 entities");
+    assert_eq!(vaults_scanned, 1, "should scan 1 vault");
+
+    // Verify future entities still exist
+    let future_1h_val =
+        read_entity(leader.addr, ns_id, vault_id, "future-1h").await.expect("read future-1h");
+    assert!(future_1h_val.is_some(), "future-1h entity should still exist");
+
+    let future_1d_val =
+        read_entity(leader.addr, ns_id, vault_id, "future-1d").await.expect("read future-1d");
+    assert!(future_1d_val.is_some(), "future-1d entity should still exist");
+}
+
+/// Test that GC is idempotent — running twice produces zero expirations the second time.
+///
+/// After all expired entities are collected, subsequent GC runs should find
+/// nothing to expire.
+#[serial]
+#[tokio::test]
+async fn test_force_gc_idempotent() {
+    let cluster = TestCluster::new(1).await;
+    let _leader_id = cluster.wait_for_leader().await;
+    let leader = cluster.leader().expect("should have leader");
+
+    let ns_id =
+        create_namespace(leader.addr, "idempotent-gc-test").await.expect("create namespace");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    // Write expired entity
+    write_entity_with_ttl(
+        leader.addr,
+        ns_id,
+        vault_id,
+        "expired-once",
+        b"value",
+        Some(now - 3600),
+        "gc-idem-client",
+    )
+    .await
+    .expect("write expired");
+
+    // First GC run
+    let (count1, _) = force_gc(leader.addr, Some(ns_id), Some(vault_id)).await.expect("first gc");
+    assert_eq!(count1, 1, "first GC should expire 1 entity");
+
+    // Second GC run — nothing to expire
+    let (count2, scanned2) =
+        force_gc(leader.addr, Some(ns_id), Some(vault_id)).await.expect("second gc");
+    assert_eq!(count2, 0, "second GC should expire 0 entities");
+    assert_eq!(scanned2, 1, "should still scan the vault");
+}
+
+/// Test that expired entities are filtered from read responses.
+///
+/// DESIGN.md: Expired entities remain in state until GC runs, but reads
+/// should filter them out based on current time vs expires_at.
+#[serial]
+#[tokio::test]
+async fn test_expired_entity_not_returned_by_read() {
+    let cluster = TestCluster::new(1).await;
+    let _leader_id = cluster.wait_for_leader().await;
+    let leader = cluster.leader().expect("should have leader");
+
+    let ns_id = create_namespace(leader.addr, "read-filter-test").await.expect("create namespace");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    // Write entity that is already expired (1 hour ago)
+    write_entity_with_ttl(
+        leader.addr,
+        ns_id,
+        vault_id,
+        "already-expired",
+        b"ghost",
+        Some(now - 3600),
+        "read-filter-client",
+    )
+    .await
+    .expect("write expired entity");
+
+    // Read should NOT return the expired entity (lazy filtering)
+    let result = read_entity(leader.addr, ns_id, vault_id, "already-expired")
+        .await
+        .expect("read expired entity");
+
+    assert!(result.is_none(), "expired entity should not be returned by read (lazy TTL filtering)");
+}
+
 /// Test that GC fails on follower node.
 ///
 /// Only the leader can run garbage collection.

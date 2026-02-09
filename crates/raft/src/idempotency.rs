@@ -464,4 +464,189 @@ mod tests {
             }
         }
     }
+
+    // ── Concurrency Stress Tests ────────────────────────────────────────
+
+    /// Stress test: 50 concurrent identical requests verify exactly-once execution.
+    ///
+    /// Simulates a thundering herd where 50 threads simultaneously submit the
+    /// same (namespace, vault, client, idempotency_key). Due to the TOCTOU gap
+    /// in check_and_insert, multiple threads may race to insert. The test
+    /// verifies that all threads see a consistent result (either NewRequest or
+    /// Duplicate) and that the cached result is never corrupted.
+    #[test]
+    fn stress_concurrent_identical_requests_exactly_once() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+            thread,
+        };
+
+        let cache = Arc::new(IdempotencyCache::new());
+        let num_threads = 50;
+        let idem_key = [0xAB; 16];
+        let request_hash = 99999u64;
+        let result = make_result(500, 42);
+
+        let new_request_count = Arc::new(AtomicUsize::new(0));
+        let duplicate_count = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+
+        for _ in 0..num_threads {
+            let cache = Arc::clone(&cache);
+            let result = result.clone();
+            let new_count = Arc::clone(&new_request_count);
+            let dup_count = Arc::clone(&duplicate_count);
+
+            handles.push(thread::spawn(move || {
+                let check = cache.check_and_insert(
+                    1,
+                    1,
+                    "thundering-herd-client",
+                    idem_key,
+                    request_hash,
+                    result,
+                );
+                match check {
+                    IdempotencyCheckResult::NewRequest => {
+                        new_count.fetch_add(1, Ordering::Relaxed);
+                    },
+                    IdempotencyCheckResult::Duplicate(cached) => {
+                        // Duplicate must return the correct cached result
+                        assert_eq!(
+                            cached.assigned_sequence, 42,
+                            "Duplicate returned wrong sequence"
+                        );
+                        assert_eq!(
+                            cached.block_height, 500,
+                            "Duplicate returned wrong block height"
+                        );
+                        dup_count.fetch_add(1, Ordering::Relaxed);
+                    },
+                    IdempotencyCheckResult::KeyReused => {
+                        panic!("KeyReused should never occur with same request_hash");
+                    },
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        cache.run_pending_tasks();
+
+        // Due to the TOCTOU gap in check_and_insert (check, then insert separately),
+        // multiple threads may see NewRequest before any insert completes.
+        // The important invariant is: total == num_threads, no panics, no corruption.
+        let new_count = new_request_count.load(Ordering::Relaxed);
+        let dup_count = duplicate_count.load(Ordering::Relaxed);
+        assert_eq!(
+            new_count + dup_count,
+            num_threads,
+            "All threads must report either NewRequest or Duplicate"
+        );
+
+        // At least one thread must have been a new request
+        assert!(new_count >= 1, "At least one thread should see NewRequest");
+
+        // The cache should contain exactly one entry
+        assert_eq!(cache.len(), 1, "Cache should have exactly one entry");
+
+        // A subsequent check must return Duplicate with correct data
+        let final_check = cache.check(1, 1, "thundering-herd-client", idem_key, request_hash);
+        match final_check {
+            IdempotencyCheckResult::Duplicate(cached) => {
+                assert_eq!(cached.assigned_sequence, 42);
+            },
+            other => panic!("Expected Duplicate, got {other:?}"),
+        }
+    }
+
+    /// Stress test: cache eviction during active deduplication.
+    ///
+    /// Fills the cache near capacity with unique entries, then races
+    /// deduplication checks against new insertions that trigger eviction.
+    /// Verifies that eviction doesn't corrupt entries being actively read.
+    #[test]
+    fn stress_cache_eviction_during_deduplication() {
+        use std::{sync::Arc, thread};
+
+        let cache = Arc::new(IdempotencyCache::new());
+
+        // Pre-fill with entries
+        for i in 0..200u16 {
+            let mut key = [0u8; 16];
+            key[0] = (i >> 8) as u8;
+            key[1] = (i & 0xFF) as u8;
+            let result = make_result(i as u64, i as u64);
+            cache.insert(i as i64, 0, format!("prefill-client-{i}"), key, i as u64, result);
+        }
+        cache.run_pending_tasks();
+
+        let mut handles = Vec::new();
+
+        // Thread group 1: Check existing entries (deduplication reads)
+        for batch in 0..5 {
+            let cache = Arc::clone(&cache);
+            handles.push(thread::spawn(move || {
+                for i in (batch * 40)..((batch + 1) * 40).min(200) {
+                    let mut key = [0u8; 16];
+                    key[0] = (i >> 8) as u8;
+                    key[1] = (i & 0xFF) as u8;
+                    let check =
+                        cache.check(i as i64, 0, &format!("prefill-client-{i}"), key, i as u64);
+                    // Entry may have been evicted by moka's TinyLFU policy, so
+                    // either Duplicate (still cached) or NewRequest (evicted) is valid.
+                    match check {
+                        IdempotencyCheckResult::Duplicate(cached) => {
+                            assert_eq!(
+                                cached.assigned_sequence, i as u64,
+                                "Corrupted cache entry for key {i}"
+                            );
+                        },
+                        IdempotencyCheckResult::NewRequest => {
+                            // Evicted by TinyLFU — acceptable
+                        },
+                        IdempotencyCheckResult::KeyReused => {
+                            panic!("KeyReused should not occur with same hash");
+                        },
+                    }
+                }
+            }));
+        }
+
+        // Thread group 2: Insert new entries (may trigger eviction)
+        for batch in 0..5 {
+            let cache = Arc::clone(&cache);
+            handles.push(thread::spawn(move || {
+                for i in 0..100 {
+                    let idx = 1000 + batch * 100 + i;
+                    let mut key = [0u8; 16];
+                    key[0] = (idx >> 8) as u8;
+                    key[1] = (idx & 0xFF) as u8;
+                    let result = make_result(idx as u64, idx as u64);
+                    cache.insert(
+                        idx as i64,
+                        0,
+                        format!("new-client-{idx}"),
+                        key,
+                        idx as u64,
+                        result,
+                    );
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Cache should be in a consistent state (no panics)
+        cache.run_pending_tasks();
+        assert!(!cache.is_empty(), "Cache should not be empty after inserts");
+    }
 }

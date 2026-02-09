@@ -24,7 +24,9 @@ subtle.workspace = true
 
 # Serialization
 serde.workspace = true
+serde_json.workspace = true
 postcard.workspace = true
+schemars.workspace = true
 
 # Error handling
 snafu.workspace = true
@@ -34,7 +36,6 @@ chrono.workspace = true
 humantime.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 

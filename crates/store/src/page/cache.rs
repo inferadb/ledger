@@ -372,4 +372,56 @@ mod tests {
         let clean_remaining = [1, 2].iter().filter(|&&id| cache.contains(id)).count();
         assert_eq!(clean_remaining, 1);
     }
+
+    // ── Concurrency Stress Tests ────────────────────────────────────────
+
+    /// Stress test: concurrent page cache access with eviction under contention.
+    ///
+    /// 10 threads inserting and reading pages simultaneously to verify the clock
+    /// eviction algorithm doesn't corrupt state under concurrent access.
+    #[test]
+    fn stress_concurrent_cache_access_with_eviction() {
+        use std::{sync::Arc, thread};
+
+        let cache = Arc::new(PageCache::new(50)); // Small capacity to force eviction
+        let num_threads = 10;
+        let ops_per_thread = 200;
+
+        let mut handles = Vec::new();
+
+        // Mix of inserters and readers
+        for thread_id in 0..num_threads {
+            let cache = Arc::clone(&cache);
+            handles.push(thread::spawn(move || {
+                for i in 0..ops_per_thread {
+                    let page_id = (thread_id * ops_per_thread + i) as PageId;
+                    // Insert a clean page (evictable)
+                    cache.insert(make_clean_page(page_id));
+
+                    // Try to read back a recently inserted page
+                    if i > 0 {
+                        let recent_id = (thread_id * ops_per_thread + i - 1) as PageId;
+                        // May or may not still be cached (eviction is allowed)
+                        let _ = cache.get(recent_id);
+                    }
+
+                    // Occasionally remove a page
+                    if i % 5 == 0 && i > 10 {
+                        let old_id = (thread_id * ops_per_thread + i - 10) as PageId;
+                        let _ = cache.remove(old_id);
+                    }
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify cache is in a consistent state
+        let stats = cache.stats();
+        assert!(stats.size <= stats.capacity + num_threads, "Cache grew far beyond capacity");
+        // Total operations should have generated some hits and misses
+        assert!(stats.hits + stats.misses > 0, "Expected some cache activity");
+    }
 }

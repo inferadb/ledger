@@ -2595,4 +2595,203 @@ mod tests {
         let entries: Vec<_> = rtxn.iter::<tables::Entities>().unwrap().collect_entries();
         assert_eq!(entries.len(), 5);
     }
+
+    // ── Concurrency Stress Tests ────────────────────────────────────────
+
+    /// Stress test: 100 tasks contending on concurrent reads and writes.
+    ///
+    /// Verifies that the single-writer model correctly serializes writes
+    /// while allowing concurrent readers to observe consistent snapshots.
+    #[test]
+    fn stress_concurrent_read_write_contention() {
+        use std::{sync::Arc, thread};
+
+        let db = Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
+        let num_writers = 10;
+        let writes_per_writer = 100;
+        let num_readers = 10;
+        let reads_per_reader = 100;
+
+        let mut handles = Vec::new();
+
+        // Spawn writer threads — each writes to its own key space
+        for writer_id in 0..num_writers {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for i in 0..writes_per_writer {
+                    let mut txn = db.write().unwrap();
+                    let key = format!("w{:02}-{:04}", writer_id, i).into_bytes();
+                    let value = format!("v{:02}-{:04}", writer_id, i).into_bytes();
+                    txn.insert::<tables::Entities>(&key, &value).unwrap();
+                    txn.commit().unwrap();
+                }
+            }));
+        }
+
+        // Spawn reader threads — reads should always see consistent state
+        for _ in 0..num_readers {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for _ in 0..reads_per_reader {
+                    let txn = db.read().unwrap();
+                    // Snapshot consistency: if we can see key N for a writer,
+                    // we must also see all keys < N from that same writer.
+                    for writer_id in 0..num_writers {
+                        let mut last_seen = None;
+                        for i in 0..writes_per_writer {
+                            let key = format!("w{:02}-{:04}", writer_id, i).into_bytes();
+                            match txn.get::<tables::Entities>(&key).unwrap() {
+                                Some(_) => last_seen = Some(i),
+                                None => {
+                                    // Gap: if we see a gap, all later keys
+                                    // should also be missing (monotonic writes).
+                                    // Break and verify last_seen is continuous from 0.
+                                    break;
+                                },
+                            }
+                        }
+                        // If we saw any keys, they must be a contiguous prefix [0..last_seen].
+                        if let Some(last) = last_seen {
+                            for i in 0..=last {
+                                let key = format!("w{:02}-{:04}", writer_id, i).into_bytes();
+                                assert!(
+                                    txn.get::<tables::Entities>(&key).unwrap().is_some(),
+                                    "Snapshot inconsistency: saw key {last} but missing key {i} for writer {writer_id}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify all writes landed
+        let txn = db.read().unwrap();
+        for writer_id in 0..num_writers {
+            for i in 0..writes_per_writer {
+                let key = format!("w{:02}-{:04}", writer_id, i).into_bytes();
+                let expected = format!("v{:02}-{:04}", writer_id, i).into_bytes();
+                let value = txn.get::<tables::Entities>(&key).unwrap();
+                assert_eq!(value, Some(expected), "Missing key w{writer_id:02}-{i:04}");
+            }
+        }
+    }
+
+    /// Stress test: high-contention B-tree operations with many threads.
+    ///
+    /// 50 threads each perform 100 write transactions to the same table,
+    /// exercising the single-writer serialization under heavy thread contention.
+    /// Verifies all writes land correctly and no data is lost.
+    #[test]
+    fn stress_high_contention_btree_writes() {
+        use std::{sync::Arc, thread};
+
+        let db = Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
+        let num_threads = 50;
+        let ops_per_thread = 100;
+
+        let mut handles = Vec::new();
+
+        for thread_id in 0..num_threads {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for i in 0..ops_per_thread {
+                    let mut txn = db.write().unwrap();
+                    let key = format!("hc-{:03}-{:04}", thread_id, i).into_bytes();
+                    let value = vec![thread_id as u8; 32]; // 32 bytes of thread_id
+                    txn.insert::<tables::Entities>(&key, &value).unwrap();
+                    txn.commit().unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify all writes landed
+        let txn = db.read().unwrap();
+        let all_entries: Vec<_> = txn.iter::<tables::Entities>().unwrap().collect_entries();
+        assert_eq!(
+            all_entries.len(),
+            num_threads * ops_per_thread,
+            "Expected {} entries, got {}",
+            num_threads * ops_per_thread,
+            all_entries.len()
+        );
+
+        // Spot-check values
+        for thread_id in 0..num_threads {
+            let key = format!("hc-{:03}-0000", thread_id).into_bytes();
+            let value = txn.get::<tables::Entities>(&key).unwrap();
+            assert_eq!(
+                value,
+                Some(vec![thread_id as u8; 32]),
+                "Value mismatch for thread {thread_id}"
+            );
+        }
+    }
+
+    /// Stress test: concurrent writes with deletes to exercise B-tree rebalancing.
+    ///
+    /// Interleaves inserts and deletes from multiple threads to stress the
+    /// B-tree's split/merge/rebalance paths under contention.
+    #[test]
+    fn stress_concurrent_write_delete_interleave() {
+        use std::{sync::Arc, thread};
+
+        let db = Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
+        let num_threads = 8;
+        let ops_per_thread = 100;
+
+        // Phase 1: Seed the database so there's something to delete
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..500 {
+                let key = format!("seed-{:04}", i).into_bytes();
+                let value = format!("seedval-{:04}", i).into_bytes();
+                txn.insert::<tables::Entities>(&key, &value).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let mut handles = Vec::new();
+
+        for thread_id in 0..num_threads {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for i in 0..ops_per_thread {
+                    let mut txn = db.write().unwrap();
+                    // Insert a new key
+                    let new_key = format!("new-{:02}-{:04}", thread_id, i).into_bytes();
+                    txn.insert::<tables::Entities>(&new_key, &b"new-val".to_vec()).unwrap();
+                    // Delete a seeded key (may already be deleted by another thread)
+                    let del_key =
+                        format!("seed-{:04}", (thread_id * ops_per_thread + i) % 500).into_bytes();
+                    let _ = txn.delete::<tables::Entities>(&del_key);
+                    txn.commit().unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify all new keys exist
+        let txn = db.read().unwrap();
+        for thread_id in 0..num_threads {
+            for i in 0..ops_per_thread {
+                let key = format!("new-{:02}-{:04}", thread_id, i).into_bytes();
+                assert!(
+                    txn.get::<tables::Entities>(&key).unwrap().is_some(),
+                    "Missing new key from thread {thread_id} op {i}"
+                );
+            }
+        }
+    }
 }

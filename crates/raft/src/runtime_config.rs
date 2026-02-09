@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use inferadb_ledger_types::config::{ConfigError, RuntimeConfig};
+use inferadb_ledger_types::config::{ConfigChange, ConfigError, RuntimeConfig};
 use tracing::{info, warn};
 
 use crate::{hot_key_detector::HotKeyDetector, rate_limit::RateLimiter};
@@ -67,6 +67,10 @@ impl RuntimeConfigHandle {
         if changed.is_empty() {
             return Ok(changed);
         }
+
+        // Emit structured diff log line for operator visibility.
+        let detailed_changes = old_config.detailed_diff(&new_config);
+        Self::log_config_changes(&detailed_changes);
 
         // Propagate rate limit config changes to the live RateLimiter.
         if changed.contains(&"rate_limit".to_string()) {
@@ -132,6 +136,22 @@ impl RuntimeConfigHandle {
     /// Used by the SIGHUP handler after external validation.
     pub fn store(&self, config: RuntimeConfig) {
         self.inner.store(Arc::new(config));
+    }
+
+    /// Log each config change as a structured event.
+    ///
+    /// Emits one log line per changed field with `event=config_field_changed`,
+    /// `field`, `old`, and `new` structured fields.
+    fn log_config_changes(changes: &[ConfigChange]) {
+        for change in changes {
+            info!(
+                event = "config_field_changed",
+                field = %change.field,
+                old = %change.old,
+                new = %change.new,
+                "Configuration field changed"
+            );
+        }
     }
 }
 
@@ -241,5 +261,107 @@ mod tests {
         assert!(loaded.hot_key.is_none());
         assert!(loaded.compaction.is_none());
         assert!(loaded.validation.is_none());
+    }
+
+    // ── Concurrency Stress Tests ────────────────────────────────────────
+
+    /// Stress test: concurrent reads via ArcSwap::load() during store() updates.
+    ///
+    /// Verifies that ArcSwap provides consistent snapshots — readers always see
+    /// a complete config (either old or new), never a partially-updated state.
+    /// This exercises the lock-free read path that every RPC hits.
+    #[test]
+    fn stress_concurrent_load_during_store() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            thread,
+        };
+
+        let handle = Arc::new(RuntimeConfigHandle::new(RuntimeConfig::default()));
+        let running = Arc::new(AtomicBool::new(true));
+
+        let mut handles = Vec::new();
+
+        // Spawn 20 reader threads
+        for _ in 0..20 {
+            let handle = Arc::clone(&handle);
+            let running = Arc::clone(&running);
+            handles.push(thread::spawn(move || {
+                let mut read_count = 0u64;
+                while running.load(Ordering::Relaxed) {
+                    let config = handle.load();
+                    // Config must be internally consistent:
+                    // If rate_limit is Some, it must be a valid RateLimitConfig
+                    if let Some(ref rl) = config.rate_limit {
+                        // All fields must be coherent (not partially updated)
+                        assert!(
+                            rl.client_burst > 0 || rl.client_rate > 0.0 || rl.namespace_burst > 0,
+                            "Rate limit config must have at least some non-zero fields"
+                        );
+                    }
+                    // If hot_key is Some, it must be valid
+                    if let Some(ref hk) = config.hot_key {
+                        assert!(hk.window_secs > 0, "Hot key window must be positive");
+                    }
+                    read_count += 1;
+                    if read_count.is_multiple_of(100) {
+                        thread::yield_now();
+                    }
+                }
+                read_count
+            }));
+        }
+
+        // Spawn 5 writer threads that alternate configs
+        for writer_id in 0..5 {
+            let handle = Arc::clone(&handle);
+            let running = Arc::clone(&running);
+            handles.push(thread::spawn(move || {
+                let mut write_count = 0u64;
+                while running.load(Ordering::Relaxed) {
+                    let config = if write_count % 3 == writer_id as u64 % 3 {
+                        // Config A: rate_limit only
+                        RuntimeConfig::builder().rate_limit(RateLimitConfig::default()).build()
+                    } else if write_count % 3 == 1 {
+                        // Config B: hot_key only
+                        RuntimeConfig::builder().hot_key(HotKeyConfig::default()).build()
+                    } else {
+                        // Config C: both
+                        RuntimeConfig::builder()
+                            .rate_limit(RateLimitConfig::default())
+                            .hot_key(HotKeyConfig::default())
+                            .build()
+                    };
+                    handle.store(config);
+                    write_count += 1;
+                    thread::yield_now();
+                }
+                write_count
+            }));
+        }
+
+        // Let it run
+        thread::sleep(std::time::Duration::from_millis(200));
+        running.store(false, Ordering::Relaxed);
+
+        let mut total_reads = 0u64;
+        let mut total_writes = 0u64;
+
+        for (i, handle) in handles.into_iter().enumerate() {
+            let count = handle.join().expect("Thread panicked");
+            // First 20 handles are readers, rest are writers
+            if i < 20 {
+                total_reads += count;
+            } else {
+                total_writes += count;
+            }
+        }
+
+        // Must have done significant work
+        assert!(total_reads > 0, "Readers must have executed");
+        assert!(total_writes > 0, "Writers must have executed");
     }
 }

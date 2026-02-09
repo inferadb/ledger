@@ -5,8 +5,15 @@
 //! fallible builders. Post-deserialization validation is available via
 //! the [`validate`](StorageConfig::validate) method on each struct.
 
+// The schemars `JsonSchema` derive macro internally uses `.unwrap()` in its
+// `json_schema!` and `json_internal!` expansions. Allow `disallowed_methods`
+// at the module level since config types are declarative structs with minimal
+// procedural code.
+#![allow(clippy::disallowed_methods)]
+
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
@@ -34,7 +41,7 @@ const MAX_COMPRESSION_LEVEL: i32 = 22;
 const MIN_COMPRESSION_LEVEL: i32 = 1;
 
 /// Main configuration for a ledger node.
-#[derive(Debug, Clone, bon::Builder, Serialize, Deserialize)]
+#[derive(Debug, Clone, bon::Builder, Serialize, Deserialize, JsonSchema)]
 pub struct NodeConfig {
     /// Unique identifier for this node.
     #[builder(into)]
@@ -63,7 +70,7 @@ pub struct NodeConfig {
 }
 
 /// Configuration for a peer node.
-#[derive(Debug, Clone, PartialEq, Eq, bon::Builder, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder, Serialize, Deserialize, JsonSchema)]
 pub struct PeerConfig {
     /// Peer node identifier.
     #[builder(into)]
@@ -90,7 +97,7 @@ pub struct PeerConfig {
 ///     .build()
 ///     .expect("valid storage config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StorageConfig {
     /// Maximum size of the inferadb-ledger-store cache in bytes.
     ///
@@ -103,6 +110,7 @@ pub struct StorageConfig {
     /// Interval between automatic snapshots.
     #[serde(default = "default_snapshot_interval")]
     #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
     pub snapshot_interval: Duration,
     /// Zstd compression level for snapshots (1-22, 3 recommended).
     #[serde(default = "default_compression_level")]
@@ -196,7 +204,7 @@ impl Default for StorageConfig {
 ///     .build()
 ///     .expect("valid raft config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RaftConfig {
     /// Heartbeat interval.
     ///
@@ -204,18 +212,21 @@ pub struct RaftConfig {
     /// to prevent spurious leader elections.
     #[serde(default = "default_heartbeat_interval")]
     #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
     pub heartbeat_interval: Duration,
     /// Election timeout range (min).
     ///
     /// Must be less than `election_timeout_max`.
     #[serde(default = "default_election_timeout_min")]
     #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
     pub election_timeout_min: Duration,
     /// Election timeout range (max).
     ///
     /// Must be greater than `election_timeout_min`.
     #[serde(default = "default_election_timeout_max")]
     #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
     pub election_timeout_max: Duration,
     /// Maximum entries per append_entries RPC.
     ///
@@ -233,6 +244,7 @@ pub struct RaftConfig {
     /// Must be >= 1s.
     #[serde(default = "default_proposal_timeout")]
     #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
     pub proposal_timeout: Duration,
 }
 
@@ -345,7 +357,7 @@ impl Default for RaftConfig {
 ///     .build()
 ///     .expect("valid batch config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BatchConfig {
     /// Maximum transactions per batch.
     ///
@@ -355,6 +367,7 @@ pub struct BatchConfig {
     /// Maximum wait time before flushing a partial batch.
     #[serde(default = "default_batch_timeout")]
     #[serde(with = "humantime_serde")]
+    #[schemars(with = "String")]
     pub batch_timeout: Duration,
     /// Enable batch coalescing for higher throughput.
     #[serde(default = "default_coalesce_enabled")]
@@ -516,7 +529,7 @@ fn default_backpressure_threshold() -> u64 {
 ///     .build()
 ///     .expect("valid rate limit config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RateLimitConfig {
     /// Maximum burst size per client (token bucket capacity).
     ///
@@ -656,7 +669,7 @@ fn default_max_rotated_files() -> u32 {
 ///     .build()
 ///     .expect("valid audit config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AuditConfig {
     /// Path to the audit log file (JSON Lines format).
     ///
@@ -780,7 +793,7 @@ fn default_compaction_interval_secs() -> u64 {
 ///     .build()
 ///     .expect("valid compaction config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BTreeCompactionConfig {
     /// Minimum fill factor threshold (0.0 to 1.0).
     ///
@@ -907,7 +920,7 @@ const MIN_PRE_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 ///     .build()
 ///     .expect("valid shutdown config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ShutdownConfig {
     /// Seconds to wait after marking readiness as failing before draining.
     ///
@@ -1075,7 +1088,7 @@ const fn default_top_k() -> usize {
 ///     .build()
 ///     .expect("valid hot key config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HotKeyConfig {
     /// Detection window in seconds.
     ///
@@ -1241,7 +1254,7 @@ const fn default_max_relationship_string_bytes() -> usize {
 ///     .build()
 ///     .expect("valid validation config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ValidationConfig {
     /// Maximum entity key size in bytes.
     ///
@@ -1405,7 +1418,7 @@ fn default_max_raft_lag() -> u64 {
 /// assert_eq!(config.health_cache_ttl_secs, 5);
 /// assert_eq!(config.max_raft_lag, 1000);
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HealthCheckConfig {
     /// Timeout in seconds for each individual dependency check (disk, peer).
     ///
@@ -1481,7 +1494,7 @@ impl HealthCheckConfig {
 ///     .expect("valid backup config");
 /// assert_eq!(config.retention_count, 7);
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BackupConfig {
     /// Backup destination path (local directory or object store URL).
     ///
@@ -1588,7 +1601,7 @@ const fn default_full_scan_period_secs() -> u64 {
 ///     .expect("valid integrity config");
 /// assert_eq!(config.full_scan_period_secs, 345_600);
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct IntegrityConfig {
     /// Interval between scrub cycles in seconds.
     ///
@@ -1700,7 +1713,7 @@ const fn default_max_read_ops_per_sec() -> u32 {
 ///     .build()
 ///     .expect("valid quota");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceQuota {
     /// Maximum cumulative storage bytes for the namespace.
     #[serde(default = "default_max_storage_bytes")]
@@ -1801,7 +1814,7 @@ const fn default_max_cardinality() -> u32 {
 ///     .build()
 ///     .expect("valid config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MetricsCardinalityConfig {
     /// Emit a WARN log when estimated distinct label combinations reach this count.
     #[serde(default = "default_warn_cardinality")]
@@ -1882,7 +1895,7 @@ impl MetricsCardinalityConfig {
 /// // All fields default to None (disabled) when not set.
 /// let config = RuntimeConfig::builder().build();
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, bon::Builder)]
 pub struct RuntimeConfig {
     /// Rate limiting thresholds. `None` disables rate limiting.
     #[serde(default)]
@@ -1916,6 +1929,69 @@ pub struct NonReconfigurableField {
     pub reason: String,
 }
 
+/// A single field-level change detected during config diff.
+///
+/// Captures the full dotted path (e.g. "rate_limit.client_burst"),
+/// the old value as a JSON string, and the new value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigChange {
+    /// Dotted field path (e.g. "rate_limit.client_burst").
+    pub field: String,
+    /// Previous value serialized as JSON.
+    pub old: String,
+    /// New value serialized as JSON.
+    pub new: String,
+}
+
+impl std::fmt::Display for ConfigChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {} → {}", self.field, self.old, self.new)
+    }
+}
+
+/// Recursively compare two JSON values and collect leaf-level differences.
+fn collect_json_diffs(
+    prefix: &str,
+    old: &serde_json::Value,
+    new: &serde_json::Value,
+    out: &mut Vec<ConfigChange>,
+) {
+    match (old, new) {
+        (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+            // Check all keys in both maps.
+            let mut all_keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+            all_keys.sort();
+            all_keys.dedup();
+            for key in all_keys {
+                let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+                match (a.get(key), b.get(key)) {
+                    (Some(av), Some(bv)) => collect_json_diffs(&path, av, bv, out),
+                    (Some(av), None) => out.push(ConfigChange {
+                        field: path,
+                        old: av.to_string(),
+                        new: "null".to_string(),
+                    }),
+                    (None, Some(bv)) => out.push(ConfigChange {
+                        field: path,
+                        old: "null".to_string(),
+                        new: bv.to_string(),
+                    }),
+                    (None, None) => {},
+                }
+            }
+        },
+        _ => {
+            if old != new {
+                out.push(ConfigChange {
+                    field: prefix.to_string(),
+                    old: old.to_string(),
+                    new: new.to_string(),
+                });
+            }
+        },
+    }
+}
+
 impl RuntimeConfig {
     /// Validate all present config sections.
     ///
@@ -1946,10 +2022,38 @@ impl RuntimeConfig {
         Ok(())
     }
 
-    /// Compute the list of field paths that differ between two runtime configs.
+    /// Compute field-level differences between two runtime configs.
     ///
-    /// Returns human-readable strings like `"rate_limit.client_burst"` for
-    /// audit logging and operator feedback.
+    /// Returns a list of [`ConfigChange`] with dotted field paths and
+    /// old/new values serialized as JSON strings. Uses JSON-based recursive
+    /// comparison so new fields automatically participate in diff reporting.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_types::config::RuntimeConfig;
+    /// let old = RuntimeConfig::default();
+    /// let new = RuntimeConfig::builder().build();
+    /// let changes = old.detailed_diff(&new);
+    /// for change in &changes {
+    ///     println!("{change}");
+    /// }
+    /// ```
+    #[must_use]
+    pub fn detailed_diff(&self, other: &RuntimeConfig) -> Vec<ConfigChange> {
+        // Serialize both to JSON values for recursive comparison.
+        // Serialization cannot fail for these types (all fields are serde-compatible).
+        let old_json = serde_json::to_value(self).unwrap_or_default();
+        let new_json = serde_json::to_value(other).unwrap_or_default();
+        let mut changes = Vec::new();
+        collect_json_diffs("", &old_json, &new_json, &mut changes);
+        changes
+    }
+
+    /// Compute the list of top-level section names that differ.
+    ///
+    /// Returns human-readable strings like `"rate_limit"` for backward
+    /// compatibility with existing callers.
     #[must_use]
     pub fn diff(&self, other: &RuntimeConfig) -> Vec<String> {
         let mut changes = Vec::new();
@@ -3281,5 +3385,150 @@ mod tests {
         };
         let changes = a.diff(&b);
         assert!(changes.contains(&"metrics_cardinality".to_string()));
+    }
+
+    // =========================================================================
+    // DetailedDiff tests
+    // =========================================================================
+
+    #[test]
+    fn test_detailed_diff_empty_when_identical() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig::default();
+        let changes = a.detailed_diff(&b);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_detailed_diff_detects_nested_field_changes() {
+        let a = RuntimeConfig {
+            rate_limit: Some(RateLimitConfig::default()),
+            ..RuntimeConfig::default()
+        };
+        let b = RuntimeConfig {
+            rate_limit: Some(RateLimitConfig { client_burst: 999, ..RateLimitConfig::default() }),
+            ..RuntimeConfig::default()
+        };
+        let changes = a.detailed_diff(&b);
+        assert!(!changes.is_empty());
+        let field_names: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert!(
+            field_names.contains(&"rate_limit.client_burst"),
+            "Expected rate_limit.client_burst in {field_names:?}"
+        );
+        // Only client_burst changed — other fields should not appear.
+        assert_eq!(changes.len(), 1, "Expected exactly 1 change, got {changes:?}");
+    }
+
+    #[test]
+    fn test_detailed_diff_detects_added_optional_section() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            rate_limit: Some(RateLimitConfig::default()),
+            ..RuntimeConfig::default()
+        };
+        let changes = a.detailed_diff(&b);
+        assert!(!changes.is_empty());
+        // Should report the whole section as added (null → object).
+        let field_names: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert!(
+            field_names.iter().any(|f| f.starts_with("rate_limit")),
+            "Expected rate_limit fields in {field_names:?}"
+        );
+    }
+
+    #[test]
+    fn test_detailed_diff_detects_removed_optional_section() {
+        let a =
+            RuntimeConfig { hot_key: Some(HotKeyConfig::default()), ..RuntimeConfig::default() };
+        let b = RuntimeConfig::default();
+        let changes = a.detailed_diff(&b);
+        assert!(!changes.is_empty());
+        let field_names: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert!(
+            field_names.iter().any(|f| f.starts_with("hot_key")),
+            "Expected hot_key fields in {field_names:?}"
+        );
+    }
+
+    #[test]
+    fn test_detailed_diff_multiple_sections_changed() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            rate_limit: Some(RateLimitConfig::default()),
+            validation: Some(ValidationConfig::default()),
+            ..RuntimeConfig::default()
+        };
+        let changes = a.detailed_diff(&b);
+        let field_names: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert!(
+            field_names.iter().any(|f| f.starts_with("rate_limit")),
+            "Expected rate_limit fields"
+        );
+        assert!(
+            field_names.iter().any(|f| f.starts_with("validation")),
+            "Expected validation fields"
+        );
+    }
+
+    #[test]
+    fn test_config_change_display() {
+        let change = ConfigChange {
+            field: "rate_limit.client_burst".to_string(),
+            old: "100".to_string(),
+            new: "200".to_string(),
+        };
+        let display = change.to_string();
+        assert_eq!(display, "rate_limit.client_burst: 100 → 200");
+    }
+
+    #[test]
+    fn test_config_change_serialization_roundtrip() {
+        let change = ConfigChange {
+            field: "hot_key.threshold".to_string(),
+            old: "50".to_string(),
+            new: "100".to_string(),
+        };
+        let json = serde_json::to_string(&change).unwrap();
+        let deserialized: ConfigChange = serde_json::from_str(&json).unwrap();
+        assert_eq!(change, deserialized);
+    }
+
+    // =========================================================================
+    // JsonSchema tests
+    // =========================================================================
+
+    #[test]
+    fn test_runtime_config_json_schema_is_valid() {
+        let schema = schemars::schema_for!(RuntimeConfig);
+        let json = serde_json::to_string_pretty(&schema).unwrap();
+        // Validate it's parseable JSON.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Must have a $schema field pointing to JSON Schema draft.
+        assert!(value.get("$schema").is_some(), "Schema missing $schema field");
+        // Must have a title matching the type name.
+        assert_eq!(value.get("title").and_then(|v| v.as_str()), Some("RuntimeConfig"));
+        // Must have properties for all sections.
+        let props = value.get("properties").and_then(|v| v.as_object()).unwrap();
+        assert!(props.contains_key("rate_limit"), "Missing rate_limit");
+        assert!(props.contains_key("hot_key"), "Missing hot_key");
+        assert!(props.contains_key("compaction"), "Missing compaction");
+        assert!(props.contains_key("validation"), "Missing validation");
+        assert!(props.contains_key("default_quota"), "Missing default_quota");
+        assert!(props.contains_key("integrity"), "Missing integrity");
+        assert!(props.contains_key("metrics_cardinality"), "Missing metrics_cardinality");
+    }
+
+    #[test]
+    fn test_rate_limit_config_json_schema_has_fields() {
+        let schema = schemars::schema_for!(RateLimitConfig);
+        let json = serde_json::to_string(&schema).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let props = value.get("properties").and_then(|v| v.as_object()).unwrap();
+        assert!(props.contains_key("client_burst"));
+        assert!(props.contains_key("client_rate"));
+        assert!(props.contains_key("namespace_burst"));
+        assert!(props.contains_key("namespace_rate"));
+        assert!(props.contains_key("backpressure_threshold"));
     }
 }
