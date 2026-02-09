@@ -13,7 +13,10 @@
 //!
 //! Recovery runs only on the leader to avoid duplicate work.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::StorageBackend;
@@ -518,6 +521,9 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                     }
 
                     let trace_ctx = TraceContext::new();
+                    let cycle_start = Instant::now();
+                    let mut vaults_recovered = 0u64;
+                    let mut had_failure = false;
 
                     let vaults = self.find_vaults_needing_recovery();
                     if !vaults.is_empty() {
@@ -534,12 +540,15 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                         match result {
                             RecoveryResult::Success => {
                                 crate::metrics::record_recovery_success(namespace_id.value(), vault_id.value());
+                                vaults_recovered += 1;
                             }
                             RecoveryResult::TransientFailure(ref msg) => {
                                 crate::metrics::record_recovery_failure(namespace_id.value(), vault_id.value(), msg);
+                                had_failure = true;
                             }
                             RecoveryResult::DeterminismBug => {
                                 // Metrics already recorded in attempt_recovery
+                                had_failure = true;
                                 error!(
                                     trace_id = %trace_ctx.trace_id,
                                     namespace_id = namespace_id.value(),
@@ -549,6 +558,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                             }
                             RecoveryResult::MaxAttemptsExceeded => {
                                 crate::metrics::set_vault_health(namespace_id.value(), vault_id.value(), "diverged");
+                                had_failure = true;
                                 error!(
                                     trace_id = %trace_ctx.trace_id,
                                     namespace_id = namespace_id.value(),
@@ -558,6 +568,16 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                                 );
                             }
                         }
+                    }
+
+                    let duration = cycle_start.elapsed().as_secs_f64();
+                    crate::metrics::record_background_job_duration("auto_recovery", duration);
+                    crate::metrics::record_background_job_run(
+                        "auto_recovery",
+                        if had_failure { "failure" } else { "success" },
+                    );
+                    if vaults_recovered > 0 {
+                        crate::metrics::record_background_job_items("auto_recovery", vaults_recovered);
                     }
                 }
                 _ = shutdown.recv() => {

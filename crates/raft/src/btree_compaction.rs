@@ -3,7 +3,10 @@
 //! Periodically scans all B+ tree tables and merges underfull leaf nodes
 //! to reclaim space after deletions. Only runs on the leader node.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
@@ -13,7 +16,10 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
-    metrics::record_btree_compaction,
+    metrics::{
+        record_background_job_duration, record_background_job_items, record_background_job_run,
+        record_btree_compaction,
+    },
     trace_context::TraceContext,
     types::{LedgerNodeId, LedgerTypeConfig},
 };
@@ -79,30 +85,42 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
         }
 
         let trace_ctx = TraceContext::new();
+        let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting B+ tree compaction cycle");
 
         match self.state.compact_tables(self.min_fill_factor) {
             Ok(stats) => {
+                let duration = cycle_start.elapsed().as_secs_f64();
                 record_btree_compaction(stats.pages_merged, stats.pages_freed);
+                record_background_job_duration("compaction", duration);
+                record_background_job_run("compaction", "success");
+                record_background_job_items("compaction", stats.pages_merged);
 
                 if stats.pages_merged > 0 {
                     info!(
                         trace_id = %trace_ctx.trace_id,
                         pages_merged = stats.pages_merged,
                         pages_freed = stats.pages_freed,
+                        duration_secs = duration,
                         "B+ tree compaction cycle complete"
                     );
                 } else {
                     debug!(
                         trace_id = %trace_ctx.trace_id,
+                        duration_secs = duration,
                         "B+ tree compaction cycle complete (no pages merged)"
                     );
                 }
             },
             Err(e) => {
+                let duration = cycle_start.elapsed().as_secs_f64();
+                record_background_job_duration("compaction", duration);
+                record_background_job_run("compaction", "failure");
+
                 warn!(
                     trace_id = %trace_ctx.trace_id,
                     error = %e,
+                    duration_secs = duration,
                     "B+ tree compaction cycle failed"
                 );
             },
@@ -140,5 +158,24 @@ mod tests {
         let config = BTreeCompactionConfig::default();
         let duration = Duration::from_secs(config.interval_secs);
         assert_eq!(duration, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn test_background_job_metrics_emitted_on_compaction() {
+        // Verify metric recording functions accept expected arguments for compaction.
+        // These are no-ops without a recorder — the test confirms call signatures
+        // match what run_cycle() uses.
+        use crate::metrics::{
+            record_background_job_duration, record_background_job_items, record_background_job_run,
+        };
+
+        // Success path: pages were merged
+        record_background_job_duration("compaction", 2.5);
+        record_background_job_run("compaction", "success");
+        record_background_job_items("compaction", 16);
+
+        // Failure path
+        record_background_job_duration("compaction", 0.01);
+        record_background_job_run("compaction", "failure");
     }
 }

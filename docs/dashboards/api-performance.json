@@ -1,0 +1,437 @@
+{
+  "uid": "inferadb-api-performance",
+  "title": "InferaDB Ledger — API Performance",
+  "description": "Request rate, latency percentiles, error rate by service/method, and error class breakdown.",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["inferadb", "api", "performance", "slo"],
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "10s",
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "node_id",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(inferadb_ledger_raft_is_leader, node_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "namespace_id",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_namespace_operations_total, namespace_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_grpc_requests_total, service)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "method",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_grpc_requests_total{service=~\"$service\"}, method)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Leader Elections",
+        "datasource": { "uid": "${datasource}" },
+        "enable": true,
+        "expr": "increase(ledger_leader_elections_total[1m]) > 0",
+        "tagKeys": "event",
+        "textFormat": "Leader election detected",
+        "iconColor": "orange"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (service, method) (rate(ledger_grpc_requests_total{service=~\"$service\", method=~\"$method\"}[$__rate_interval]))",
+          "legendFormat": "{{service}}/{{method}}"
+        }
+      ]
+    },
+    {
+      "title": "Error Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.001 },
+              { "color": "red", "value": 0.01 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_grpc_requests_total{service=~\"$service\", error_class!=\"none\"}[$__rate_interval])) / sum(rate(ledger_grpc_requests_total{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "Error Rate"
+        }
+      ]
+    },
+    {
+      "title": "Request Latency — p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.025 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=~\"$service\", method=~\"$method\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=~\"$service\", method=~\"$method\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=~\"$service\", method=~\"$method\"}[$__rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Write Latency — p50 / p95 / p99",
+      "description": "SLO targets: p50 < 5ms, p95 < 25ms, p99 < 50ms",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.025 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_write_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_write_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_write_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Read Latency — p50 / p95 / p99",
+      "description": "SLO targets: p50 < 1ms, p95 < 5ms, p99 < 10ms",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.005 },
+              { "color": "red", "value": 0.01 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_read_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_read_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_read_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Error Class Breakdown",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "hideFrom": { "tooltip": false, "legend": false, "viz": false } }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"] },
+        "pieType": "donut",
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }
+      },
+      "targets": [
+        {
+          "expr": "sum by (error_class) (increase(ledger_grpc_requests_total{service=~\"$service\", error_class!=\"none\"}[$__range]))",
+          "legendFormat": "{{error_class}}"
+        }
+      ]
+    },
+    {
+      "title": "Error Rate by Service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 24 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (service, error_class) (rate(ledger_grpc_requests_total{service=~\"$service\", error_class!=\"none\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} — {{error_class}}"
+        }
+      ]
+    },
+    {
+      "title": "Request Success Rate (SLO)",
+      "description": "Target: > 99.9%",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 32 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.99 },
+              { "color": "green", "value": 0.999 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "1 - (sum(rate(ledger_grpc_requests_total{error_class!=\"none\"}[5m])) / sum(rate(ledger_grpc_requests_total[5m])))",
+          "legendFormat": "Success Rate"
+        }
+      ]
+    },
+    {
+      "title": "Total Requests",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 32 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(ledger_grpc_requests_total{service=~\"$service\"}[$__range]))",
+          "legendFormat": "Total"
+        }
+      ]
+    },
+    {
+      "title": "Write Ops/s",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 32 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_writes_total[5m]))",
+          "legendFormat": "Write Rate"
+        }
+      ]
+    },
+    {
+      "title": "Read Ops/s",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 32 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_reads_total[5m]))",
+          "legendFormat": "Read Rate"
+        }
+      ]
+    },
+    {
+      "title": "Rate Limit Rejections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (level, reason) (rate(ledger_rate_limit_rejected_total[$__rate_interval]))",
+          "legendFormat": "{{level}} — {{reason}}"
+        }
+      ]
+    },
+    {
+      "title": "Batch Write Performance",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_batch_flush_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "Batch Flush p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_batch_flush_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "Batch Flush p99"
+        }
+      ]
+    },
+    {
+      "title": "Namespace Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace_id, operation) (rate(ledger_namespace_operations_total{namespace_id=~\"$namespace_id\"}[$__rate_interval]))",
+          "legendFormat": "ns:{{namespace_id}} {{operation}}"
+        }
+      ]
+    },
+    {
+      "title": "Namespace Latency — p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (namespace_id, le) (rate(ledger_namespace_latency_seconds_bucket{namespace_id=~\"$namespace_id\"}[$__rate_interval])))",
+          "legendFormat": "ns:{{namespace_id}} p99"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "SLO Reference",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/operations/slo.md",
+      "type": "link",
+      "icon": "doc",
+      "tooltip": "SLI/SLO thresholds and alert definitions"
+    },
+    {
+      "title": "Error Code Catalog",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/errors.md",
+      "type": "link",
+      "icon": "doc",
+      "tooltip": "Machine-readable error codes and recovery guidance"
+    }
+  ]
+}

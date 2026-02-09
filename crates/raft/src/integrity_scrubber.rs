@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     metrics::{
+        record_background_job_duration, record_background_job_items, record_background_job_run,
         record_integrity_errors, record_integrity_pages_checked, record_integrity_scan_duration,
     },
     trace_context::TraceContext,
@@ -133,6 +134,7 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
             checksum_result.structural_errors + structural_result.structural_errors;
 
         // Record metrics
+        let duration = cycle_start.elapsed().as_secs_f64();
         record_integrity_pages_checked(total_checked);
         if total_checksum_errors > 0 {
             record_integrity_errors("checksum", total_checksum_errors);
@@ -140,10 +142,18 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
         if total_structural_errors > 0 {
             record_integrity_errors("structural", total_structural_errors);
         }
-        record_integrity_scan_duration(cycle_start.elapsed().as_secs_f64());
+        record_integrity_scan_duration(duration);
+
+        // Background job observability
+        let has_errors = total_checksum_errors > 0 || total_structural_errors > 0;
+        record_background_job_duration("integrity_scrub", duration);
+        record_background_job_run(
+            "integrity_scrub",
+            if has_errors { "failure" } else { "success" },
+        );
+        record_background_job_items("integrity_scrub", total_checked);
 
         // Log results
-        let has_errors = total_checksum_errors > 0 || total_structural_errors > 0;
         if has_errors {
             for err in checksum_result.errors.iter().chain(structural_result.errors.iter()) {
                 warn!(
@@ -287,6 +297,26 @@ mod tests {
         let result = scrubber.verify_btree_invariants();
         assert!(result.pages_checked > 0);
         assert_eq!(result.structural_errors, 0);
+    }
+
+    #[test]
+    fn test_background_job_metrics_emitted_on_scrub() {
+        // Verify that scrubber metric recording functions accept expected arguments
+        // Without a recorder, these are no-ops — the test confirms the function
+        // signatures match what run_cycle() calls.
+        use crate::metrics::{
+            record_background_job_duration, record_background_job_items, record_background_job_run,
+        };
+
+        // Simulate success path
+        record_background_job_duration("integrity_scrub", 0.05);
+        record_background_job_run("integrity_scrub", "success");
+        record_background_job_items("integrity_scrub", 10);
+
+        // Simulate failure path (corruption detected)
+        record_background_job_duration("integrity_scrub", 0.12);
+        record_background_job_run("integrity_scrub", "failure");
+        record_background_job_items("integrity_scrub", 5);
     }
 
     #[test]

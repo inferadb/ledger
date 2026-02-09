@@ -837,6 +837,63 @@ pub fn record_namespace_latency(namespace_id: i64, operation: &str, latency_secs
     .record(latency_secs);
 }
 
+// ─── Background Job Observability Metrics ────────────────────
+
+/// Duration of each background job cycle (histogram, seconds).
+///
+/// Labels: `job` = gc | compaction | integrity_scrub | auto_recovery | backup
+const BACKGROUND_JOB_DURATION_SECONDS: &str = "ledger_background_job_duration_seconds";
+
+/// Total number of background job cycle runs (counter).
+///
+/// Labels: `job`, `result` = success | failure
+const BACKGROUND_JOB_RUNS_TOTAL: &str = "ledger_background_job_runs_total";
+
+/// Total items processed by background jobs (counter).
+///
+/// Labels: `job`
+///
+/// Meaning per job:
+/// - `gc`: blocks compacted
+/// - `compaction`: pages merged
+/// - `integrity_scrub`: pages checked
+/// - `auto_recovery`: vaults recovered
+/// - `backup`: backups created
+const BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL: &str = "ledger_background_job_items_processed_total";
+
+/// Record the duration of a background job cycle.
+#[inline]
+pub fn record_background_job_duration(job: &str, duration_secs: f64) {
+    histogram!(
+        BACKGROUND_JOB_DURATION_SECONDS,
+        "job" => job.to_string()
+    )
+    .record(duration_secs);
+}
+
+/// Record a completed background job cycle.
+///
+/// `result` must be `"success"` or `"failure"` — bounded cardinality.
+#[inline]
+pub fn record_background_job_run(job: &str, result: &str) {
+    counter!(
+        BACKGROUND_JOB_RUNS_TOTAL,
+        "job" => job.to_string(),
+        "result" => result.to_string()
+    )
+    .increment(1);
+}
+
+/// Record items processed by a background job cycle.
+#[inline]
+pub fn record_background_job_items(job: &str, count: u64) {
+    counter!(
+        BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL,
+        "job" => job.to_string()
+    )
+    .increment(count);
+}
+
 /// Create a timer for write operations.
 pub fn write_timer() -> Timer {
     Timer::new(|secs| record_write(true, secs))
@@ -923,5 +980,28 @@ mod tests {
         assert!((SLI_HISTOGRAM_BUCKETS[10] - 10.0).abs() < f64::EPSILON);
         // 11 buckets total
         assert_eq!(SLI_HISTOGRAM_BUCKETS.len(), 11);
+    }
+
+    #[test]
+    fn test_background_job_metrics_dont_panic() {
+        // All five background job types with both success and failure outcomes
+        for job in &["gc", "compaction", "integrity_scrub", "auto_recovery", "backup"] {
+            record_background_job_duration(job, 1.234);
+            record_background_job_run(job, "success");
+            record_background_job_run(job, "failure");
+            record_background_job_items(job, 42);
+            record_background_job_items(job, 0);
+        }
+    }
+
+    #[test]
+    fn test_background_job_metric_names() {
+        // Verify metric name constants follow naming conventions
+        assert!(BACKGROUND_JOB_DURATION_SECONDS.starts_with("ledger_"));
+        assert!(BACKGROUND_JOB_DURATION_SECONDS.ends_with("_seconds"));
+        assert!(BACKGROUND_JOB_RUNS_TOTAL.starts_with("ledger_"));
+        assert!(BACKGROUND_JOB_RUNS_TOTAL.ends_with("_total"));
+        assert!(BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL.starts_with("ledger_"));
+        assert!(BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL.ends_with("_total"));
     }
 }

@@ -10,7 +10,10 @@
 //! - Removes transaction bodies for blocks older than (tip - retention_blocks)
 //! - Headers are always preserved for chain verification
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::StorageBackend;
@@ -20,6 +23,9 @@ use tracing::{debug, info, warn};
 
 use crate::{
     log_storage::AppliedStateAccessor,
+    metrics::{
+        record_background_job_duration, record_background_job_items, record_background_job_run,
+    },
     trace_context::TraceContext,
     types::{BlockRetentionMode, LedgerNodeId, LedgerTypeConfig},
 };
@@ -69,6 +75,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
         }
 
         let trace_ctx = TraceContext::new();
+        let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting block compaction cycle");
 
         // Get all vault metadata to check retention policies
@@ -76,6 +83,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
         let vault_heights = self.applied_state.all_vault_heights();
 
         let mut total_compacted = 0u64;
+        let mut had_error = false;
 
         for ((namespace_id, vault_id), meta) in vaults {
             // Skip vaults not in COMPACTED mode
@@ -112,6 +120,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                         error = %e,
                         "Failed to get compaction watermark"
                     );
+                    had_error = true;
                     continue;
                 },
                 _ => {},
@@ -141,14 +150,28 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                         error = %e,
                         "Block compaction failed"
                     );
+                    had_error = true;
                 },
             }
         }
 
+        let duration = cycle_start.elapsed().as_secs_f64();
+        record_background_job_duration("gc", duration);
+        record_background_job_run("gc", if had_error { "failure" } else { "success" });
         if total_compacted > 0 {
-            info!(trace_id = %trace_ctx.trace_id, total_compacted, "Block compaction cycle complete");
+            record_background_job_items("gc", total_compacted);
+            info!(
+                trace_id = %trace_ctx.trace_id,
+                total_compacted,
+                duration_secs = duration,
+                "Block compaction cycle complete"
+            );
         } else {
-            debug!(trace_id = %trace_ctx.trace_id, "Block compaction cycle complete (no blocks compacted)");
+            debug!(
+                trace_id = %trace_ctx.trace_id,
+                duration_secs = duration,
+                "Block compaction cycle complete (no blocks compacted)"
+            );
         }
     }
 

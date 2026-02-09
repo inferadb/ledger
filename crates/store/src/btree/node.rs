@@ -642,9 +642,7 @@ impl<'a> LeafNodeRef<'a> {
     /// Read the bloom filter embedded in this leaf page.
     pub fn bloom_filter(&self) -> BloomFilter {
         BloomFilter::from_array(
-            self.data[LEAF_BLOOM_OFFSET..LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE]
-                .try_into()
-                .unwrap(),
+            self.data[LEAF_BLOOM_OFFSET..LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE].try_into().unwrap(),
         )
     }
 

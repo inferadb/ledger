@@ -1,0 +1,356 @@
+{
+  "uid": "inferadb-storage-engine",
+  "title": "InferaDB Ledger — Storage Engine",
+  "description": "Disk usage, page cache hit rate, B-tree depth, compaction progress, and free list utilization.",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["inferadb", "storage", "btree", "compaction"],
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "node_id",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_disk_bytes_total, node_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "namespace_id",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_namespace_storage_bytes, namespace_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "shard_id",
+        "type": "query",
+        "datasource": { "uid": "${datasource}" },
+        "query": "label_values(ledger_disk_bytes_total, shard_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Disk Usage",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.7 },
+              { "color": "orange", "value": 0.85 },
+              { "color": "red", "value": 0.95 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_disk_bytes_used / ledger_disk_bytes_total",
+          "legendFormat": "Used %"
+        }
+      ]
+    },
+    {
+      "title": "Disk Bytes",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "uid": "${datasource}" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes" }
+      },
+      "targets": [
+        {
+          "expr": "ledger_disk_bytes_used",
+          "legendFormat": "Used"
+        },
+        {
+          "expr": "ledger_disk_bytes_free",
+          "legendFormat": "Free"
+        },
+        {
+          "expr": "ledger_disk_bytes_total",
+          "legendFormat": "Total"
+        }
+      ]
+    },
+    {
+      "title": "Snapshot Disk Usage",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes" }
+      },
+      "targets": [
+        {
+          "expr": "ledger_snapshot_disk_bytes",
+          "legendFormat": "Snapshot Bytes"
+        }
+      ]
+    },
+    {
+      "title": "Page Cache Hit Rate",
+      "description": "Target: > 95%",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.8 },
+              { "color": "green", "value": 0.95 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(ledger_page_cache_hits_total[$__rate_interval]) / (rate(ledger_page_cache_hits_total[$__rate_interval]) + rate(ledger_page_cache_misses_total[$__rate_interval]))",
+          "legendFormat": "Hit Rate"
+        }
+      ]
+    },
+    {
+      "title": "Page Cache Size",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_page_cache_size",
+          "legendFormat": "Pages Cached"
+        }
+      ]
+    },
+    {
+      "title": "B-tree Depth (per table)",
+      "description": "Lower is better. Depth > 4 may indicate need for page size tuning.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_btree_depth",
+          "legendFormat": "{{table}}"
+        }
+      ]
+    },
+    {
+      "title": "B-tree Page Splits",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(ledger_btree_page_splits_total[$__rate_interval])",
+          "legendFormat": "Page Splits/s"
+        }
+      ]
+    },
+    {
+      "title": "Compaction Progress",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(ledger_btree_compaction_pages_merged[$__rate_interval])",
+          "legendFormat": "Pages Merged/s"
+        },
+        {
+          "expr": "rate(ledger_btree_compaction_pages_freed[$__rate_interval])",
+          "legendFormat": "Pages Freed/s"
+        }
+      ]
+    },
+    {
+      "title": "Compaction Lag (Free Pages)",
+      "description": "High values indicate compaction falling behind.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1000 },
+              { "color": "red", "value": 5000 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_compaction_lag_blocks",
+          "legendFormat": "Reclaimable Pages"
+        }
+      ]
+    },
+    {
+      "title": "Storage I/O",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(ledger_storage_bytes_written_total[$__rate_interval])",
+          "legendFormat": "Written"
+        },
+        {
+          "expr": "rate(ledger_storage_bytes_read_total[$__rate_interval])",
+          "legendFormat": "Read"
+        }
+      ]
+    },
+    {
+      "title": "Storage Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (op) (rate(ledger_storage_operations_total[$__rate_interval]))",
+          "legendFormat": "{{op}}"
+        }
+      ]
+    },
+    {
+      "title": "Namespace Storage Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ledger_namespace_storage_bytes{namespace_id=~\"$namespace_id\"}",
+          "legendFormat": "ns:{{namespace_id}}"
+        }
+      ]
+    },
+    {
+      "title": "Integrity Scrubber",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "datasource": { "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(ledger_integrity_pages_checked_total[$__rate_interval])",
+          "legendFormat": "Pages Checked/s"
+        },
+        {
+          "expr": "rate(ledger_integrity_errors_total[$__rate_interval])",
+          "legendFormat": "Errors/s ({{error_type}})"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "SLO Reference",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/operations/slo.md",
+      "type": "link",
+      "icon": "doc",
+      "tooltip": "SLI/SLO thresholds and alert definitions"
+    },
+    {
+      "title": "Background Jobs",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/operations/background-jobs.md",
+      "type": "link",
+      "icon": "doc",
+      "tooltip": "Background job metric reference and alerting queries"
+    }
+  ]
+}

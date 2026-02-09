@@ -14,7 +14,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -829,12 +829,16 @@ impl BackupJob {
                     continue;
                 }
 
+                let cycle_start = Instant::now();
                 info!("Starting automated backup");
 
                 // Trigger a Raft snapshot to ensure latest state is on disk
                 if let Err(e) = self.raft.trigger().snapshot().await {
-                    warn!(error = %e, "Failed to trigger snapshot for backup");
+                    let duration = cycle_start.elapsed().as_secs_f64();
+                    warn!(error = %e, duration_secs = duration, "Failed to trigger snapshot for backup");
                     record_backup_failed();
+                    crate::metrics::record_background_job_duration("backup", duration);
+                    crate::metrics::record_background_job_run("backup", "failure");
                     continue;
                 }
 
@@ -843,27 +847,41 @@ impl BackupJob {
                     Ok(Some(snapshot)) => {
                         match self.backup_manager.create_backup(&snapshot, "auto") {
                             Ok(meta) => {
+                                let duration = cycle_start.elapsed().as_secs_f64();
                                 record_backup_created(meta.shard_height, meta.size_bytes);
+                                crate::metrics::record_background_job_duration("backup", duration);
+                                crate::metrics::record_background_job_run("backup", "success");
+                                crate::metrics::record_background_job_items("backup", 1);
                                 info!(
                                     backup_id = %meta.backup_id,
                                     shard_height = meta.shard_height,
                                     size_bytes = meta.size_bytes,
+                                    duration_secs = duration,
                                     "Automated backup completed"
                                 );
                             },
                             Err(e) => {
-                                error!(error = %e, "Failed to write backup");
+                                let duration = cycle_start.elapsed().as_secs_f64();
+                                error!(error = %e, duration_secs = duration, "Failed to write backup");
                                 record_backup_failed();
+                                crate::metrics::record_background_job_duration("backup", duration);
+                                crate::metrics::record_background_job_run("backup", "failure");
                             },
                         }
                     },
                     Ok(None) => {
-                        warn!("No snapshot available for backup");
+                        let duration = cycle_start.elapsed().as_secs_f64();
+                        warn!(duration_secs = duration, "No snapshot available for backup");
                         record_backup_failed();
+                        crate::metrics::record_background_job_duration("backup", duration);
+                        crate::metrics::record_background_job_run("backup", "failure");
                     },
                     Err(e) => {
-                        error!(error = %e, "Failed to load snapshot for backup");
+                        let duration = cycle_start.elapsed().as_secs_f64();
+                        error!(error = %e, duration_secs = duration, "Failed to load snapshot for backup");
                         record_backup_failed();
+                        crate::metrics::record_background_job_duration("backup", duration);
+                        crate::metrics::record_background_job_run("backup", "failure");
                     },
                 }
             }
