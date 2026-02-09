@@ -349,6 +349,8 @@ impl WriteService for MultiShardWriteService {
                 );
 
                 metrics::record_write(true, latency);
+                metrics::record_namespace_operation(namespace_id.value(), "write");
+                metrics::record_namespace_latency(namespace_id.value(), "write", latency);
                 info!(
                     trace_id = %trace_ctx.trace_id,
                     block_height,
@@ -575,6 +577,8 @@ impl WriteService for MultiShardWriteService {
                 };
 
                 metrics::record_batch_write(true, batch_size, latency);
+                metrics::record_namespace_operation(namespace_id.value(), "write");
+                metrics::record_namespace_latency(namespace_id.value(), "write", latency);
                 info!(
                     trace_id = %trace_ctx.trace_id,
                     block_height,

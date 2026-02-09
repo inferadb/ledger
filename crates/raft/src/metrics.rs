@@ -780,8 +780,7 @@ const NAMESPACE_LATENCY_SECONDS: &str = "ledger_namespace_latency_seconds";
 /// operator-controlled (typically < 100 in production).
 #[inline]
 pub fn set_namespace_storage_bytes(namespace_id: i64, bytes: u64) {
-    gauge!(NAMESPACE_STORAGE_BYTES, "namespace_id" => namespace_id.to_string())
-        .set(bytes as f64);
+    gauge!(NAMESPACE_STORAGE_BYTES, "namespace_id" => namespace_id.to_string()).set(bytes as f64);
 }
 
 /// Record a namespace-level operation (read, write, or admin).

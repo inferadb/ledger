@@ -21,6 +21,7 @@ use tonic::{Request, Response, Status};
 use crate::{
     error::{ServiceError, classify_raft_error},
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    metrics,
     proto::{
         BackupInfo, BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
         ClusterMemberRole, CreateBackupRequest, CreateBackupResponse, CreateNamespaceRequest,
@@ -262,6 +263,12 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
                 ctx.set_namespace_id(namespace_id.value());
                 ctx.set_success();
+                metrics::record_namespace_operation(namespace_id.value(), "admin");
+                metrics::record_namespace_latency(
+                    namespace_id.value(),
+                    "admin",
+                    ctx.elapsed_secs(),
+                );
                 self.emit_audit_event(
                     &self.build_audit_event(
                         AuditAction::CreateNamespace,
@@ -372,6 +379,12 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
                 if success {
                     ctx.set_success();
+                    metrics::record_namespace_operation(namespace_id.value(), "admin");
+                    metrics::record_namespace_latency(
+                        namespace_id.value(),
+                        "admin",
+                        ctx.elapsed_secs(),
+                    );
                     self.emit_audit_event(&self.build_audit_event(
                         AuditAction::DeleteNamespace,
                         "system",
@@ -633,6 +646,12 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::VaultCreated { vault_id } => {
                 ctx.set_vault_id(vault_id.value());
                 ctx.set_success();
+                metrics::record_namespace_operation(namespace_id.value(), "admin");
+                metrics::record_namespace_latency(
+                    namespace_id.value(),
+                    "admin",
+                    ctx.elapsed_secs(),
+                );
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::CreateVault,
                     "system",
@@ -765,6 +784,12 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::VaultDeleted { success } => {
                 if success {
                     ctx.set_success();
+                    metrics::record_namespace_operation(namespace_id.value(), "admin");
+                    metrics::record_namespace_latency(
+                        namespace_id.value(),
+                        "admin",
+                        ctx.elapsed_secs(),
+                    );
                     self.emit_audit_event(&self.build_audit_event(
                         AuditAction::DeleteVault,
                         "system",

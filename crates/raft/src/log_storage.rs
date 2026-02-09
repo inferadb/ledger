@@ -30,8 +30,8 @@ use inferadb_ledger_state::system::{
 use inferadb_ledger_state::{BlockArchive, StateError, StateLayer};
 use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend, StorageBackend, tables};
 use inferadb_ledger_types::{
-    Hash, NamespaceId, Operation, ShardBlock, ShardId, Transaction, VaultEntry, VaultId,
-    compute_tx_merkle_root, decode, encode,
+    Hash, NamespaceId, NamespaceUsage, Operation, ShardBlock, ShardId, Transaction, VaultEntry,
+    VaultId, compute_tx_merkle_root, decode, encode,
 };
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
@@ -280,6 +280,45 @@ pub fn select_least_loaded_shard(namespaces: &HashMap<NamespaceId, NamespaceMeta
         .unwrap_or(ShardId::new(0))
 }
 
+/// Estimate the net storage delta (in bytes) for a batch of transactions.
+///
+/// Sets and relationship creates add bytes (key + value sizes).
+/// Deletes subtract bytes (key sizes only — we don't know the old value size).
+/// Returns a signed value: positive for net growth, negative for net shrinkage.
+fn estimate_write_storage_delta(transactions: &[Transaction]) -> i64 {
+    let mut delta: i64 = 0;
+    for tx in transactions {
+        for op in &tx.operations {
+            match op {
+                Operation::SetEntity { key, value, .. } => {
+                    delta = delta.saturating_add(key.len() as i64);
+                    delta = delta.saturating_add(value.len() as i64);
+                },
+                Operation::DeleteEntity { key } => {
+                    // Subtract estimated key bytes (conservative: we don't know
+                    // the value size being removed, only the key)
+                    delta = delta.saturating_sub(key.len() as i64);
+                },
+                Operation::CreateRelationship { resource, relation, subject } => {
+                    delta = delta.saturating_add(resource.len() as i64);
+                    delta = delta.saturating_add(relation.len() as i64);
+                    delta = delta.saturating_add(subject.len() as i64);
+                },
+                Operation::DeleteRelationship { resource, relation, subject } => {
+                    delta = delta.saturating_sub(resource.len() as i64);
+                    delta = delta.saturating_sub(relation.len() as i64);
+                    delta = delta.saturating_sub(subject.len() as i64);
+                },
+                Operation::ExpireEntity { key, .. } => {
+                    // TTL expiration removes the entity
+                    delta = delta.saturating_sub(key.len() as i64);
+                },
+            }
+        }
+    }
+    delta
+}
+
 /// Maximum recovery attempts before requiring manual intervention.
 pub const MAX_RECOVERY_ATTEMPTS: u8 = 3;
 
@@ -437,6 +476,19 @@ impl AppliedStateAccessor {
     /// Returns 0 if no data has been written to the namespace.
     pub fn namespace_storage_bytes(&self, namespace_id: NamespaceId) -> u64 {
         self.state.read().namespace_storage_bytes.get(&namespace_id).copied().unwrap_or(0)
+    }
+
+    /// Get a snapshot of resource usage for a namespace.
+    ///
+    /// Combines `storage_bytes` and `vault_count` into a single struct
+    /// for quota enforcement and capacity-planning APIs.
+    pub fn namespace_usage(&self, namespace_id: NamespaceId) -> NamespaceUsage {
+        let state = self.state.read();
+        let storage_bytes = state.namespace_storage_bytes.get(&namespace_id).copied().unwrap_or(0);
+        let vault_count =
+            state.vaults.values().filter(|v| v.namespace_id == namespace_id && !v.deleted).count();
+        #[allow(clippy::cast_possible_truncation)]
+        NamespaceUsage { storage_bytes, vault_count: vault_count as u32 }
     }
 
     /// Get the namespace quota (per-namespace override or None for server default).
@@ -5345,5 +5397,667 @@ mod tests {
             state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
             Some(&VaultHealthStatus::Healthy)
         );
+    }
+
+    // ─── Namespace Resource Accounting Tests ───────────────────────────────────
+
+    #[test]
+    fn test_estimate_delta_set_entity() {
+        let tx = inferadb_ledger_types::Transaction {
+            id: [0u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "hello".to_string(),   // 5 bytes
+                value: b"world!!".to_vec(), // 7 bytes
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(estimate_write_storage_delta(&[tx]), 12);
+    }
+
+    #[test]
+    fn test_estimate_delta_delete_entity() {
+        let tx = inferadb_ledger_types::Transaction {
+            id: [0u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::DeleteEntity {
+                key: "hello".to_string(), // -5 bytes
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(estimate_write_storage_delta(&[tx]), -5);
+    }
+
+    #[test]
+    fn test_estimate_delta_create_relationship() {
+        let tx = inferadb_ledger_types::Transaction {
+            id: [0u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::CreateRelationship {
+                resource: "doc:1".to_string(),  // 5
+                relation: "viewer".to_string(), // 6
+                subject: "user:2".to_string(),  // 6
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(estimate_write_storage_delta(&[tx]), 17);
+    }
+
+    #[test]
+    fn test_estimate_delta_delete_relationship() {
+        let tx = inferadb_ledger_types::Transaction {
+            id: [0u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::DeleteRelationship {
+                resource: "doc:1".to_string(),
+                relation: "viewer".to_string(),
+                subject: "user:2".to_string(),
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(estimate_write_storage_delta(&[tx]), -17);
+    }
+
+    #[test]
+    fn test_estimate_delta_expire_entity() {
+        let tx = inferadb_ledger_types::Transaction {
+            id: [0u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::ExpireEntity {
+                key: "mykey".to_string(), // -5
+                expired_at: 12345,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(estimate_write_storage_delta(&[tx]), -5);
+    }
+
+    #[test]
+    fn test_estimate_delta_mixed_operations() {
+        let tx = inferadb_ledger_types::Transaction {
+            id: [0u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![
+                inferadb_ledger_types::Operation::SetEntity {
+                    key: "k1".to_string(),  // +2
+                    value: b"val".to_vec(), // +3
+                    condition: None,
+                    expires_at: None,
+                },
+                inferadb_ledger_types::Operation::DeleteEntity {
+                    key: "k2".to_string(),        // -2
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+        };
+        // +5 - 2 = 3
+        assert_eq!(estimate_write_storage_delta(&[tx]), 3);
+    }
+
+    #[test]
+    fn test_estimate_delta_multiple_transactions() {
+        let tx1 = inferadb_ledger_types::Transaction {
+            id: [1u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "aa".to_string(),
+                value: b"bb".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        let tx2 = inferadb_ledger_types::Transaction {
+            id: [2u8; 16],
+            client_id: "c".to_string(),
+            sequence: 2,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "cc".to_string(),
+                value: b"dd".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        // tx1: 2+2=4, tx2: 2+2=4 → total 8
+        assert_eq!(estimate_write_storage_delta(&[tx1, tx2]), 8);
+    }
+
+    #[test]
+    fn test_estimate_delta_empty() {
+        assert_eq!(estimate_write_storage_delta(&[]), 0);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_storage_bytes_accumulate() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Setup namespace + vault
+        store.apply_request(
+            &LedgerRequest::CreateNamespace {
+                name: "test-ns".to_string(),
+                shard_id: None,
+                quota: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v1".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        assert_eq!(
+            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            0,
+            "Storage starts at zero"
+        );
+
+        // Write 1: key=4 bytes, value=6 bytes → +10
+        let tx1 = inferadb_ledger_types::Transaction {
+            id: [1u8; 16],
+            client_id: "client1".to_string(),
+            sequence: 1,
+            actor: "test".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "key1".to_string(),
+                value: b"value1".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![tx1],
+            },
+            &mut state,
+        );
+        assert_eq!(
+            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            10,
+            "First write adds 4+6=10 bytes"
+        );
+
+        // Write 2: key=4 bytes, value=10 bytes → +14
+        let tx2 = inferadb_ledger_types::Transaction {
+            id: [2u8; 16],
+            client_id: "client1".to_string(),
+            sequence: 2,
+            actor: "test".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "key2".to_string(),
+                value: b"longerval!".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![tx2],
+            },
+            &mut state,
+        );
+        assert_eq!(
+            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            24,
+            "Second write accumulates: 10+14=24 bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_namespace_storage_bytes_decrease_on_delete() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Setup
+        store.apply_request(
+            &LedgerRequest::CreateNamespace { name: "ns".to_string(), shard_id: None, quota: None },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v1".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        // Write: key="abcde" (5), value="fghij" (5) → +10
+        let tx_set = inferadb_ledger_types::Transaction {
+            id: [1u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "abcde".to_string(),
+                value: b"fghij".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![tx_set],
+            },
+            &mut state,
+        );
+        assert_eq!(state.namespace_storage_bytes[&NamespaceId::new(1)], 10);
+
+        // Delete: key="abcde" (5) → -5 (conservative: doesn't know value size)
+        let tx_del = inferadb_ledger_types::Transaction {
+            id: [2u8; 16],
+            client_id: "c".to_string(),
+            sequence: 2,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::DeleteEntity {
+                key: "abcde".to_string(),
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![tx_del],
+            },
+            &mut state,
+        );
+        assert_eq!(
+            state.namespace_storage_bytes[&NamespaceId::new(1)],
+            5,
+            "Delete subtracts key bytes only: 10-5=5"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_namespace_storage_bytes_floor_at_zero() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateNamespace { name: "ns".to_string(), shard_id: None, quota: None },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v1".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        // Delete without prior write — should floor at 0 via saturating_sub
+        let tx = inferadb_ledger_types::Transaction {
+            id: [1u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::DeleteEntity {
+                key: "missing_key".to_string(),
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![tx],
+            },
+            &mut state,
+        );
+        assert_eq!(
+            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            0,
+            "Storage bytes must never go negative — saturating_sub floors at 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_namespace_storage_bytes_independent_namespaces() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create two namespaces, each with a vault
+        store.apply_request(
+            &LedgerRequest::CreateNamespace {
+                name: "ns-alpha".to_string(),
+                shard_id: None,
+                quota: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateNamespace {
+                name: "ns-beta".to_string(),
+                shard_id: None,
+                quota: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v1".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(2),
+                name: Some("v2".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        // Write to namespace 1: "aa" + "bb" = 4 bytes
+        let tx1 = inferadb_ledger_types::Transaction {
+            id: [1u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "aa".to_string(),
+                value: b"bb".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![tx1],
+            },
+            &mut state,
+        );
+
+        // Write to namespace 2: "cccccc" + "dddddddd" = 14 bytes
+        let tx2 = inferadb_ledger_types::Transaction {
+            id: [2u8; 16],
+            client_id: "c".to_string(),
+            sequence: 2,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "cccccc".to_string(),
+                value: b"dddddddd".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(2),
+                vault_id: VaultId::new(2),
+                transactions: vec![tx2],
+            },
+            &mut state,
+        );
+
+        assert_eq!(state.namespace_storage_bytes[&NamespaceId::new(1)], 4);
+        assert_eq!(state.namespace_storage_bytes[&NamespaceId::new(2)], 14);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_storage_accessor() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Before any writes, accessor returns 0
+        assert_eq!(store.accessor().namespace_storage_bytes(NamespaceId::new(1)), 0);
+
+        // Write some data
+        let mut state = store.applied_state.write();
+        state.namespace_storage_bytes.insert(NamespaceId::new(1), 42);
+        drop(state);
+
+        assert_eq!(store.accessor().namespace_storage_bytes(NamespaceId::new(1)), 42);
+        assert_eq!(
+            store.accessor().namespace_storage_bytes(NamespaceId::new(999)),
+            0,
+            "Unknown namespace returns 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_namespace_usage_combines_storage_and_vaults() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create namespace with two vaults
+        store.apply_request(
+            &LedgerRequest::CreateNamespace {
+                name: "usage-ns".to_string(),
+                shard_id: None,
+                quota: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v1".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v2".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        // Write some data
+        let tx = inferadb_ledger_types::Transaction {
+            id: [1u8; 16],
+            client_id: "c".to_string(),
+            sequence: 1,
+            actor: "a".to_string(),
+            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                key: "key".to_string(),
+                value: b"value".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        store.apply_request(
+            &LedgerRequest::Write {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![tx],
+            },
+            &mut state,
+        );
+        drop(state);
+
+        let usage = store.accessor().namespace_usage(NamespaceId::new(1));
+        assert_eq!(usage.storage_bytes, 8, "key(3) + value(5) = 8 bytes");
+        assert_eq!(usage.vault_count, 2, "Two active vaults");
+
+        // Unknown namespace returns zeroes
+        let empty = store.accessor().namespace_usage(NamespaceId::new(999));
+        assert_eq!(empty.storage_bytes, 0);
+        assert_eq!(empty.vault_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_usage_excludes_deleted_vaults() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateNamespace {
+                name: "del-ns".to_string(),
+                shard_id: None,
+                quota: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v1".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::CreateVault {
+                namespace_id: NamespaceId::new(1),
+                name: Some("v2".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        drop(state);
+        assert_eq!(store.accessor().namespace_usage(NamespaceId::new(1)).vault_count, 2);
+
+        // Delete one vault
+        let mut state = store.applied_state.write();
+        store.apply_request(
+            &LedgerRequest::DeleteVault {
+                namespace_id: NamespaceId::new(1),
+                vault_id: VaultId::new(1),
+            },
+            &mut state,
+        );
+        drop(state);
+
+        assert_eq!(
+            store.accessor().namespace_usage(NamespaceId::new(1)).vault_count,
+            1,
+            "Deleted vaults excluded from count"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_namespace_storage_bytes_concurrent_reads() {
+        use std::sync::Arc;
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = Arc::new(RaftLogStore::<FileBackend>::open(&path).expect("open store"));
+
+        // Set up state with known storage bytes
+        {
+            let mut state = store.applied_state.write();
+            store.apply_request(
+                &LedgerRequest::CreateNamespace {
+                    name: "conc-ns".to_string(),
+                    shard_id: None,
+                    quota: None,
+                },
+                &mut state,
+            );
+            store.apply_request(
+                &LedgerRequest::CreateVault {
+                    namespace_id: NamespaceId::new(1),
+                    name: Some("v1".to_string()),
+                    retention_policy: None,
+                },
+                &mut state,
+            );
+            // Write data: "hello" (5) + "world!" (6) = 11 bytes
+            let tx = inferadb_ledger_types::Transaction {
+                id: [1u8; 16],
+                client_id: "c".to_string(),
+                sequence: 1,
+                actor: "a".to_string(),
+                operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                    key: "hello".to_string(),
+                    value: b"world!".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                timestamp: chrono::Utc::now(),
+            };
+            store.apply_request(
+                &LedgerRequest::Write {
+                    namespace_id: NamespaceId::new(1),
+                    vault_id: VaultId::new(1),
+                    transactions: vec![tx],
+                },
+                &mut state,
+            );
+        }
+
+        // Spawn 50 concurrent readers — all must see consistent state
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let store_clone = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let usage = store_clone.accessor().namespace_usage(NamespaceId::new(1));
+                assert_eq!(usage.storage_bytes, 11);
+                assert_eq!(usage.vault_count, 1);
+                usage
+            }));
+        }
+
+        for handle in handles {
+            let usage = handle.await.expect("task panicked");
+            assert_eq!(usage.storage_bytes, 11);
+            assert_eq!(usage.vault_count, 1);
+        }
     }
 }

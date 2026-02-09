@@ -35,6 +35,8 @@ pub use types::{
     ClientId,
     Entity,
     NamespaceId,
+    // Resource accounting
+    NamespaceUsage,
     NodeId,
     // Enums
     Operation,

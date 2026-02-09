@@ -123,9 +123,9 @@ impl QuotaChecker {
     /// Check whether a write operation's estimated payload would exceed
     /// the namespace storage quota.
     ///
-    /// This is an estimate based on operation payload size, not exact storage
-    /// accounting. Exact byte-level tracking is deferred to Task 6
-    /// (Namespace Resource Accounting).
+    /// Compares `current_usage + estimated_bytes` against `max_storage_bytes`.
+    /// Current usage is tracked cumulatively in `AppliedState` and updated
+    /// on every committed write.
     ///
     /// `estimated_bytes` is the sum of key + value sizes for all operations
     /// in the write request.
@@ -139,14 +139,12 @@ impl QuotaChecker {
             None => return Ok(()),
         };
 
-        // Without exact accounting (Task 6), we can only check whether
-        // this single write exceeds the total limit as a sanity guard.
-        // Once Task 6 adds cumulative tracking, this will compare
-        // (current_usage + estimated_bytes) against max_storage_bytes.
-        if estimated_bytes > quota.max_storage_bytes {
+        let current_usage = self.applied_state.namespace_storage_bytes(namespace_id);
+        let projected = current_usage.saturating_add(estimated_bytes);
+        if projected > quota.max_storage_bytes {
             return Err(QuotaExceeded {
                 resource: QuotaResource::StorageBytes,
-                current: estimated_bytes,
+                current: current_usage,
                 limit: quota.max_storage_bytes,
                 namespace_id,
             });
@@ -354,13 +352,48 @@ mod tests {
 
         let checker = QuotaChecker::new(make_accessor(state), None);
 
-        // Under limit — passes
+        // Under limit — passes (current=0, estimated=500k)
         assert!(checker.check_storage_estimate(ns, 500_000).is_ok());
 
-        // Over limit — fails
+        // Over limit — fails (current=0, estimated=2M > 1M limit)
         let err = checker.check_storage_estimate(ns, 2_000_000).unwrap_err();
         assert_eq!(err.resource, QuotaResource::StorageBytes);
-        assert_eq!(err.current, 2_000_000);
+        assert_eq!(err.current, 0); // no prior usage
+        assert_eq!(err.limit, 1_000_000);
+    }
+
+    #[test]
+    fn test_storage_estimate_cumulative_tracking() {
+        let mut state = default_state();
+        let ns = NamespaceId::new(1);
+        state.namespaces.insert(
+            ns,
+            NamespaceMeta {
+                namespace_id: ns,
+                name: "test".to_owned(),
+                shard_id: ShardId::new(0),
+                status: NamespaceStatus::Active,
+                pending_shard_id: None,
+                quota: Some(NamespaceQuota {
+                    max_vaults: u32::MAX,
+                    max_storage_bytes: 1_000_000,
+                    max_write_ops_per_sec: u32::MAX,
+                    max_read_ops_per_sec: u32::MAX,
+                }),
+            },
+        );
+
+        // Simulate 800KB already used
+        state.namespace_storage_bytes.insert(ns, 800_000);
+        let checker = QuotaChecker::new(make_accessor(state), None);
+
+        // 100KB more — fits (800k + 100k = 900k < 1M)
+        assert!(checker.check_storage_estimate(ns, 100_000).is_ok());
+
+        // 300KB more — exceeds (800k + 300k = 1.1M > 1M)
+        let err = checker.check_storage_estimate(ns, 300_000).unwrap_err();
+        assert_eq!(err.resource, QuotaResource::StorageBytes);
+        assert_eq!(err.current, 800_000);
         assert_eq!(err.limit, 1_000_000);
     }
 
@@ -413,9 +446,9 @@ mod tests {
         assert_eq!(checker.effective_quota(ns), Some(server_default));
         // Vault count check passes (0 vaults < 10 limit)
         assert!(checker.check_vault_count(ns).is_ok());
-        // Storage check passes under limit
+        // Storage check passes under limit (current=0, estimated=100k < 500k)
         assert!(checker.check_storage_estimate(ns, 100_000).is_ok());
-        // Storage check fails over limit
+        // Storage check fails over limit (current=0, estimated=1M > 500k)
         assert!(checker.check_storage_estimate(ns, 1_000_000).is_err());
     }
 }

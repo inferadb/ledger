@@ -600,6 +600,22 @@ pub struct WriteResult {
     pub statuses: Vec<WriteStatus>,
 }
 
+/// Snapshot of per-namespace resource consumption.
+///
+/// Used by `QuotaChecker` for enforcement and by operators for
+/// capacity planning. All values are point-in-time snapshots from
+/// Raft-replicated state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespaceUsage {
+    /// Cumulative estimated storage bytes for this namespace.
+    ///
+    /// Updated on every committed write via `estimate_write_storage_delta`.
+    /// Approximate — does not track exact on-disk overhead.
+    pub storage_bytes: u64,
+    /// Number of active (non-deleted) vaults in this namespace.
+    pub vault_count: u32,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -966,5 +982,26 @@ mod tests {
 
         assert_eq!(header.namespace_id, NamespaceId::new(10));
         assert_eq!(header.vault_id, VaultId::new(20));
+    }
+
+    #[test]
+    fn test_namespace_usage_default_values() {
+        let usage = NamespaceUsage { storage_bytes: 0, vault_count: 0 };
+        assert_eq!(usage.storage_bytes, 0);
+        assert_eq!(usage.vault_count, 0);
+    }
+
+    #[test]
+    fn test_namespace_usage_with_data() {
+        let usage = NamespaceUsage { storage_bytes: 1_048_576, vault_count: 5 };
+        assert_eq!(usage.storage_bytes, 1_048_576);
+        assert_eq!(usage.vault_count, 5);
+    }
+
+    #[test]
+    fn test_namespace_usage_copy_semantics() {
+        let a = NamespaceUsage { storage_bytes: 100, vault_count: 3 };
+        let b = a; // Copy
+        assert_eq!(a, b); // Both accessible — Copy trait
     }
 }

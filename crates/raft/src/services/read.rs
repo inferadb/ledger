@@ -483,7 +483,10 @@ impl ReadService for ReadServiceImpl {
         ctx.set_value_size_bytes(value_size);
         ctx.set_bytes_read(value_size);
 
-        metrics::record_read(true, ctx.elapsed_secs());
+        let elapsed = ctx.elapsed_secs();
+        metrics::record_read(true, elapsed);
+        metrics::record_namespace_operation(namespace_id.value(), "read");
+        metrics::record_namespace_latency(namespace_id.value(), "read", elapsed);
         ctx.set_success();
 
         // Get current block height for this vault
@@ -618,6 +621,8 @@ impl ReadService for ReadServiceImpl {
         for _ in 0..batch_size {
             metrics::record_read(true, latency / batch_size as f64);
         }
+        metrics::record_namespace_operation(namespace_id.value(), "read");
+        metrics::record_namespace_latency(namespace_id.value(), "read", latency);
 
         ctx.set_success();
 

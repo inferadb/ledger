@@ -604,6 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_tracker_wait_for_zero_with_drain() {
+        tokio::time::pause();
         let tracker = ConnectionTracker::new();
         tracker.increment();
 
@@ -619,6 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_tracker_wait_for_zero_timeout() {
+        tokio::time::pause();
         let tracker = ConnectionTracker::new();
         tracker.increment();
 
@@ -749,6 +751,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_signals_server() {
+        tokio::time::pause();
         let health = HealthState::new();
         health.mark_ready();
 
@@ -777,6 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_marks_not_ready() {
+        tokio::time::pause();
         let health = HealthState::new();
         health.mark_ready();
         assert!(health.readiness_check());
@@ -797,6 +801,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_drains_connections() {
+        tokio::time::pause();
         let health = HealthState::new();
         health.mark_ready();
 
@@ -823,6 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_drain_timeout_expires() {
+        tokio::time::pause();
         let health = HealthState::new();
         health.mark_ready();
 
@@ -841,6 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_pre_shutdown_timeout() {
+        tokio::time::pause();
         let health = HealthState::new();
         health.mark_ready();
 
@@ -870,6 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_with_pre_stop_delay() {
+        tokio::time::pause();
         let health = HealthState::new();
         health.mark_ready();
 

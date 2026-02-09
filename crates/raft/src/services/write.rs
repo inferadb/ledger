@@ -745,7 +745,9 @@ impl WriteService for WriteServiceImpl {
                     ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
                 }
 
-                metrics::record_write(true, ctx.elapsed_secs());
+                let elapsed = ctx.elapsed_secs();
+                metrics::record_write(true, elapsed);
+                metrics::record_namespace_latency(namespace_id.value(), "write", elapsed);
 
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::Write,
@@ -1105,7 +1107,9 @@ impl WriteService for WriteServiceImpl {
                     ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
                 }
 
-                metrics::record_batch_write(true, batch_size, ctx.elapsed_secs());
+                let elapsed = ctx.elapsed_secs();
+                metrics::record_batch_write(true, batch_size, elapsed);
+                metrics::record_namespace_latency(namespace_id.value(), "write", elapsed);
 
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::BatchWrite,
