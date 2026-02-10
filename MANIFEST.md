@@ -42,7 +42,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Public modules: `audit`, `codec`, `config`, `error`, `hash`, `merkle`, `types`, `validation`
 - **Insights**: Clean public API surface, excellent organization
 
-#### `audit.rs` (395 lines)
+#### `audit.rs` (394 lines)
 
 - **Purpose**: SOC2/HIPAA audit logging types for compliance
 - **Key Types/Functions**:
@@ -52,30 +52,35 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `AuditOutcome`: Success vs. Failure with optional error message
 - **Insights**: Comprehensive coverage of auditable operations, ready for regulatory compliance
 
-#### `codec.rs` (563 lines)
+#### `codec.rs` (562 lines)
 
 - **Purpose**: postcard-based serialization/deserialization with structured error handling
 - **Key Types/Functions**:
   - `encode<T: Serialize>(value: &T) -> Result<Vec<u8>>`: Serialize to bytes
   - `decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T>`: Deserialize from bytes
   - `CodecError`: snafu error with SerializationFailed/DeserializationFailed variants
-  - 32 unit tests, 9 proptest strategies covering all domain types
+  - 29 unit tests + 1 proptest block covering all domain types
 - **Insights**: Excellent test coverage, postcard chosen for determinism and compactness
 
-#### `config.rs` (3534 lines)
+#### `config/` (3610 lines across 7 submodules)
 
 - **Purpose**: Configuration types for all subsystems with fallible builders, serde, and JSON Schema
+- **Structure**:
+  - `config/mod.rs` (1516 lines) — `ConfigError` enum, `MIN_AUDIT_FILE_SIZE` constant, re-exports from submodules
+  - `config/node.rs` (49 lines) — `NodeConfig`, `PeerConfig`
+  - `config/storage.rs` (441 lines) — `StorageConfig`, `BTreeCompactionConfig`, `IntegrityConfig`, `BackupConfig`
+  - `config/raft.rs` (285 lines) — `RaftConfig`, `BatchConfig`
+  - `config/resilience.rs` (611 lines) — `RateLimitConfig`, `ShutdownConfig`, `HealthCheckConfig`, `ValidationConfig`
+  - `config/observability.rs` (375 lines) — `HotKeyConfig`, `AuditConfig`, `MetricsCardinalityConfig`
+  - `config/runtime.rs` (333 lines) — `RuntimeConfig`, `ConfigChange`, `NonReconfigurableField`, `NamespaceQuota`
 - **Key Types/Functions**:
-  - `ServerConfig`: Root config with nested subsystem configs (18 total structs)
-  - `RaftConfig`, `StorageConfig`, `BatchConfig`, `RateLimitConfig`, `ValidationConfig`: Core subsystem configs
-  - `TlsConfig`, `OtelConfig`, `AuditConfig`: Security and observability
-  - `CircuitBreakerConfig`, `HotKeyConfig`, `QuotaConfig`: Advanced features
+  - 19 config structs across submodules (was monolithic, now organized by subsystem)
   - All use `#[bon::bon]` fallible builders with validation
   - All derive `serde::Serialize/Deserialize` for TOML loading
   - All derive `schemars::JsonSchema` for schema export
-- **Insights**: ⚠️ **CONCERN**: 3534 lines is excessive for a single file. Should be split into submodules by subsystem (e.g., `config/raft.rs`, `config/storage.rs`, `config/security.rs`, `config/observability.rs`, `config/resilience.rs`, `config/features.rs`). Excellent validation with humantime-serde for durations, byte-unit for sizes.
+- **Insights**: Well-organized module split groups configs by subsystem. Excellent validation with humantime-serde for durations, byte-unit for sizes. Each struct's tests and default functions live alongside the struct definition.
 
-#### `error.rs` (1185 lines)
+#### `error.rs` (1184 lines)
 
 - **Purpose**: Structured error taxonomy with numeric codes, retryability, and guidance
 - **Key Types/Functions**:
@@ -86,7 +91,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `code()`, `is_retryable()`, `suggested_action()`: Traits on all error types
 - **Insights**: State-of-the-art error handling. Every error has numeric code, retryability classification, and actionable guidance. Implicit location tracking via snafu.
 
-#### `hash.rs` (718 lines)
+#### `hash.rs` (717 lines)
 
 - **Purpose**: Cryptographic and non-cryptographic hashing utilities
 - **Key Types/Functions**:
@@ -96,7 +101,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `BucketHasher`: State bucketing (256 buckets) for incremental hashing
 - **Insights**: Excellent security practices. Constant-time comparison prevents timing attacks. Clear separation of cryptographic vs. non-cryptographic use cases.
 
-#### `merkle.rs` (332 lines)
+#### `merkle.rs` (331 lines)
 
 - **Purpose**: Merkle tree and proof generation/verification using rs_merkle
 - **Key Types/Functions**:
@@ -114,16 +119,16 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `NamespaceId`, `VaultId`, `UserId`, `ShardId`: Newtype IDs (replaced type aliases)
   - `BlockHeader`: version, height, prev_hash, timestamp, tx_merkle_root, state_root
   - `Transaction`: namespace, vault, operations (fallible builder with validation)
-  - `Operation`: 14 variants (CreateEntity, DeleteEntity, CreateRelationship, etc.)
+  - `Operation`: 5 variants (CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity)
   - `Entity`: key, value, ttl, version
   - `Relationship`: resource, relation, subject (authorization tuple)
 - **Insights**: Fallible Transaction builder validates constraints (max 100 ops, max 1MB size). Newtype IDs prevent accidental mixing (e.g., NamespaceId vs VaultId).
 
-#### `validation.rs` (563 lines)
+#### `validation.rs` (562 lines)
 
 - **Purpose**: Input validation with character whitelists and configurable size limits
 - **Key Types/Functions**:
-  - `ValidationConfig`: max_name_length, max_value_length, max_operations_per_transaction, etc.
+  - `ValidationConfig` (defined in `config/resilience.rs`): max_name_length, max_value_length, max_operations_per_transaction, etc.
   - `validate_name()`, `validate_entity_key()`, `validate_entity_value()`: Character whitelist enforcement
   - `validate_transaction_size()`: Enforces request size limits (default 1MB)
   - Character sets: alphanumeric + hyphen/underscore for names, UTF-8 for values
@@ -139,14 +144,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Files
 
-#### `lib.rs`
+#### `lib.rs` (107 lines)
 
 - **Purpose**: Re-exports public API (Database, Transaction, StorageBackend, Table)
 - **Key Types/Functions**:
-  - Modules: `backend`, `bloom`, `btree`, `cache`, `db`, `dirty_bitmap`, `integrity`, `page`, `tables`, `transaction`, `types`
-- **Insights**: Clean layering: backend abstraction → page management → B+ tree → database → transactions
+  - Modules: `backend`, `bloom` (pub(crate)), `btree`, `db`, `dirty_bitmap`, `error`, `integrity`, `page`, `tables`, `transaction`, `types`
+- **Insights**: Clean layering: backend abstraction → page management → B+ tree → database → transactions. `bloom` is crate-private; `error` was missing from original listing.
 
-#### `backend/mod.rs`
+#### `backend/mod.rs` (466 lines)
 
 - **Purpose**: Storage backend trait with file and in-memory implementations
 - **Key Types/Functions**:
@@ -163,17 +168,17 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `insert(&hash)`, `contains(&hash) -> bool`: Add/check membership
 - **Insights**: Space-efficient probabilistic data structure. Used to avoid disk reads for non-existent keys.
 
-#### `btree/mod.rs` (~500 lines)
+#### `btree/mod.rs` (1671 lines)
 
-- **Purpose**: B+ tree core logic (insert, get, remove, split, merge, compact)
+- **Purpose**: B+ tree core logic (insert, get, remove, split, merge, compact) with extensive tests
 - **Key Types/Functions**:
   - `BTree::new(root_page_id, page_manager, node_manager)`: Open existing tree
   - `insert(&key, &value)`, `get(&key) -> Option<Vec<u8>>`, `remove(&key) -> bool`
   - `cursor() -> BTreeCursor`: Iterator support
   - `compact(fill_threshold) -> Result<CompactionStats>`: Reclaim dead space
-- **Insights**: Custom implementation (not using existing crate). Supports variable-length keys/values. Compaction merges underfull leaves.
+- **Insights**: Custom implementation (not using existing crate). Supports variable-length keys/values. Compaction merges underfull leaves. Bulk of line count is comprehensive inline tests.
 
-#### `btree/node.rs` (~800 lines)
+#### `btree/node.rs` (898 lines)
 
 - **Purpose**: B+ tree node representation (internal and leaf nodes)
 - **Key Types/Functions**:
@@ -183,7 +188,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `merge_leaves()`: Merge adjacent leaves during compaction
 - **Insights**: Leaf nodes form doubly-linked list for range scans. Split logic is complex but well-tested.
 
-#### `btree/split.rs`
+#### `btree/split.rs` (598 lines)
 
 - **Purpose**: Node splitting logic separated from main btree module
 - **Key Types/Functions**:
@@ -191,7 +196,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `promote_key()`: Promote separator key to parent internal node
 - **Insights**: Clean separation of concerns. Split logic is complex enough to warrant dedicated file.
 
-#### `btree/cursor.rs`
+#### `btree/cursor.rs` (340 lines)
 
 - **Purpose**: Iterator over B+ tree (forward scan, range queries)
 - **Key Types/Functions**:
@@ -200,16 +205,16 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `advance()`: Move to next leaf via linked list or parent backtracking
 - **Insights**: Supports range queries with start_key bound. Fixed critical bug in `advance()` for multi-leaf traversal (resume-key pattern).
 
-#### `page/mod.rs` (~400 lines)
+#### `page/mod.rs` (219 lines)
 
-- **Purpose**: Page abstraction (4KB blocks), page cache, allocator
+- **Purpose**: Page abstraction (configurable-size blocks), page header types
 - **Key Types/Functions**:
-  - `Page`: 4096-byte buffer with header (page_id, page_type, checksum)
+  - `Page`: Fixed-size buffer with header (page_id, page_type, checksum)
   - `PageManager`: Owns backend, cache, allocator
   - `read_page()`, `write_page()`, `allocate_page()`, `free_page()`
-- **Insights**: Fixed-size pages simplify memory management. CRC32 checksums detect corruption.
+- **Insights**: Fixed-size pages simplify memory management. XXH3-64 checksums detect corruption. Actual cache and allocator live in sub-files.
 
-#### `page/cache.rs`
+#### `page/cache.rs` (427 lines)
 
 - **Purpose**: LRU page cache (reduces disk I/O)
 - **Key Types/Functions**:
@@ -218,7 +223,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `insert(page_id, page)`: Add to cache, evict LRU if full
 - **Insights**: `Arc<Page>` enables safe sharing across threads. LRU eviction policy is simple and effective.
 
-#### `page/allocator.rs`
+#### `page/allocator.rs` (182 lines)
 
 - **Purpose**: Free page tracking (bitmap-based)
 - **Key Types/Functions**:
@@ -245,16 +250,25 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `verify_checksum(page: &Page) -> bool`: Compare stored vs. computed
 - **Insights**: Detects silent data corruption. Checksums stored in page header.
 
-#### `db.rs` (~600 lines)
+#### `db.rs` (2797 lines)
 
-- **Purpose**: Database layer with ACID transactions, multiple B+ trees (tables)
+- **Purpose**: Database layer with ACID transactions, multiple B+ trees (tables), and comprehensive tests
 - **Key Types/Functions**:
   - `Database::open(backend, config) -> Result<Self>`: Open database
   - `begin_read() -> ReadTransaction`, `begin_write() -> WriteTransaction`
   - `open_table<T: Table>() -> Result<()>`: Initialize table (allocate root page)
-- **Insights**: Multiple tables share same PageManager. Dual-slot commit protocol (commit bit + sync) ensures atomicity.
+- **Insights**: Multiple tables share same PageManager. Dual-slot commit protocol (commit bit + sync) ensures atomicity. Large file primarily due to extensive inline test coverage.
 
-#### `transaction.rs` (~500 lines)
+#### `error.rs` (312 lines)
+
+- **Purpose**: Storage engine error types with snafu
+- **Key Types/Functions**:
+  - `Error`: Store error enum with IO, corruption, capacity, and internal variants
+  - `Result<T>`: Type alias for `std::result::Result<T, Error>`
+  - `PageId`, `PageType`: Type aliases re-exported from here
+- **Insights**: Structured error types with snafu context selectors. Provides the foundational error type for all store operations.
+
+#### `transaction.rs` (342 lines)
 
 - **Purpose**: Read and write transactions with cursor-based iteration
 - **Key Types/Functions**:
@@ -304,53 +318,57 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Files
 
-#### `lib.rs`
+#### `lib.rs` (51 lines)
 
 - **Purpose**: Re-exports public API (StateLayer, Entity/Relationship stores, ShardManager)
 - **Key Types/Functions**:
   - Modules: `block_archive`, `bucket`, `engine`, `entity`, `indexes`, `keys`, `relationship`, `shard`, `snapshot`, `state`, `tiered_storage`, `time_travel`, `system`
-- **Insights**: Rich feature set: snapshots, time travel, tiered storage, multi-shard. Production-ready.
+- **Insights**: Rich feature set: snapshots, time travel, tiered storage, multi-shard, saga-based cross-shard transactions. Total crate: 9,442 lines.
 
-#### `engine.rs`
+#### `engine.rs` (118 lines)
 
 - **Purpose**: StorageEngine wrapper around store::Database with transaction helpers
 - **Key Types/Functions**:
-  - `StorageEngine::open(backend, config) -> Result<Self>`
-  - `begin_read()`, `begin_write()`: Transaction wrappers
-  - `with_read_tx<F>(&self, f: F)`, `with_write_tx<F>(&self, f: F)`: Closure-based helpers
-- **Insights**: Thin wrapper adds ergonomics. Closure pattern ensures transactions are committed/rolled back.
+  - `StorageEngine` (file backend) and `InMemoryStorageEngine` (in-memory backend) — thin wrappers around `Database`
+  - `open(path) -> Result<Self>`: Constructor (file-backed) or `open() -> Result<Self>` (in-memory)
+  - `db() -> Arc<Database<B>>`: Returns raw database handle for transaction access
+- **Insights**: Thin wrapper provides backend-specific construction. Transactions are on the `Database` itself (not on the engine wrapper).
 
-#### `state.rs` (~800 lines)
+#### `state.rs` (1,604 lines)
 
 - **Purpose**: StateLayer applies blocks, computes state roots using bucket-based incremental hashing
 - **Key Types/Functions**:
-  - `StateLayer::new(engine) -> Self`: Initialize with 256 buckets
-  - `apply_block(block: &Block) -> Result<Sha256Hash>`: Apply operations, compute state root
-  - `get_state_root() -> Result<Sha256Hash>`: Current state root (SHA-256 of 256 bucket roots)
-  - `verify_state_root(expected: &Sha256Hash) -> Result<bool>`: Integrity check
-- **Insights**: Bucket hashing enables incremental updates (only recompute dirty buckets). State root is deterministic and verifiable.
+  - `StateLayer::new(db) -> Self`: Initialize with 256-bucket vault commitment system
+  - `apply_operations(vault_id, operations, block_height) -> Result<Hash>`: Apply operations and compute new state root
+  - `compute_state_root(vault_id) -> Result<Hash>`: Current state root (SHA-256 of 256 bucket roots)
+  - `get_entity()`, `relationship_exists()`, `list_entities()`, `list_relationships()`: Read queries
+  - `clear_vault()`, `compact_tables()`, `list_subjects()`, `list_resources_for_subject()`: Management operations
+- **Insights**: Bucket hashing enables incremental updates (only recompute dirty buckets). State root is deterministic and verifiable. 1 proptest validates determinism across independent instances.
 
-#### `entity.rs`
+#### `entity.rs` (625 lines)
 
 - **Purpose**: Entity CRUD operations (zero-sized type with static methods)
 - **Key Types/Functions**:
-  - `Entity::create(tx, namespace, vault, key, value, ttl)`: Insert entity
-  - `Entity::read(tx, namespace, vault, key) -> Option<Entity>`: Retrieve entity
-  - `Entity::delete(tx, namespace, vault, key) -> bool`: Remove entity
-  - `Entity::list(tx, namespace, vault) -> Vec<Entity>`: All entities in vault
-- **Insights**: Zero-sized type avoids unnecessary allocations. Static methods are ergonomic.
+  - `EntityStore` — zero-sized struct with static methods (generic over `StorageBackend`)
+  - `get(tx, vault_id, key) -> Option<Entity>`: Retrieve entity
+  - `set(tx, vault_id, key, value, ...)`: Insert/update entity
+  - `delete(tx, vault_id, key) -> bool`: Remove entity
+  - `exists()`, `list_in_vault()`, `list_in_bucket()`, `count_in_vault()`, `scan_prefix()`: Query methods
+- **Insights**: Zero-sized type avoids unnecessary allocations. Static methods generic over backend enable reuse across file and in-memory stores.
 
-#### `relationship.rs`
+#### `relationship.rs` (511 lines)
 
 - **Purpose**: Relationship CRUD operations with dual indexing (object and subject)
 - **Key Types/Functions**:
-  - `Relationship::create(tx, namespace, vault, resource, relation, subject)`: Insert relationship
-  - `Relationship::check(tx, namespace, vault, resource, relation, subject) -> bool`: Permission check
-  - `Relationship::delete(tx, namespace, vault, resource, relation, subject) -> bool`: Remove relationship
-  - `Relationship::list_by_resource()`, `Relationship::list_by_subject()`: Index queries
-- **Insights**: Dual indexing enables efficient queries in both directions (who can access X? what can Y access?). Critical for authorization.
+  - `RelationshipStore` — zero-sized struct with static methods (generic over `StorageBackend`)
+  - `create(tx, vault_id, resource, relation, subject)`: Insert relationship
+  - `exists(tx, vault_id, resource, relation, subject) -> bool`: Permission check
+  - `delete(tx, vault_id, resource, relation, subject) -> bool`: Remove relationship
+  - `list_for_resource(tx, vault_id, resource)`: List relationships for a resource
+  - `list_in_vault()`, `count_in_vault()`, `get()`: Additional query methods
+- **Insights**: Dual indexing (object + subject) via `IndexManager` enables efficient queries in both directions (who can access X? what can Y access?). Critical for authorization.
 
-#### `keys.rs`
+#### `keys.rs` (165 lines)
 
 - **Purpose**: Key encoding for storage layer (namespace, vault, bucket, local key)
 - **Key Types/Functions**:
@@ -359,7 +377,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `parse_entity_key(&[u8]) -> (NamespaceId, VaultId, u8, Vec<u8>)`: Decode
 - **Insights**: Fixed-size prefix (8-byte vault_id + 1-byte bucket_id) enables range scans. Big-endian for lexicographic ordering.
 
-#### `indexes.rs`
+#### `indexes.rs` (379 lines)
 
 - **Purpose**: Dual object/subject indexes for relationships
 - **Key Types/Functions**:
@@ -368,7 +386,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `list_by_object()`, `list_by_subject()`: Query indexes
 - **Insights**: Index keys include all tuple components to support efficient lookups. Consistent with relationship key encoding.
 
-#### `bucket.rs`
+#### `bucket.rs` (284 lines)
 
 - **Purpose**: VaultCommitment with 256 buckets, dirty tracking, incremental state root computation
 - **Key Types/Functions**:
@@ -378,7 +396,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `commit()`: Flush dirty buckets to storage
 - **Insights**: Incremental hashing is critical for performance. Dirty tracking prevents redundant computation.
 
-#### `block_archive.rs`
+#### `block_archive.rs` (828 lines)
 
 - **Purpose**: Persistent block storage with optional compaction
 - **Key Types/Functions**:
@@ -388,7 +406,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `compact_blocks(retention_policy: &BlockRetentionPolicy) -> Result<()>`: Remove old blocks
 - **Insights**: Blocks stored by height. Compaction policy configurable (retain last N blocks or time-based). Supports audit requirements.
 
-#### `shard.rs`
+#### `shard.rs` (622 lines)
 
 - **Purpose**: ShardManager coordinates multiple vaults within a shard
 - **Key Types/Functions**:
@@ -398,27 +416,29 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `list_vaults(namespace_id) -> Result<Vec<Vault>>`
 - **Insights**: Shard = collection of namespaces sharing a Raft group. ShardManager is coordination layer above StateLayer.
 
-#### `snapshot.rs` (~600 lines)
+#### `snapshot.rs` (787 lines)
 
 - **Purpose**: Point-in-time snapshots with zstd compression, chain verification
 - **Key Types/Functions**:
-  - `Snapshot::create(state_layer, height, metadata) -> Result<Self>`: Capture snapshot
-  - `Snapshot::restore(engine, snapshot_data) -> Result<()>`: Restore from snapshot
-  - `Snapshot::verify_chain(snapshots: &[Snapshot]) -> Result<bool>`: Verify snapshot chain integrity
-  - Compression: zstd level 3 (balanced speed/ratio)
-- **Insights**: Snapshots include state root for verification. Chain verification ensures no tampering. Critical for backup/restore.
+  - `VaultSnapshotMeta`: Per-vault metadata within a snapshot (bucket_roots, entities, entity_count)
+  - `Snapshot`: Point-in-time snapshot with shard_height, vault metadata, and optional bucket roots
+  - `write_to_file(path) -> Result<()>`, `read_from_file(path) -> Result<Self>`: Serialization with zstd compression
+  - `SnapshotManager`: Manages snapshot directory with rotation (`save()`, `load()`, `load_latest()`, `list_snapshots()`, `find_snapshot_at_or_before()`)
+- **Insights**: Snapshots include state root for verification. `SnapshotManager` handles rotation (configurable max_snapshots). Critical for backup/restore and Raft snapshot transfer.
 
-#### `tiered_storage.rs` (~400 lines)
+#### `tiered_storage.rs` (1,012 lines)
 
 - **Purpose**: Hot/warm/cold storage tiers with S3/GCS/Azure backend support
 - **Key Types/Functions**:
-  - `TieredStorage::new(config) -> Self`
-  - `promote_to_hot()`, `demote_to_warm()`, `archive_to_cold()`: Tier transitions
-  - `TierPolicy`: Age-based or access-based promotion/demotion
-  - Backend implementations: `S3Backend`, `GcsBackend`, `AzureBackend`
-- **Insights**: Cost optimization for large deployments. Hot = local SSD, warm = local HDD, cold = object storage. Transparent to application.
+  - `StorageTier` enum: Hot, Warm, Cold
+  - `StorageBackend` trait: `store()`, `load()`, `exists()`, `list()`, `delete()` — unified interface for all tiers
+  - `LocalBackend`: File-system snapshot storage with rotation
+  - `ObjectStorageBackend`: Generic object storage (S3/GCS/Azure via URL-based configuration)
+  - `TieredSnapshotManager`: Orchestrates snapshot storage across tiers (`store()`, `load()`, `promote()`, `demote()`)
+  - `TieredConfig`: Tier thresholds and retention settings
+- **Insights**: `ObjectStorageBackend` is a single generic implementation (not separate S3/GCS/Azure backends) — URL scheme determines provider. Cost optimization for large deployments.
 
-#### `time_travel.rs` (~300 lines)
+#### `time_travel.rs` (561 lines)
 
 - **Purpose**: Historical versioning with inverted height keys for efficient latest-version queries
 - **Key Types/Functions**:
@@ -428,14 +448,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Key encoding: `entity_key + (u64::MAX - height)` for reverse chronological ordering
 - **Insights**: Inverted height encoding enables latest-version queries via prefix scan. No secondary index needed. Clever optimization.
 
-#### `system/mod.rs`
+#### `system/mod.rs` (28 lines)
 
-- **Purpose**: \_system namespace for cluster metadata, sagas, service discovery
+- **Purpose**: `_system` namespace for cluster metadata, sagas, service discovery
 - **Key Types/Functions**:
   - Submodules: `cluster`, `keys`, `saga`, `service`, `types`
-- **Insights**: System namespace stores metadata (cluster config, node registry, distributed transactions). Separate from user data.
+- **Insights**: System namespace stores metadata (cluster config, node registry, distributed transactions). Total system/ directory: 1,895 lines.
 
-#### `system/cluster.rs`
+#### `system/cluster.rs` (370 lines)
 
 - **Purpose**: Cluster metadata (nodes, shards, rebalancing)
 - **Key Types/Functions**:
@@ -444,7 +464,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `ShardAssignment`: Namespace → shard mapping
 - **Insights**: Supports dynamic shard assignment. Enables horizontal scaling.
 
-#### `system/saga.rs`
+#### `system/saga.rs` (589 lines)
 
 - **Purpose**: Distributed transaction orchestration (saga pattern)
 - **Key Types/Functions**:
@@ -453,13 +473,23 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `SagaExecutor`: Orchestrates execution, handles failures
 - **Insights**: Saga pattern for cross-shard transactions. Compensating actions ensure eventual consistency.
 
-#### `system/service.rs`
+#### `system/service.rs` (452 lines)
 
 - **Purpose**: Service discovery (node registry, health checks)
 - **Key Types/Functions**:
   - `ServiceRegistry`: Node registration, heartbeats
   - `register_node()`, `unregister_node()`, `get_healthy_nodes()`
 - **Insights**: Enables dynamic cluster membership. Health checks detect failed nodes.
+
+#### `system/keys.rs` (233 lines)
+
+- **Purpose**: Key encoding for system namespace entries
+- **Insights**: Dedicated key scheme for system metadata separate from user data keys.
+
+#### `system/types.rs` (223 lines)
+
+- **Purpose**: Type definitions for system namespace (cluster membership, saga state, service records)
+- **Insights**: Decoupled from user-facing types to maintain clean separation.
 
 ---
 
@@ -475,27 +505,27 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Dual-mode proto compilation (dev codegen vs pre-generated for crates.io)
 - **Key Types/Functions**:
-  - Checks `INFERADB_CODEGEN` env var
-  - Dev mode: runs `tonic_build::configure()` to generate code
-  - Release mode: expects pre-generated code in `src/generated/`
+  - Checks if `proto/ledger/v1/ledger.proto` file exists on disk
+  - Dev mode (proto exists): runs `tonic_prost_build::configure()` to generate code
+  - Published mode (proto missing): sets `cfg(use_pregenerated_proto)` to include `src/generated/`
 - **Insights**: Enables publishing to crates.io without requiring protoc. Risk: pre-generated code can drift from .proto files if not updated.
 
 #### `lib.rs`
 
 - **Purpose**: Conditional include of generated code
 - **Key Types/Functions**:
-  - `#[cfg(feature = "codegen")]`: Include generated code
+  - `#[cfg(use_pregenerated_proto)]`: Include pre-generated code when proto files unavailable
   - Re-exports: `ledger.v1` module with all message types
-- **Insights**: Feature flag controls compilation mode.
+- **Insights**: Custom cfg flag (not a feature flag) set by build.rs controls compilation mode.
 
-#### `convert.rs` (1200 lines)
+#### `convert.rs` (1114 lines)
 
 - **Purpose**: From/TryFrom trait implementations for domain↔proto conversions
 - **Key Types/Functions**:
   - `impl From<types::Entity> for proto::Entity`: Infallible domain→proto
   - `impl TryFrom<proto::Entity> for types::Entity`: Fallible proto→domain (validation)
   - Covers all domain types: Block, Transaction, Operation, Entity, Relationship, etc.
-  - 42 unit tests + 4 proptests validating round-trip conversions
+  - 43 unit tests + 4 proptests validating round-trip conversions
 - **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Comprehensive test coverage prevents serialization bugs.
 
 #### `generated/ledger.v1.rs` (6914 lines)
@@ -504,7 +534,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, etc.
   - Service traits: ReadService, WriteService, AdminService, HealthService, DiscoveryService, RaftService
-  - 100+ message types, 50+ RPC methods
+  - 258 struct/enum types, 159 functions
 - **Insights**: Large generated file. Regular updates needed when .proto changes. Consider splitting .proto into smaller files if this grows further.
 
 ---
@@ -519,24 +549,31 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `lib.rs`
 
-- **Purpose**: Public API surface (restricted to 3 modules post-hygiene: services, types, metrics)
+- **Purpose**: Public API surface (2 stable modules: `metrics`, `trace_context`; remaining modules are `#[doc(hidden)]`)
 - **Key Types/Functions**:
-  - Re-exports: `LedgerServer`, `LedgerTypeConfig`, `LedgerNodeId`, `LedgerRequest`
-  - Private modules: Most implementation details hidden (batching, rate_limit, idempotency, etc.)
-- **Insights**: Phase 2 Task 2 cleaned up public API. ~50 re-exports removed. Excellent encapsulation.
+  - Re-exports: `LedgerServer`, `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, etc.
+  - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`)
+  - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure
+- **Insights**: Phase 2 Task 2 cleaned up public API. 2 stable modules + many doc-hidden modules. Excellent encapsulation.
 
-#### `log_storage.rs` (~5000 lines)
+#### `log_storage/` (6135 lines across 6 submodules)
 
 - **Purpose**: openraft LogStore and StateMachine implementation, log storage, snapshot building
+- **Structure**:
+  - `log_storage/mod.rs` (4061 lines) — Metadata constants, `ShardChainState`, re-exports, test suite
+  - `log_storage/types.rs` (276 lines) — `AppliedState`, `CombinedSnapshot`, `NamespaceMeta`, `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`
+  - `log_storage/accessor.rs` (165 lines) — `AppliedStateAccessor` (15 pub query methods for reading applied state)
+  - `log_storage/store.rs` (250 lines) — `RaftLogStore` struct definition, creation/config/accessor methods
+  - `log_storage/operations.rs` (737 lines) — `apply_request()` state machine dispatch logic
+  - `log_storage/raft_impl.rs` (646 lines) — `RaftLogReader`, `RaftSnapshotBuilder`, `RaftStorage` trait impls, error conversion helpers
 - **Key Types/Functions**:
-  - `RaftLogStore`: Implements openraft's `RaftLogStorage` trait
-  - `AppliedState`: StateMachine with apply_request dispatch to StateLayer
-  - `append_to_log()`, `get_log_entry()`, `purge_logs_upto()`: Log operations
-  - `build_snapshot()`: Captures state snapshot at current height
-  - 14 operation handlers: create/read/update/delete for entities, relationships, vaults, namespaces
-- **Insights**: ⚠️ **CONCERN**: 5000 lines is too large. Should split into submodules (`log_ops.rs`, `state_machine.rs`, `snapshot.rs`). Excellent feature coverage but difficult to navigate.
+  - `RaftLogStore`: Implements openraft's `RaftStorage` trait (combined log + state machine)
+  - `AppliedState`: State machine with vault heights, namespaces, sequences
+  - `apply_request()`: Dispatches to operation handlers for entities, relationships, vaults, namespaces
+  - `AppliedStateAccessor`: Shared read accessor (passed to services without direct Raft storage access)
+- **Insights**: Successfully split from monolithic file into directory module. Fields use `pub(super)` for cross-submodule access within the same effective boundary.
 
-#### `server.rs` (~800 lines)
+#### `server.rs` (330 lines)
 
 - **Purpose**: LedgerServer builder with all gRPC services and Raft integration
 - **Key Types/Functions**:
@@ -556,39 +593,42 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `LedgerResponse`: Operation results (success/error)
 - **Insights**: Type-safe Raft integration. LedgerRequest is the state machine input type.
 
-#### `error.rs` (~400 lines)
+#### `error.rs` (606 lines)
 
-- **Purpose**: ServiceError with gRPC status code mapping, ErrorDetails enrichment
+- **Purpose**: ServiceError, RecoveryError, SagaError with gRPC status code mapping, ErrorDetails enrichment
 - **Key Types/Functions**:
-  - `ServiceError`: snafu error with 15 variants (Storage, Raft, RateLimited, Timeout, etc.)
+  - `ServiceError`: snafu error with 10 variants (Storage, Raft, RateLimited, Timeout, Snapshot, etc.)
+  - `RecoveryError`: 8 variants for auto-recovery failures
+  - `SagaError`: 7 variants for distributed transaction failures
+  - `OrphanCleanupError`: 2 variants for resource leak cleanup
   - `classify_raft_error(msg: &str) -> Code`: Maps Raft error messages to gRPC codes
   - `is_leadership_error(msg: &str) -> bool`: Detects leadership errors for UNAVAILABLE
-  - PRD Task 3: Leadership→UNAVAILABLE, snapshot→FAILED_PRECONDITION
-- **Insights**: Excellent error classification. Clients can retry UNAVAILABLE (leadership change), not FAILED_PRECONDITION.
+- **Insights**: Comprehensive error classification across multiple domains. Clients can retry UNAVAILABLE (leadership change), not FAILED_PRECONDITION.
 
 ### Service Layer (14 files)
 
-#### `services/admin.rs` (~800 lines)
+#### `services/admin.rs` (2876 lines)
 
-- **Purpose**: AdminService gRPC implementation (namespace/vault/shard management)
+- **Purpose**: AdminService gRPC implementation (namespace/vault/shard management, runtime config, backup/restore)
 - **Key Types/Functions**:
   - `create_namespace()`, `delete_namespace()`, `list_namespaces()`
   - `create_vault()`, `delete_vault()`, `list_vaults()`
-  - `update_shard_config()`, `rebalance_shards()`
+  - `update_config()`, `get_config()`: Runtime reconfiguration RPCs
+  - `create_backup()`, `list_backups()`, `restore_backup()`: Backup/restore RPCs
   - Audit logging for all mutations
-- **Insights**: Admin operations require elevated privileges. Audit logging for compliance.
+- **Insights**: Largest service file — includes admin CRUD, runtime config, backup management, and comprehensive tests. Audit logging for compliance.
 
-#### `services/write.rs` (~600 lines)
+#### `services/write.rs` (1503 lines)
 
 - **Purpose**: WriteService gRPC implementation (entity/relationship mutations)
 - **Key Types/Functions**:
   - `write()`, `batch_write()`: Entity/relationship mutations
   - `create_relationship()`, `delete_relationship()`: Authorization tuple mutations
-  - Rate limiting, hot key detection, validation
+  - Rate limiting, hot key detection, validation, quota enforcement
   - Error classification via `classify_batch_error()`
-- **Insights**: Core data path. Rate limiting + hot key detection protect cluster. Batch writes go through BatchWriter.
+- **Insights**: Core data path. Rate limiting + hot key detection protect cluster. Batch writes go through BatchWriter. Includes extensive inline tests.
 
-#### `services/read.rs` (~500 lines)
+#### `services/read.rs` (1535 lines)
 
 - **Purpose**: ReadService gRPC implementation (entity/relationship queries)
 - **Key Types/Functions**:
@@ -596,9 +636,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `check_permission()`: Authorization check (relationship query)
   - `list_relationships_by_resource()`, `list_relationships_by_subject()`: Index queries
   - Pagination support via PageToken
-- **Insights**: Read path with pagination. Permission checks use dual indexes for efficiency.
+- **Insights**: Read path with pagination. Permission checks use dual indexes for efficiency. Includes comprehensive inline tests.
 
-#### `services/health.rs` (~300 lines)
+#### `services/health.rs` (237 lines)
 
 - **Purpose**: HealthService with readiness/liveness/startup probes
 - **Key Types/Functions**:
@@ -607,7 +647,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - DependencyHealthChecker: disk writability, Raft lag, peer reachability
 - **Insights**: Three-probe pattern for Kubernetes. Readiness gates traffic, liveness triggers restart, startup delays initial traffic.
 
-#### `services/helpers.rs` (~300 lines)
+#### `services/helpers.rs` (518 lines)
 
 - **Purpose**: Shared service utilities (rate limiting, validation, metadata extraction)
 - **Key Types/Functions**:
@@ -616,7 +656,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `extract_namespace_from_request()`: Common metadata extraction
 - **Insights**: Phase 2 Task 1 extracted shared code from write/multi-shard/admin services. Reduces duplication.
 
-#### `services/metadata.rs` (~200 lines)
+#### `services/metadata.rs` (219 lines)
 
 - **Purpose**: Request/response metadata helpers (correlation IDs, tracing)
 - **Key Types/Functions**:
@@ -645,6 +685,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
 - `metrics.rs`: Prometheus metrics with SLI histograms
+- `otel.rs` (580 lines): OpenTelemetry tracing setup and OTLP exporter configuration
 
 #### Enterprise Features
 
@@ -702,9 +743,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `tracing`, `builders`, `server`, `idempotency`, `mock`
 - **Insights**: Comprehensive SDK. All features needed for production use.
 
-#### `client.rs` (~1000 lines)
+#### `client.rs` (6516 lines)
 
-- **Purpose**: LedgerClient with 16+ methods, retry, cancellation, metrics
+- **Purpose**: LedgerClient with 36 public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
   - `LedgerClient::new(config) -> Result<Self>`: Create client
   - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation)
@@ -714,7 +755,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `with_metrics()` wrapper for user-perceived latency
 - **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency.
 
-#### `config.rs` (~400 lines)
+#### `config.rs` (1157 lines)
 
 - **Purpose**: ClientConfig with fallible builder, TLS support
 - **Key Types/Functions**:
@@ -724,7 +765,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Validation: at least one endpoint, valid TLS config
 - **Insights**: Fallible builder validates constraints. TLS support for secure communication. Precedent for other configs.
 
-#### `connection.rs` (~600 lines)
+#### `connection.rs` (623 lines)
 
 - **Purpose**: ConnectionPool with circuit breaker integration
 - **Key Types/Functions**:
@@ -734,9 +775,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - ServerSelector syncs with circuit breaker (open→mark_unhealthy, close→mark_healthy)
 - **Insights**: Circuit breaker prevents cascade failures. Pool handles connection lifecycle. Sync with ServerSelector for consistent routing.
 
-#### `error.rs` (~500 lines)
+#### `error.rs` (1204 lines)
 
-- **Purpose**: SdkError with rich context and ServerErrorDetails decoding
+- **Purpose**: SdkError with rich context, ServerErrorDetails decoding, and comprehensive tests
 - **Key Types/Functions**:
   - `SdkError`: 10 variants (Connection, Rpc, RateLimited, Timeout, Cancelled, CircuitOpen, etc.)
   - `ServerErrorDetails`: Decoded from proto ErrorDetails (error_code, retryable, retry_after, context, action)
@@ -744,7 +785,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `attempt_history: Vec<(u32, String)>`: Retry tracking (PRD Task 2)
 - **Insights**: Rich error context for debugging. ServerErrorDetails decode via prost. RateLimited variant with retry_after guidance.
 
-#### `retry.rs` (~400 lines)
+#### `retry.rs` (924 lines)
 
 - **Purpose**: with_retry_cancellable (manual retry loop with tokio::select!)
 - **Key Types/Functions**:
@@ -755,7 +796,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Metrics: retries, circuit state
 - **Insights**: Replaced backon for cancellation support. Manual loop is more flexible. Circuit breaker integration prevents hammering open circuits.
 
-#### `circuit_breaker.rs` (~500 lines)
+#### `circuit_breaker.rs` (668 lines)
 
 - **Purpose**: Per-endpoint circuit breaker state machine (PRD Task 5)
 - **Key Types/Functions**:
@@ -766,7 +807,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `CircuitBreakerConfig`: failure_threshold, success_threshold, timeout
 - **Insights**: State machine prevents cascade failures. Open state rejects fast. HalfOpen tests recovery. Syncs with ServerSelector.
 
-#### `discovery.rs` (~300 lines)
+#### `discovery.rs` (643 lines)
 
 - **Purpose**: Background endpoint refresh (dynamic service discovery)
 - **Key Types/Functions**:
@@ -775,7 +816,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Configurable interval (default 30s)
 - **Insights**: Enables dynamic cluster membership. Clients discover new nodes without restart.
 
-#### `metrics.rs` (~300 lines)
+#### `metrics.rs` (351 lines)
 
 - **Purpose**: SdkMetrics trait with noop and metrics-crate implementations (PRD Task 6)
 - **Key Types/Functions**:
@@ -785,7 +826,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Prefix: `ledger_sdk_` for all metrics
 - **Insights**: Dynamic dispatch (Arc<dyn SdkMetrics>) avoids type param infection. Noop default ensures zero overhead when disabled.
 
-#### `streaming.rs` (~400 lines)
+#### `streaming.rs` (568 lines)
 
 - **Purpose**: WatchBlocksStream with auto-reconnection
 - **Key Types/Functions**:
@@ -795,7 +836,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Backoff on errors
 - **Insights**: Streaming API for real-time block updates. Auto-reconnection for resilience. Used for event sourcing.
 
-#### `tracing.rs` (~300 lines)
+#### `tracing.rs` (299 lines)
 
 - **Purpose**: W3C Trace Context propagation, API version header injection
 - **Key Types/Functions**:
@@ -808,9 +849,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Type-safe request builders for read, write, relationship operations
 - **Key Types/Functions**:
-  - `ReadRequestBuilder`, `WriteRequestBuilder`, `CreateRelationshipBuilder`
+  - `BatchReadBuilder`: Batch read with typestate pattern (`NoKeys` → keys added)
+  - `WriteBuilder`: Write operations with typestate pattern (`NoOps` → ops added)
+  - `RelationshipQueryBuilder`: Relationship queries
   - Fluent APIs with validation
-- **Insights**: Type-safe builders prevent invalid requests. bon-based.
+- **Insights**: Type-safe builders prevent invalid requests. Typestate pattern enforces required fields at compile time.
 
 #### `server/` (3 files)
 
@@ -829,13 +872,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `next_sequence() -> u64`: Monotonic sequence
 - **Insights**: Client-side sequence numbers. Server deduplicates via IdempotencyCache.
 
-#### `mock.rs` (~400 lines)
+#### `mock.rs` (2452 lines)
 
 - **Purpose**: MockLedgerClient for testing
 - **Key Types/Functions**:
   - `MockLedgerClient`: In-memory mock with HashMap storage
   - All LedgerClient methods implemented (no network)
-- **Insights**: Enables unit testing without server. In-memory state for fast tests.
+- **Insights**: Enables unit testing without server. In-memory state for fast tests. Large due to comprehensive mock implementations and inline tests.
 
 ---
 
@@ -847,7 +890,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Files
 
-#### `main.rs` (~300 lines)
+#### `main.rs` (254 lines)
 
 - **Purpose**: CLI with clap, config loading, server startup
 - **Key Types/Functions**:
@@ -856,19 +899,19 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Subcommands: `start`, `export-schema`, `config-diff` (Phase 2 Task 14)
 - **Insights**: Clean CLI. Supports TOML config file + env var overrides. Subcommands for schema export and config diff.
 
-#### `bootstrap.rs` (~800 lines)
+#### `bootstrap.rs` (633 lines)
 
 - **Purpose**: Node bootstrap, lifecycle management, background job spawning
 - **Key Types/Functions**:
   - `bootstrap_node(config) -> Result<BootstrappedNode>`: Initialize node
-  - `BootstrappedNode`: Handle to running node (server, Raft, background jobs)
-  - Background jobs: auto_recovery, block_compaction, btree_compaction, ttl_gc, integrity_scrubber, learner_refresh, orphan_cleanup, peer_maintenance, discovery, hot_key_detector, resource_metrics
+  - `BootstrappedNode`: Handle to running node (server, Raft, 6 tracked background job handles)
+  - Background job handles: `gc_handle`, `compactor_handle`, `recovery_handle`, `learner_refresh_handle`, `resource_metrics_handle`, `backup_handle` (optional)
   - Graceful shutdown: 6 phases (health drain, Raft snapshot, job stop, Raft shutdown, connection drain, service stop)
-- **Insights**: Central orchestration point. Spawns all background jobs. Manages lifecycle. Graceful shutdown is complex but correct.
+- **Insights**: Central orchestration point. Spawns background jobs and holds `JoinHandle`s to keep them alive. `#[allow(dead_code)]` on handles — they're kept for Arc reference counting, not polled.
 
-#### `config.rs` (~600 lines)
+#### `config.rs` (1863 lines)
 
-- **Purpose**: ServerConfig with all subsystem configs, SIGHUP reload support
+- **Purpose**: ServerConfig with all subsystem configs, SIGHUP reload support, and comprehensive tests
 - **Key Types/Functions**:
   - `ServerConfig`: Root config (raft, storage, batch, rate_limit, validation, tls, otel, audit, etc.)
   - `load_config(path) -> Result<ServerConfig>`: Load from TOML file
@@ -876,7 +919,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Env var overrides: `INFERADB__LEDGER__<FIELD>` convention
 - **Insights**: TOML config with env var overrides. Hot-reload for runtime reconfiguration. JSON Schema export for validation.
 
-#### `coordinator.rs` (~500 lines)
+#### `coordinator.rs` (552 lines)
 
 - **Purpose**: Multi-node bootstrap coordination via Snowflake IDs
 - **Key Types/Functions**:
@@ -885,7 +928,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Snowflake ID: 64-bit (timestamp + node_id + sequence)
 - **Insights**: Snowflake IDs enable decentralized ID generation (no coordination needed). Bootstrap requires initial seed nodes.
 
-#### `discovery.rs` (~400 lines)
+#### `discovery.rs` (445 lines)
 
 - **Purpose**: Peer discovery via DNS or file
 - **Key Types/Functions**:
@@ -895,7 +938,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Background refresh (configurable interval)
 - **Insights**: Multiple discovery mechanisms (DNS for cloud, file for on-prem). Background refresh for dynamic membership.
 
-#### `node_id.rs` (~200 lines)
+#### `node_id.rs` (448 lines)
 
 - **Purpose**: Snowflake ID generator with persistence
 - **Key Types/Functions**:
@@ -904,7 +947,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Persistence: node_id stored in `{data_dir}/node_id.json`
 - **Insights**: Snowflake IDs are time-ordered and unique. Persistence ensures stable node ID across restarts.
 
-#### `shutdown.rs` (~300 lines)
+#### `shutdown.rs` (106 lines)
 
 - **Purpose**: Signal handling (Ctrl-C, SIGTERM) and graceful shutdown coordination
 - **Key Types/Functions**:
@@ -913,7 +956,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Used by `serve_with_shutdown(addr, shutdown_signal)`
 - **Insights**: watch channel for shutdown broadcast. Multiple tasks can wait on same receiver.
 
-#### `config_reload.rs` (~300 lines)
+#### `config_reload.rs` (227 lines)
 
 - **Purpose**: SIGHUP-driven runtime config hot-reload (PRD Task 10)
 - **Key Types/Functions**:
@@ -922,24 +965,32 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Audit logs config changes
 - **Insights**: SIGHUP is Unix standard for config reload. Validation prevents invalid configs. Audit logging for compliance.
 
-#### Integration Tests (15+ files)
+#### Integration Tests (18 test files + 2 helper modules, 10568 lines total)
 
-- **Purpose**: End-to-end tests covering replication, failover, multi-shard, chaos
-- **Test Coverage**:
-  - `tests/integration.rs`: Basic read/write/permission checks
-  - `tests/replication.rs`: Multi-node consensus tests
-  - `tests/failover.rs`: Leader failure and election
-  - `tests/multi_shard.rs`: Cross-shard queries and transactions
-  - `tests/chaos.rs`: Chaos engineering (network partitions, node crashes)
-  - `tests/backup_restore.rs`: Backup and restore flows
-  - `tests/time_travel.rs`: Historical versioning
-  - `tests/rate_limiting.rs`: Rate limiter behavior
-  - `tests/cancellation.rs`: Cancellation support
-  - `tests/circuit_breaker.rs`: Circuit breaker state transitions
-  - `tests/api_version.rs`: API version negotiation
-  - `tests/quota.rs`: Namespace quota enforcement
-  - And more...
-- **Insights**: Excellent test coverage. Integration tests require running cluster (expected failures in local dev). Chaos tests validate Byzantine fault tolerance.
+- **Purpose**: End-to-end tests covering replication, failover, multi-shard, chaos, and more
+- **Test Helper Modules**:
+  - `tests/common/mod.rs` (874 lines): Shared cluster setup, assertions, test harness
+  - `tests/turmoil_common/mod.rs` (197 lines): Turmoil-based network simulation helpers
+- **Test Files**:
+  - `tests/stress_test.rs` (1606 lines): Concurrent write stress testing
+  - `tests/design_compliance.rs` (984 lines): Validates implementation against DESIGN.md spec
+  - `tests/chaos_consistency.rs` (960 lines): Network partitions, node crashes, Byzantine scenarios
+  - `tests/network_simulation.rs` (785 lines): Turmoil-based network failure simulation
+  - `tests/isolation.rs` (635 lines): Namespace and vault isolation guarantees
+  - `tests/watch_blocks_realtime.rs` (584 lines): Block streaming via gRPC
+  - `tests/leader_failover.rs` (473 lines): Leader failure and re-election
+  - `tests/ttl_gc.rs` (468 lines): Time-to-live garbage collection
+  - `tests/multi_shard.rs` (452 lines): Cross-shard queries and transactions
+  - `tests/saga_orchestrator.rs` (385 lines): Distributed transaction orchestration
+  - `tests/bootstrap_coordination.rs` (376 lines): Multi-node cluster bootstrap
+  - `tests/orphan_cleanup.rs` (367 lines): Resource leak cleanup
+  - `tests/write_read.rs` (326 lines): Basic read/write/permission checks
+  - `tests/background_jobs.rs` (323 lines): Background job lifecycle
+  - `tests/backup_restore.rs` (298 lines): Backup and restore flows
+  - `tests/replication.rs` (191 lines): Multi-node consensus tests
+  - `tests/get_node_info.rs` (167 lines): Node info RPC
+  - `tests/election.rs` (117 lines): Raft election scenarios
+- **Insights**: Comprehensive end-to-end coverage. Tests require a running cluster (expected failures in local dev). Turmoil enables deterministic network simulation without real network I/O.
 
 #### Benchmarks (3 files)
 
@@ -960,58 +1011,64 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Files
 
-#### `lib.rs`
+#### `lib.rs` (172 lines)
 
-- **Purpose**: Re-exports test utilities
+- **Purpose**: Re-exports test utilities; inline integration tests for all utilities (9 `#[test]`/`#[tokio::test]` functions)
 - **Key Types/Functions**:
-  - Modules: `assertions`, `config`, `crash_injector`, `strategies`, `test_dir`
-- **Insights**: Clean separation of test utilities from production code.
+  - Modules: `test_dir`, `assertions`, `config`, `crash_injector`, `strategies` (strategies is `pub mod`, rest are private with `pub use` re-exports)
+  - Re-exports: `TestDir`, `assert_eventually`, `test_batch_config`, `test_rate_limit_config`, `TestRateLimitConfig`, `CrashInjector`, `CrashPoint`
+- **Insights**: Tests for all utilities live in lib.rs's `#[cfg(test)] mod tests` rather than in each submodule's own tests (crash_injector and strategies are exceptions with their own test modules). This is unusual but works well for a small utility crate.
 
-#### `assertions.rs`
+#### `assertions.rs` (68 lines)
 
-- **Purpose**: assert_eventually polling helper for async tests
+- **Purpose**: `assert_eventually` polling helper for async tests
 - **Key Types/Functions**:
-  - `assert_eventually<F>(f: F, timeout: Duration)`: Poll condition until true or timeout
-  - Useful for eventual consistency tests
-- **Insights**: Prevents flaky tests due to timing. Configurable timeout and polling interval.
+  - `assert_eventually<F>(timeout: Duration, condition: F) -> bool`: Poll condition every 10ms until true or timeout. Returns `bool` (not panic).
+  - `DEFAULT_POLL_INTERVAL`: 10ms constant
+- **Insights**: Returns `bool` rather than panicking — callers use `assert!(result, ...)` for custom messages. Prevents flaky tests due to timing.
 
-#### `config.rs`
+#### `config.rs` (47 lines)
 
-- **Purpose**: Test config factories (BatchConfig, RateLimitConfig, etc.)
+- **Purpose**: Test config factories for `BatchConfig` and rate limits
 - **Key Types/Functions**:
-  - `test_batch_config() -> BatchConfig`: Returns config suitable for tests (small batch size, short timeout)
-  - `TestRateLimitConfig`: Test-friendly rate limits (high limits to avoid flakes)
-- **Insights**: Test configs reduce boilerplate. Consistent configs across tests.
+  - `test_batch_config() -> BatchConfig`: Returns config for tests (max_batch_size=10, batch_timeout=10ms, coalesce_enabled=false)
+  - `TestRateLimitConfig`: bon `#[derive(bon::Builder)]` struct with `max_concurrent` (default 100) and `timeout_secs` (default 30)
+  - `test_rate_limit_config() -> TestRateLimitConfig`: Factory using builder defaults
+- **Insights**: `TestRateLimitConfig` is a local test-only struct (not the production `RateLimitConfig` from types crate) to avoid circular dependencies.
 
-#### `crash_injector.rs` (~300 lines)
+#### `crash_injector.rs` (310 lines)
 
-- **Purpose**: Deterministic crash injection for crash recovery tests (Task 3)
+- **Purpose**: Deterministic crash injection for testing dual-slot commit protocol recovery
 - **Key Types/Functions**:
-  - `CrashInjector`: AtomicU8 array tracking crash points
-  - `CrashPoint`: 5 variants (BeforeWrite, AfterWrite, BeforeCommit, AfterCommit, BeforeSync)
-  - `enable(point)`, `disable(point)`, `check(point) -> bool`: Control crash points
-  - `inject()`: Panic if crash point enabled
-- **Insights**: Deterministic crash injection (not random). Enables testing specific failure scenarios. 17 crash tests in store crate.
+  - `CrashInjector`: Thread-safe injector using `AtomicU32` for counters (`sync_count`, `header_write_count`, `page_write_count`) and `AtomicBool` for flags (`crashed`, `armed`). Wrapped in `Arc<Self>` via `new()`.
+  - `CrashPoint`: 5 variants: `BeforeFirstSync`, `AfterFirstSync`, `DuringGodByteFlip`, `AfterSecondSync`, `DuringPageWrite` — each models a specific point in the dual-slot commit sequence.
+  - `arm()` / `disarm()`: Enable/disable injection (starts disarmed for setup operations)
+  - `on_sync() -> bool`, `on_header_write() -> bool`, `on_page_write(page_threshold) -> bool`: Hook methods that return `true` when the crash should trigger. Called by storage backend during commit operations.
+  - 7 unit tests validating each crash point and arm/disarm lifecycle
+- **Insights**: Deterministic crash injection (not random) — each `CrashPoint` triggers at a precise operation count. The dual-slot commit protocol diagram in the module docs maps crash points to on-disk states. 17 crash tests in store crate exercise all 5 crash points.
 
-#### `strategies.rs` (~500 lines)
+#### `strategies.rs` (357 lines)
 
-- **Purpose**: 23 proptest strategy generators for all domain types (Task 10)
+- **Purpose**: 23 proptest strategy generators for all domain types
+- **Key Types/Functions** (all `pub fn arb_*() -> impl Strategy<Value = T>`):
+  - Primitives: `arb_key()`, `arb_value()`, `arb_small_value()`, `arb_hash()`, `arb_tx_id()`, `arb_timestamp()`
+  - IDs: `arb_namespace_id()`, `arb_vault_id()`, `arb_shard_id()`
+  - Relationship components: `arb_resource()`, `arb_relation()`, `arb_subject()`
+  - Domain types: `arb_entity()`, `arb_relationship()`, `arb_set_condition()`, `arb_operation()`, `arb_operation_sequence()`
+  - Blocks: `arb_transaction()`, `arb_block_header()`, `arb_vault_block()`, `arb_vault_entry()`, `arb_shard_block()`, `arb_chain_commitment()`
+  - 4 proptest functions validate strategy output well-formedness
+- **Insights**: Composable strategy functions (not `Arbitrary` derives) — complex types compose from simpler ones (e.g., `arb_transaction` uses `arb_tx_id`, `arb_operation_sequence`, `arb_timestamp`). 30+ proptests across 4 crates use these strategies.
+
+#### `test_dir.rs` (61 lines)
+
+- **Purpose**: `TestDir` wrapper around `tempfile::TempDir` for managed temporary directories
 - **Key Types/Functions**:
-  - `entity_strategy() -> impl Strategy<Value = Entity>`
-  - `relationship_strategy() -> impl Strategy<Value = Relationship>`
-  - `transaction_strategy() -> impl Strategy<Value = Transaction>`
-  - `block_strategy() -> impl Strategy<Value = Block>`
-  - And 19 more strategies for all types
-- **Insights**: Composable strategy functions (not Arbitrary derives). Enables property-based testing. 30+ proptests across 4 crates.
-
-#### `test_dir.rs`
-
-- **Purpose**: TestDir wrapper around tempfile for temporary directories
-- **Key Types/Functions**:
-  - `TestDir::new() -> Self`: Create temp directory
-  - `path() -> &Path`: Get path
-  - Drop impl removes directory
-- **Insights**: RAII cleanup of test directories. Prevents test pollution.
+  - `TestDir::new() -> Self`: Create temp directory (panics on failure — acceptable for test utilities)
+  - `path() -> &Path`: Get underlying path
+  - `join<P: AsRef<Path>>(path: P) -> PathBuf`: Convenience for `self.path().join(path)`
+  - `Default` impl delegates to `new()`
+  - Cleanup via `tempfile::TempDir`'s `Drop` (not a custom Drop impl)
+- **Insights**: RAII cleanup of test directories. Prevents test pollution across parallel test runs.
 
 ---
 
@@ -1041,12 +1098,12 @@ The codebase uses the `bon` crate extensively for type-safe builders:
 
 The codebase has exceptional test coverage:
 
-- **Property-based testing**: 30+ proptests across 4 crates using proptest. Strategies in test-utils enable composable generators. Nightly CI runs with 10k iterations.
+- **Property-based testing**: 26 proptest functions across 7 crates (types, proto, state, sdk, raft, store, test-utils) using proptest. 23 reusable strategy generators in test-utils. Nightly CI runs with 10k iterations via `PROPTEST_CASES` env var.
 - **Crash recovery testing**: 17 crash injection tests in store crate using `CrashInjector`. Validates durability guarantees.
 - **Chaos testing**: Integration tests cover network partitions, node crashes, Byzantine faults. 22 in-process unit tests for Byzantine scenarios.
 - **Benchmarks**: Criterion benchmarks for B+ tree, read/write operations, whitepaper validation. CI tracks regressions via benchmark.yml workflow.
-- **Integration tests**: 15+ end-to-end tests in server crate covering replication, failover, multi-shard, backup/restore, time travel, rate limiting, cancellation, circuit breaker, API version, quotas, etc.
-- **Unit tests**: 1000+ unit tests across all crates. Coverage target: 90%+.
+- **Integration tests**: 18 integration test files in server crate (10,568 lines total) covering replication, failover, multi-shard, backup/restore, time travel, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, and more.
+- **Unit tests**: 1,671 `#[test]` functions across all crates. Coverage target: 90%+.
 
 ### 4. Security Practices
 
@@ -1097,52 +1154,20 @@ The codebase includes 40+ production-ready features:
 
 The codebase has excellent documentation:
 
-- **ADRs (Architecture Decision Records)**: 3 ADRs in docs/architecture/ covering key decisions (bucket-based hashing, Snowflake IDs, saga pattern).
-- **Invariant docs**: 11 `.invariants` files documenting critical invariants (e.g., store/btree.invariants: "Leaf nodes form doubly-linked list").
+- **ADRs (Architecture Decision Records)**: 10 ADRs in `docs/adr/` covering key decisions (bucket-based-state-commitment, dual-slot-commit-protocol, embedded-btree-engine, count-min-sketch-hot-key-detection, three-tier-rate-limiting, atomic-health-state-machine, moka-tinylfu-idempotency-cache, network-trust-model, openraft-09-version-choice, server-assigned-sequences).
+- **Invariant docs**: `docs/specs/invariants.md` documents critical system invariants.
 - **Module docs**: All crates have module-level documentation with examples.
 - **rustdoc examples**: Many public functions have ` ```no_run ` examples (cargo test skips execution, cargo doc validates syntax).
-- **Operations docs**: docs/operations/ has 10+ guides (api-versioning.md, backup-restore.md, config-schema.md, graceful-shutdown.md, hot-reload.md, quota-enforcement.md, slo.md, etc.).
-- **Error codes**: docs/errors.md documents all 29 error codes with descriptions, causes, and suggested actions.
+- **Operations docs**: `docs/operations/` has 18 .md files covering alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, logging, metrics reference, multi-region, namespace metrics, production deployment tutorial, security, shard management, SLO, troubleshooting, vault repair, and a README.
+- **Client docs**: `docs/client/` has 7 guides (admin, API, discovery, errors, health, idempotency, SDK).
+- **Error codes**: `docs/errors.md` documents all 29 error codes with descriptions, causes, and suggested actions.
 
-### 8. Code Quality Concerns
+### 8. Code Quality Achievements
 
-Despite the overall high quality, there are two areas needing attention:
+Two previously identified large-file concerns have been resolved:
 
-#### **A. config.rs is too large (3534 lines)**
-
-**Location**: `types/src/config.rs`
-
-**Issue**: Single file with 18 config structs (ServerConfig, RaftConfig, StorageConfig, BatchConfig, RateLimitConfig, ValidationConfig, TlsConfig, OtelConfig, AuditConfig, CircuitBreakerConfig, HotKeyConfig, QuotaConfig, BackupConfig, HealthCheckConfig, GracefulShutdownConfig, DiscoveryConfig, ResourceMetricsConfig, RuntimeConfig).
-
-**Recommendation**: Split into submodules:
-
-- `config/mod.rs` — Re-exports + ServerConfig
-- `config/raft.rs` — RaftConfig
-- `config/storage.rs` — StorageConfig
-- `config/security.rs` — TlsConfig, ValidationConfig, AuditConfig
-- `config/observability.rs` — OtelConfig, ResourceMetricsConfig
-- `config/resilience.rs` — CircuitBreakerConfig, GracefulShutdownConfig, BackupConfig
-- `config/features.rs` — HotKeyConfig, QuotaConfig, DiscoveryConfig, RuntimeConfig
-
-**Effort**: Medium (3-4 hours). Move structs to submodules, update re-exports, verify all imports.
-
-#### **B. log_storage.rs is too large (~5000 lines)**
-
-**Location**: `raft/src/log_storage.rs`
-
-**Issue**: Single file with RaftLogStore, AppliedState, 14 operation handlers, snapshot building, log operations.
-
-**Recommendation**: Split into submodules:
-
-- `log_storage/mod.rs` — RaftLogStore + re-exports
-- `log_storage/state_machine.rs` — AppliedState + apply_request dispatcher
-- `log_storage/operations.rs` — 14 operation handlers (create_entity, delete_entity, etc.)
-- `log_storage/snapshot.rs` — build_snapshot, install_snapshot
-- `log_storage/log_ops.rs` — append_to_log, get_log_entry, purge_logs_upto
-
-**Effort**: Large (6-8 hours). Extract functions to submodules, update re-exports, verify openraft trait impls.
-
-**Impact**: Both refactorings improve maintainability and navigability without changing behavior. All tests should pass after refactoring.
+- **`types/src/config.rs` (was 3,534 lines)** → Split into `config/` directory module with 7 submodules (mod.rs, node.rs, storage.rs, raft.rs, resilience.rs, observability.rs, runtime.rs). Total 3,610 lines across files. All public APIs preserved via `pub use` re-exports.
+- **`raft/src/log_storage.rs` (was ~5,000 lines)** → Split into `log_storage/` directory module with 6 submodules (mod.rs, types.rs, accessor.rs, store.rs, operations.rs, raft_impl.rs). Total 6,135 lines. Fields use `pub(super)` for cross-submodule access. All openraft trait implementations preserved.
 
 ---
 
@@ -1150,19 +1175,14 @@ Despite the overall high quality, there are two areas needing attention:
 
 InferaDB Ledger is a **production-grade blockchain database** with exceptional engineering quality:
 
-- **8 crates**, ~50,000 lines of Rust, 1000+ tests, 90%+ coverage
+- **8 crates**, 186 Rust source files, ~114,000 lines of Rust, 1,671 test functions, 90%+ coverage
 - **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
 - **Raft consensus** via openraft, batching, idempotency, multi-shard horizontal scaling
 - **Enterprise features**: graceful shutdown, circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, time travel, tiered storage, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, audit logging, and 30+ more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, wide events, SDK-side metrics
-- **Comprehensive testing**: Property-based tests (proptest), crash recovery tests, chaos tests, integration tests, benchmarks with CI tracking
+- **Comprehensive testing**: 1,671 test functions, property-based tests (proptest), crash recovery tests, chaos tests, 18 integration test files, benchmarks with CI tracking
 - **Security practices**: No unsafe, constant-time comparison, input validation, audit logging, TLS/mTLS, rate limiting, quotas
-- **Documentation**: ADRs, invariant docs, module docs, rustdoc examples, operations guides, error code reference
-
-**Areas for improvement**:
-
-1. Split `types/src/config.rs` (3534 lines) into submodules
-2. Split `raft/src/log_storage.rs` (~5000 lines) into submodules
+- **Documentation**: 10 ADRs, invariant specs, module docs, rustdoc examples, 18 operations guides, 7 client guides, error code reference
 
 Overall assessment: **★★★★★ Exemplary codebase** ready for production deployment.
