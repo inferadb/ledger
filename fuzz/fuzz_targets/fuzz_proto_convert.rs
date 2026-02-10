@@ -9,7 +9,7 @@
 use libfuzzer_sys::fuzz_target;
 use prost::Message;
 
-use inferadb_ledger_raft::proto;
+use inferadb_ledger_proto::proto;
 
 fuzz_target!(|data: &[u8]| {
     // Vary which message type we decode based on the first byte.

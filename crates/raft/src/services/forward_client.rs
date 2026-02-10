@@ -18,21 +18,21 @@
 
 use std::time::Duration;
 
+use inferadb_ledger_proto::proto::{
+    BatchWriteRequest, BatchWriteResponse, BlockAnnouncement, GetBlockRangeRequest,
+    GetBlockRangeResponse, GetBlockRequest, GetBlockResponse, GetClientStateRequest,
+    GetClientStateResponse, GetTipRequest, GetTipResponse, HistoricalReadRequest,
+    HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse, ListRelationshipsRequest,
+    ListRelationshipsResponse, ListResourcesRequest, ListResourcesResponse, ReadRequest,
+    ReadResponse, VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest, WriteRequest,
+    WriteResponse, read_service_client::ReadServiceClient,
+    write_service_client::WriteServiceClient,
+};
 use inferadb_ledger_types::ShardId;
 use tonic::{Request, Response, Status, transport::Channel};
 use tracing::{debug, warn};
 
 use crate::{
-    proto::{
-        BatchWriteRequest, BatchWriteResponse, BlockAnnouncement, GetBlockRangeRequest,
-        GetBlockRangeResponse, GetBlockRequest, GetBlockResponse, GetClientStateRequest,
-        GetClientStateResponse, GetTipRequest, GetTipResponse, HistoricalReadRequest,
-        HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
-        ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
-        ListResourcesResponse, ReadRequest, ReadResponse, VerifiedReadRequest,
-        VerifiedReadResponse, WatchBlocksRequest, WriteRequest, WriteResponse,
-        read_service_client::ReadServiceClient, write_service_client::WriteServiceClient,
-    },
     shard_router::ShardConnection,
     trace_context::{self, TraceContext},
 };

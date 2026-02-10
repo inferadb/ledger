@@ -48,7 +48,7 @@ use std::{
     time::Duration,
 };
 
-use inferadb_ledger_raft::proto::{
+use inferadb_ledger_proto::proto::{
     self,
     admin_service_server::{AdminService, AdminServiceServer},
     health_service_server::{HealthService, HealthServiceServer},

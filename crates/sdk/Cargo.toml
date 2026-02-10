@@ -60,6 +60,7 @@ uuid = { workspace = true }
 
 # Internal crates
 inferadb-ledger-types = { workspace = true }
+inferadb-ledger-proto = { workspace = true }
 inferadb-ledger-raft = { workspace = true }
 
 [dev-dependencies]

@@ -13,6 +13,14 @@
 use std::{pin::Pin, sync::Arc, time::Instant};
 
 use futures::StreamExt;
+use inferadb_ledger_proto::proto::{
+    BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
+    GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest, GetTipResponse,
+    HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
+    ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
+    ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse, VerifiedReadRequest,
+    VerifiedReadResponse, WatchBlocksRequest, read_service_server::ReadService,
+};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{NamespaceId, VaultId};
@@ -25,15 +33,6 @@ use crate::{
     log_storage::VaultHealthStatus,
     metrics,
     multi_raft::MultiRaftManager,
-    proto::{
-        BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
-        GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest,
-        GetTipResponse, HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest,
-        ListEntitiesResponse, ListRelationshipsRequest, ListRelationshipsResponse,
-        ListResourcesRequest, ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse,
-        VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
-        read_service_server::ReadService,
-    },
     services::{
         ForwardClient,
         shard_resolver::{RemoteShardInfo, ResolveResult, ShardResolver},
@@ -357,13 +356,18 @@ impl MultiShardReadService {
                 // Compute block hash from vault entry (hash of previous_hash || state_root ||
                 // tx_merkle_root) For announcements, we use the tx_merkle_root as a
                 // representative hash
-                let block_hash = Some(crate::proto::Hash { value: entry.tx_merkle_root.to_vec() });
+                let block_hash = Some(inferadb_ledger_proto::proto::Hash {
+                    value: entry.tx_merkle_root.to_vec(),
+                });
 
-                let state_root = Some(crate::proto::Hash { value: entry.state_root.to_vec() });
+                let state_root =
+                    Some(inferadb_ledger_proto::proto::Hash { value: entry.state_root.to_vec() });
 
                 announcements.push(BlockAnnouncement {
-                    namespace_id: Some(crate::proto::NamespaceId { id: namespace_id.value() }),
-                    vault_id: Some(crate::proto::VaultId { id: vault_id.value() }),
+                    namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
+                        id: namespace_id.value(),
+                    }),
+                    vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id.value() }),
                     height,
                     block_hash,
                     state_root,
@@ -445,9 +449,9 @@ impl ReadService for MultiShardReadService {
     #[instrument(skip(self, request), fields(namespace_id, vault_id, batch_size))]
     async fn batch_read(
         &self,
-        request: Request<crate::proto::BatchReadRequest>,
-    ) -> Result<Response<crate::proto::BatchReadResponse>, Status> {
-        use crate::proto::{BatchReadResponse, BatchReadResult};
+        request: Request<inferadb_ledger_proto::proto::BatchReadRequest>,
+    ) -> Result<Response<inferadb_ledger_proto::proto::BatchReadResponse>, Status> {
+        use inferadb_ledger_proto::proto::{BatchReadResponse, BatchReadResult};
 
         let start = Instant::now();
         let req = request.into_inner();
@@ -672,7 +676,7 @@ impl ReadService for MultiShardReadService {
                     req.resource.as_ref().is_none_or(|r| resource == r)
                         && req.relation.as_ref().is_none_or(|rel| relation == rel)
                 })
-                .map(|(resource, relation)| crate::proto::Relationship {
+                .map(|(resource, relation)| inferadb_ledger_proto::proto::Relationship {
                     resource,
                     relation,
                     subject: subject.clone(),
@@ -689,7 +693,7 @@ impl ReadService for MultiShardReadService {
                 .into_iter()
                 .filter(|r| req.resource.as_ref().is_none_or(|res| r.resource == *res))
                 .filter(|r| req.relation.as_ref().is_none_or(|rel| r.relation == *rel))
-                .map(|r| crate::proto::Relationship {
+                .map(|r| inferadb_ledger_proto::proto::Relationship {
                     resource: r.resource,
                     relation: r.relation,
                     subject: r.subject,
@@ -745,11 +749,11 @@ impl ReadService for MultiShardReadService {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let entities: Vec<crate::proto::Entity> = raw_entities
+        let entities: Vec<inferadb_ledger_proto::proto::Entity> = raw_entities
             .into_iter()
             .filter(|e| req.include_expired || e.expires_at == 0 || e.expires_at > now)
             .take(limit)
-            .map(|e| crate::proto::Entity {
+            .map(|e| inferadb_ledger_proto::proto::Entity {
                 key: String::from_utf8_lossy(&e.key).to_string(),
                 value: e.value,
                 version: e.version,

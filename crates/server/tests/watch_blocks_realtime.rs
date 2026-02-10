@@ -29,7 +29,7 @@ async fn create_namespace(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
+        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
             name: name.to_string(),
             shard_id: None,
             quota: None,
@@ -49,8 +49,8 @@ async fn create_vault(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -73,14 +73,14 @@ async fn write_entity(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.to_string() }),
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: key.to_string(),
                     value: value.to_vec(),
                     condition: None,
@@ -94,8 +94,10 @@ async fn write_entity(
     let response = client.write(request).await?.into_inner();
 
     match response.result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => Ok(s.block_height),
-        Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
+            Ok(s.block_height)
+        },
+        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
             Err(format!("Write failed: {:?}", e).into())
         },
         None => Err("No result in response".into()),
@@ -125,9 +127,9 @@ async fn test_watch_blocks_subscribe_before_writes() {
 
     // Subscribe to WatchBlocks BEFORE any writes
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
-    let request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+    let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         start_height: 1,
     };
 
@@ -194,9 +196,9 @@ async fn test_watch_blocks_historical_then_realtime() {
 
     // Now subscribe with start_height=1
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
-    let request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+    let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         start_height: 1,
     };
 
@@ -267,9 +269,9 @@ async fn test_watch_blocks_multiple_subscribers() {
     let mut streams = Vec::new();
     for _ in 0..3 {
         let mut read_client = create_read_client(leader.addr).await.expect("create read client");
-        let request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+        let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
             start_height: 1,
         };
         let stream = read_client
@@ -326,9 +328,9 @@ async fn test_watch_blocks_vault_isolation() {
 
     // Subscribe only to vault A
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
-    let request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_a_id }),
+    let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_a_id }),
         start_height: 1,
     };
 
@@ -402,9 +404,9 @@ async fn test_watch_blocks_lagging_subscriber() {
 
     // Subscribe but don't consume any messages
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
-    let request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+    let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         start_height: 1,
     };
 
@@ -462,9 +464,9 @@ async fn test_watch_blocks_lagging_subscriber() {
     // (simulate reconnection by creating a new subscription)
     let reconnect_height = received_count as u64 + 1;
     let mut read_client2 = create_read_client(leader.addr).await.expect("create read client");
-    let reconnect_request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+    let reconnect_request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         start_height: reconnect_height,
     };
 
@@ -510,9 +512,9 @@ async fn test_watch_blocks_reconnection_after_restart() {
 
     // Subscribe and read historical blocks, tracking last height
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
-    let request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+    let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         start_height: 1,
     };
 
@@ -540,9 +542,9 @@ async fn test_watch_blocks_reconnection_after_restart() {
     // Here we just reconnect to the same server to verify the protocol works
 
     let mut read_client2 = create_read_client(leader.addr).await.expect("reconnect read client");
-    let reconnect_request = inferadb_ledger_raft::proto::WatchBlocksRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+    let reconnect_request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         start_height: last_height + 1, // Resume from where we left off
     };
 

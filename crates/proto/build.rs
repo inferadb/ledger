@@ -1,4 +1,4 @@
-//! Build script for inferadb-ledger-raft.
+//! Build script for inferadb-ledger-proto.
 //!
 //! Compiles protobuf definitions into Rust code using tonic-prost-build.
 //! When publishing to crates.io, proto files aren't available, so we use

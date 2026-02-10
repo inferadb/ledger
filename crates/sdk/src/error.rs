@@ -517,7 +517,7 @@ fn decode_error_details(details: &[u8]) -> Option<ServerErrorDetails> {
     if details.is_empty() {
         return None;
     }
-    use inferadb_ledger_raft::proto::ErrorDetails;
+    use inferadb_ledger_proto::proto::ErrorDetails;
     use prost::Message;
 
     let decoded = ErrorDetails::decode(details).ok()?;
@@ -1049,7 +1049,7 @@ mod tests {
         context: std::collections::HashMap<String, String>,
         suggested_action: Option<&str>,
     ) -> tonic::Status {
-        use inferadb_ledger_raft::proto::ErrorDetails;
+        use inferadb_ledger_proto::proto::ErrorDetails;
         use prost::Message;
 
         let details = ErrorDetails {
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn test_error_details_roundtrip_all_fields() {
-        use inferadb_ledger_raft::proto::ErrorDetails;
+        use inferadb_ledger_proto::proto::ErrorDetails;
         use prost::Message;
 
         // Build server-side details

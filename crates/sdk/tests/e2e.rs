@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_raft::proto::{
+use inferadb_ledger_proto::proto::{
     GetClusterInfoRequest, admin_service_client::AdminServiceClient,
 };
 use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource};

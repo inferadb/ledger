@@ -14,6 +14,18 @@
 use std::{pin::Pin, sync::Arc};
 
 use futures::StreamExt;
+use inferadb_ledger_proto::{
+    convert::vault_entry_to_proto_block,
+    proto::{
+        BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
+        GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest,
+        GetTipResponse, HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest,
+        ListEntitiesResponse, ListRelationshipsRequest, ListRelationshipsResponse,
+        ListResourcesRequest, ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse,
+        VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
+        read_service_server::ReadService,
+    },
+};
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{NamespaceId, VaultId};
@@ -28,16 +40,6 @@ use crate::{
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     metrics,
     pagination::{PageToken, PageTokenCodec},
-    proto::{
-        BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
-        GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest,
-        GetTipResponse, HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest,
-        ListEntitiesResponse, ListRelationshipsRequest, ListRelationshipsResponse,
-        ListResourcesRequest, ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse,
-        VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
-        read_service_server::ReadService,
-    },
-    proto_convert::vault_entry_to_proto_block,
     trace_context,
     types::{LedgerNodeId, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
@@ -127,7 +129,7 @@ impl ReadServiceImpl {
         namespace_id: NamespaceId,
         vault_id: VaultId,
         vault_height: u64,
-    ) -> Option<crate::proto::BlockHeader> {
+    ) -> Option<inferadb_ledger_proto::proto::BlockHeader> {
         // Height 0 means no blocks yet
         if vault_height == 0 {
             return None;
@@ -147,18 +149,28 @@ impl ReadServiceImpl {
             .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)?;
 
         // Build proto block header
-        Some(crate::proto::BlockHeader {
+        Some(inferadb_ledger_proto::proto::BlockHeader {
             height: entry.vault_height,
-            namespace_id: Some(crate::proto::NamespaceId { id: entry.namespace_id.value() }),
-            vault_id: Some(crate::proto::VaultId { id: entry.vault_id.value() }),
-            previous_hash: Some(crate::proto::Hash { value: entry.previous_vault_hash.to_vec() }),
-            tx_merkle_root: Some(crate::proto::Hash { value: entry.tx_merkle_root.to_vec() }),
-            state_root: Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
+                id: entry.namespace_id.value(),
+            }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: entry.vault_id.value() }),
+            previous_hash: Some(inferadb_ledger_proto::proto::Hash {
+                value: entry.previous_vault_hash.to_vec(),
+            }),
+            tx_merkle_root: Some(inferadb_ledger_proto::proto::Hash {
+                value: entry.tx_merkle_root.to_vec(),
+            }),
+            state_root: Some(inferadb_ledger_proto::proto::Hash {
+                value: entry.state_root.to_vec(),
+            }),
             timestamp: Some(prost_types::Timestamp {
                 seconds: shard_block.timestamp.timestamp(),
                 nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
             }),
-            leader_id: Some(crate::proto::NodeId { id: shard_block.leader_id.clone() }),
+            leader_id: Some(inferadb_ledger_proto::proto::NodeId {
+                id: shard_block.leader_id.clone(),
+            }),
             term: shard_block.term,
             committed_index: shard_block.committed_index,
         })
@@ -173,7 +185,8 @@ impl ReadServiceImpl {
         namespace_id: NamespaceId,
         vault_id: VaultId,
         vault_height: u64,
-    ) -> (Option<crate::proto::Hash>, Option<crate::proto::Hash>) {
+    ) -> (Option<inferadb_ledger_proto::proto::Hash>, Option<inferadb_ledger_proto::proto::Hash>)
+    {
         // Find the shard height containing this vault block
         let shard_height =
             match archive.find_shard_height(namespace_id, vault_id, vault_height).ok().flatten() {
@@ -201,8 +214,8 @@ impl ReadServiceImpl {
         let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
         (
-            Some(crate::proto::Hash { value: block_hash.to_vec() }),
-            Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
+            Some(inferadb_ledger_proto::proto::Hash { value: block_hash.to_vec() }),
+            Some(inferadb_ledger_proto::proto::Hash { value: entry.state_root.to_vec() }),
         )
     }
 
@@ -305,10 +318,10 @@ impl ReadServiceImpl {
         vault_id: VaultId,
         trusted_height: u64,
         response_height: u64,
-    ) -> Option<crate::proto::ChainProof> {
+    ) -> Option<inferadb_ledger_proto::proto::ChainProof> {
         // Nothing to prove if trusted is at or past response
         if trusted_height >= response_height {
-            return Some(crate::proto::ChainProof { headers: vec![] });
+            return Some(inferadb_ledger_proto::proto::ChainProof { headers: vec![] });
         }
 
         // Collect headers from trusted_height+1 to response_height
@@ -319,7 +332,7 @@ impl ReadServiceImpl {
             headers.push(header);
         }
 
-        Some(crate::proto::ChainProof { headers })
+        Some(inferadb_ledger_proto::proto::ChainProof { headers })
     }
 
     /// Fetch historical block announcements from the block archive.
@@ -375,13 +388,19 @@ impl ReadServiceImpl {
                 let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
                 announcements.push(BlockAnnouncement {
-                    namespace_id: Some(crate::proto::NamespaceId {
+                    namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                         id: entry.namespace_id.value(),
                     }),
-                    vault_id: Some(crate::proto::VaultId { id: entry.vault_id.value() }),
+                    vault_id: Some(inferadb_ledger_proto::proto::VaultId {
+                        id: entry.vault_id.value(),
+                    }),
                     height: entry.vault_height,
-                    block_hash: Some(crate::proto::Hash { value: block_hash.to_vec() }),
-                    state_root: Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
+                    block_hash: Some(inferadb_ledger_proto::proto::Hash {
+                        value: block_hash.to_vec(),
+                    }),
+                    state_root: Some(inferadb_ledger_proto::proto::Hash {
+                        value: entry.state_root.to_vec(),
+                    }),
                     timestamp: Some(Timestamp {
                         seconds: shard_block.timestamp.timestamp(),
                         nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
@@ -502,9 +521,9 @@ impl ReadService for ReadServiceImpl {
     /// All reads use the same namespace/vault scope and consistency level.
     async fn batch_read(
         &self,
-        request: Request<crate::proto::BatchReadRequest>,
-    ) -> Result<Response<crate::proto::BatchReadResponse>, Status> {
-        use crate::proto::{BatchReadResponse, BatchReadResult};
+        request: Request<inferadb_ledger_proto::proto::BatchReadRequest>,
+    ) -> Result<Response<inferadb_ledger_proto::proto::BatchReadResponse>, Status> {
+        use inferadb_ledger_proto::proto::{BatchReadResponse, BatchReadResult};
 
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -720,7 +739,8 @@ impl ReadService for ReadServiceImpl {
         // so we can't generate individual key inclusion proofs. The state_root in the
         // block header commits to the entire vault state. Clients must trust the
         // state_root or reconstruct the full bucket hash to verify.
-        let merkle_proof = crate::proto::MerkleProof { leaf_hash: None, siblings: vec![] };
+        let merkle_proof =
+            inferadb_ledger_proto::proto::MerkleProof { leaf_hash: None, siblings: vec![] };
 
         // Build chain proof if requested
         let chain_proof = if req.include_chain_proof {
@@ -1258,7 +1278,7 @@ impl ReadService for ReadServiceImpl {
         let state = &*self.state;
 
         // Determine which method to use based on filters
-        let relationships: Vec<crate::proto::Relationship> =
+        let relationships: Vec<inferadb_ledger_proto::proto::Relationship> =
             if let (Some(resource), Some(relation)) = (&req.resource, &req.relation) {
                 // Optimized path: use index lookup for resource+relation
                 let subjects = state
@@ -1268,7 +1288,7 @@ impl ReadService for ReadServiceImpl {
                 subjects
                     .into_iter()
                     .take(limit)
-                    .map(|subject| crate::proto::Relationship {
+                    .map(|subject| inferadb_ledger_proto::proto::Relationship {
                         resource: resource.clone(),
                         relation: relation.clone(),
                         subject,
@@ -1283,7 +1303,7 @@ impl ReadService for ReadServiceImpl {
                 resources
                     .into_iter()
                     .take(limit)
-                    .map(|(resource, relation)| crate::proto::Relationship {
+                    .map(|(resource, relation)| inferadb_ledger_proto::proto::Relationship {
                         resource,
                         relation,
                         subject: subject.clone(),
@@ -1487,7 +1507,8 @@ impl ReadService for ReadServiceImpl {
             .collect();
 
         // Convert to proto entities
-        let entities: Vec<crate::proto::Entity> = filtered.iter().map(|e| e.into()).collect();
+        let entities: Vec<inferadb_ledger_proto::proto::Entity> =
+            filtered.iter().map(|e| e.into()).collect();
 
         // Create secure pagination token from last key if there are more
         let next_page_token = if entities.len() >= limit {

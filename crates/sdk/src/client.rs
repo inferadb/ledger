@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use inferadb_ledger_raft::proto;
+use inferadb_ledger_proto::proto;
 use tonic::service::interceptor::InterceptedService;
 
 use crate::{
@@ -4875,28 +4875,28 @@ mod tests {
 
     #[test]
     fn test_direction_from_proto_left() {
-        use inferadb_ledger_raft::proto::Direction as ProtoDirection;
+        use inferadb_ledger_proto::proto::Direction as ProtoDirection;
         let direction = Direction::from_proto(ProtoDirection::Left as i32);
         assert_eq!(direction, Direction::Left);
     }
 
     #[test]
     fn test_direction_from_proto_right() {
-        use inferadb_ledger_raft::proto::Direction as ProtoDirection;
+        use inferadb_ledger_proto::proto::Direction as ProtoDirection;
         let direction = Direction::from_proto(ProtoDirection::Right as i32);
         assert_eq!(direction, Direction::Right);
     }
 
     #[test]
     fn test_direction_from_proto_unspecified_defaults_to_right() {
-        use inferadb_ledger_raft::proto::Direction as ProtoDirection;
+        use inferadb_ledger_proto::proto::Direction as ProtoDirection;
         let direction = Direction::from_proto(ProtoDirection::Unspecified as i32);
         assert_eq!(direction, Direction::Right);
     }
 
     #[test]
     fn test_merkle_sibling_from_proto() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
         let proto_sibling = proto::MerkleSibling {
             hash: Some(proto::Hash { value: vec![1, 2, 3, 4] }),
             direction: proto::Direction::Left as i32,
@@ -4908,7 +4908,7 @@ mod tests {
 
     #[test]
     fn test_merkle_proof_from_proto() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
         let proto_proof = proto::MerkleProof {
             leaf_hash: Some(proto::Hash { value: vec![0; 32] }),
             siblings: vec![
@@ -5043,7 +5043,7 @@ mod tests {
 
     #[test]
     fn test_block_header_from_proto() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
 
         let proto_header = proto::BlockHeader {
             height: 100,
@@ -5073,7 +5073,7 @@ mod tests {
 
     #[test]
     fn test_block_header_from_proto_with_missing_fields() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
 
         let proto_header = proto::BlockHeader {
             height: 1,
@@ -5101,7 +5101,7 @@ mod tests {
 
     #[test]
     fn test_chain_proof_from_proto() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
 
         let proto_chain = proto::ChainProof {
             headers: vec![
@@ -5217,7 +5217,7 @@ mod tests {
 
     #[test]
     fn test_verified_value_from_proto() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
 
         let proto_response = proto::VerifiedReadResponse {
             value: Some(b"test-value".to_vec()),
@@ -5253,7 +5253,7 @@ mod tests {
 
     #[test]
     fn test_verified_value_from_proto_missing_header() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
 
         let proto_response = proto::VerifiedReadResponse {
             value: Some(b"test-value".to_vec()),
@@ -5272,7 +5272,7 @@ mod tests {
 
     #[test]
     fn test_verified_value_from_proto_missing_proof() {
-        use inferadb_ledger_raft::proto;
+        use inferadb_ledger_proto::proto;
 
         let proto_response = proto::VerifiedReadResponse {
             value: Some(b"test-value".to_vec()),

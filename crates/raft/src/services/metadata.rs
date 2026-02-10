@@ -3,15 +3,14 @@
 //! Injects `x-request-id` and `x-trace-id` into response metadata, ensuring
 //! that both successful responses and error statuses carry correlation IDs for
 //! debugging and SDK error enrichment. Also attaches structured
-//! [`ErrorDetails`](crate::proto::ErrorDetails) to error statuses for
+//! [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) to error statuses for
 //! machine-readable error handling.
 
 use std::collections::HashMap;
 
+use inferadb_ledger_proto::proto;
 use prost::Message;
 use tonic::{Response, Status};
-
-use crate::proto;
 
 /// Inject `x-request-id` and `x-trace-id` correlation metadata into a gRPC response.
 ///

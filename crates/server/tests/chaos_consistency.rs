@@ -32,7 +32,7 @@ use std::{
     time::Duration,
 };
 
-use inferadb_ledger_raft::proto::{
+use inferadb_ledger_proto::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
     RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse,
     raft_service_server::{RaftService, RaftServiceServer},
@@ -255,7 +255,7 @@ fn test_minority_cannot_elect_leader() {
         // Verify nodes 3, 4, 5 can still communicate (majority partition)
         let mut client3 = turmoil_common::create_turmoil_channel("node3", 9999)
             .await
-            .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+            .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
             .expect("connect to node3");
 
         let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
@@ -392,7 +392,7 @@ fn test_write_fails_in_minority_partition() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -413,7 +413,7 @@ fn test_write_fails_in_minority_partition() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -434,7 +434,7 @@ fn test_write_fails_in_minority_partition() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -557,7 +557,7 @@ fn test_consistency_after_partition_heals() {
         for node in ["node1", "node2"] {
             let mut client = turmoil_common::create_turmoil_channel(node, 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -578,7 +578,7 @@ fn test_consistency_after_partition_heals() {
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
             let req = RaftAppendEntriesRequest {
@@ -602,7 +602,7 @@ fn test_consistency_after_partition_heals() {
         for node in ["node1", "node2"] {
             let mut client = turmoil_common::create_turmoil_channel(node, 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect after heal");
 
             let req = RaftAppendEntriesRequest {
@@ -931,7 +931,7 @@ fn test_network_delay_request_completion() {
         {
             let mut client = turmoil_common::create_turmoil_channel("fast_node", 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to fast node");
 
             let req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };
@@ -942,7 +942,7 @@ fn test_network_delay_request_completion() {
         {
             let mut client = turmoil_common::create_turmoil_channel("slow_node", 9999)
                 .await
-                .map(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new)
+                .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to slow node");
 
             let req = RaftVoteRequest { vote: None, last_log_id: None, shard_id: None };

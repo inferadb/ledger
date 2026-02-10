@@ -5,6 +5,7 @@
 
 use std::{collections::HashMap, future::Future, sync::Arc};
 
+use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
 use inferadb_ledger_types::encode;
 use openraft::{
     BasicNode, Snapshot, Vote,
@@ -19,7 +20,6 @@ use parking_lot::RwLock;
 use tonic::{Request, transport::Channel};
 
 use crate::{
-    proto::raft_service_client::RaftServiceClient,
     trace_context::{self, TraceContext},
     types::{LedgerNodeId, LedgerTypeConfig},
 };
@@ -155,11 +155,12 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-        let proto_request = crate::proto::RaftVoteRequest {
+        let proto_request = inferadb_ledger_proto::proto::RaftVoteRequest {
             vote: Some((&rpc.vote).into()),
-            last_log_id: rpc
-                .last_log_id
-                .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
+            last_log_id: rpc.last_log_id.map(|id| inferadb_ledger_proto::proto::RaftLogId {
+                term: id.leader_id.term,
+                index: id.index,
+            }),
             shard_id: None, // Default to system shard (0)
         };
 
@@ -201,15 +202,17 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         let entries: Vec<Vec<u8>> =
             rpc.entries.iter().map(|e| encode(e).unwrap_or_default()).collect();
 
-        let proto_request = crate::proto::RaftAppendEntriesRequest {
+        let proto_request = inferadb_ledger_proto::proto::RaftAppendEntriesRequest {
             vote: Some((&rpc.vote).into()),
-            prev_log_id: rpc
-                .prev_log_id
-                .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
+            prev_log_id: rpc.prev_log_id.map(|id| inferadb_ledger_proto::proto::RaftLogId {
+                term: id.leader_id.term,
+                index: id.index,
+            }),
             entries,
-            leader_commit: rpc
-                .leader_commit
-                .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
+            leader_commit: rpc.leader_commit.map(|id| inferadb_ledger_proto::proto::RaftLogId {
+                term: id.leader_id.term,
+                index: id.index,
+            }),
             shard_id: None, // Default to system shard (0)
         };
 
@@ -249,14 +252,16 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-        let proto_request = crate::proto::RaftInstallSnapshotRequest {
+        let proto_request = inferadb_ledger_proto::proto::RaftInstallSnapshotRequest {
             vote: Some((&rpc.vote).into()),
-            meta: Some(crate::proto::RaftSnapshotMeta {
-                last_log_id: rpc
-                    .meta
-                    .last_log_id
-                    .map(|id| crate::proto::RaftLogId { term: id.leader_id.term, index: id.index }),
-                last_membership: Some(crate::proto::RaftMembership {
+            meta: Some(inferadb_ledger_proto::proto::RaftSnapshotMeta {
+                last_log_id: rpc.meta.last_log_id.map(|id| {
+                    inferadb_ledger_proto::proto::RaftLogId {
+                        term: id.leader_id.term,
+                        index: id.index,
+                    }
+                }),
+                last_membership: Some(inferadb_ledger_proto::proto::RaftMembership {
                     configs: {
                         let members: std::collections::HashMap<u64, String> = rpc
                             .meta
@@ -264,7 +269,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
                             .nodes()
                             .map(|(id, node)| (*id, node.addr.clone()))
                             .collect();
-                        vec![crate::proto::RaftMembershipConfig { members }]
+                        vec![inferadb_ledger_proto::proto::RaftMembershipConfig { members }]
                     },
                 }),
                 snapshot_id: rpc.meta.snapshot_id.clone(),

@@ -27,6 +27,7 @@
 
 use std::sync::Arc;
 
+use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{NamespaceId, ShardId};
@@ -37,7 +38,6 @@ use tonic::Status;
 use crate::{
     log_storage::AppliedStateAccessor,
     multi_raft::MultiRaftManager,
-    proto::BlockAnnouncement,
     shard_router::{RoutingInfo, ShardRouter},
     types::LedgerTypeConfig,
 };

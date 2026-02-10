@@ -4,6 +4,7 @@ members = [
     "crates/types",
     "crates/store",
     "crates/state",
+    "crates/proto",
     "crates/raft",
     "crates/server",
     "crates/sdk",
@@ -124,6 +125,7 @@ async-stream = "0.3"
 inferadb-ledger-types = { version = "0.1.0", path = "crates/types" }
 inferadb-ledger-store = { version = "0.1.0", path = "crates/store" }
 inferadb-ledger-state = { version = "0.1.0", path = "crates/state" }
+inferadb-ledger-proto = { version = "0.1.0", path = "crates/proto" }
 inferadb-ledger-raft = { version = "0.1.0", path = "crates/raft" }
 inferadb-ledger-server = { path = "crates/server" }
 inferadb-ledger-sdk = { version = "0.1.0", path = "crates/sdk" }

@@ -4,6 +4,21 @@
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
+use inferadb_ledger_proto::proto::{
+    BackupInfo, BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
+    ClusterMemberRole, CreateBackupRequest, CreateBackupResponse, CreateNamespaceRequest,
+    CreateNamespaceResponse, CreateSnapshotRequest, CreateSnapshotResponse, CreateVaultRequest,
+    CreateVaultResponse, DeleteNamespaceRequest, DeleteNamespaceResponse, DeleteVaultRequest,
+    DeleteVaultResponse, GetClusterInfoRequest, GetClusterInfoResponse, GetConfigRequest,
+    GetConfigResponse, GetNamespaceRequest, GetNamespaceResponse, GetNodeInfoRequest,
+    GetNodeInfoResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
+    JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
+    ListBackupsRequest, ListBackupsResponse, ListNamespacesRequest, ListNamespacesResponse,
+    ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest,
+    RecoverVaultResponse, RestoreBackupRequest, RestoreBackupResponse, ShardId,
+    UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto, VaultId,
+    admin_service_server::AdminService,
+};
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
@@ -21,23 +36,7 @@ use tonic::{Request, Response, Status};
 use crate::{
     error::{ServiceError, classify_raft_error},
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
-    metrics,
-    proto::{
-        BackupInfo, BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
-        ClusterMemberRole, CreateBackupRequest, CreateBackupResponse, CreateNamespaceRequest,
-        CreateNamespaceResponse, CreateSnapshotRequest, CreateSnapshotResponse, CreateVaultRequest,
-        CreateVaultResponse, DeleteNamespaceRequest, DeleteNamespaceResponse, DeleteVaultRequest,
-        DeleteVaultResponse, GetClusterInfoRequest, GetClusterInfoResponse, GetConfigRequest,
-        GetConfigResponse, GetNamespaceRequest, GetNamespaceResponse, GetNodeInfoRequest,
-        GetNodeInfoResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
-        JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
-        ListBackupsRequest, ListBackupsResponse, ListNamespacesRequest, ListNamespacesResponse,
-        ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest,
-        RecoverVaultResponse, RestoreBackupRequest, RestoreBackupResponse, ShardId,
-        UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto, VaultId,
-        admin_service_server::AdminService,
-    },
-    trace_context,
+    metrics, trace_context,
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
     },
@@ -470,11 +469,11 @@ impl AdminService for AdminServiceImpl {
 
         // Extract namespace from lookup oneof (by ID or name)
         let ns_meta = match req.lookup {
-            Some(crate::proto::get_namespace_request::Lookup::NamespaceId(n)) => {
+            Some(inferadb_ledger_proto::proto::get_namespace_request::Lookup::NamespaceId(n)) => {
                 ctx.set_namespace_id(n.id);
                 self.applied_state.get_namespace(DomainNamespaceId::new(n.id))
             },
-            Some(crate::proto::get_namespace_request::Lookup::Name(name)) => {
+            Some(inferadb_ledger_proto::proto::get_namespace_request::Lookup::Name(name)) => {
                 ctx.set_target_namespace_name(&name);
                 self.applied_state.get_namespace_by_name(&name)
             },
@@ -488,7 +487,7 @@ impl AdminService for AdminServiceImpl {
             Some(ns) => {
                 ctx.set_namespace_id(ns.namespace_id.value());
                 ctx.set_success();
-                let status: crate::proto::NamespaceStatus = ns.status.into();
+                let status = crate::proto_compat::namespace_status_to_proto(ns.status);
                 Ok(Response::new(GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,
@@ -526,8 +525,8 @@ impl AdminService for AdminServiceImpl {
             .list_namespaces()
             .into_iter()
             .map(|ns| {
-                let status: crate::proto::NamespaceStatus = ns.status.into();
-                crate::proto::GetNamespaceResponse {
+                let status = crate::proto_compat::namespace_status_to_proto(ns.status);
+                inferadb_ledger_proto::proto::GetNamespaceResponse {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,
                     shard_id: Some(ShardId { id: ns.shard_id.value() }),
@@ -896,7 +895,7 @@ impl AdminService for AdminServiceImpl {
                     state_root: None,
                     nodes: vec![],
                     leader: None,
-                    status: crate::proto::VaultStatus::Active.into(),
+                    status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
                     retention_policy: None,
                 }))
             },
@@ -930,14 +929,14 @@ impl AdminService for AdminServiceImpl {
             .filter_map(|(ns_id, vault_id)| {
                 self.applied_state.get_vault(*ns_id, *vault_id).map(|v| {
                     let height = self.applied_state.vault_height(v.namespace_id, v.vault_id);
-                    crate::proto::GetVaultResponse {
+                    inferadb_ledger_proto::proto::GetVaultResponse {
                         namespace_id: Some(NamespaceId { id: v.namespace_id.value() }),
                         vault_id: Some(VaultId { id: v.vault_id.value() }),
                         height,
                         state_root: None,
                         nodes: vec![],
                         leader: None,
-                        status: crate::proto::VaultStatus::Active.into(),
+                        status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
                         retention_policy: None,
                     }
                 })
@@ -2054,8 +2053,8 @@ impl AdminService for AdminServiceImpl {
     /// `RecoverVault` with `force=true`.
     async fn simulate_divergence(
         &self,
-        request: Request<crate::proto::SimulateDivergenceRequest>,
-    ) -> Result<Response<crate::proto::SimulateDivergenceResponse>, Status> {
+        request: Request<inferadb_ledger_proto::proto::SimulateDivergenceRequest>,
+    ) -> Result<Response<inferadb_ledger_proto::proto::SimulateDivergenceResponse>, Status> {
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -2142,7 +2141,7 @@ impl AdminService for AdminServiceImpl {
                 ctx.end_raft_timer();
                 ctx.set_success();
 
-                Ok(Response::new(crate::proto::SimulateDivergenceResponse {
+                Ok(Response::new(inferadb_ledger_proto::proto::SimulateDivergenceResponse {
                     success: true,
                     message: format!(
                         "Vault {}:{} marked as diverged at height {}",
@@ -2170,8 +2169,8 @@ impl AdminService for AdminServiceImpl {
 
     async fn force_gc(
         &self,
-        request: Request<crate::proto::ForceGcRequest>,
-    ) -> Result<Response<crate::proto::ForceGcResponse>, Status> {
+        request: Request<inferadb_ledger_proto::proto::ForceGcRequest>,
+    ) -> Result<Response<inferadb_ledger_proto::proto::ForceGcResponse>, Status> {
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -2318,7 +2317,7 @@ impl AdminService for AdminServiceImpl {
             ),
         );
 
-        Ok(Response::new(crate::proto::ForceGcResponse {
+        Ok(Response::new(inferadb_ledger_proto::proto::ForceGcResponse {
             success: true,
             message: format!(
                 "GC cycle complete: {} expired entities removed from {} vaults",

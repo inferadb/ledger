@@ -19,6 +19,9 @@
 
 use std::{sync::Arc, time::Duration};
 
+use inferadb_ledger_proto::proto::{
+    GetSystemStateRequest, system_discovery_service_client::SystemDiscoveryServiceClient,
+};
 use openraft::Raft;
 use parking_lot::RwLock;
 use tokio::{sync::mpsc, time::interval};
@@ -27,7 +30,6 @@ use tracing::{debug, info, warn};
 
 use crate::{
     log_storage::AppliedStateAccessor,
-    proto::{GetSystemStateRequest, system_discovery_service_client::SystemDiscoveryServiceClient},
     types::{LedgerNodeId, LedgerTypeConfig},
 };
 

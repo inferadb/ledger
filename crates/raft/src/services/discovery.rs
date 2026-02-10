@@ -10,22 +10,19 @@ use std::{
     sync::Arc,
 };
 
-use inferadb_ledger_state::{StateLayer, system::NamespaceStatus};
+use inferadb_ledger_proto::proto::{
+    AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
+    GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry, NodeId,
+    NodeInfo, NodeRole, PeerInfo, ShardId, system_discovery_service_server::SystemDiscoveryService,
+};
+use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
 use crate::{
-    log_storage::AppliedStateAccessor,
-    peer_tracker::PeerTracker,
-    proto::{
-        AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-        GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry, NodeId,
-        NodeInfo, NodeRole, PeerInfo, ShardId,
-        system_discovery_service_server::SystemDiscoveryService,
-    },
-    types::LedgerTypeConfig,
+    log_storage::AppliedStateAccessor, peer_tracker::PeerTracker, types::LedgerTypeConfig,
 };
 
 // =============================================================================
@@ -384,14 +381,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             .list_namespaces()
             .into_iter()
             .map(|ns| {
-                // Map internal NamespaceStatus to proto NamespaceStatus
-                let status = match ns.status {
-                    NamespaceStatus::Active => crate::proto::NamespaceStatus::Active,
-                    NamespaceStatus::Migrating => crate::proto::NamespaceStatus::Migrating,
-                    NamespaceStatus::Suspended => crate::proto::NamespaceStatus::Suspended,
-                    NamespaceStatus::Deleting => crate::proto::NamespaceStatus::Deleting,
-                    NamespaceStatus::Deleted => crate::proto::NamespaceStatus::Deleted,
-                };
+                let status = crate::proto_compat::namespace_status_to_proto(ns.status);
                 NamespaceRegistry {
                     namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
                     name: ns.name,

@@ -41,20 +41,6 @@
 pub mod metrics;
 pub mod trace_context;
 
-/// Generated protobuf types and service traits.
-pub mod proto {
-    #![allow(clippy::all)]
-    #![allow(missing_docs)]
-
-    // Use pre-generated code when proto files aren't available (crates.io)
-    #[cfg(use_pregenerated_proto)]
-    include!("generated/ledger.v1.rs");
-
-    // Use build-time generated code in development
-    #[cfg(not(use_pregenerated_proto))]
-    tonic::include_proto!("ledger.v1");
-}
-
 // ---------------------------------------------------------------------------
 // Server-internal modules — implementation details hidden from `cargo doc`.
 // These are `pub` so the server crate can access them, but `#[doc(hidden)]`
@@ -102,7 +88,7 @@ pub mod peer_tracker;
 #[doc(hidden)]
 pub mod proof;
 #[doc(hidden)]
-pub mod proto_convert;
+pub mod proto_compat;
 #[doc(hidden)]
 pub mod quota;
 #[doc(hidden)]

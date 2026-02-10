@@ -48,6 +48,7 @@ use std::{
     sync::Arc,
 };
 
+use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemNamespaceService};
 use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend};
 use inferadb_ledger_types::{NamespaceId, ShardId};
@@ -63,7 +64,6 @@ use crate::{
     btree_compaction::BTreeCompactor,
     integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
-    proto::BlockAnnouncement,
     raft_network::GrpcRaftNetworkFactory,
     shard_router::ShardRouter,
     ttl_gc::TtlGarbageCollector,

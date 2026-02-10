@@ -38,14 +38,14 @@ async fn test_idempotency_key_reuse_detection() {
     let shared_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
     // First write with idempotency key
-    let request1 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "idem-test".to_string() }),
+    let request1 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "idem-test".to_string() }),
         idempotency_key: shared_key.clone(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "idem-key-1".to_string(),
                     value: b"value-a".to_vec(),
                     expires_at: None,
@@ -58,7 +58,7 @@ async fn test_idempotency_key_reuse_detection() {
 
     let response1 = write_client.write(request1).await.expect("write should succeed");
     match response1.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {},
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {},
         other => panic!("first write should succeed, got: {:?}", other),
     }
 
@@ -66,14 +66,14 @@ async fn test_idempotency_key_reuse_detection() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Second write reusing the same idempotency key with a DIFFERENT payload
-    let request2 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "idem-test".to_string() }),
+    let request2 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "idem-test".to_string() }),
         idempotency_key: shared_key.clone(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "idem-key-different".to_string(),
                     value: b"value-b".to_vec(),
                     expires_at: None,
@@ -86,10 +86,10 @@ async fn test_idempotency_key_reuse_detection() {
 
     let response2 = write_client.write(request2).await.expect("write RPC should succeed");
     match response2.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
             assert_eq!(
                 e.code(),
-                inferadb_ledger_raft::proto::WriteErrorCode::IdempotencyKeyReused,
+                inferadb_ledger_proto::proto::WriteErrorCode::IdempotencyKeyReused,
                 "should get IdempotencyKeyReused error"
             );
         },
@@ -109,14 +109,14 @@ async fn test_same_vault_two_writes() {
         common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // First write
-    let request1 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "same-vault".to_string() }),
+    let request1 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "same-vault".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "key-1".to_string(),
                     value: b"val-1".to_vec(),
                     expires_at: None,
@@ -129,7 +129,7 @@ async fn test_same_vault_two_writes() {
 
     let resp1 = write_client.write(request1).await.expect("write 1");
     match resp1.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
             println!("Write 1 succeeded");
         },
         other => panic!("write 1 should succeed, got: {:?}", other),
@@ -138,14 +138,14 @@ async fn test_same_vault_two_writes() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Second write with a different idempotency key
-    let request2 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "same-vault".to_string() }),
+    let request2 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "same-vault".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "key-2".to_string(),
                     value: b"val-2".to_vec(),
                     expires_at: None,
@@ -158,7 +158,7 @@ async fn test_same_vault_two_writes() {
 
     let resp2 = write_client.write(request2).await.expect("write 2");
     match resp2.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
             println!("Write 2 succeeded");
         },
         other => panic!("write 2 should succeed, got: {:?}", other),
@@ -177,14 +177,14 @@ async fn test_only_vault_2() {
         common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Write to vault 2
-    let request1 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "only-v2".to_string() }),
+    let request1 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "only-v2".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 2 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 2 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v2-key".to_string(),
                     value: b"v2-val".to_vec(),
                     expires_at: None,
@@ -197,7 +197,7 @@ async fn test_only_vault_2() {
 
     let resp1 = write_client.write(request1).await.expect("write v2 first");
     match resp1.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 2 (first) succeeded");
         },
         other => panic!("vault 2 write 1 should succeed, got: {:?}", other),
@@ -206,14 +206,14 @@ async fn test_only_vault_2() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Second write to vault 2
-    let request2 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "only-v2".to_string() }),
+    let request2 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "only-v2".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 2 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 2 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v2-key-2".to_string(),
                     value: b"v2-val-2".to_vec(),
                     expires_at: None,
@@ -226,7 +226,7 @@ async fn test_only_vault_2() {
 
     let resp2 = write_client.write(request2).await.expect("write v2 second");
     match resp2.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 2 (second) succeeded");
         },
         other => panic!("vault 2 write 2 should succeed, got: {:?}", other),
@@ -245,16 +245,16 @@ async fn test_vault_2_first_then_1_then_2() {
         common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Write to vault 2 first
-    let request1 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request1 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "vault-order-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 2 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 2 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v2-key".to_string(),
                     value: b"v2-val".to_vec(),
                     expires_at: None,
@@ -267,7 +267,7 @@ async fn test_vault_2_first_then_1_then_2() {
 
     let resp1 = write_client.write(request1).await.expect("write v2 first");
     match resp1.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 2 succeeded");
         },
         other => panic!("vault 2 write 1 should succeed, got: {:?}", other),
@@ -276,16 +276,16 @@ async fn test_vault_2_first_then_1_then_2() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Write to vault 1
-    let request2 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request2 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "vault-order-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v1-key".to_string(),
                     value: b"v1-val".to_vec(),
                     expires_at: None,
@@ -298,7 +298,7 @@ async fn test_vault_2_first_then_1_then_2() {
 
     let resp2 = write_client.write(request2).await.expect("write v1");
     match resp2.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 1 succeeded");
         },
         other => panic!("vault 1 write 1 should succeed, got: {:?}", other),
@@ -307,16 +307,16 @@ async fn test_vault_2_first_then_1_then_2() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Write to vault 2 again
-    let request3 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request3 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "vault-order-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 2 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 2 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v2-key-2".to_string(),
                     value: b"v2-val-2".to_vec(),
                     expires_at: None,
@@ -329,7 +329,7 @@ async fn test_vault_2_first_then_1_then_2() {
 
     let resp3 = write_client.write(request3).await.expect("write v2 again");
     match resp3.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
             println!("Write to vault 2 (again) succeeded");
         },
         other => panic!("vault 2 write 2 should succeed, got: {:?}", other),
@@ -354,14 +354,14 @@ async fn test_two_vault_server_assigned_sequences() {
     let client_id = "two-vault-test".to_string();
 
     // Write to vault 1
-    let request1 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
+    let request1 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault1_id }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault1_id }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v1-key".to_string(),
                     value: b"v1-value".to_vec(),
                     expires_at: None,
@@ -374,7 +374,7 @@ async fn test_two_vault_server_assigned_sequences() {
 
     let resp1 = write_client.write(request1).await.expect("write to vault 1");
     let v1_seq1 = match resp1.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
             println!("Write to vault 1 succeeded, assigned_sequence={}", s.assigned_sequence);
             s.assigned_sequence
         },
@@ -385,14 +385,14 @@ async fn test_two_vault_server_assigned_sequences() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Write to vault 2
-    let request2 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
+    let request2 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault2_id }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault2_id }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v2-key".to_string(),
                     value: b"v2-value".to_vec(),
                     expires_at: None,
@@ -405,7 +405,7 @@ async fn test_two_vault_server_assigned_sequences() {
 
     let resp2 = write_client.write(request2).await.expect("write to vault 2");
     let v2_seq1 = match resp2.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
             println!("Write to vault 2 succeeded, assigned_sequence={}", s.assigned_sequence);
             s.assigned_sequence
         },
@@ -416,14 +416,14 @@ async fn test_two_vault_server_assigned_sequences() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Write to vault 2 again
-    let request3 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
+    let request3 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault2_id }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault2_id }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "v2-key-2".to_string(),
                     value: b"v2-value-2".to_vec(),
                     expires_at: None,
@@ -436,7 +436,7 @@ async fn test_two_vault_server_assigned_sequences() {
 
     let resp3 = write_client.write(request3).await.expect("write to vault 2 second");
     let v2_seq2 = match resp3.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
             println!(
                 "Write to vault 2 (second) succeeded, assigned_sequence={}",
                 s.assigned_sequence
@@ -483,16 +483,16 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
         common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Write to vault 1
-    let request1 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request1 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "vault-isolation-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault1_id }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault1_id }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "vault1-key".to_string(),
                     value: b"vault1-value".to_vec(),
                     expires_at: None,
@@ -505,7 +505,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 
     let response1 = write_client.write(request1).await.expect("write to vault 1");
     match response1.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {},
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {},
         _ => panic!("write to vault 1 should succeed"),
     }
 
@@ -513,16 +513,16 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Write to vault 2
-    let request2 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request2 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "vault-isolation-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault2_id }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault2_id }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "vault2-key".to_string(),
                     value: b"vault2-value".to_vec(),
                     expires_at: None,
@@ -535,7 +535,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 
     let response2 = write_client.write(request2).await.expect("write to vault 2");
     match response2.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {},
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {},
         other => panic!("write to vault 2 should succeed, got: {:?}", other),
     }
 
@@ -549,13 +549,13 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
     let mut admin_client =
         common::create_admin_client(leader.addr).await.expect("connect to admin service");
 
-    let divergence_request = inferadb_ledger_raft::proto::SimulateDivergenceRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault1_id }),
-        expected_state_root: Some(inferadb_ledger_raft::proto::Hash {
+    let divergence_request = inferadb_ledger_proto::proto::SimulateDivergenceRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault1_id }),
+        expected_state_root: Some(inferadb_ledger_proto::proto::Hash {
             value: vec![1u8; 32], // Fake expected root
         }),
-        computed_state_root: Some(inferadb_ledger_raft::proto::Hash {
+        computed_state_root: Some(inferadb_ledger_proto::proto::Hash {
             value: vec![2u8; 32], // Different computed root
         }),
         at_height: 1,
@@ -575,45 +575,45 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
         common::create_health_client(leader.addr).await.expect("connect to health service");
 
     let vault1_health = health_client
-        .check(inferadb_ledger_raft::proto::HealthCheckRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault1_id }),
+        .check(inferadb_ledger_proto::proto::HealthCheckRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault1_id }),
         })
         .await
         .expect("health check for vault 1");
 
     assert_eq!(
         vault1_health.into_inner().status(),
-        inferadb_ledger_raft::proto::HealthStatus::Unavailable,
+        inferadb_ledger_proto::proto::HealthStatus::Unavailable,
         "Vault 1 should be marked as UNAVAILABLE (diverged)"
     );
 
     // Verify vault 2 is still HEALTHY - this is the key invariant
     let vault2_health = health_client
-        .check(inferadb_ledger_raft::proto::HealthCheckRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault2_id }),
+        .check(inferadb_ledger_proto::proto::HealthCheckRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault2_id }),
         })
         .await
         .expect("health check for vault 2");
 
     assert_eq!(
         vault2_health.into_inner().status(),
-        inferadb_ledger_raft::proto::HealthStatus::Healthy,
+        inferadb_ledger_proto::proto::HealthStatus::Healthy,
         "Vault 2 should still be HEALTHY despite vault 1 divergence"
     );
 
     // Verify vault 2 is still writable
-    let request3 = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request3 = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "vault-isolation-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault2_id }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault2_id }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "vault2-key-2".to_string(),
                     value: b"vault2-value-2".to_vec(),
                     expires_at: None,
@@ -626,7 +626,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 
     let response3 = write_client.write(request3).await.expect("write to vault 2 after divergence");
     match response3.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {},
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {},
         other => panic!(
             "write to vault 2 should still succeed after vault 1 divergence, got: {:?}",
             other
@@ -649,16 +649,16 @@ async fn test_diverged_vault_returns_unavailable() {
         common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Write some data to establish a vault
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "divergence-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "divergence-key".to_string(),
                     value: b"divergence-value".to_vec(),
                     expires_at: None,
@@ -678,13 +678,13 @@ async fn test_diverged_vault_returns_unavailable() {
     let mut admin_client =
         common::create_admin_client(leader.addr).await.expect("connect to admin service");
 
-    let divergence_request = inferadb_ledger_raft::proto::SimulateDivergenceRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        expected_state_root: Some(inferadb_ledger_raft::proto::Hash {
+    let divergence_request = inferadb_ledger_proto::proto::SimulateDivergenceRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        expected_state_root: Some(inferadb_ledger_proto::proto::Hash {
             value: vec![1u8; 32], // Fake expected root
         }),
-        computed_state_root: Some(inferadb_ledger_raft::proto::Hash {
+        computed_state_root: Some(inferadb_ledger_proto::proto::Hash {
             value: vec![2u8; 32], // Different computed root
         }),
         at_height: 1,
@@ -704,16 +704,16 @@ async fn test_diverged_vault_returns_unavailable() {
         common::create_health_client(leader.addr).await.expect("connect to health service");
 
     let health_response = health_client
-        .check(inferadb_ledger_raft::proto::HealthCheckRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
+        .check(inferadb_ledger_proto::proto::HealthCheckRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         })
         .await
         .expect("health check should succeed");
 
     assert_eq!(
         health_response.into_inner().status(),
-        inferadb_ledger_raft::proto::HealthStatus::Unavailable,
+        inferadb_ledger_proto::proto::HealthStatus::Unavailable,
         "Vault should be marked as UNAVAILABLE (diverged)"
     );
 
@@ -721,11 +721,11 @@ async fn test_diverged_vault_returns_unavailable() {
     let mut read_client =
         common::create_read_client(leader.addr).await.expect("connect to read service");
 
-    let read_request = inferadb_ledger_raft::proto::ReadRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
+    let read_request = inferadb_ledger_proto::proto::ReadRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         key: "divergence-key".to_string(),
-        consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual.into(),
+        consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual.into(),
     };
 
     let read_result = read_client.read(read_request).await;
@@ -765,16 +765,16 @@ async fn test_follower_state_root_verification() {
     let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit a write that will replicate to followers
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "state-root-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "verification-key".to_string(),
                     value: b"verification-value".to_vec(),
                     expires_at: None,
@@ -797,9 +797,9 @@ async fn test_follower_state_root_verification() {
             .await
             .expect("connect to node for health check");
 
-        let health_req = inferadb_ledger_raft::proto::HealthCheckRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
+        let health_req = inferadb_ledger_proto::proto::HealthCheckRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         };
 
         let response = health_client.check(health_req).await.expect("health check should succeed");
@@ -807,7 +807,7 @@ async fn test_follower_state_root_verification() {
 
         assert_eq!(
             status,
-            inferadb_ledger_raft::proto::HealthStatus::Healthy,
+            inferadb_ledger_proto::proto::HealthStatus::Healthy,
             "Node {} vault should be healthy after replication",
             node.id
         );
@@ -842,7 +842,7 @@ async fn test_idempotency_survives_leader_failover() {
         common::create_admin_client(leader_addr).await.expect("connect to admin service");
 
     let ns_response = admin_client
-        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
+        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
             name: "failover-test-ns".to_string(),
             shard_id: None,
             quota: None,
@@ -853,8 +853,8 @@ async fn test_idempotency_survives_leader_failover() {
     let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).expect("namespace_id");
 
     let vault_response = admin_client
-        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -873,14 +873,14 @@ async fn test_idempotency_survives_leader_failover() {
     // Submit a write with a known idempotency key
     let idem_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "failover-test".to_string() }),
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "failover-test".to_string() }),
         idempotency_key: idem_key.clone(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "failover-key".to_string(),
                     value: b"failover-value".to_vec(),
                     expires_at: None,
@@ -893,7 +893,7 @@ async fn test_idempotency_survives_leader_failover() {
 
     let response1 = write_client.write(request.clone()).await.expect("first write");
     let original_tx_id = match response1.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
             s.tx_id.expect("should have tx_id")
         },
         other => panic!("first write should succeed, got: {:?}", other),
@@ -908,7 +908,7 @@ async fn test_idempotency_survives_leader_failover() {
         common::create_admin_client(leader_addr).await.expect("connect to admin service");
 
     let leave_response = admin_client
-        .leave_cluster(inferadb_ledger_raft::proto::LeaveClusterRequest {
+        .leave_cluster(inferadb_ledger_proto::proto::LeaveClusterRequest {
             node_id: original_leader_id,
         })
         .await
@@ -951,10 +951,10 @@ async fn test_idempotency_survives_leader_failover() {
         new_write_client.write(request.clone()).await.expect("retry write should succeed");
 
     match retry_response.into_inner().result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
             assert_eq!(
                 e.code(),
-                inferadb_ledger_raft::proto::WriteErrorCode::AlreadyCommitted,
+                inferadb_ledger_proto::proto::WriteErrorCode::AlreadyCommitted,
                 "duplicate idempotency key should return AlreadyCommitted after failover"
             );
             assert_eq!(
@@ -963,7 +963,7 @@ async fn test_idempotency_survives_leader_failover() {
                 "should return the original tx_id from the replicated cache"
             );
         },
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
             // If the in-memory idempotency cache didn't survive failover, the write
             // succeeds as a new write. This documents the limitation.
             let retry_tx_id = s.tx_id.expect("should have tx_id");

@@ -14,6 +14,7 @@ libfuzzer-sys = "0.4"
 inferadb-ledger-types = { path = "../crates/types" }
 inferadb-ledger-store = { path = "../crates/store" }
 inferadb-ledger-raft = { path = "../crates/raft" }
+inferadb-ledger-proto = { path = "../crates/proto" }
 
 # Protobuf (needed for proto fuzz target)
 prost = "0.14"

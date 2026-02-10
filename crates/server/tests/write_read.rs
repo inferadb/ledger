@@ -48,14 +48,14 @@ async fn test_single_node_write_read() {
     let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit a write request using SetEntity operation
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "test-client".to_string() }),
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "test-client".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "test-key".to_string(),
                     value: b"test-value".to_vec(),
                     expires_at: None,
@@ -71,11 +71,11 @@ async fn test_single_node_write_read() {
 
     let response = response.unwrap().into_inner();
     match response.result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(success)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(success)) => {
             assert!(success.tx_id.is_some(), "should have tx_id");
             assert!(success.block_height > 0, "should have non-zero block height");
         },
-        Some(inferadb_ledger_raft::proto::write_response::Result::Error(err)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Error(err)) => {
             panic!("write failed: {:?}", err);
         },
         None => {
@@ -97,16 +97,16 @@ async fn test_write_idempotency() {
     // Use a fixed idempotency key for both writes to test deduplication
     let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "idempotent-client".to_string(),
         }),
         idempotency_key: idempotency_key.clone(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "idempotent-key".to_string(),
                     value: b"idempotent-value".to_vec(),
                     expires_at: None,
@@ -127,8 +127,8 @@ async fn test_write_idempotency() {
     // Both should return the same result
     match (response1.result, response2.result) {
         (
-            Some(inferadb_ledger_raft::proto::write_response::Result::Success(s1)),
-            Some(inferadb_ledger_raft::proto::write_response::Result::Success(s2)),
+            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s1)),
+            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s2)),
         ) => {
             assert_eq!(s1.tx_id, s2.tx_id, "tx_id should match");
             assert_eq!(s1.block_height, s2.block_height, "block_height should match");
@@ -208,14 +208,14 @@ async fn test_write_creates_retrievable_block() {
         common::create_read_client(leader.addr).await.expect("connect to leader for reads");
 
     // Submit a write
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "block-test".to_string() }),
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "block-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "block-key".to_string(),
                     value: b"block-value".to_vec(),
                     expires_at: None,
@@ -229,16 +229,16 @@ async fn test_write_creates_retrievable_block() {
     let response = write_client.write(request).await.expect("write should succeed").into_inner();
 
     let block_height = match response.result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => s.block_height,
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => s.block_height,
         _ => panic!("write should succeed"),
     };
 
     assert!(block_height > 0, "block_height should be > 0");
 
     // Retrieve the block via GetBlock
-    let get_block_request = inferadb_ledger_raft::proto::GetBlockRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
+    let get_block_request = inferadb_ledger_proto::proto::GetBlockRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         height: block_height,
     };
 
@@ -280,16 +280,16 @@ async fn test_three_node_write_replication() {
     let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit a write
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "replication-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 1 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "replicated-key".to_string(),
                     value: b"replicated-value".to_vec(),
                     expires_at: None,
@@ -305,7 +305,7 @@ async fn test_three_node_write_replication() {
 
     // Verify write succeeded
     match response.result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {},
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {},
         _ => panic!("write should succeed"),
     }
 

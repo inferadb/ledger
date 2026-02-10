@@ -11,7 +11,7 @@ use std::{
 };
 
 use futures::Stream;
-use inferadb_ledger_raft::proto;
+use inferadb_ledger_proto::proto;
 use tonic::Status;
 use tracing::{debug, warn};
 

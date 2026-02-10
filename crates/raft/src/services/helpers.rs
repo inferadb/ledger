@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{
     NamespaceId, VaultId,
     audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
@@ -15,7 +16,7 @@ use tonic::Status;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::{metrics, proto, rate_limit::RateLimiter};
+use crate::{metrics, rate_limit::RateLimiter};
 
 /// Emit an audit event and record the corresponding Prometheus metric.
 ///
@@ -73,7 +74,7 @@ pub(crate) fn build_audit_event(
 /// Check all rate limit tiers (backpressure, namespace, client).
 ///
 /// Returns `Status::resource_exhausted` with `retry-after-ms` metadata and
-/// structured [`ErrorDetails`](crate::proto::ErrorDetails) if rejected.
+/// structured [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) if rejected.
 pub(crate) fn check_rate_limit(
     rate_limiter: Option<&Arc<RateLimiter>>,
     client_id: &str,
@@ -128,8 +129,8 @@ pub(crate) fn check_rate_limit(
 /// Check whether creating a new vault would exceed the namespace vault quota.
 ///
 /// Returns `Status::resource_exhausted` with structured
-/// [`ErrorDetails`](crate::proto::ErrorDetails) including current/max values if the quota is
-/// exceeded.
+/// [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) including current/max values if the
+/// quota is exceeded.
 pub(crate) fn check_vault_quota(
     quota_checker: Option<&crate::quota::QuotaChecker>,
     namespace_id: NamespaceId,
@@ -176,8 +177,8 @@ pub(crate) fn check_vault_quota(
 ///
 /// `estimated_bytes` is the sum of key + value sizes for all operations.
 /// Returns `Status::resource_exhausted` with structured
-/// [`ErrorDetails`](crate::proto::ErrorDetails) including current/max values if the quota is
-/// exceeded.
+/// [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) including current/max values if the
+/// quota is exceeded.
 pub(crate) fn check_storage_quota(
     quota_checker: Option<&crate::quota::QuotaChecker>,
     namespace_id: NamespaceId,
@@ -224,29 +225,31 @@ pub(crate) fn check_storage_quota(
 ///
 /// Sums key + value sizes across all operations. This is an estimate —
 /// exact storage accounting is deferred to Task 6 (Namespace Resource Accounting).
-pub(crate) fn estimate_operations_bytes(operations: &[crate::proto::Operation]) -> u64 {
+pub(crate) fn estimate_operations_bytes(
+    operations: &[inferadb_ledger_proto::proto::Operation],
+) -> u64 {
     let mut total: u64 = 0;
     for op in operations {
         if let Some(ref inner) = op.op {
             match inner {
-                crate::proto::operation::Op::SetEntity(set) => {
+                inferadb_ledger_proto::proto::operation::Op::SetEntity(set) => {
                     total = total.saturating_add(set.key.len() as u64);
                     total = total.saturating_add(set.value.len() as u64);
                 },
-                crate::proto::operation::Op::DeleteEntity(del) => {
+                inferadb_ledger_proto::proto::operation::Op::DeleteEntity(del) => {
                     total = total.saturating_add(del.key.len() as u64);
                 },
-                crate::proto::operation::Op::CreateRelationship(rel) => {
+                inferadb_ledger_proto::proto::operation::Op::CreateRelationship(rel) => {
                     total = total.saturating_add(rel.resource.len() as u64);
                     total = total.saturating_add(rel.relation.len() as u64);
                     total = total.saturating_add(rel.subject.len() as u64);
                 },
-                crate::proto::operation::Op::DeleteRelationship(rel) => {
+                inferadb_ledger_proto::proto::operation::Op::DeleteRelationship(rel) => {
                     total = total.saturating_add(rel.resource.len() as u64);
                     total = total.saturating_add(rel.relation.len() as u64);
                     total = total.saturating_add(rel.subject.len() as u64);
                 },
-                crate::proto::operation::Op::ExpireEntity(exp) => {
+                inferadb_ledger_proto::proto::operation::Op::ExpireEntity(exp) => {
                     total = total.saturating_add(exp.key.len() as u64);
                 },
             }
@@ -417,19 +420,21 @@ mod tests {
 
     #[test]
     fn test_estimate_operations_bytes_empty() {
-        let ops: Vec<crate::proto::Operation> = vec![];
+        let ops: Vec<inferadb_ledger_proto::proto::Operation> = vec![];
         assert_eq!(estimate_operations_bytes(&ops), 0);
     }
 
     #[test]
     fn test_estimate_operations_bytes_set_entity() {
-        let ops = vec![crate::proto::Operation {
-            op: Some(crate::proto::operation::Op::SetEntity(crate::proto::SetEntity {
-                key: "hello".to_owned(),
-                value: vec![0u8; 100],
-                condition: None,
-                expires_at: None,
-            })),
+        let ops = vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
+                    key: "hello".to_owned(),
+                    value: vec![0u8; 100],
+                    condition: None,
+                    expires_at: None,
+                },
+            )),
         }];
         // "hello" = 5 bytes + 100 bytes value
         assert_eq!(estimate_operations_bytes(&ops), 105);
@@ -437,19 +442,19 @@ mod tests {
 
     #[test]
     fn test_estimate_operations_bytes_delete_entity() {
-        let ops = vec![crate::proto::Operation {
-            op: Some(crate::proto::operation::Op::DeleteEntity(crate::proto::DeleteEntity {
-                key: "mykey".to_owned(),
-            })),
+        let ops = vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::DeleteEntity(
+                inferadb_ledger_proto::proto::DeleteEntity { key: "mykey".to_owned() },
+            )),
         }];
         assert_eq!(estimate_operations_bytes(&ops), 5);
     }
 
     #[test]
     fn test_estimate_operations_bytes_relationship() {
-        let ops = vec![crate::proto::Operation {
-            op: Some(crate::proto::operation::Op::CreateRelationship(
-                crate::proto::CreateRelationship {
+        let ops = vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::CreateRelationship(
+                inferadb_ledger_proto::proto::CreateRelationship {
                     resource: "doc:123".to_owned(),
                     relation: "viewer".to_owned(),
                     subject: "user:456".to_owned(),
@@ -463,20 +468,22 @@ mod tests {
     #[test]
     fn test_estimate_operations_bytes_mixed() {
         let ops = vec![
-            crate::proto::Operation {
-                op: Some(crate::proto::operation::Op::SetEntity(crate::proto::SetEntity {
-                    key: "k".to_owned(),
-                    value: vec![0u8; 10],
-                    condition: None,
-                    expires_at: None,
-                })),
+            inferadb_ledger_proto::proto::Operation {
+                op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                    inferadb_ledger_proto::proto::SetEntity {
+                        key: "k".to_owned(),
+                        value: vec![0u8; 10],
+                        condition: None,
+                        expires_at: None,
+                    },
+                )),
             },
-            crate::proto::Operation {
-                op: Some(crate::proto::operation::Op::DeleteEntity(crate::proto::DeleteEntity {
-                    key: "kk".to_owned(),
-                })),
+            inferadb_ledger_proto::proto::Operation {
+                op: Some(inferadb_ledger_proto::proto::operation::Op::DeleteEntity(
+                    inferadb_ledger_proto::proto::DeleteEntity { key: "kk".to_owned() },
+                )),
             },
-            crate::proto::Operation { op: None },
+            inferadb_ledger_proto::proto::Operation { op: None },
         ];
         // 1 + 10 + 2 + 0 = 13
         assert_eq!(estimate_operations_bytes(&ops), 13);
@@ -484,11 +491,13 @@ mod tests {
 
     #[test]
     fn test_estimate_operations_bytes_expire_entity() {
-        let ops = vec![crate::proto::Operation {
-            op: Some(crate::proto::operation::Op::ExpireEntity(crate::proto::ExpireEntity {
-                key: "expkey".to_owned(),
-                expired_at: 0,
-            })),
+        let ops = vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::ExpireEntity(
+                inferadb_ledger_proto::proto::ExpireEntity {
+                    key: "expkey".to_owned(),
+                    expired_at: 0,
+                },
+            )),
         }];
         // "expkey" = 6 bytes
         assert_eq!(estimate_operations_bytes(&ops), 6);

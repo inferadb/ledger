@@ -1,0 +1,42 @@
+[package]
+name = "inferadb-ledger-proto"
+description = "Protobuf types and conversions for InferaDB Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+documentation = "https://docs.rs/inferadb-ledger-proto"
+readme = "README.md"
+keywords = ["protobuf", "grpc", "ledger", "types"]
+categories = ["encoding", "network-programming"]
+
+[dependencies]
+# Internal
+inferadb-ledger-types.workspace = true
+
+# gRPC / proto
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+# Raft (for Vote type in conversions)
+openraft.workspace = true
+
+# Error handling (for tonic::Status in TryFrom)
+snafu.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+inferadb-ledger-test-utils.workspace = true
+proptest.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

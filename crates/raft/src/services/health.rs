@@ -9,6 +9,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use inferadb_ledger_proto::proto::{
+    HealthCheckRequest, HealthCheckResponse, HealthStatus, health_service_server::HealthService,
+};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
@@ -17,9 +20,6 @@ use tonic::{Request, Response, Status};
 use crate::{
     dependency_health::DependencyHealthChecker,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
-    proto::{
-        HealthCheckRequest, HealthCheckResponse, HealthStatus, health_service_server::HealthService,
-    },
     types::LedgerTypeConfig,
 };
 

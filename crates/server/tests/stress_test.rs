@@ -172,7 +172,7 @@ async fn setup_namespace_and_vault(
 ) -> Result<(), String> {
     let endpoint = format!("http://{}", leader_addr);
     let mut admin_client =
-        inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(
+        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
             endpoint.clone(),
         )
         .await
@@ -180,7 +180,7 @@ async fn setup_namespace_and_vault(
 
     // Create namespace (skip for system namespace 0)
     if config.namespace_id != 0 {
-        let ns_request = inferadb_ledger_raft::proto::CreateNamespaceRequest {
+        let ns_request = inferadb_ledger_proto::proto::CreateNamespaceRequest {
             name: format!("stress-ns-{}", config.namespace_id),
             shard_id: None,
             quota: None,
@@ -192,8 +192,8 @@ async fn setup_namespace_and_vault(
     }
 
     // Create vault (replication_factor=1 for test simplicity)
-    let vault_request = inferadb_ledger_raft::proto::CreateVaultRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: config.namespace_id }),
+    let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: config.namespace_id }),
         replication_factor: 1,
         initial_nodes: vec![],
         retention_policy: None,
@@ -227,7 +227,7 @@ async fn setup_multi_shard_namespaces(
 ) -> Result<Vec<ShardAssignment>, String> {
     let endpoint = format!("http://{}", leader_addr);
     let mut admin_client =
-        inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(
+        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
             endpoint.clone(),
         )
         .await
@@ -239,9 +239,9 @@ async fn setup_multi_shard_namespaces(
         let shard_id_u32 = shard_id as u32;
 
         // Create namespace explicitly assigned to this shard
-        let ns_request = inferadb_ledger_raft::proto::CreateNamespaceRequest {
+        let ns_request = inferadb_ledger_proto::proto::CreateNamespaceRequest {
             name: format!("stress-shard-{}-ns", shard_id),
-            shard_id: Some(inferadb_ledger_raft::proto::ShardId { id: shard_id_u32 }),
+            shard_id: Some(inferadb_ledger_proto::proto::ShardId { id: shard_id_u32 }),
             quota: None,
         };
 
@@ -257,8 +257,8 @@ async fn setup_multi_shard_namespaces(
             .ok_or_else(|| format!("No namespace_id in response for shard {}", shard_id))?;
 
         // Create vault in this namespace
-        let vault_request = inferadb_ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+        let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
             replication_factor: 1,
             initial_nodes: vec![],
             retention_policy: None,
@@ -429,7 +429,7 @@ async fn write_worker(
 ) {
     let mut current_endpoint = format!("http://{}", leader_addr);
     let mut client =
-        match inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+        match inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
             current_endpoint.clone(),
         )
         .await
@@ -457,7 +457,7 @@ async fn write_worker(
                 // Reset and try reconnecting
                 consecutive_errors = 0;
                 if let Ok(new_client) =
-                    inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+                    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
                         current_endpoint.clone(),
                     )
                     .await
@@ -488,28 +488,29 @@ async fn write_worker(
         // amortizing the consensus overhead (~16-30ms) across all operations.
         if batch_size > 1 {
             // Build BatchWriteRequest with operations grouped
-            let operations: Vec<inferadb_ledger_raft::proto::BatchWriteOperation> = keys_and_values
-                .iter()
-                .map(|(key, value)| inferadb_ledger_raft::proto::BatchWriteOperation {
-                    operations: vec![inferadb_ledger_raft::proto::Operation {
-                        op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                            inferadb_ledger_raft::proto::SetEntity {
-                                key: key.clone(),
-                                value: value.clone(),
-                                expires_at: None,
-                                condition: None,
-                            },
-                        )),
-                    }],
-                })
-                .collect();
+            let operations: Vec<inferadb_ledger_proto::proto::BatchWriteOperation> =
+                keys_and_values
+                    .iter()
+                    .map(|(key, value)| inferadb_ledger_proto::proto::BatchWriteOperation {
+                        operations: vec![inferadb_ledger_proto::proto::Operation {
+                            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                                inferadb_ledger_proto::proto::SetEntity {
+                                    key: key.clone(),
+                                    value: value.clone(),
+                                    expires_at: None,
+                                    condition: None,
+                                },
+                            )),
+                        }],
+                    })
+                    .collect();
 
-            let request = inferadb_ledger_raft::proto::BatchWriteRequest {
-                namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
+            let request = inferadb_ledger_proto::proto::BatchWriteRequest {
+                namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
-                client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
+                vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
+                client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 operations,
                 include_tx_proofs: false,
@@ -521,7 +522,7 @@ async fn write_worker(
                     let inner = response.into_inner();
                     match inner.result {
                         Some(
-                            inferadb_ledger_raft::proto::batch_write_response::Result::Success(_),
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(_),
                         ) => {
                             // Record all operations in the batch with amortized latency.
                             // The batch latency divided by batch_size gives per-operation latency.
@@ -542,9 +543,9 @@ async fn write_worker(
                             }
                             consecutive_errors = 0;
                         },
-                        Some(inferadb_ledger_raft::proto::batch_write_response::Result::Error(
-                            _e,
-                        )) => {
+                        Some(
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Error(_e),
+                        ) => {
                             for _ in 0..batch_size {
                                 metrics.record_write_error();
                             }
@@ -568,7 +569,7 @@ async fn write_worker(
                         if current_endpoint != new_endpoint {
                             current_endpoint = new_endpoint;
                             if let Ok(new_client) =
-                                inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+                                inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
                                     current_endpoint.clone(),
                                 )
                                 .await
@@ -589,7 +590,7 @@ async fn write_worker(
                         eprintln!("Write worker {} batch error: {}", worker_id, e);
                     }
                     if let Ok(new_client) =
-                        inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
                             current_endpoint.clone(),
                         )
                         .await
@@ -601,16 +602,16 @@ async fn write_worker(
         } else {
             // Single-operation write uses regular Write RPC
             let (key, value) = keys_and_values.into_iter().next().unwrap();
-            let request = inferadb_ledger_raft::proto::WriteRequest {
-                client_id: Some(inferadb_ledger_raft::proto::ClientId { id: client_id.clone() }),
+            let request = inferadb_ledger_proto::proto::WriteRequest {
+                client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-                namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
+                namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
-                operations: vec![inferadb_ledger_raft::proto::Operation {
-                    op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                        inferadb_ledger_raft::proto::SetEntity {
+                vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
+                operations: vec![inferadb_ledger_proto::proto::Operation {
+                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                        inferadb_ledger_proto::proto::SetEntity {
                             key: key.clone(),
                             value: value.clone(),
                             expires_at: None,
@@ -626,7 +627,7 @@ async fn write_worker(
                     let latency = start.elapsed();
                     let inner = response.into_inner();
                     match inner.result {
-                        Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+                        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
                             if config.track_write_locations {
                                 metrics.record_write_with_location(
                                     latency,
@@ -640,7 +641,7 @@ async fn write_worker(
                             }
                             consecutive_errors = 0;
                         },
-                        Some(inferadb_ledger_raft::proto::write_response::Result::Error(_e)) => {
+                        Some(inferadb_ledger_proto::proto::write_response::Result::Error(_e)) => {
                             metrics.record_write_error();
                             consecutive_errors += 1;
                         },
@@ -660,7 +661,7 @@ async fn write_worker(
                         if current_endpoint != new_endpoint {
                             current_endpoint = new_endpoint;
                             if let Ok(new_client) =
-                                inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+                                inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
                                     current_endpoint.clone(),
                                 )
                                 .await
@@ -679,7 +680,7 @@ async fn write_worker(
                         eprintln!("Write worker {} error: {}", worker_id, e);
                     }
                     if let Ok(new_client) =
-                        inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(
+                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
                             current_endpoint.clone(),
                         )
                         .await
@@ -722,7 +723,7 @@ async fn read_worker(
     };
 
     let mut client =
-        inferadb_ledger_raft::proto::read_service_client::ReadServiceClient::new(channel);
+        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel);
     let mut key_counter = 0u64;
     let read_batch_size = config.read_batch_size;
 
@@ -746,13 +747,13 @@ async fn read_worker(
                 })
                 .collect();
 
-            let request = inferadb_ledger_raft::proto::BatchReadRequest {
-                namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
+            let request = inferadb_ledger_proto::proto::BatchReadRequest {
+                namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
+                vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
                 keys,
-                consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual as i32,
+                consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
             };
 
             match client.batch_read(request).await {
@@ -790,13 +791,13 @@ async fn read_worker(
             let key =
                 format!("stress-key-{}-{}-0", worker_id % config.write_workers, key_counter % 1000);
 
-            let request = inferadb_ledger_raft::proto::ReadRequest {
-                namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
+            let request = inferadb_ledger_proto::proto::ReadRequest {
+                namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                     id: config.namespace_id,
                 }),
-                vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
+                vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
                 key,
-                consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual as i32,
+                consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
             };
 
             match client.read(request).await {
@@ -826,7 +827,7 @@ async fn verify_consistency(
 
     let endpoint = format!("http://{}", leader_addr);
     let mut client =
-        inferadb_ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint)
+        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::connect(endpoint)
             .await
             .map_err(|e| format!("Failed to connect for verification: {}", e))?;
 
@@ -837,16 +838,16 @@ async fn verify_consistency(
     let sample_size = std::cmp::min(1000, total); // Sample up to 1000 keys
 
     for (i, (key, expected_value)) in written.iter().take(sample_size).enumerate() {
-        let request = inferadb_ledger_raft::proto::ReadRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
+        let request = inferadb_ledger_proto::proto::ReadRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                 id: config.namespace_id,
             }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: config.vault_id }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
             key: key.clone(),
             // Use eventual consistency for verification - linearizable reads require
             // additional Raft configuration that isn't always enabled in test clusters.
             // Eventual consistency is sufficient here since we wait for cluster sync.
-            consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual as i32,
+            consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
         };
 
         // Add timeout to prevent hanging if server is unresponsive
@@ -926,7 +927,7 @@ async fn verify_multi_shard_consistency(
 
     let endpoint = format!("http://{}", leader_addr);
     let mut client =
-        inferadb_ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint)
+        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::connect(endpoint)
             .await
             .map_err(|e| format!("Failed to connect for verification: {}", e))?;
 
@@ -948,13 +949,13 @@ async fn verify_multi_shard_consistency(
     for (i, key) in keys_to_verify.iter().enumerate() {
         let written_value = written.get(key).unwrap();
 
-        let request = inferadb_ledger_raft::proto::ReadRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId {
+        let request = inferadb_ledger_proto::proto::ReadRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                 id: written_value.namespace_id,
             }),
-            vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: written_value.vault_id }),
+            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: written_value.vault_id }),
             key: key.clone(),
-            consistency: inferadb_ledger_raft::proto::ReadConsistency::Eventual as i32,
+            consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
         };
 
         let read_result = tokio::time::timeout(Duration::from_secs(5), client.read(request)).await;

@@ -23,6 +23,7 @@
 
 use std::{collections::HashMap, fmt::Debug, io::Cursor, ops::RangeBounds, path::Path, sync::Arc};
 
+use inferadb_ledger_proto::proto::BlockAnnouncement;
 // Re-export storage types used in this module
 use inferadb_ledger_state::system::{
     NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys,
@@ -44,7 +45,6 @@ use tokio::sync::broadcast;
 
 use crate::{
     metrics,
-    proto::BlockAnnouncement,
     types::{
         BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
         SystemRequest,
@@ -1866,13 +1866,19 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 for entry in &vault_entries {
                     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
                     let announcement = BlockAnnouncement {
-                        namespace_id: Some(crate::proto::NamespaceId {
+                        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
                             id: entry.namespace_id.value(),
                         }),
-                        vault_id: Some(crate::proto::VaultId { id: entry.vault_id.value() }),
+                        vault_id: Some(inferadb_ledger_proto::proto::VaultId {
+                            id: entry.vault_id.value(),
+                        }),
                         height: entry.vault_height,
-                        block_hash: Some(crate::proto::Hash { value: block_hash.to_vec() }),
-                        state_root: Some(crate::proto::Hash { value: entry.state_root.to_vec() }),
+                        block_hash: Some(inferadb_ledger_proto::proto::Hash {
+                            value: block_hash.to_vec(),
+                        }),
+                        state_root: Some(inferadb_ledger_proto::proto::Hash {
+                            value: entry.state_root.to_vec(),
+                        }),
                         timestamp: Some(prost_types::Timestamp {
                             seconds: timestamp.timestamp(),
                             nanos: timestamp.timestamp_subsec_nanos() as i32,
@@ -4915,7 +4921,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_announcements_sender_stored() {
-        use crate::proto::{BlockAnnouncement, Hash, NamespaceId, VaultId};
+        use inferadb_ledger_proto::proto::{BlockAnnouncement, Hash, NamespaceId, VaultId};
 
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
@@ -5003,11 +5009,10 @@ mod tests {
     async fn test_apply_to_state_machine_broadcasts_block_announcements() {
         use std::time::{Duration, Instant};
 
-        use openraft::RaftStorage;
-
-        use crate::proto::{
+        use inferadb_ledger_proto::proto::{
             BlockAnnouncement, NamespaceId as ProtoNamespaceId, VaultId as ProtoVaultId,
         };
+        use openraft::RaftStorage;
 
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");

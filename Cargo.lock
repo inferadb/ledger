@@ -1456,6 +1456,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "inferadb-ledger-proto"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "inferadb-ledger-test-utils",
+ "inferadb-ledger-types",
+ "openraft",
+ "proptest",
+ "prost",
+ "prost-types",
+ "snafu",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
+ "uuid",
+]
+
+[[package]]
 name = "inferadb-ledger-raft"
 version = "0.1.0"
 dependencies = [
@@ -1469,6 +1488,7 @@ dependencies = [
  "fs2",
  "futures",
  "hmac",
+ "inferadb-ledger-proto",
  "inferadb-ledger-state",
  "inferadb-ledger-store",
  "inferadb-ledger-test-utils",
@@ -1494,9 +1514,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-build",
  "tonic-prost",
- "tonic-prost-build",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -1514,6 +1532,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hickory-resolver",
+ "inferadb-ledger-proto",
  "inferadb-ledger-raft",
  "inferadb-ledger-server",
  "inferadb-ledger-test-utils",
@@ -1555,6 +1574,7 @@ dependencies = [
  "hickory-resolver",
  "hyper",
  "hyper-util",
+ "inferadb-ledger-proto",
  "inferadb-ledger-raft",
  "inferadb-ledger-state",
  "inferadb-ledger-store",

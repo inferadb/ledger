@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use inferadb_ledger_proto::proto;
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
@@ -15,8 +16,6 @@ use inferadb_ledger_types::{
     merkle::MerkleTree,
 };
 use snafu::{ResultExt, Snafu};
-
-use crate::proto;
 
 // ============================================================================
 // Error Types
@@ -344,9 +343,9 @@ pub fn verify_state_proof(
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use chrono::Utc;
+    use inferadb_ledger_proto::proto::Direction;
 
     use super::*;
-    use crate::proto::Direction;
 
     fn make_tx(id: u8) -> Transaction {
         Transaction {

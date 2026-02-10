@@ -7,18 +7,16 @@
 
 use std::sync::Arc;
 
+use inferadb_ledger_proto::proto::{
+    RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
+    RaftInstallSnapshotResponse, RaftLogId, RaftVoteRequest, RaftVoteResponse,
+    raft_service_server::RaftService,
+};
 use inferadb_ledger_types::decode;
 use openraft::{Raft, Vote, raft::AppendEntriesRequest};
 use tonic::{Request, Response, Status};
 
-use crate::{
-    proto::{
-        RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
-        RaftInstallSnapshotResponse, RaftLogId, RaftVoteRequest, RaftVoteResponse,
-        raft_service_server::RaftService,
-    },
-    types::{LedgerNodeId, LedgerTypeConfig},
-};
+use crate::types::{LedgerNodeId, LedgerTypeConfig};
 
 /// Raft service implementation for handling inter-node Raft RPCs.
 pub struct RaftServiceImpl {
@@ -392,17 +390,17 @@ impl RaftService for MultiShardRaftService {
 mod tests {
     use std::sync::Arc;
 
+    use inferadb_ledger_proto::proto::{
+        RaftAppendEntriesRequest, RaftInstallSnapshotRequest, RaftLogId, RaftMembership,
+        RaftMembershipConfig, RaftSnapshotMeta, RaftVote, RaftVoteRequest,
+        raft_service_server::RaftService,
+    };
     use inferadb_ledger_test_utils::TestDir;
     use inferadb_ledger_types::ShardId;
     use tonic::Request;
 
     use crate::{
         MultiRaftConfig, MultiRaftManager, ShardConfig,
-        proto::{
-            RaftAppendEntriesRequest, RaftInstallSnapshotRequest, RaftLogId, RaftMembership,
-            RaftMembershipConfig, RaftSnapshotMeta, RaftVote, RaftVoteRequest,
-            raft_service_server::RaftService,
-        },
         services::raft::{MultiShardRaftService, RaftServiceImpl},
     };
 

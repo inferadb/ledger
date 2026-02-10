@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use inferadb_ledger_raft::proto::{
+use inferadb_ledger_proto::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
     RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse,
     raft_service_server::{RaftService, RaftServiceServer},
@@ -88,11 +88,11 @@ async fn start_minimal_server(node_id: u64, counter: Arc<RpcCounter>) {
 async fn create_raft_client(
     host: &str,
 ) -> Result<
-    inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient<tonic::transport::Channel>,
+    inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient<tonic::transport::Channel>,
     tonic::transport::Error,
 > {
     let channel = turmoil_common::create_turmoil_channel(host, 9999).await?;
-    Ok(inferadb_ledger_raft::proto::raft_service_client::RaftServiceClient::new(channel))
+    Ok(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(channel))
 }
 
 /// Test that network partitions block communication between nodes.

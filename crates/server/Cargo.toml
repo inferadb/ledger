@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 inferadb-ledger-types.workspace = true
+inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-raft.workspace = true
 

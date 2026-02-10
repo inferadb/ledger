@@ -53,6 +53,11 @@
         {
           "type": "toml",
           "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.inferadb-ledger-proto.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
           "jsonpath": "$.workspace.dependencies.inferadb-ledger-raft.version"
         },
         {

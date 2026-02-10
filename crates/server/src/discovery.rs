@@ -33,7 +33,7 @@ use hickory_resolver::{
     config::{ResolverConfig, ResolverOpts},
     name_server::TokioConnectionProvider,
 };
-use inferadb_ledger_raft::proto::{GetNodeInfoRequest, admin_service_client::AdminServiceClient};
+use inferadb_ledger_proto::proto::{GetNodeInfoRequest, admin_service_client::AdminServiceClient};
 use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};

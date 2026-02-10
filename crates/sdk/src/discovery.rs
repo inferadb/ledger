@@ -46,7 +46,7 @@ use std::{
     time::SystemTime,
 };
 
-use inferadb_ledger_raft::proto;
+use inferadb_ledger_proto::proto;
 use parking_lot::RwLock;
 use tokio::{
     sync::Notify,

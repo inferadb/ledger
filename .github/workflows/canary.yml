@@ -61,6 +61,7 @@ jobs:
               - 'crates/types/**'
               - 'crates/store/**'
               - 'crates/state/**'
+              - 'crates/proto/**'
               - 'crates/raft/**'
               - 'crates/sdk/**'
               - 'proto/**'
@@ -459,7 +460,7 @@ jobs:
 
           # Update inter-crate dependency versions to use exact prerelease version
           # (semver ranges like ^0.1.0 don't match prereleases)
-          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-raft inferadb-ledger-sdk; do
+          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-sdk; do
             sed -i "s/\(${crate} = { version = \)\"[^\"]*\"/\1\"=${CRATE_VERSION}\"/" Cargo.toml
           done
 
@@ -474,7 +475,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-raft inferadb-ledger-sdk; do
+          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-sdk; do
             echo "Publishing ${crate}..."
             cargo publish -p "${crate}" --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
             echo "Waiting for crates.io to index..."

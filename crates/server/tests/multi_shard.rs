@@ -26,7 +26,7 @@ async fn create_namespace(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
+        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
             name: name.to_string(),
             shard_id: None,
             quota: None,
@@ -46,8 +46,8 @@ async fn create_vault(
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
+            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -68,16 +68,16 @@ async fn write_entity(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_write_client(addr).await?;
 
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
-        client_id: Some(inferadb_ledger_raft::proto::ClientId {
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "multi-shard-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: key.to_string(),
                     value: value.to_vec(),
                     expires_at: None,
@@ -90,8 +90,10 @@ async fn write_entity(
 
     let response = client.write(request).await?.into_inner();
     match response.result {
-        Some(inferadb_ledger_raft::proto::write_response::Result::Success(s)) => Ok(s.block_height),
-        Some(inferadb_ledger_raft::proto::write_response::Result::Error(e)) => {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
+            Ok(s.block_height)
+        },
+        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
             Err(format!("Write error: {:?}", e).into())
         },
         None => Err("No result in write response".into()),
@@ -107,9 +109,9 @@ async fn read_entity(
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
-    let request = inferadb_ledger_raft::proto::ReadRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
+    let request = inferadb_ledger_proto::proto::ReadRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -203,16 +205,16 @@ async fn test_multi_shard_batch_write() {
     // Submit a batch write with multiple operations
     let mut client = create_write_client(node.addr).await.expect("connect");
 
-    let request = inferadb_ledger_raft::proto::BatchWriteRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: ns_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "batch-client".to_string() }),
+    let request = inferadb_ledger_proto::proto::BatchWriteRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: ns_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-client".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_raft::proto::BatchWriteOperation {
+        operations: vec![inferadb_ledger_proto::proto::BatchWriteOperation {
             operations: vec![
-                inferadb_ledger_raft::proto::Operation {
-                    op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                        inferadb_ledger_raft::proto::SetEntity {
+                inferadb_ledger_proto::proto::Operation {
+                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                        inferadb_ledger_proto::proto::SetEntity {
                             key: "batch-key-1".to_string(),
                             value: b"batch-val-1".to_vec(),
                             expires_at: None,
@@ -220,9 +222,9 @@ async fn test_multi_shard_batch_write() {
                         },
                     )),
                 },
-                inferadb_ledger_raft::proto::Operation {
-                    op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                        inferadb_ledger_raft::proto::SetEntity {
+                inferadb_ledger_proto::proto::Operation {
+                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                        inferadb_ledger_proto::proto::SetEntity {
                             key: "batch-key-2".to_string(),
                             value: b"batch-val-2".to_vec(),
                             expires_at: None,
@@ -237,11 +239,11 @@ async fn test_multi_shard_batch_write() {
 
     let response = client.batch_write(request).await.expect("batch write").into_inner();
     match response.result {
-        Some(inferadb_ledger_raft::proto::batch_write_response::Result::Success(s)) => {
+        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Success(s)) => {
             assert!(s.block_height > 0, "batch should produce a block");
             assert!(s.tx_id.is_some(), "batch should have a tx_id");
         },
-        Some(inferadb_ledger_raft::proto::batch_write_response::Result::Error(e)) => {
+        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(e)) => {
             panic!("batch write failed: {:?}", e);
         },
         None => panic!("no result in batch write response"),
@@ -276,14 +278,14 @@ async fn test_multi_shard_write_idempotency() {
     let mut client = create_write_client(node.addr).await.expect("connect");
     let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: ns_id }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: vault_id }),
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "idempotent-ms".to_string() }),
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: ns_id }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "idempotent-ms".to_string() }),
         idempotency_key: idempotency_key.clone(),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "idem-key".to_string(),
                     value: b"idem-value".to_vec(),
                     expires_at: None,
@@ -303,8 +305,8 @@ async fn test_multi_shard_write_idempotency() {
     // Both should return identical results
     match (resp1.result, resp2.result) {
         (
-            Some(inferadb_ledger_raft::proto::write_response::Result::Success(s1)),
-            Some(inferadb_ledger_raft::proto::write_response::Result::Success(s2)),
+            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s1)),
+            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s2)),
         ) => {
             assert_eq!(s1.tx_id, s2.tx_id, "idempotent writes should return same tx_id");
             assert_eq!(
@@ -332,14 +334,16 @@ async fn test_multi_shard_write_nonexistent_namespace() {
     let mut client = create_write_client(node.addr).await.expect("connect");
 
     // Write to namespace 99999 which doesn't exist
-    let request = inferadb_ledger_raft::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: 99999 }),
-        vault_id: Some(inferadb_ledger_raft::proto::VaultId { id: 1 }),
-        client_id: Some(inferadb_ledger_raft::proto::ClientId { id: "nonexistent-ns".to_string() }),
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 99999 }),
+        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
+            id: "nonexistent-ns".to_string(),
+        }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_raft::proto::Operation {
-            op: Some(inferadb_ledger_raft::proto::operation::Op::SetEntity(
-                inferadb_ledger_raft::proto::SetEntity {
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
                     key: "test".to_string(),
                     value: b"test".to_vec(),
                     expires_at: None,
@@ -357,10 +361,10 @@ async fn test_multi_shard_write_nonexistent_namespace() {
         Ok(response) => {
             let inner = response.into_inner();
             match inner.result {
-                Some(inferadb_ledger_raft::proto::write_response::Result::Error(_)) => {
+                Some(inferadb_ledger_proto::proto::write_response::Result::Error(_)) => {
                     // Expected: write error for nonexistent namespace
                 },
-                Some(inferadb_ledger_raft::proto::write_response::Result::Success(_)) => {
+                Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
                     panic!("write to nonexistent namespace should not succeed");
                 },
                 None => {

@@ -14,10 +14,10 @@
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
 use inferadb_ledger_raft::{
     LedgerTypeConfig, MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig,
     ShardGroup,
-    proto::{JoinClusterRequest, admin_service_client::AdminServiceClient},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -397,13 +397,13 @@ impl TestCluster {
 pub async fn create_write_client(
     addr: SocketAddr,
 ) -> Result<
-    inferadb_ledger_raft::proto::write_service_client::WriteServiceClient<
+    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    inferadb_ledger_raft::proto::write_service_client::WriteServiceClient::connect(endpoint).await
+    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(endpoint).await
 }
 
 /// Helper to create a read client for a node.
@@ -411,11 +411,11 @@ pub async fn create_write_client(
 pub async fn create_read_client(
     addr: SocketAddr,
 ) -> Result<
-    inferadb_ledger_raft::proto::read_service_client::ReadServiceClient<tonic::transport::Channel>,
+    inferadb_ledger_proto::proto::read_service_client::ReadServiceClient<tonic::transport::Channel>,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    inferadb_ledger_raft::proto::read_service_client::ReadServiceClient::connect(endpoint).await
+    inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::connect(endpoint).await
 }
 
 /// Helper to create a health client for a node.
@@ -423,13 +423,14 @@ pub async fn create_read_client(
 pub async fn create_health_client(
     addr: SocketAddr,
 ) -> Result<
-    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient<
+    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient::connect(endpoint).await
+    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient::connect(endpoint)
+        .await
 }
 
 /// Helper to create an admin client for a node.
@@ -437,13 +438,13 @@ pub async fn create_health_client(
 pub async fn create_admin_client(
     addr: SocketAddr,
 ) -> Result<
-    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient<
+    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
     let endpoint = format!("http://{}", addr);
-    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
+    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
 }
 
 // ============================================================================
@@ -773,17 +774,17 @@ impl ExternalCluster {
     pub async fn get_cluster_info(
         endpoint: &str,
     ) -> Result<
-        inferadb_ledger_raft::proto::GetClusterInfoResponse,
+        inferadb_ledger_proto::proto::GetClusterInfoResponse,
         Box<dyn std::error::Error + Send + Sync>,
     > {
         let mut client =
-            inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(
+            inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
                 endpoint.to_string(),
             )
             .await?;
 
         let response =
-            client.get_cluster_info(inferadb_ledger_raft::proto::GetClusterInfoRequest {}).await?;
+            client.get_cluster_info(inferadb_ledger_proto::proto::GetClusterInfoRequest {}).await?;
 
         Ok(response.into_inner())
     }
@@ -791,7 +792,7 @@ impl ExternalCluster {
     /// Find the leader's endpoint URL by matching leader address from
     /// `GetClusterInfoResponse` against known endpoints.
     pub fn leader_endpoint_from_info(
-        info: &inferadb_ledger_raft::proto::GetClusterInfoResponse,
+        info: &inferadb_ledger_proto::proto::GetClusterInfoResponse,
         endpoints: &[String],
     ) -> Option<String> {
         let leader_member = info.members.iter().find(|m| m.is_leader)?;
@@ -803,7 +804,7 @@ impl ExternalCluster {
 
     /// Find non-leader endpoint URLs.
     pub fn non_leader_endpoints(
-        info: &inferadb_ledger_raft::proto::GetClusterInfoResponse,
+        info: &inferadb_ledger_proto::proto::GetClusterInfoResponse,
         endpoints: &[String],
     ) -> Vec<String> {
         let leader_member = info.members.iter().find(|m| m.is_leader);
@@ -846,12 +847,12 @@ where
 pub async fn create_admin_client_from_url(
     endpoint: &str,
 ) -> Result<
-    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient<
+    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(
+    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
         endpoint.to_string(),
     )
     .await
@@ -861,12 +862,12 @@ pub async fn create_admin_client_from_url(
 pub async fn create_health_client_from_url(
     endpoint: &str,
 ) -> Result<
-    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient<
+    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient::connect(
+    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient::connect(
         endpoint.to_string(),
     )
     .await

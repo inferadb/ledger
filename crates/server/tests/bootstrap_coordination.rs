@@ -13,7 +13,7 @@ mod common;
 use std::time::Duration;
 
 use common::{TestCluster, create_admin_client};
-use inferadb_ledger_raft::proto::GetNodeInfoRequest;
+use inferadb_ledger_proto::proto::GetNodeInfoRequest;
 use inferadb_ledger_server::{
     bootstrap::bootstrap_node, config::Config, node_id::load_or_generate_node_id,
 };

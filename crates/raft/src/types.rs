@@ -8,20 +8,11 @@
 
 use std::{fmt, io::Cursor};
 
+// Re-export domain types that originated here but now live in types crate.
+pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
 use inferadb_ledger_types::{Hash, NamespaceId, SetCondition, ShardId, Transaction, VaultId};
 use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
-
-// ============================================================================
-// Type Configuration
-// ============================================================================
-
-/// Node identifier in the Raft cluster.
-///
-/// We use u64 for efficient storage and comparison. The mapping from
-/// human-readable node names (e.g., "node-1") to numeric IDs is maintained
-/// in the `_system` namespace.
-pub type LedgerNodeId = u64;
 
 // Use the declare_raft_types macro for type configuration.
 // This macro generates a `LedgerTypeConfig` struct that implements `RaftTypeConfig`.
@@ -47,45 +38,6 @@ openraft::declare_raft_types!(
         AsyncRuntime = openraft::TokioRuntime,
         Responder = OneshotResponder<LedgerTypeConfig>
 );
-
-// ============================================================================
-// Block Retention Policy
-// ============================================================================
-
-/// Block retention mode for storage/compliance trade-off.
-///
-/// Per DESIGN.md §4.4: Configurable retention policy determines
-/// whether transaction bodies are preserved after snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum BlockRetentionMode {
-    /// Full retention: all transaction bodies preserved indefinitely.
-    /// Use case: Audit/compliance requirements.
-    #[default]
-    Full,
-    /// Compacted retention: after snapshot, transaction bodies are removed
-    /// for blocks older than retention_blocks from tip.
-    /// Headers (state_root, tx_merkle_root) are preserved for verification.
-    /// Use case: High-volume workloads prioritizing storage efficiency.
-    Compacted,
-}
-
-/// Block retention policy for a vault.
-///
-/// Controls how long transaction bodies are preserved vs. compacted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockRetentionPolicy {
-    /// Retention mode (Full or Compacted).
-    pub mode: BlockRetentionMode,
-    /// For COMPACTED mode: blocks newer than tip - retention_blocks keep full transactions.
-    /// Ignored for FULL mode. Default: 10000 blocks.
-    pub retention_blocks: u64,
-}
-
-impl Default for BlockRetentionPolicy {
-    fn default() -> Self {
-        Self { mode: BlockRetentionMode::Full, retention_blocks: 10_000 }
-    }
-}
 
 // ============================================================================
 // Request/Response Types

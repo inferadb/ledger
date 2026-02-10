@@ -9,6 +9,13 @@
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use inferadb_ledger_proto::proto::{
+    BlockAnnouncement, admin_service_server::AdminServiceServer,
+    health_service_server::HealthServiceServer, raft_service_server::RaftServiceServer,
+    read_service_server::ReadServiceServer,
+    system_discovery_service_server::SystemDiscoveryServiceServer,
+    write_service_server::WriteServiceServer,
+};
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
@@ -22,13 +29,6 @@ use crate::{
     graceful_shutdown::ConnectionTrackingLayer,
     idempotency::IdempotencyCache,
     log_storage::AppliedStateAccessor,
-    proto::{
-        BlockAnnouncement, admin_service_server::AdminServiceServer,
-        health_service_server::HealthServiceServer, raft_service_server::RaftServiceServer,
-        read_service_server::ReadServiceServer,
-        system_discovery_service_server::SystemDiscoveryServiceServer,
-        write_service_server::WriteServiceServer,
-    },
     rate_limit::RateLimiter,
     services::{
         AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl,

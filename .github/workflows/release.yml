@@ -494,6 +494,14 @@ jobs:
           echo "Waiting for crates.io to index..."
           sleep 45
 
+      - name: Publish inferadb-ledger-proto
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          cargo publish -p inferadb-ledger-proto --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
+          echo "Waiting for crates.io to index..."
+          sleep 45
+
       - name: Publish inferadb-ledger-raft
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

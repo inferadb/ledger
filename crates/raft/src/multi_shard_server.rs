@@ -20,6 +20,12 @@
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use inferadb_ledger_proto::proto::{
+    admin_service_server::AdminServiceServer, health_service_server::HealthServiceServer,
+    raft_service_server::RaftServiceServer, read_service_server::ReadServiceServer,
+    system_discovery_service_server::SystemDiscoveryServiceServer,
+    write_service_server::WriteServiceServer,
+};
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
@@ -28,12 +34,6 @@ use crate::{
     graceful_shutdown::ConnectionTrackingLayer,
     idempotency::IdempotencyCache,
     multi_raft::MultiRaftManager,
-    proto::{
-        admin_service_server::AdminServiceServer, health_service_server::HealthServiceServer,
-        raft_service_server::RaftServiceServer, read_service_server::ReadServiceServer,
-        system_discovery_service_server::SystemDiscoveryServiceServer,
-        write_service_server::WriteServiceServer,
-    },
     rate_limit::RateLimiter,
     services::{
         AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, MultiShardRaftService,

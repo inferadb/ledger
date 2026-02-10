@@ -9,6 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use inferadb_ledger_proto::proto::{
+    BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, Operation, TxId, WriteError,
+    WriteErrorCode, WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
+};
 use inferadb_ledger_types::config::ValidationConfig;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
@@ -19,11 +23,6 @@ use crate::{
     idempotency::IdempotencyCache,
     metrics,
     proof::{self, ProofError},
-    proto::{
-        BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, Operation, TxId, WriteError,
-        WriteErrorCode, WriteRequest, WriteResponse, WriteSuccess,
-        write_service_server::WriteService,
-    },
     rate_limit::RateLimiter,
     services::{
         metadata::{response_with_correlation, status_with_correlation},
@@ -103,7 +102,10 @@ impl MultiShardWriteService {
         namespace_id: inferadb_ledger_types::NamespaceId,
         vault_id: inferadb_ledger_types::VaultId,
         vault_height: u64,
-    ) -> (Option<crate::proto::BlockHeader>, Option<crate::proto::MerkleProof>) {
+    ) -> (
+        Option<inferadb_ledger_proto::proto::BlockHeader>,
+        Option<inferadb_ledger_proto::proto::MerkleProof>,
+    ) {
         let ctx = match self.resolver.resolve(namespace_id) {
             Ok(ctx) => ctx,
             Err(_) => return (None, None),
@@ -229,7 +231,9 @@ impl WriteService for MultiShardWriteService {
                 metrics::record_write(true, start.elapsed().as_secs_f64());
                 return Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Success(cached)),
+                        result: Some(
+                            inferadb_ledger_proto::proto::write_response::Result::Success(cached),
+                        ),
                     },
                     &request_id,
                     &trace_ctx.trace_id,
@@ -239,7 +243,7 @@ impl WriteService for MultiShardWriteService {
                 metrics::record_write(false, start.elapsed().as_secs_f64());
                 return Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Error(WriteError {
+                        result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(WriteError {
                             code: WriteErrorCode::IdempotencyKeyReused.into(),
                             key: String::new(),
                             current_version: None,
@@ -361,7 +365,9 @@ impl WriteService for MultiShardWriteService {
 
                 Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Success(success)),
+                        result: Some(
+                            inferadb_ledger_proto::proto::write_response::Result::Success(success),
+                        ),
                     },
                     &request_id,
                     &trace_ctx.trace_id,
@@ -414,7 +420,7 @@ impl WriteService for MultiShardWriteService {
             })?;
 
         // Flatten all operations from all groups
-        let all_operations: Vec<crate::proto::Operation> =
+        let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
             req.operations.iter().flat_map(|group| group.operations.clone()).collect();
 
         // Validate all operations before any processing
@@ -446,15 +452,17 @@ impl WriteService for MultiShardWriteService {
                 metrics::record_batch_write(true, 0, start.elapsed().as_secs_f64());
                 return Ok(response_with_correlation(
                     BatchWriteResponse {
-                        result: Some(crate::proto::batch_write_response::Result::Success(
-                            BatchWriteSuccess {
-                                tx_id: cached.tx_id,
-                                block_height: cached.block_height,
-                                block_header: cached.block_header,
-                                tx_proof: cached.tx_proof,
-                                assigned_sequence: cached.assigned_sequence,
-                            },
-                        )),
+                        result: Some(
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(
+                                BatchWriteSuccess {
+                                    tx_id: cached.tx_id,
+                                    block_height: cached.block_height,
+                                    block_header: cached.block_header,
+                                    tx_proof: cached.tx_proof,
+                                    assigned_sequence: cached.assigned_sequence,
+                                },
+                            ),
+                        ),
                     },
                     &request_id,
                     &trace_ctx.trace_id,
@@ -463,7 +471,7 @@ impl WriteService for MultiShardWriteService {
             IdempotencyCheckResult::KeyReused => {
                 metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
                 return Ok(response_with_correlation(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
+                    result: Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(WriteError {
                         code: WriteErrorCode::IdempotencyKeyReused.into(),
                         key: String::new(),
                         current_version: None,
@@ -590,7 +598,11 @@ impl WriteService for MultiShardWriteService {
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {
-                        result: Some(crate::proto::batch_write_response::Result::Success(success)),
+                        result: Some(
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(
+                                success,
+                            ),
+                        ),
                     },
                     &request_id,
                     &trace_ctx.trace_id,

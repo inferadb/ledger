@@ -8,6 +8,10 @@
 
 use std::{fmt::Write, sync::Arc, time::Duration};
 
+use inferadb_ledger_proto::proto::{
+    BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
+    WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
+};
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
@@ -29,10 +33,6 @@ use crate::{
     log_storage::AppliedStateAccessor,
     metrics,
     proof::{self, ProofError},
-    proto::{
-        BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
-        WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
-    },
     rate_limit::RateLimiter,
     trace_context,
     types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
@@ -243,7 +243,10 @@ impl WriteServiceImpl {
     }
 
     /// Validate all operations in a proto operation list.
-    fn validate_operations(&self, operations: &[crate::proto::Operation]) -> Result<(), Status> {
+    fn validate_operations(
+        &self,
+        operations: &[inferadb_ledger_proto::proto::Operation],
+    ) -> Result<(), Status> {
         super::helpers::validate_operations(operations, &self.validation_config)
     }
 
@@ -279,7 +282,11 @@ impl WriteServiceImpl {
     }
 
     /// Record key accesses from operations for hot key detection.
-    fn record_hot_keys(&self, vault_id: VaultId, operations: &[crate::proto::Operation]) {
+    fn record_hot_keys(
+        &self,
+        vault_id: VaultId,
+        operations: &[inferadb_ledger_proto::proto::Operation],
+    ) {
         super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault_id, operations);
     }
 
@@ -335,8 +342,10 @@ impl WriteServiceImpl {
     }
 
     /// Extract operation type names from proto operations for wide event logging.
-    fn extract_operation_types(operations: &[crate::proto::Operation]) -> Vec<&'static str> {
-        use crate::proto::operation::Op;
+    fn extract_operation_types(
+        operations: &[inferadb_ledger_proto::proto::Operation],
+    ) -> Vec<&'static str> {
+        use inferadb_ledger_proto::proto::operation::Op;
 
         operations
             .iter()
@@ -355,8 +364,8 @@ impl WriteServiceImpl {
     ///
     /// Sums key and value sizes for entity operations, and resource/relation/subject
     /// lengths for relationship operations.
-    fn estimate_operations_bytes(operations: &[crate::proto::Operation]) -> usize {
-        use crate::proto::operation::Op;
+    fn estimate_operations_bytes(operations: &[inferadb_ledger_proto::proto::Operation]) -> usize {
+        use inferadb_ledger_proto::proto::operation::Op;
 
         operations
             .iter()
@@ -376,7 +385,7 @@ impl WriteServiceImpl {
     }
 
     /// Compute a hash of operations for idempotency payload comparison.
-    fn hash_operations(operations: &[crate::proto::Operation]) -> Vec<u8> {
+    fn hash_operations(operations: &[inferadb_ledger_proto::proto::Operation]) -> Vec<u8> {
         super::helpers::hash_operations(operations)
     }
 
@@ -389,7 +398,10 @@ impl WriteServiceImpl {
         namespace_id: NamespaceId,
         vault_id: VaultId,
         vault_height: u64,
-    ) -> (Option<crate::proto::BlockHeader>, Option<crate::proto::MerkleProof>) {
+    ) -> (
+        Option<inferadb_ledger_proto::proto::BlockHeader>,
+        Option<inferadb_ledger_proto::proto::MerkleProof>,
+    ) {
         let Some(archive) = &self.block_archive else {
             debug!("Block archive not available for proof generation");
             return (None, None);
@@ -422,7 +434,7 @@ impl WriteServiceImpl {
         &self,
         namespace_id: NamespaceId,
         vault_id: Option<VaultId>,
-        operations: &[crate::proto::Operation],
+        operations: &[inferadb_ledger_proto::proto::Operation],
         client_id: &str,
     ) -> Result<LedgerRequest, Status> {
         // Convert proto operations to internal Operations
@@ -548,7 +560,9 @@ impl WriteService for WriteServiceImpl {
                 metrics::record_write(true, ctx.elapsed_secs());
                 return Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Success(cached)),
+                        result: Some(
+                            inferadb_ledger_proto::proto::write_response::Result::Success(cached),
+                        ),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -562,7 +576,7 @@ impl WriteService for WriteServiceImpl {
                 metrics::record_write(false, ctx.elapsed_secs());
                 return Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Error(WriteError {
+                        result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(WriteError {
                             code: WriteErrorCode::IdempotencyKeyReused.into(),
                             key: String::new(),
                             current_version: None,
@@ -760,7 +774,9 @@ impl WriteService for WriteServiceImpl {
 
                 Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Success(success)),
+                        result: Some(
+                            inferadb_ledger_proto::proto::write_response::Result::Success(success),
+                        ),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -784,16 +800,18 @@ impl WriteService for WriteServiceImpl {
 
                 Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Error(WriteError {
-                            code: WriteErrorCode::Unspecified.into(),
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message,
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            assigned_sequence: None,
-                        })),
+                        result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(
+                            WriteError {
+                                code: WriteErrorCode::Unspecified.into(),
+                                key: String::new(),
+                                current_version: None,
+                                current_value: None,
+                                message,
+                                committed_tx_id: None,
+                                committed_block_height: None,
+                                assigned_sequence: None,
+                            },
+                        )),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -829,16 +847,18 @@ impl WriteService for WriteServiceImpl {
 
                 Ok(response_with_correlation(
                     WriteResponse {
-                        result: Some(crate::proto::write_response::Result::Error(WriteError {
-                            code: error_code.into(),
-                            key,
-                            current_version,
-                            current_value,
-                            message: "Precondition failed".to_string(),
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            assigned_sequence: None,
-                        })),
+                        result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(
+                            WriteError {
+                                code: error_code.into(),
+                                key,
+                                current_version,
+                                current_value,
+                                message: "Precondition failed".to_string(),
+                                committed_tx_id: None,
+                                committed_block_height: None,
+                                assigned_sequence: None,
+                            },
+                        )),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -911,7 +931,7 @@ impl WriteService for WriteServiceImpl {
         ctx.set_target(namespace_id.value(), vault_id.value());
 
         // Flatten all operations from all groups
-        let all_operations: Vec<crate::proto::Operation> =
+        let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
             req.operations.iter().flat_map(|group| group.operations.clone()).collect();
 
         // Validate all operations before any processing
@@ -950,15 +970,17 @@ impl WriteService for WriteServiceImpl {
                 metrics::record_batch_write(true, 0, ctx.elapsed_secs());
                 return Ok(response_with_correlation(
                     BatchWriteResponse {
-                        result: Some(crate::proto::batch_write_response::Result::Success(
-                            BatchWriteSuccess {
-                                tx_id: cached.tx_id,
-                                block_height: cached.block_height,
-                                block_header: cached.block_header,
-                                tx_proof: cached.tx_proof,
-                                assigned_sequence: cached.assigned_sequence,
-                            },
-                        )),
+                        result: Some(
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(
+                                BatchWriteSuccess {
+                                    tx_id: cached.tx_id,
+                                    block_height: cached.block_height,
+                                    block_header: cached.block_header,
+                                    tx_proof: cached.tx_proof,
+                                    assigned_sequence: cached.assigned_sequence,
+                                },
+                            ),
+                        ),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -971,7 +993,7 @@ impl WriteService for WriteServiceImpl {
                 );
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
                 return Ok(response_with_correlation(BatchWriteResponse {
-                    result: Some(crate::proto::batch_write_response::Result::Error(WriteError {
+                    result: Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(WriteError {
                         code: WriteErrorCode::IdempotencyKeyReused.into(),
                         key: String::new(),
                         current_version: None,
@@ -1122,15 +1144,17 @@ impl WriteService for WriteServiceImpl {
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {
-                        result: Some(crate::proto::batch_write_response::Result::Success(
-                            BatchWriteSuccess {
-                                tx_id: success.tx_id,
-                                block_height: success.block_height,
-                                block_header: success.block_header,
-                                tx_proof: success.tx_proof,
-                                assigned_sequence: success.assigned_sequence,
-                            },
-                        )),
+                        result: Some(
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(
+                                BatchWriteSuccess {
+                                    tx_id: success.tx_id,
+                                    block_height: success.block_height,
+                                    block_header: success.block_header,
+                                    tx_proof: success.tx_proof,
+                                    assigned_sequence: success.assigned_sequence,
+                                },
+                            ),
+                        ),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -1154,18 +1178,20 @@ impl WriteService for WriteServiceImpl {
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {
-                        result: Some(crate::proto::batch_write_response::Result::Error(
-                            WriteError {
-                                code: WriteErrorCode::Unspecified.into(),
-                                key: String::new(),
-                                current_version: None,
-                                current_value: None,
-                                message,
-                                committed_tx_id: None,
-                                committed_block_height: None,
-                                assigned_sequence: None,
-                            },
-                        )),
+                        result: Some(
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Error(
+                                WriteError {
+                                    code: WriteErrorCode::Unspecified.into(),
+                                    key: String::new(),
+                                    current_version: None,
+                                    current_value: None,
+                                    message,
+                                    committed_tx_id: None,
+                                    committed_block_height: None,
+                                    assigned_sequence: None,
+                                },
+                            ),
+                        ),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -1201,18 +1227,20 @@ impl WriteService for WriteServiceImpl {
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {
-                        result: Some(crate::proto::batch_write_response::Result::Error(
-                            WriteError {
-                                code: error_code.into(),
-                                key,
-                                current_version,
-                                current_value,
-                                message: "Precondition failed".to_string(),
-                                committed_tx_id: None,
-                                committed_block_height: None,
-                                assigned_sequence: None,
-                            },
-                        )),
+                        result: Some(
+                            inferadb_ledger_proto::proto::batch_write_response::Result::Error(
+                                WriteError {
+                                    code: error_code.into(),
+                                    key,
+                                    current_version,
+                                    current_value,
+                                    message: "Precondition failed".to_string(),
+                                    committed_tx_id: None,
+                                    committed_block_height: None,
+                                    assigned_sequence: None,
+                                },
+                            ),
+                        ),
                     },
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
@@ -1234,10 +1262,9 @@ impl WriteService for WriteServiceImpl {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
+    use inferadb_ledger_proto::proto;
     use inferadb_ledger_types::{config::ValidationConfig, validation};
     use tonic::Status;
-
-    use crate::proto;
 
     /// Helper: run the same validate-and-map-to-Status logic the service uses.
     fn validate_proto_operations(

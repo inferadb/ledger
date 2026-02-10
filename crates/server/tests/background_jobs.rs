@@ -19,7 +19,7 @@ mod common;
 use std::time::Duration;
 
 use common::{ExternalCluster, create_admin_client_from_url, create_health_client_from_url};
-use inferadb_ledger_raft::proto;
+use inferadb_ledger_proto::proto;
 
 /// Skip macro: returns early if no external cluster is available.
 macro_rules! require_cluster {

@@ -30,10 +30,14 @@ pub use hash::{
 pub use types::{
     // Structs
     BlockHeader,
+    BlockRetentionMode,
+    BlockRetentionPolicy,
     ChainCommitment,
     // Type aliases
     ClientId,
     Entity,
+    // Raft node ID
+    LedgerNodeId,
     NamespaceId,
     // Resource accounting
     NamespaceUsage,

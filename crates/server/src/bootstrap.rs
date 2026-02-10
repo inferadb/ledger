@@ -11,11 +11,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use inferadb_ledger_proto::proto::{
+    BlockAnnouncement, JoinClusterRequest, admin_service_client::AdminServiceClient,
+};
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, GrpcRaftNetworkFactory,
     LearnerRefreshJob, LedgerNodeId, LedgerServer, LedgerTypeConfig, RaftLogStore,
     ResourceMetricsCollector, RuntimeConfigHandle, TtlGarbageCollector,
-    proto::{BlockAnnouncement, JoinClusterRequest, admin_service_client::AdminServiceClient},
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};

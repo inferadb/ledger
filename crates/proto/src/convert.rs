@@ -12,23 +12,28 @@
 //! # Usage
 //!
 //! ```ignore
-//! use crate::proto_convert::*;
+//! use inferadb_ledger_proto::convert;
 //!
 //! // Domain to proto
 //! let proto_op: proto::Operation = domain_op.into();
 //!
-//! // Proto to domain  
+//! // Proto to domain
 //! let domain_vote: Vote<LedgerNodeId> = proto_vote.into();
 //! ```
+//!
+//! # Note
+//!
+//! The `NamespaceStatus` conversion lives in the `raft` crate because it
+//! depends on `inferadb_ledger_state::system::NamespaceStatus`.
 
-use inferadb_ledger_types::merkle::MerkleProof as InternalMerkleProof;
+use inferadb_ledger_types::{
+    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId,
+    merkle::MerkleProof as InternalMerkleProof,
+};
 use openraft::Vote;
 use tonic::Status;
 
-use crate::{
-    proto,
-    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId},
-};
+use crate::proto;
 
 // =============================================================================
 // Vote conversions (openraft::Vote <-> proto::RaftVote)
@@ -234,24 +239,6 @@ impl TryFrom<proto::Operation> for inferadb_ledger_types::Operation {
 
     fn try_from(proto_op: proto::Operation) -> Result<Self, Self::Error> {
         Self::try_from(&proto_op)
-    }
-}
-
-// =============================================================================
-// NamespaceStatus conversions
-// =============================================================================
-
-impl From<inferadb_ledger_state::system::NamespaceStatus> for proto::NamespaceStatus {
-    fn from(status: inferadb_ledger_state::system::NamespaceStatus) -> Self {
-        use inferadb_ledger_state::system::NamespaceStatus;
-
-        match status {
-            NamespaceStatus::Active => proto::NamespaceStatus::Active,
-            NamespaceStatus::Migrating => proto::NamespaceStatus::Migrating,
-            NamespaceStatus::Suspended => proto::NamespaceStatus::Suspended,
-            NamespaceStatus::Deleting => proto::NamespaceStatus::Deleting,
-            NamespaceStatus::Deleted => proto::NamespaceStatus::Deleted,
-        }
     }
 }
 
@@ -953,36 +940,6 @@ mod tests {
                 key: "key:exp".to_string(),
                 expired_at: 1699999999,
             }
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // NamespaceStatus conversion tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_namespace_status_all_variants() {
-        use inferadb_ledger_state::system::NamespaceStatus;
-
-        assert_eq!(
-            proto::NamespaceStatus::from(NamespaceStatus::Active),
-            proto::NamespaceStatus::Active
-        );
-        assert_eq!(
-            proto::NamespaceStatus::from(NamespaceStatus::Migrating),
-            proto::NamespaceStatus::Migrating
-        );
-        assert_eq!(
-            proto::NamespaceStatus::from(NamespaceStatus::Suspended),
-            proto::NamespaceStatus::Suspended
-        );
-        assert_eq!(
-            proto::NamespaceStatus::from(NamespaceStatus::Deleting),
-            proto::NamespaceStatus::Deleting
-        );
-        assert_eq!(
-            proto::NamespaceStatus::from(NamespaceStatus::Deleted),
-            proto::NamespaceStatus::Deleted
         );
     }
 
