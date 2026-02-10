@@ -208,6 +208,12 @@ impl<'a> WriteBuilder<'a, HasOps> {
     ///
     /// Uses the client's retry and metrics infrastructure. The write is
     /// idempotent — retries reuse the same server-generated idempotency key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write RPC fails after retry attempts are
+    /// exhausted, the client has been shut down, a CAS condition is not met,
+    /// or the cancellation token is triggered.
     pub async fn execute(self) -> Result<WriteSuccess> {
         match self.cancellation {
             Some(token) => {

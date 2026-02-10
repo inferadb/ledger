@@ -1,3 +1,5 @@
+//! Raft consensus and batch writer configuration.
+
 use std::time::Duration;
 
 use schemars::JsonSchema;

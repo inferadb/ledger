@@ -40,6 +40,11 @@ impl std::error::Error for ValidationError {}
 /// - Be non-empty
 /// - Not exceed `config.max_key_bytes` in UTF-8 byte length
 /// - Contain only `[a-zA-Z0-9:/_.-]`
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the key is empty, exceeds `max_key_bytes`,
+/// or contains characters outside the `[a-zA-Z0-9:/_.-]` whitelist.
 pub fn validate_key(key: &str, config: &ValidationConfig) -> Result<(), ValidationError> {
     if key.is_empty() {
         return Err(ValidationError {
@@ -73,6 +78,10 @@ pub fn validate_key(key: &str, config: &ValidationConfig) -> Result<(), Validati
 /// Validate an entity value against configured size limits.
 ///
 /// Values must not exceed `config.max_value_bytes`.
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the value exceeds `max_value_bytes`.
 pub fn validate_value(value: &[u8], config: &ValidationConfig) -> Result<(), ValidationError> {
     if value.len() > config.max_value_bytes {
         return Err(ValidationError {
@@ -94,6 +103,11 @@ pub fn validate_value(value: &[u8], config: &ValidationConfig) -> Result<(), Val
 /// - Not exceed `config.max_namespace_name_bytes` in UTF-8 byte length
 /// - Contain only `[a-z0-9-]`
 /// - Not start or end with a hyphen
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the name is empty, exceeds `max_namespace_name_bytes`,
+/// starts or ends with a hyphen, or contains characters outside `[a-z0-9-]`.
 pub fn validate_namespace_name(
     name: &str,
     config: &ValidationConfig,
@@ -139,6 +153,12 @@ pub fn validate_namespace_name(
 /// - Be non-empty
 /// - Not exceed `config.max_relationship_string_bytes`
 /// - Contain only `[a-zA-Z0-9:/_.-#]`
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the string is empty, exceeds
+/// `max_relationship_string_bytes`, or contains characters outside
+/// `[a-zA-Z0-9:/_.-#]`.
 pub fn validate_relationship_string(
     value: &str,
     field_name: &str,
@@ -174,6 +194,11 @@ pub fn validate_relationship_string(
 }
 
 /// Validate the number of operations in a write request.
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the count is zero or exceeds
+/// `max_operations_per_write`.
 pub fn validate_operations_count(
     count: usize,
     config: &ValidationConfig,
@@ -197,6 +222,11 @@ pub fn validate_operations_count(
 }
 
 /// Validate the total payload size of a batch of operations.
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the total payload exceeds
+/// `max_batch_payload_bytes`.
 pub fn validate_batch_payload_bytes(
     total_bytes: usize,
     config: &ValidationConfig,

@@ -1,3 +1,5 @@
+//! Runtime-reconfigurable configuration and namespace quota management.
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -101,7 +103,11 @@ impl NamespaceQuota {
 }
 
 impl NamespaceQuota {
-    /// Validate an existing quota configuration (e.g., after deserialization).
+    /// Validates an existing quota configuration (e.g., after deserialization).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any quota value is zero.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_storage_bytes == 0 {
             return Err(ConfigError::Validation {
@@ -243,10 +249,12 @@ fn collect_json_diffs(
 }
 
 impl RuntimeConfig {
-    /// Validate all present config sections.
+    /// Validates all present config sections.
     ///
-    /// Returns `Ok(())` if all sections pass validation,
-    /// or `Err(ConfigError)` with the first validation failure.
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] with the first subsection
+    /// validation failure encountered.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(ref rl) = self.rate_limit {
             rl.validate()?;

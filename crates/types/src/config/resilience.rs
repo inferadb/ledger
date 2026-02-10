@@ -1,3 +1,5 @@
+//! Rate limiting, shutdown, health check, validation, and circuit breaker configuration.
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

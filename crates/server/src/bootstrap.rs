@@ -118,6 +118,15 @@ pub struct BootstrappedNode {
 ///   - If any peer is already a cluster member, waits to join existing cluster
 ///   - If enough peers found, the node with lowest Snowflake ID bootstraps all members
 ///   - If this node doesn't have lowest ID, waits to be added by the bootstrapping node
+///
+/// # Errors
+///
+/// Returns [`BootstrapError`] if:
+/// - Configuration validation fails
+/// - Node ID resolution fails
+/// - Database creation or opening fails
+/// - Raft instance creation fails
+/// - Cluster initialization or join times out
 pub async fn bootstrap_node(
     config: &Config,
     data_dir: &std::path::Path,
@@ -515,6 +524,13 @@ async fn wait_for_cluster_join(
 ///
 /// Note: This should be called after the gRPC server has started, since the
 /// leader needs to be able to reach this node to replicate logs.
+///
+/// # Errors
+///
+/// Returns [`BootstrapError`] if:
+/// - Node ID resolution fails
+/// - No peers are discoverable via DNS or cache
+/// - All join attempts to discovered peers fail
 #[allow(dead_code)] // reserved for join-cluster mode
 pub async fn join_cluster(
     config: &Config,

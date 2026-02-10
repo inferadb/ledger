@@ -182,8 +182,13 @@ impl BackgroundJobWatchdog {
         }
     }
 
-    /// Checks all registered jobs. Returns `Ok(())` if all are healthy,
-    /// or `Err(name)` with the first stale job name.
+    /// Checks all registered jobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the name of the first stale job if any registered job has
+    /// not sent a heartbeat within its expected interval multiplied by
+    /// the staleness multiplier.
     pub fn check_all(&self) -> Result<(), String> {
         let now = current_unix_secs();
         let entries = self.entries.read();

@@ -125,6 +125,11 @@ impl<'a> RelationshipQueryBuilder<'a> {
     }
 
     /// Execute the relationship query and return a paginated result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query RPC fails after retry attempts are
+    /// exhausted or the client has been shut down.
     pub async fn execute(self) -> Result<PagedResult<Relationship>> {
         let opts = ListRelationshipsOpts {
             resource: self.resource,

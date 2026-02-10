@@ -12,6 +12,7 @@ use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 /// Entity store error types.
 #[derive(Debug, Snafu)]
 pub enum EntityError {
+    /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
     Storage {
         source: inferadb_ledger_store::Error,
@@ -19,6 +20,7 @@ pub enum EntityError {
         location: snafu::Location,
     },
 
+    /// Serialization or deserialization failed.
     #[snafu(display("Codec error: {source}"))]
     Codec {
         source: CodecError,
@@ -35,6 +37,11 @@ pub struct EntityStore;
 
 impl EntityStore {
     /// Get an entity by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Storage` if the read transaction fails.
+    /// Returns `EntityError::Codec` if deserialization of the stored entity fails.
     pub fn get<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -52,6 +59,11 @@ impl EntityStore {
     }
 
     /// Set an entity value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Codec` if serialization of the entity fails.
+    /// Returns `EntityError::Storage` if the write transaction fails.
     pub fn set<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -65,6 +77,10 @@ impl EntityStore {
     }
 
     /// Delete an entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Storage` if the delete operation fails.
     pub fn delete<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -76,6 +92,10 @@ impl EntityStore {
     }
 
     /// Check if an entity exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Storage` if the read transaction fails.
     pub fn exists<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -88,6 +108,11 @@ impl EntityStore {
     /// List all entities in a vault with pagination.
     ///
     /// Returns entities sorted by key with their local keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Storage` if the iterator or read transaction fails.
+    /// Returns `EntityError::Codec` if deserialization of any entity fails.
     pub fn list_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -127,6 +152,11 @@ impl EntityStore {
     /// List all entities in a specific bucket within a vault.
     ///
     /// Used for state root computation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Storage` if the iterator or read transaction fails.
+    /// Returns `EntityError::Codec` if deserialization of any entity fails.
     pub fn list_in_bucket<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -165,6 +195,10 @@ impl EntityStore {
     }
 
     /// Count entities in a vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Storage` if the iterator or read transaction fails.
     pub fn count_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -188,6 +222,11 @@ impl EntityStore {
     }
 
     /// Scan entities with a key prefix within a vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EntityError::Storage` if the iterator or read transaction fails.
+    /// Returns `EntityError::Codec` if deserialization of any matching entity fails.
     pub fn scan_prefix<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,

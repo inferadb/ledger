@@ -12,9 +12,11 @@ use crate::keys::{encode_storage_key, vault_prefix};
 /// Relationship store error types.
 #[derive(Debug, Snafu)]
 pub enum RelationshipError {
+    /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
     Storage { source: inferadb_ledger_store::Error },
 
+    /// Serialization or deserialization failed.
     #[snafu(display("Codec error: {source}"))]
     Codec { source: CodecError },
 }
@@ -27,6 +29,11 @@ pub struct RelationshipStore;
 
 impl RelationshipStore {
     /// Get a relationship by its components.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RelationshipError::Storage` if the read transaction fails.
+    /// Returns `RelationshipError::Codec` if deserialization of the stored relationship fails.
     pub fn get<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -48,6 +55,10 @@ impl RelationshipStore {
     }
 
     /// Check if a relationship exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RelationshipError::Storage` if the read transaction fails.
     pub fn exists<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -65,6 +76,11 @@ impl RelationshipStore {
     /// Create a relationship.
     ///
     /// Returns true if created, false if already existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RelationshipError::Storage` if the read or write transaction fails.
+    /// Returns `RelationshipError::Codec` if serialization of the relationship fails.
     pub fn create<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -91,6 +107,10 @@ impl RelationshipStore {
     /// Delete a relationship.
     ///
     /// Returns true if deleted, false if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RelationshipError::Storage` if the delete operation fails.
     pub fn delete<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -107,6 +127,11 @@ impl RelationshipStore {
     }
 
     /// List all relationships in a vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RelationshipError::Storage` if the iterator or read transaction fails.
+    /// Returns `RelationshipError::Codec` if deserialization of any relationship fails.
     pub fn list_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -143,6 +168,10 @@ impl RelationshipStore {
     }
 
     /// Count relationships in a vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RelationshipError::Storage` if the iterator or read transaction fails.
     pub fn count_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -167,6 +196,11 @@ impl RelationshipStore {
     }
 
     /// List relationships for a specific resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RelationshipError::Storage` if the iterator or read transaction fails.
+    /// Returns `RelationshipError::Codec` if deserialization of any relationship fails.
     pub fn list_for_resource<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,

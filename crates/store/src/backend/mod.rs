@@ -39,25 +39,55 @@ pub const FORMAT_VERSION: u16 = 2;
 
 /// Storage backend trait for abstracting file I/O.
 pub trait StorageBackend: Send + Sync {
-    /// Read the database header (512 bytes).
+    /// Read the database header (768 bytes).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the read fails.
     fn read_header(&self) -> Result<Vec<u8>>;
 
     /// Write the database header.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the write fails.
+    /// Returns `Error::Corrupted` if the header size is incorrect.
     fn write_header(&self, header: &[u8]) -> Result<()>;
 
     /// Read a page by its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the read fails.
     fn read_page(&self, page_id: PageId) -> Result<Vec<u8>>;
 
     /// Write a page at the given ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the write fails.
+    /// Returns `Error::Corrupted` if the data size does not match the page size.
     fn write_page(&self, page_id: PageId, data: &[u8]) -> Result<()>;
 
     /// Flush all writes to durable storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the sync fails.
     fn sync(&self) -> Result<()>;
 
     /// Get the current file size in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the metadata query fails.
     fn file_size(&self) -> Result<u64>;
 
     /// Extend the file to accommodate more pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the file cannot be extended.
     fn extend(&self, new_size: u64) -> Result<()>;
 
     /// Get the page size for this backend.
@@ -287,6 +317,12 @@ impl DatabaseHeader {
     }
 
     /// Deserialize from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Corrupted` if the buffer is too short or a commit slot is malformed.
+    /// Returns `Error::InvalidMagic` if the magic number does not match.
+    /// Returns `Error::UnsupportedVersion` if the format version is unsupported.
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
         use crate::error::Error;
 
@@ -325,6 +361,10 @@ impl DatabaseHeader {
     ///
     /// Returns the index of the valid primary slot, or an error if both are corrupt.
     /// If the indicated primary slot has an invalid checksum, tries the secondary.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Corrupted` if both commit slots have invalid checksums.
     pub fn validate_and_choose_slot(&self) -> Result<usize> {
         use crate::error::Error;
 

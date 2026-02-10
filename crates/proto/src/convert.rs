@@ -39,6 +39,7 @@ use crate::proto;
 // Vote conversions (openraft::Vote <-> proto::RaftVote)
 // =============================================================================
 
+/// Converts a domain [`Vote`] reference to its protobuf representation.
 impl From<&Vote<LedgerNodeId>> for proto::RaftVote {
     fn from(vote: &Vote<LedgerNodeId>) -> Self {
         proto::RaftVote {
@@ -49,12 +50,14 @@ impl From<&Vote<LedgerNodeId>> for proto::RaftVote {
     }
 }
 
+/// Converts an owned domain [`Vote`] to its protobuf representation.
 impl From<Vote<LedgerNodeId>> for proto::RaftVote {
     fn from(vote: Vote<LedgerNodeId>) -> Self {
         (&vote).into()
     }
 }
 
+/// Converts a protobuf [`RaftVote`](proto::RaftVote) reference to the domain [`Vote`].
 impl From<&proto::RaftVote> for Vote<LedgerNodeId> {
     fn from(proto: &proto::RaftVote) -> Self {
         if proto.committed {
@@ -65,6 +68,7 @@ impl From<&proto::RaftVote> for Vote<LedgerNodeId> {
     }
 }
 
+/// Converts an owned protobuf [`RaftVote`](proto::RaftVote) to the domain [`Vote`].
 impl From<proto::RaftVote> for Vote<LedgerNodeId> {
     fn from(proto: proto::RaftVote) -> Self {
         (&proto).into()
@@ -75,6 +79,8 @@ impl From<proto::RaftVote> for Vote<LedgerNodeId> {
 // Operation conversions (inferadb_ledger_types::Operation <-> proto::Operation)
 // =============================================================================
 
+/// Converts a domain [`Operation`](inferadb_ledger_types::Operation) reference to its protobuf
+/// representation.
 impl From<&inferadb_ledger_types::Operation> for proto::Operation {
     fn from(op: &inferadb_ledger_types::Operation) -> Self {
         use inferadb_ledger_types::Operation as LedgerOp;
@@ -120,6 +126,8 @@ impl From<&inferadb_ledger_types::Operation> for proto::Operation {
     }
 }
 
+/// Converts an owned domain [`Operation`](inferadb_ledger_types::Operation) to its protobuf
+/// representation.
 impl From<inferadb_ledger_types::Operation> for proto::Operation {
     fn from(op: inferadb_ledger_types::Operation) -> Self {
         (&op).into()
@@ -130,6 +138,8 @@ impl From<inferadb_ledger_types::Operation> for proto::Operation {
 // SetCondition conversions (inferadb_ledger_types::SetCondition <-> proto::SetCondition)
 // =============================================================================
 
+/// Converts a domain [`SetCondition`](inferadb_ledger_types::SetCondition) reference to its
+/// protobuf representation.
 impl From<&inferadb_ledger_types::SetCondition> for proto::SetCondition {
     fn from(c: &inferadb_ledger_types::SetCondition) -> Self {
         use proto::set_condition::Condition;
@@ -150,6 +160,8 @@ impl From<&inferadb_ledger_types::SetCondition> for proto::SetCondition {
     }
 }
 
+/// Converts an owned domain [`SetCondition`](inferadb_ledger_types::SetCondition) to its protobuf
+/// representation.
 impl From<inferadb_ledger_types::SetCondition> for proto::SetCondition {
     fn from(c: inferadb_ledger_types::SetCondition) -> Self {
         (&c).into()
@@ -160,7 +172,8 @@ impl From<inferadb_ledger_types::SetCondition> for proto::SetCondition {
 // SetCondition conversions (proto::SetCondition -> inferadb_ledger_types::SetCondition)
 // =============================================================================
 
-/// Convert a proto `SetCondition` to an optional domain `SetCondition`.
+/// Converts a protobuf [`SetCondition`](proto::SetCondition) reference to an optional domain
+/// [`SetCondition`](inferadb_ledger_types::SetCondition).
 ///
 /// Returns `None` if the proto condition field is not set.
 /// The `NotExists(false)` and `MustExists(false)` cases map to their logical
@@ -186,6 +199,10 @@ impl From<&proto::SetCondition> for Option<inferadb_ledger_types::SetCondition> 
 // Operation conversions (proto::Operation -> inferadb_ledger_types::Operation)
 // =============================================================================
 
+/// Converts a protobuf [`Operation`](proto::Operation) reference to the domain
+/// [`Operation`](inferadb_ledger_types::Operation).
+///
+/// Returns `Err(Status::InvalidArgument)` if the `op` field is not set.
 impl TryFrom<&proto::Operation> for inferadb_ledger_types::Operation {
     type Error = Status;
 
@@ -234,6 +251,10 @@ impl TryFrom<&proto::Operation> for inferadb_ledger_types::Operation {
     }
 }
 
+/// Converts an owned protobuf [`Operation`](proto::Operation) to the domain
+/// [`Operation`](inferadb_ledger_types::Operation).
+///
+/// Delegates to the reference-based conversion.
 impl TryFrom<proto::Operation> for inferadb_ledger_types::Operation {
     type Error = Status;
 
@@ -246,6 +267,11 @@ impl TryFrom<proto::Operation> for inferadb_ledger_types::Operation {
 // Entity conversions (inferadb_ledger_types::Entity -> proto::Entity)
 // =============================================================================
 
+/// Converts a domain [`Entity`](inferadb_ledger_types::Entity) reference to its protobuf
+/// representation.
+///
+/// Entity keys are converted from bytes to UTF-8 via lossy conversion.
+/// An `expires_at` of 0 (never expires) maps to `None`.
 impl From<&inferadb_ledger_types::Entity> for proto::Entity {
     fn from(e: &inferadb_ledger_types::Entity) -> Self {
         proto::Entity {
@@ -262,6 +288,8 @@ impl From<&inferadb_ledger_types::Entity> for proto::Entity {
 // Relationship conversions (inferadb_ledger_types::Relationship -> proto::Relationship)
 // =============================================================================
 
+/// Converts a domain [`Relationship`](inferadb_ledger_types::Relationship) reference to its
+/// protobuf representation.
 impl From<&inferadb_ledger_types::Relationship> for proto::Relationship {
     fn from(r: &inferadb_ledger_types::Relationship) -> Self {
         proto::Relationship {
@@ -272,6 +300,8 @@ impl From<&inferadb_ledger_types::Relationship> for proto::Relationship {
     }
 }
 
+/// Converts an owned domain [`Relationship`](inferadb_ledger_types::Relationship) to its protobuf
+/// representation.
 impl From<inferadb_ledger_types::Relationship> for proto::Relationship {
     fn from(r: inferadb_ledger_types::Relationship) -> Self {
         proto::Relationship { resource: r.resource, relation: r.relation, subject: r.subject }
@@ -282,6 +312,7 @@ impl From<inferadb_ledger_types::Relationship> for proto::Relationship {
 // BlockRetentionPolicy conversions
 // =============================================================================
 
+/// Converts a domain [`BlockRetentionMode`] to its protobuf representation.
 impl From<BlockRetentionMode> for proto::BlockRetentionMode {
     fn from(mode: BlockRetentionMode) -> Self {
         match mode {
@@ -291,6 +322,10 @@ impl From<BlockRetentionMode> for proto::BlockRetentionMode {
     }
 }
 
+/// Converts a protobuf [`BlockRetentionPolicy`](proto::BlockRetentionPolicy) reference to the
+/// domain type.
+///
+/// Unspecified mode defaults to `Full`. Zero `retention_blocks` defaults to 10,000.
 impl From<&proto::BlockRetentionPolicy> for BlockRetentionPolicy {
     fn from(proto_policy: &proto::BlockRetentionPolicy) -> Self {
         let mode = match proto_policy.mode() {
@@ -311,6 +346,7 @@ impl From<&proto::BlockRetentionPolicy> for BlockRetentionPolicy {
     }
 }
 
+/// Converts an owned domain [`BlockRetentionPolicy`] to its protobuf representation.
 impl From<BlockRetentionPolicy> for proto::BlockRetentionPolicy {
     fn from(policy: BlockRetentionPolicy) -> Self {
         proto::BlockRetentionPolicy {
@@ -324,12 +360,12 @@ impl From<BlockRetentionPolicy> for proto::BlockRetentionPolicy {
 // MerkleProof conversions (InternalMerkleProof -> proto::MerkleProof)
 // =============================================================================
 
+/// Converts a domain [`MerkleProof`](InternalMerkleProof) reference to its protobuf representation.
+///
+/// The internal format stores raw sibling hashes with the `leaf_index` to
+/// determine direction. The proto format explicitly encodes direction for
+/// each sibling.
 impl From<&InternalMerkleProof> for proto::MerkleProof {
-    /// Convert an internal MerkleProof to a proto MerkleProof.
-    ///
-    /// The internal format stores raw sibling hashes with the leaf_index to
-    /// determine direction. The proto format explicitly encodes direction for
-    /// each sibling.
     fn from(internal: &InternalMerkleProof) -> Self {
         use proto::Direction;
 
@@ -361,6 +397,7 @@ impl From<&InternalMerkleProof> for proto::MerkleProof {
     }
 }
 
+/// Converts an owned domain [`MerkleProof`](InternalMerkleProof) to its protobuf representation.
 impl From<InternalMerkleProof> for proto::MerkleProof {
     fn from(internal: InternalMerkleProof) -> Self {
         (&internal).into()

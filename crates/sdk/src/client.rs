@@ -942,10 +942,10 @@ impl VerifiedValue {
     /// in the block header. If a chain proof is present, also verifies the
     /// chain of blocks links correctly.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// `Ok(true)` if verification passes.
-    /// `Err` with details if verification fails.
+    /// Returns `SdkError::ProofVerification` if the Merkle proof does not
+    /// match the block header's state root.
     pub fn verify(&self) -> Result<bool> {
         // Verify the Merkle proof against the block header's state root
         if !self.merkle_proof.verify(&self.block_header.state_root) {

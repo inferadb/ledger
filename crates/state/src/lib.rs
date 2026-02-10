@@ -12,6 +12,7 @@
 //! - Block archive for committed block storage
 
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
 mod block_archive;
 mod bucket;

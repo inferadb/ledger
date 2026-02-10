@@ -1,3 +1,5 @@
+//! Storage engine configuration for B+ tree, compaction, and integrity.
+
 use std::time::Duration;
 
 use schemars::JsonSchema;

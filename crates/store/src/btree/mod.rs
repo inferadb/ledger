@@ -86,6 +86,10 @@ impl<P: PageProvider> BTree<P> {
     /// Compute the depth of the B-tree (0 = empty, 1 = root is leaf, 2+ = branches + leaf).
     ///
     /// Walks the leftmost path from root to leaf.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails or a non-B-tree page type is encountered.
     pub fn depth(&self) -> Result<u32> {
         if self.root_page == 0 {
             return Ok(0);
@@ -153,6 +157,10 @@ impl<P: PageProvider> BTree<P> {
     ///
     /// Uses the leaf page's embedded bloom filter for fast negative lookups:
     /// if the bloom filter says "definitely absent," the binary search is skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails or a page type mismatch is found.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if self.root_page == 0 {
             return Ok(None);
@@ -574,6 +582,10 @@ impl<P: PageProvider> BTree<P> {
     /// Delete a key from the tree.
     ///
     /// Returns the value that was deleted, or None if key didn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read/write fails during the deletion.
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if self.root_page == 0 {
             return Ok(None);
@@ -611,16 +623,28 @@ impl<P: PageProvider> BTree<P> {
     }
 
     /// Create an iterator over all entries in the tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial seek to the first leaf fails.
     pub fn iter(&self) -> Result<BTreeIterator<'_, P>> {
         BTreeIterator::new(self, Range::all())
     }
 
     /// Create an iterator over a range of entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial seek to the range start fails.
     pub fn range<'a>(&'a self, range: Range<'a>) -> Result<BTreeIterator<'a, P>> {
         BTreeIterator::new(self, range)
     }
 
     /// Get the first (smallest) key-value pair in the tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while walking to the leftmost leaf.
     pub fn first(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         if self.root_page == 0 {
             return Ok(None);
@@ -639,6 +663,10 @@ impl<P: PageProvider> BTree<P> {
     }
 
     /// Get the last (largest) key-value pair in the tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while walking to the rightmost leaf.
     pub fn last(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         if self.root_page == 0 {
             return Ok(None);
@@ -718,6 +746,10 @@ impl<P: PageProvider> BTree<P> {
     ///
     /// # Returns
     /// Statistics about the compaction: pages merged and pages freed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read/write fails during the merge operation.
     pub fn compact(&mut self, min_fill_factor: f64) -> Result<CompactionStats> {
         if self.root_page == 0 {
             return Ok(CompactionStats::default());
@@ -1031,6 +1063,10 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
     }
 
     /// Get the current key-value pair, if positioned (returns owned copies).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Corrupted`] if the iterator has no current leaf page.
     pub fn current(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         if !self.state.position.valid {
             return Ok(None);
@@ -1054,6 +1090,10 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
     }
 
     /// Move to next entry and return it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails during leaf advancement.
     pub fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         if !self.state.started {
             self.seek_to_start()?;

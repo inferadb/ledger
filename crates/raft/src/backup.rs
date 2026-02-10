@@ -155,6 +155,11 @@ pub struct BackupManager {
 
 impl BackupManager {
     /// Create a new backup manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::Io`] if the backup destination directory
+    /// cannot be created.
     pub fn new(config: &BackupConfig) -> Result<Self> {
         let backup_dir = PathBuf::from(&config.destination);
         fs::create_dir_all(&backup_dir).context(IoSnafu)?;
@@ -165,7 +170,13 @@ impl BackupManager {
     /// Create a backup from the given snapshot.
     ///
     /// Writes the snapshot to the backup directory and creates a metadata sidecar.
-    /// Returns the backup metadata.
+    /// Returns the backup metadata. Old backups are pruned according to the
+    /// retention count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the snapshot file or metadata sidecar cannot
+    /// be written, serialization fails, or pruning encounters an I/O error.
     pub fn create_backup(&self, snapshot: &Snapshot, tag: &str) -> Result<BackupMetadata> {
         let now = Utc::now();
         let backup_id =
@@ -216,6 +227,11 @@ impl BackupManager {
     }
 
     /// List available backups sorted by creation time (newest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::Io`] if the backup directory cannot be read.
+    /// Corrupt metadata files are logged and skipped rather than failing.
     pub fn list_backups(&self, limit: usize) -> Result<Vec<BackupMetadata>> {
         if !self.backup_dir.exists() {
             return Ok(Vec::new());
@@ -257,6 +273,11 @@ impl BackupManager {
     ///
     /// Reads the backup file and verifies its integrity (checksum validation
     /// is performed by `Snapshot::read_from_file`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::NotFound`] if no backup with the given ID exists,
+    /// or [`BackupError::Snapshot`] if the file is corrupt or unreadable.
     pub fn load_backup(&self, backup_id: &str) -> Result<Snapshot> {
         let backup_path = self.backup_dir.join(format!("{backup_id}{BACKUP_EXT}"));
 
@@ -268,6 +289,12 @@ impl BackupManager {
     }
 
     /// Get metadata for a specific backup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::NotFound`] if no metadata file exists for the
+    /// given ID, or [`BackupError::Io`] / [`BackupError::Serialization`] if
+    /// the file cannot be read or parsed.
     pub fn get_metadata(&self, backup_id: &str) -> Result<BackupMetadata> {
         let meta_path = self.backup_dir.join(format!("{backup_id}{META_EXT}"));
 
@@ -334,6 +361,12 @@ impl BackupManager {
     ///
     /// After a successful backup, the caller should clear the database's dirty
     /// bitmap via `Database::clear_dirty_bitmap()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::NotFound`] if the base backup does not exist,
+    /// [`BackupError::Invalid`] if the base is incremental or there are no
+    /// dirty pages, or [`BackupError::Io`] if the file cannot be written.
     pub fn create_incremental_backup<B: StorageBackend>(
         &self,
         db: &Database<B>,
@@ -478,6 +511,12 @@ impl BackupManager {
     /// Decode a page-level backup file, verifying its checksum.
     ///
     /// Returns the decoded header and page entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::NotFound`] if no page backup exists for the given ID,
+    /// [`BackupError::Io`] if the file cannot be read, or [`BackupError::Invalid`]
+    /// if the checksum fails or the binary format is corrupt.
     pub fn load_page_backup(&self, backup_id: &str) -> Result<PageBackupData> {
         let path = self.backup_dir.join(format!("{backup_id}{PAGE_BACKUP_EXT}"));
         if !path.exists() {
@@ -604,6 +643,11 @@ impl BackupManager {
     /// For a full backup, returns just that ID. For an incremental backup,
     /// walks the `base_backup_id` chain back to the full backup and returns
     /// the chain in application order (full first, then incrementals).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::NotFound`] if any backup in the chain is missing,
+    /// or [`BackupError::Invalid`] if an incremental backup lacks a `base_backup_id`.
     pub fn resolve_backup_chain(&self, backup_id: &str) -> Result<Vec<String>> {
         let mut chain = vec![backup_id.to_string()];
         let mut current_id = backup_id.to_string();
@@ -634,6 +678,12 @@ impl BackupManager {
     /// applied as page-level patches.
     ///
     /// Returns the shard height from the last backup in the chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::Invalid`] if the chain is empty or the first
+    /// entry is not a full backup, [`BackupError::NotFound`] if any backup
+    /// in the chain is missing, or [`BackupError::Storage`] if page import fails.
     pub fn restore_page_chain<B: StorageBackend>(
         &self,
         chain: &[String],
@@ -696,6 +746,11 @@ impl BackupManager {
     /// Exports all live (non-free, non-zero) pages into the page backup format.
     /// After a successful backup, the caller should clear the database's dirty
     /// bitmap via `Database::clear_dirty_bitmap()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::Io`] if the backup file cannot be created or
+    /// written, or [`BackupError::Serialization`] if metadata serialization fails.
     pub fn create_full_page_backup<B: StorageBackend>(
         &self,
         db: &Database<B>,

@@ -149,6 +149,11 @@ impl LearnerRefreshJob {
     ///
     /// This fetches the latest system state from the specified voter
     /// and updates the local cache if the voter's state is newer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description string if the endpoint is invalid, the gRPC
+    /// connection fails, or the `GetSystemState` RPC returns an error.
     pub async fn refresh_from_voter(&self, voter_addr: &str) -> Result<bool, String> {
         debug!(voter_addr, "Attempting to refresh state from voter");
 
@@ -206,6 +211,11 @@ impl LearnerRefreshJob {
     ///
     /// Tries to refresh from a randomly selected voter. If that fails,
     /// tries other voters until one succeeds or all fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description string if no voters are available or all
+    /// voter refresh attempts fail.
     pub async fn try_refresh(&self) -> Result<bool, String> {
         let voters = self.get_voter_addresses();
         if voters.is_empty() {

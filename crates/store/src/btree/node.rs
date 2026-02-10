@@ -100,6 +100,10 @@ pub struct LeafNode<'a> {
 
 impl<'a> LeafNode<'a> {
     /// Wrap a page as a leaf node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PageTypeMismatch`] if the page is not a B-tree leaf.
     pub fn from_page(page: &'a mut Page) -> Result<Self> {
         let page_type = page.page_type()?;
         if page_type != PageType::BTreeLeaf {
@@ -394,6 +398,10 @@ pub struct BranchNode<'a> {
 
 impl<'a> BranchNode<'a> {
     /// Wrap a page as a branch node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PageTypeMismatch`] if the page is not a B-tree branch.
     pub fn from_page(page: &'a mut Page) -> Result<Self> {
         let page_type = page.page_type()?;
         if page_type != PageType::BTreeBranch {
@@ -628,6 +636,10 @@ pub struct LeafNodeRef<'a> {
 
 impl<'a> LeafNodeRef<'a> {
     /// Create a read-only view of a leaf node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PageTypeMismatch`] if the page is not a B-tree leaf.
     pub fn from_page(page: &'a Page) -> Result<Self> {
         let page_type = page.page_type()?;
         if page_type != PageType::BTreeLeaf {
@@ -729,6 +741,10 @@ pub struct BranchNodeRef<'a> {
 
 impl<'a> BranchNodeRef<'a> {
     /// Create a read-only view of a branch node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PageTypeMismatch`] if the page is not a B-tree branch.
     pub fn from_page(page: &'a Page) -> Result<Self> {
         let page_type = page.page_type()?;
         if page_type != PageType::BTreeBranch {

@@ -4,6 +4,7 @@
 //! cluster bootstrap, and shutdown handling.
 
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod bootstrap;
 pub mod config;

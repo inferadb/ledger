@@ -6,7 +6,7 @@ Embedded B+ tree database engine for InferaDB Ledger.
 
 A purpose-built storage engine optimized for InferaDB's Ledger requirements:
 
-- **Fixed schema**: 13 tables known at compile time
+- **Fixed schema**: 15 tables known at compile time
 - **Single writer**: Leverages Raft's serialization (no MVCC needed)
 - **Append-optimized**: Designed for Raft log access patterns
 - **Checksummed pages**: XXHash verification for crash safety

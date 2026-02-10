@@ -66,6 +66,11 @@ pub fn spawn_sighup_handler(
 ///
 /// Returns the list of changed field paths, or an error if the file
 /// cannot be read, parsed, or validated.
+///
+/// # Errors
+///
+/// Returns an error string if the config file cannot be read, contains
+/// invalid TOML, or fails validation.
 fn reload_config(
     config_path: &std::path::Path,
     handle: &RuntimeConfigHandle,

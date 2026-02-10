@@ -262,6 +262,13 @@ impl ServerResolver {
     ///
     /// This performs the actual resolution (DNS query or file read) and
     /// updates the cached server list.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ResolverError::DnsResolution` if DNS lookup fails,
+    /// `ResolverError::FileRead` or `ResolverError::FileParse` if the
+    /// manifest file cannot be read or parsed, or
+    /// `ResolverError::NoServers` if resolution yields zero servers.
     pub async fn resolve(&self) -> Result<Vec<ResolvedServer>> {
         let servers = match &self.source {
             ServerSource::Static(endpoints) => self.resolve_static(endpoints),

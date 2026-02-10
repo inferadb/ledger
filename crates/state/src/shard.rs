@@ -28,24 +28,31 @@ use crate::{
 /// Shard manager error types.
 #[derive(Debug, Snafu)]
 pub enum ShardError {
+    /// State layer operation failed.
     #[snafu(display("State layer error: {source}"))]
     State { source: crate::state::StateError },
 
+    /// Block archive operation failed.
     #[snafu(display("Block archive error: {source}"))]
     BlockArchive { source: crate::block_archive::BlockArchiveError },
 
+    /// Snapshot operation failed.
     #[snafu(display("Snapshot error: {source}"))]
     Snapshot { source: crate::snapshot::SnapshotError },
 
+    /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
     Store { source: inferadb_ledger_store::Error },
 
+    /// Entity store operation failed.
     #[snafu(display("Entity store error: {source}"))]
     Entity { source: crate::entity::EntityError },
 
+    /// Requested vault does not exist in this shard.
     #[snafu(display("Vault {vault_id} not found"))]
     VaultNotFound { vault_id: VaultId },
 
+    /// Computed state root does not match expected value from block.
     #[snafu(display(
         "State root mismatch for vault {vault_id}: expected {expected:?}, computed {computed:?}"
     ))]
@@ -182,6 +189,13 @@ impl<B: StorageBackend> ShardManager<B> {
     /// 2. Computes and verifies state roots
     /// 3. Archives the block
     /// 4. Updates vault metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShardError::State` if applying operations or computing state root fails.
+    /// Returns `ShardError::StateRootMismatch` if the computed state root differs from the
+    /// block's expected root.
+    /// Returns `ShardError::BlockArchive` if archiving the block fails.
     pub fn apply_block(&self, block: &ShardBlock) -> Result<()> {
         let mut vault_meta = self.vault_meta.write();
 
@@ -272,6 +286,13 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Create a snapshot of current state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShardError::Store` if reading entities from the database fails.
+    /// Returns `ShardError::Entity` if entity listing fails.
+    /// Returns `ShardError::Snapshot` if snapshot creation or saving fails.
+    /// Returns `ShardError::BlockArchive` if computing chain parameters fails.
     pub fn create_snapshot(&self) -> Result<PathBuf> {
         let shard_height = self.shard_height();
         let vault_meta = self.vault_meta.read();
@@ -379,6 +400,11 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Restore from a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShardError::Store` if the write transaction or commit fails.
+    /// Returns `ShardError::Entity` if restoring any entity fails.
     pub fn restore_from_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
         let mut vault_meta = self.vault_meta.write();
         vault_meta.clear();
@@ -420,6 +446,13 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Recover from snapshot + block replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ShardError::Snapshot` if loading the latest snapshot fails.
+    /// Returns `ShardError::BlockArchive` if reading blocks for replay fails.
+    /// Returns any `ShardError` variant if restoring from the snapshot or replaying
+    /// blocks fails.
     pub fn recover(&self) -> Result<()> {
         // Load latest snapshot
         if let Some(snapshot) = self.snapshots.load_latest().context(SnapshotSnafu)? {

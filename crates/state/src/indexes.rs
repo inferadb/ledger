@@ -15,6 +15,7 @@ use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_ke
 /// Index manager error types.
 #[derive(Debug, Snafu)]
 pub enum IndexError {
+    /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
     Storage {
         source: inferadb_ledger_store::Error,
@@ -22,6 +23,7 @@ pub enum IndexError {
         location: snafu::Location,
     },
 
+    /// Serialization or deserialization failed.
     #[snafu(display("Codec error: {source}"))]
     Codec {
         source: inferadb_ledger_types::CodecError,
@@ -52,8 +54,13 @@ pub struct IndexManager;
 impl IndexManager {
     /// Add a subject to the object index.
     ///
-    /// Key: {vault_id}{bucket_id}obj_idx:{resource}#{relation}
+    /// Key: `{vault_id}{bucket_id}obj_idx:{resource}#{relation}`
     /// Value: serialized list of subjects
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexError::Codec` if serialization of the subject set fails.
+    /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn add_to_obj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -82,6 +89,11 @@ impl IndexManager {
     }
 
     /// Remove a subject from the object index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexError::Codec` if serialization of the updated subject set fails.
+    /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn remove_from_obj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -116,8 +128,13 @@ impl IndexManager {
 
     /// Add a resource-relation pair to the subject index.
     ///
-    /// Key: {vault_id}{bucket_id}subj_idx:{subject}
+    /// Key: `{vault_id}{bucket_id}subj_idx:{subject}`
     /// Value: serialized list of (resource, relation) pairs
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexError::Codec` if serialization of the resource-relation set fails.
+    /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn add_to_subj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -146,6 +163,11 @@ impl IndexManager {
     }
 
     /// Remove a resource-relation pair from the subject index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexError::Codec` if serialization of the updated resource-relation set fails.
+    /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn remove_from_subj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
@@ -181,6 +203,11 @@ impl IndexManager {
     }
 
     /// Get subjects for a resource and relation (object index lookup).
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexError::Storage` if the read transaction fails.
+    /// Returns `IndexError::Codec` if deserialization of the subject set fails.
     pub fn get_subjects<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,
@@ -201,6 +228,11 @@ impl IndexManager {
     }
 
     /// Get resource-relation pairs for a subject (subject index lookup).
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexError::Storage` if the read transaction fails.
+    /// Returns `IndexError::Codec` if deserialization of the resource-relation set fails.
     pub fn get_resources<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
         vault_id: VaultId,

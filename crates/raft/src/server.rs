@@ -115,6 +115,11 @@ impl LedgerServer {
     /// This method blocks until the server is shut down. If a `shutdown_rx`
     /// was provided via the builder, the server will stop when the signal
     /// is received. Otherwise, it blocks indefinitely.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server fails to bind to the configured address
+    /// or encounters a transport-level error during operation.
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             max_concurrent = self.max_concurrent,

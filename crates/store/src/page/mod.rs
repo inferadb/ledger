@@ -60,6 +60,11 @@ impl PageHeader {
     }
 
     /// Deserialize header from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Corrupted`] if the buffer is shorter than [`PAGE_HEADER_SIZE`].
+    /// Returns an error if the page type byte is invalid.
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
         if buf.len() < PAGE_HEADER_SIZE {
             return Err(Error::Corrupted { reason: "Page header too short".to_string() });
@@ -102,16 +107,28 @@ impl Page {
     }
 
     /// Get the page header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header bytes are corrupted or the page type is invalid.
     pub fn header(&self) -> Result<PageHeader> {
         PageHeader::from_bytes(&self.data)
     }
 
     /// Get the page type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header bytes are corrupted or the page type is invalid.
     pub fn page_type(&self) -> Result<PageType> {
         Ok(self.header()?.page_type)
     }
 
     /// Get the item count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header bytes are corrupted or the page type is invalid.
     pub fn item_count(&self) -> Result<u16> {
         Ok(self.header()?.item_count)
     }

@@ -134,6 +134,12 @@ impl<'a> BatchReadBuilder<'a, HasKeys> {
     ///
     /// Returns a vector of `(key, Option<value>)` pairs in the same order as
     /// the keys were added. Missing keys have `None` values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read RPC fails after retry attempts are
+    /// exhausted, the client has been shut down, or the cancellation token
+    /// is triggered.
     pub async fn execute(self) -> Result<Vec<(String, Option<Vec<u8>>)>> {
         match (&self.consistency, &self.cancellation) {
             (ReadConsistency::Eventual, Some(token)) => {

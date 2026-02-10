@@ -123,6 +123,10 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Get B-tree depths for all non-empty tables.
     ///
     /// Opens a read transaction internally to walk each table's B-tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the database read fails.
     pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
         self.db.table_depths().context(StoreSnafu)
     }
@@ -165,6 +169,13 @@ impl<B: StorageBackend> StateLayer<B> {
     /// let statuses = state.apply_operations(VaultId::new(1), &ops, 1)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if any storage operation fails.
+    /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
+    /// Returns [`StateError::Index`] if a relationship index update fails.
+    /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
     pub fn apply_operations(
         &self,
         vault_id: VaultId,
@@ -340,6 +351,11 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Clear all entities and relationships for a vault.
     ///
     /// Used during vault recovery to reset state before replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if any storage operation (iteration, delete,
+    /// or commit) fails.
     pub fn clear_vault(&self, vault_id: VaultId) -> Result<()> {
         use crate::keys::vault_prefix;
 
@@ -433,6 +449,11 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Get an entity by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction fails.
+    /// Returns [`StateError::Codec`] if deserialization of the stored entity fails.
     pub fn get_entity(&self, vault_id: VaultId, key: &[u8]) -> Result<Option<Entity>> {
         let storage_key = encode_storage_key(vault_id, key);
         let txn = self.db.read().context(StoreSnafu)?;
@@ -447,6 +468,10 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Check if a relationship exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction fails.
     pub fn relationship_exists(
         &self,
         vault_id: VaultId,
@@ -467,6 +492,11 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// This scans only the dirty buckets and recomputes their roots,
     /// then returns SHA-256(bucket_roots[0..256]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction or iteration fails.
+    /// Returns [`StateError::Codec`] if deserialization of any entity in a dirty bucket fails.
     pub fn compute_state_root(&self, vault_id: VaultId) -> Result<Hash> {
         // First check if dirty and get the dirty buckets list (brief read lock)
         let dirty_buckets: Vec<u8> = {
@@ -551,6 +581,10 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Compact all B+ tree tables, merging underfull leaf nodes.
     ///
     /// Returns aggregate compaction statistics across all tables.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the compaction operation or commit fails.
     pub fn compact_tables(&self, min_fill_factor: f64) -> Result<CompactionStats> {
         let mut txn = self.db.write().context(StoreSnafu)?;
         let stats = txn.compact_all_tables(min_fill_factor).context(StoreSnafu)?;
@@ -559,6 +593,11 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// List subjects for a given resource and relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction fails.
+    /// Returns [`StateError::Index`] if the index lookup fails.
     pub fn list_subjects(
         &self,
         vault_id: VaultId,
@@ -570,6 +609,11 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// List resource-relation pairs for a given subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction fails.
+    /// Returns [`StateError::Index`] if the index lookup fails.
     pub fn list_resources_for_subject(
         &self,
         vault_id: VaultId,
@@ -582,6 +626,11 @@ impl<B: StorageBackend> StateLayer<B> {
     /// List all entities in a vault with optional prefix filter.
     ///
     /// Returns up to `limit` entities. Use `start_after` for pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction or iteration fails.
+    /// Returns [`StateError::Codec`] if deserialization of any entity fails.
     pub fn list_entities(
         &self,
         vault_id: VaultId,
@@ -650,6 +699,11 @@ impl<B: StorageBackend> StateLayer<B> {
     /// List all relationships in a vault.
     ///
     /// Returns up to `limit` relationships. Use `start_after` for pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction or iteration fails.
+    /// Returns [`StateError::Codec`] if deserialization of any relationship fails.
     pub fn list_relationships(
         &self,
         vault_id: VaultId,

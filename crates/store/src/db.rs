@@ -1,6 +1,6 @@
 //! Database and transaction management for inferadb-ledger-store.
 //!
-//! Provides ACID transactions over the 13 fixed tables. Uses a single-writer
+//! Provides ACID transactions over the 15 fixed tables. Uses a single-writer
 //! model optimized for Raft's serialized writes.
 //!
 //! # Example
@@ -123,6 +123,12 @@ impl Database<FileBackend> {
     /// Recovers committed state from the dual-slot header. If the recovery
     /// flag is set (crash detected), the free list is rebuilt automatically.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be opened or read.
+    /// Returns [`Error::InvalidMagic`] if the file is not an InferaDB database.
+    /// Returns [`Error::Corrupted`] if both commit slots have invalid checksums.
+    ///
     /// ```no_run
     /// use inferadb_ledger_store::Database;
     ///
@@ -141,6 +147,11 @@ impl Database<FileBackend> {
     /// Uses 4KB pages, 1024-entry cache, and sync-on-commit.
     /// For custom settings, use [`create_with_config`](Self::create_with_config).
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be created.
+    /// Returns [`Error::Corrupted`] if the page size is invalid.
+    ///
     /// ```no_run
     /// use inferadb_ledger_store::Database;
     /// use inferadb_ledger_store::tables::Entities;
@@ -157,6 +168,11 @@ impl Database<FileBackend> {
     }
 
     /// Create a new database with custom configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be created.
+    /// Returns [`Error::Corrupted`] if the page size is invalid.
     pub fn create_with_config<P: AsRef<Path>>(path: P, config: DatabaseConfig) -> Result<Self> {
         let backend = FileBackend::create(path, config.page_size)?;
         Self::from_backend(backend, config)
@@ -167,6 +183,10 @@ impl Database<InMemoryBackend> {
     /// Create a new in-memory database.
     ///
     /// Useful for testing and ephemeral workloads. Data is lost on drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if backend initialization fails.
     ///
     /// ```no_run
     /// use inferadb_ledger_store::Database;
@@ -189,6 +209,10 @@ impl Database<InMemoryBackend> {
     }
 
     /// Create a new in-memory database with custom configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if backend initialization fails.
     pub fn open_in_memory_with_config(config: DatabaseConfig) -> Result<Self> {
         let backend = InMemoryBackend::new();
         Self::from_backend(backend, config)
@@ -562,6 +586,10 @@ impl<B: StorageBackend> Database<B> {
     ///
     /// The transaction sees a consistent point-in-time view thanks to COW:
     /// writers create new page copies, never modifying pages readers might see.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if reading the snapshot state fails.
     pub fn read(&self) -> Result<ReadTransaction<'_, B>> {
         // Load current committed state (atomic, lock-free)
         // Use load_full() to get Arc directly - avoids Guard which blocks writers
@@ -584,6 +612,10 @@ impl<B: StorageBackend> Database<B> {
     /// Only one write transaction can be active at a time. However, read
     /// transactions can run concurrently - they see a consistent snapshot
     /// and are unaffected by COW modifications.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Poisoned`] if the write lock is poisoned.
     pub fn write(&self) -> Result<WriteTransaction<'_, B>> {
         let write_guard = self.write_lock.lock().map_err(|_| Error::Poisoned)?;
 
@@ -630,6 +662,11 @@ impl<B: StorageBackend> Database<B> {
     ///
     /// Opens a read transaction internally to walk each table's B-tree.
     /// Returns `(table_name, depth)` pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read transaction cannot be started or
+    /// if a page read fails while walking the B-tree.
     pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
         let txn = self.read()?;
         txn.table_depths()
@@ -639,6 +676,11 @@ impl<B: StorageBackend> Database<B> {
     ///
     /// Returns the page without caching it. The caller is responsible for
     /// checksum verification via [`Page::verify_checksum()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the backend read fails.
+    /// Returns [`Error::PageNotFound`] if the page is unwritten (all zeros).
     pub fn read_raw_page(&self, page_id: PageId) -> Result<Page> {
         let backend = self.backend.read();
         let data = backend.read_page(page_id)?;
@@ -676,6 +718,10 @@ impl<B: StorageBackend> Database<B> {
     ///
     /// Intended for testing only — allows injecting corruption for integrity
     /// scrubber verification. Not hidden from docs since test-utils crate needs it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the backend write fails.
     pub fn write_raw_page_for_test(&self, page_id: PageId, data: &[u8]) -> Result<()> {
         let backend = self.backend.read();
         backend.write_page(page_id, data)?;
@@ -753,6 +799,10 @@ impl<B: StorageBackend> Database<B> {
     /// Used during backup restore to apply page-level patches.
     /// Evicts each page from cache to ensure subsequent reads see the
     /// imported data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if a backend write fails.
     pub fn import_pages(&self, pages: &[(PageId, &[u8])]) -> Result<()> {
         let backend = self.backend.read();
         for &(page_id, data) in pages {
@@ -879,6 +929,10 @@ pub struct ReadTransaction<'db, B: StorageBackend> {
 
 impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     /// Get a value by key from a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails during the B-tree lookup.
     pub fn get<T: Table>(&self, key: &T::KeyType) -> Result<Option<Vec<u8>>>
     where
         T::KeyType: Key,
@@ -898,6 +952,10 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     }
 
     /// Check if a key exists in a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails during the B-tree lookup.
     pub fn contains<T: Table>(&self, key: &T::KeyType) -> Result<bool>
     where
         T::KeyType: Key,
@@ -906,6 +964,10 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     }
 
     /// Get the first (smallest key) entry in a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while walking the B-tree.
     pub fn first<T: Table>(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let root = self.snapshot.table_roots[T::ID as usize];
         if root == 0 {
@@ -918,6 +980,10 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     }
 
     /// Get the last (largest key) entry in a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while walking the B-tree.
     pub fn last<T: Table>(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let root = self.snapshot.table_roots[T::ID as usize];
         if root == 0 {
@@ -932,6 +998,10 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     /// Iterate over all entries in a table.
     ///
     /// Returns an iterator that yields (key, value) pairs in key order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial B-tree seek fails.
     pub fn iter<T: Table>(&self) -> Result<TableIterator<'_, 'db, B, T>> {
         let root = self.snapshot.table_roots[T::ID as usize];
         TableIterator::new(self.db, root, &self.page_cache)
@@ -941,6 +1011,10 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     ///
     /// The range is specified as (start_key, end_key) where start is inclusive
     /// and end is exclusive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial B-tree seek fails.
     pub fn range<T: Table>(
         &self,
         start: Option<&T::KeyType>,
@@ -967,6 +1041,10 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
     ///
     /// Returns a list of `(table_name, depth)` pairs for all tables with
     /// non-empty roots. Empty tables (root == 0) are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while walking the B-tree.
     pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
         let mut depths = Vec::new();
 
@@ -1046,6 +1124,11 @@ pub struct WriteTransaction<'db, B: StorageBackend> {
 
 impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// Insert or update a key-value pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key or value exceeds page capacity, or if
+    /// a page read/write fails during the B-tree operation.
     pub fn insert<T: Table>(&mut self, key: &T::KeyType, value: &T::ValueType) -> Result<()>
     where
         T::KeyType: Key,
@@ -1081,6 +1164,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     }
 
     /// Delete a key from a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read/write fails during the B-tree operation.
     pub fn delete<T: Table>(&mut self, key: &T::KeyType) -> Result<bool>
     where
         T::KeyType: Key,
@@ -1110,6 +1197,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     }
 
     /// Get a value (within the transaction's view).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails during the B-tree lookup.
     pub fn get<T: Table>(&self, key: &T::KeyType) -> Result<Option<Vec<u8>>>
     where
         T::KeyType: Key,
@@ -1129,6 +1220,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     }
 
     /// Get the first (smallest key) entry in a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while walking the B-tree.
     pub fn first<T: Table>(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let root = self.table_roots[T::ID as usize];
         if root == 0 {
@@ -1141,6 +1236,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     }
 
     /// Get the last (largest key) entry in a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while walking the B-tree.
     pub fn last<T: Table>(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let root = self.table_roots[T::ID as usize];
         if root == 0 {
@@ -1156,6 +1255,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     ///
     /// Returns an iterator that yields (key, value) pairs in key order.
     /// Note: This reads the transaction's current view including uncommitted changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial B-tree seek fails.
     pub fn iter<T: Table>(&self) -> Result<TableIterator<'_, 'db, B, T>> {
         let root = self.table_roots[T::ID as usize];
         // Pre-populate page_cache with dirty_pages so the iterator sees uncommitted changes.
@@ -1178,6 +1281,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     ///
     /// The dual-slot commit ensures there's ALWAYS one valid commit slot to
     /// recover from, even if a crash occurs during the commit sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if flushing dirty pages or writing the header fails.
     pub fn commit(mut self) -> Result<()> {
         // Record modified page IDs in the backup dirty bitmap before draining.
         // This enables incremental backups to capture exactly which pages changed.
@@ -1230,6 +1337,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// right sibling when the combined entries fit in one page.
     ///
     /// Returns statistics about pages merged and freed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read/write fails during compaction.
     pub fn compact_table<T: Table>(&mut self, min_fill_factor: f64) -> Result<CompactionStats> {
         let root = self.table_roots[T::ID as usize];
         if root == 0 {
@@ -1251,6 +1362,10 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// Compact all tables in the database.
     ///
     /// Runs compaction on every non-empty table. Returns total statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read/write fails during compaction.
     pub fn compact_all_tables(&mut self, min_fill_factor: f64) -> Result<CompactionStats> {
         let mut total = CompactionStats::default();
 
@@ -1583,6 +1698,10 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
     ///
     /// Prefer this over the `Iterator` trait when error handling is needed,
     /// as `Iterator::next` silently converts B-tree errors into `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails while refilling the buffer.
     pub fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         if let Some((k, v)) = self.buffer.pop_front() {
             self.last_key = Some(k.clone());

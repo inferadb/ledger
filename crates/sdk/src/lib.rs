@@ -60,8 +60,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-#![deny(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(unsafe_code, missing_docs)]
 
 mod builders;
 mod circuit_breaker;

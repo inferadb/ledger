@@ -100,10 +100,11 @@ impl std::error::Error for OtelInitError {}
 ///
 /// * `config` - OTEL configuration (endpoint, transport, timeouts)
 ///
-/// # Returns
+/// # Errors
 ///
-/// Returns `Ok(())` if initialization succeeds, or an error if the provider
-/// was already initialized or the exporter failed to build.
+/// Returns [`OtelInitError::AlreadyInitialized`] if the tracer provider has
+/// already been set, or [`OtelInitError::ExporterBuild`] if the gRPC span
+/// exporter fails to build.
 ///
 /// # Example
 ///

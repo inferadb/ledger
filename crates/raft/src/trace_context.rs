@@ -147,7 +147,11 @@ impl std::error::Error for ParseError {}
 ///
 /// If the `traceparent` header is present and valid, extracts the trace context.
 /// Returns `None` if the header is missing.
-/// Returns `Err` if the header is present but malformed.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] if the `traceparent` header is present but malformed:
+/// non-ASCII value, invalid format, unsupported version, or all-zero trace/parent ID.
 pub fn extract_from_metadata(metadata: &MetadataMap) -> Result<Option<TraceContext>, ParseError> {
     let traceparent = match metadata.get(TRACEPARENT_HEADER) {
         Some(value) => value.to_str().map_err(|_| ParseError::InvalidAscii)?,

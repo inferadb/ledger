@@ -196,6 +196,10 @@ impl Snapshot {
     ///
     /// Per DESIGN.md §4.4, snapshots should include chain verification data
     /// to enable verification after block compaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Codec`] if serialization of the state data fails.
     pub fn new(
         shard_id: ShardId,
         shard_height: u64,
@@ -252,6 +256,11 @@ impl Snapshot {
     }
 
     /// Write snapshot to file with zstd compression.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Codec`] if serialization of state data or header fails.
+    /// Returns [`SnapshotError::Io`] if file creation, compression, or writing fails.
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
         let file = File::create(path).context(IoSnafu)?;
         let mut writer = BufWriter::new(file);
@@ -281,6 +290,15 @@ impl Snapshot {
     }
 
     /// Read snapshot from file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::NotFound`] if the file does not exist.
+    /// Returns [`SnapshotError::Io`] if file reading or decompression fails.
+    /// Returns [`SnapshotError::Codec`] if deserialization of header or state fails.
+    /// Returns [`SnapshotError::InvalidMagic`] if the file is not a valid snapshot.
+    /// Returns [`SnapshotError::UnsupportedVersion`] if the format version is unknown.
+    /// Returns [`SnapshotError::ChecksumMismatch`] if data integrity verification fails.
     pub fn read_from_file(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(SnapshotError::NotFound { path: path.display().to_string() });
@@ -364,12 +382,21 @@ impl SnapshotManager {
     }
 
     /// Ensure the snapshot directory exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Io`] if directory creation fails.
     pub fn init(&self) -> Result<()> {
         fs::create_dir_all(&self.snapshot_dir).context(IoSnafu)?;
         Ok(())
     }
 
     /// Save a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Io`] if directory creation or file writing fails.
+    /// Returns [`SnapshotError::Codec`] if serialization fails.
     pub fn save(&self, snapshot: &Snapshot) -> Result<PathBuf> {
         self.init()?;
 
@@ -385,6 +412,11 @@ impl SnapshotManager {
     }
 
     /// Load the latest snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Io`] if listing or reading snapshot files fails.
+    /// Returns any [`SnapshotError`] variant from [`Snapshot::read_from_file`].
     pub fn load_latest(&self) -> Result<Option<Snapshot>> {
         let snapshots = self.list_snapshots()?;
         if snapshots.is_empty() {
@@ -401,12 +433,20 @@ impl SnapshotManager {
     }
 
     /// Load a snapshot by height.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`SnapshotError`] variant from [`Snapshot::read_from_file`].
     pub fn load(&self, shard_height: u64) -> Result<Snapshot> {
         let path = self.snapshot_dir.join(snapshot_filename(shard_height));
         Snapshot::read_from_file(&path)
     }
 
     /// List available snapshot heights (sorted ascending).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Io`] if reading the snapshot directory fails.
     pub fn list_snapshots(&self) -> Result<Vec<u64>> {
         if !self.snapshot_dir.exists() {
             return Ok(Vec::new());
@@ -446,6 +486,10 @@ impl SnapshotManager {
     }
 
     /// Find the latest snapshot at or before the given height.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Io`] if listing snapshot files fails.
     pub fn find_snapshot_at_or_before(&self, height: u64) -> Result<Option<u64>> {
         let snapshots = self.list_snapshots()?;
         // list_snapshots returns ascending order, so reverse and find first <= height

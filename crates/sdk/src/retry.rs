@@ -31,6 +31,12 @@ use crate::{
 /// `PERMISSION_DENIED`, `IdempotencyKeyReused`), the error is returned immediately without
 /// retry.
 ///
+/// # Errors
+///
+/// Returns `SdkError::RetryExhausted` if all retry attempts fail with
+/// retryable errors. Returns the original non-retryable error immediately
+/// if the operation fails with a permanent error.
+///
 /// # Example
 ///
 /// ```ignore
@@ -126,6 +132,13 @@ where
 /// retryable failures increment it. When the circuit opens, subsequent
 /// `pool.get_channel()` calls within the operation will return
 /// `SdkError::CircuitOpen` immediately.
+///
+/// # Errors
+///
+/// Returns `SdkError::Cancelled` if the token is cancelled. Returns
+/// `SdkError::RetryExhausted` if all attempts fail with retryable errors.
+/// Returns the original non-retryable error immediately if the operation
+/// fails with a permanent error.
 ///
 /// # Example
 ///

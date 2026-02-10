@@ -187,6 +187,10 @@ pub mod cursor_ops {
     use super::{super::node::LeafNodeRef, *};
 
     /// Move to the first entry in a leaf node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page type is not a B-tree leaf.
     pub fn move_to_first_in_leaf(position: &mut CursorPosition, page: &Page) -> Result<bool> {
         let leaf = LeafNodeRef::from_page(page)?;
 
@@ -202,6 +206,10 @@ pub mod cursor_ops {
     }
 
     /// Move to the last entry in a leaf node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page type is not a B-tree leaf.
     pub fn move_to_last_in_leaf(position: &mut CursorPosition, page: &Page) -> Result<bool> {
         let leaf = LeafNodeRef::from_page(page)?;
 
@@ -218,6 +226,10 @@ pub mod cursor_ops {
     }
 
     /// Seek to a key within a leaf node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page type is not a B-tree leaf.
     pub fn seek_in_leaf(
         position: &mut CursorPosition,
         page: &Page,
@@ -253,7 +265,12 @@ pub mod cursor_ops {
     }
 
     /// Advance to next entry within current leaf.
+    ///
     /// Returns true if there's a next entry in this leaf.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page type is not a B-tree leaf.
     pub fn next_in_leaf(position: &mut CursorPosition, page: &Page) -> Result<bool> {
         if !position.valid || position.leaf_page_id != Some(page.id) {
             return Ok(false);
@@ -271,6 +288,10 @@ pub mod cursor_ops {
     }
 
     /// Get key at current cursor position (returns owned copy).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page type is not a B-tree leaf.
     pub fn current_key(position: &CursorPosition, page: &Page) -> Result<Option<Vec<u8>>> {
         if !position.valid || position.leaf_page_id != Some(page.id) {
             return Ok(None);
@@ -286,6 +307,10 @@ pub mod cursor_ops {
     }
 
     /// Get value at current cursor position (returns owned copy).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the page type is not a B-tree leaf.
     pub fn current_value(position: &CursorPosition, page: &Page) -> Result<Option<Vec<u8>>> {
         if !position.valid || position.leaf_page_id != Some(page.id) {
             return Ok(None);

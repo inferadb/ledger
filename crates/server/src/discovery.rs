@@ -67,9 +67,9 @@ pub struct DiscoveredNode {
 /// Cached peers file format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedPeers {
-    /// Unix timestamp when cache was written.
+    /// Unix timestamp (seconds since epoch) when this cache was written.
     cached_at: u64,
-    /// Discovered peers.
+    /// List of discovered peers from the last successful resolution.
     peers: Vec<DiscoveredPeer>,
 }
 

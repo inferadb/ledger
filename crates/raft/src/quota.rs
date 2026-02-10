@@ -99,8 +99,11 @@ impl QuotaChecker {
 
     /// Check whether creating a new vault would exceed the namespace vault quota.
     ///
-    /// Returns `Ok(())` if the vault can be created, or `Err(QuotaExceeded)` if
-    /// the namespace has reached its maximum vault count.
+    /// Returns `Ok(())` if the vault can be created or no quota is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QuotaExceeded`] if the namespace has reached its maximum vault count.
     pub fn check_vault_count(&self, namespace_id: NamespaceId) -> Result<(), QuotaExceeded> {
         let quota = match self.effective_quota(namespace_id) {
             Some(q) => q,
@@ -129,6 +132,11 @@ impl QuotaChecker {
     ///
     /// `estimated_bytes` is the sum of key + value sizes for all operations
     /// in the write request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QuotaExceeded`] if `current_usage + estimated_bytes` exceeds
+    /// the namespace's `max_storage_bytes` quota.
     pub fn check_storage_estimate(
         &self,
         namespace_id: NamespaceId,

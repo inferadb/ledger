@@ -213,6 +213,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     ///
     /// Returns the shard connection for the namespace. The connection
     /// may be cached or freshly established.
+    ///
+    /// # Errors
+    ///
+    /// Returns a routing error if the namespace is not found in the routing
+    /// table or the gRPC connection to the target shard cannot be established.
     pub async fn route(&self, namespace_id: NamespaceId) -> Result<ShardConnection> {
         // 1. Check cache
         let routing = self.get_routing_internal(namespace_id)?;
@@ -226,6 +231,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     ///
     /// Returns the shard assignment and member nodes for the namespace.
     /// Uses cached data if fresh, otherwise queries `_system`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a routing error if the namespace is not found in the `_system`
+    /// namespace store or is not assigned to any shard.
     pub fn get_routing(&self, namespace_id: NamespaceId) -> Result<RoutingInfo> {
         self.get_routing_internal(namespace_id).map(|entry| entry.to_routing_info())
     }

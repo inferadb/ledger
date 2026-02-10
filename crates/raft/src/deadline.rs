@@ -60,11 +60,13 @@ pub fn effective_timeout(proposal_timeout: Duration, grpc_deadline: Option<Durat
 
 /// Reject requests whose remaining deadline is below the near-deadline threshold.
 ///
-/// Returns `Err(Status::deadline_exceeded(...))` if the request has < 100ms
+/// Returns `Ok(())` if the request has sufficient remaining time or no deadline.
+///
+/// # Errors
+///
+/// Returns `Status::deadline_exceeded` if the request has less than 100ms
 /// remaining, preventing wasted work on Raft proposals that will expire
 /// before they can commit.
-///
-/// Returns `Ok(())` if the request has sufficient remaining time or no deadline.
 pub fn check_near_deadline<T>(request: &Request<T>) -> Result<(), Status> {
     if let Some(remaining) = extract_deadline(request)
         && remaining < NEAR_DEADLINE_THRESHOLD

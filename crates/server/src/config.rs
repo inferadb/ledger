@@ -110,6 +110,11 @@ impl WideEventsSamplingConfig {
     }
 
     /// Validate sampling configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if any rate is outside 0.0-1.0 or any
+    /// threshold is non-positive.
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Validate rates are in range 0.0-1.0
         let rates = [
@@ -248,6 +253,11 @@ impl OtelConfig {
     }
 
     /// Validate OTEL configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if OTEL is enabled without an endpoint,
+    /// or if batch/timeout values are zero.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.enabled && self.endpoint.is_none() {
             return Err(ConfigError::Validation {
@@ -359,6 +369,11 @@ impl VipConfig {
     }
 
     /// Validate VIP configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if `cache_ttl_secs` is zero or `tag_name`
+    /// is empty.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache_ttl_secs == 0 {
             return Err(ConfigError::Validation {
@@ -457,6 +472,11 @@ impl WideEventsConfig {
     }
 
     /// Validate wide events configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if sampling, VIP, or OTEL sub-configuration
+    /// is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.sampling.validate()?;
         self.vip.validate()?;
@@ -871,6 +891,11 @@ impl Config {
     /// # Arguments
     ///
     /// * `data_dir` - The resolved data directory (from `resolve_data_dir()`)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if the node ID file cannot be read, parsed,
+    /// or a new ID cannot be generated or written.
     pub fn node_id(&self, data_dir: &std::path::Path) -> Result<u64, ConfigError> {
         node_id::load_or_generate_node_id(data_dir).map_err(|e| ConfigError::Validation {
             message: format!("failed to load or generate node ID: {}", e),
@@ -885,6 +910,11 @@ impl Config {
     /// - `--cluster N`: Coordinated bootstrap (N must be >= 2)
     /// - Wide events sampling rates must be 0.0-1.0
     /// - Wide events thresholds must be positive
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if cluster size is less than 2 or wide events
+    /// configuration is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(n) = self.cluster
             && n < 2

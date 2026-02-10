@@ -176,12 +176,13 @@ impl CircuitBreaker {
 
     /// Checks whether a request to the given endpoint should be allowed.
     ///
-    /// Returns `Ok(())` if the request can proceed, or
-    /// `Err(SdkError::CircuitOpen)` if the circuit is open and the reset
-    /// timeout has not elapsed.
-    ///
     /// If the circuit is open and the reset timeout has elapsed, the circuit
     /// transitions to half-open and the request is allowed through as a probe.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::CircuitOpen`] with a `retry_after` duration if the
+    /// circuit is open and the reset timeout has not yet elapsed.
     pub fn check(&self, endpoint: &str) -> Result<(), SdkError> {
         let mut circuits = self.circuits.write();
         let circuit = circuits.entry(endpoint.to_string()).or_insert_with(EndpointCircuit::new);

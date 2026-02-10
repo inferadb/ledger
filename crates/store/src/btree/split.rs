@@ -78,6 +78,10 @@ pub struct BranchSplitResult {
 /// If the original node is empty or has only 1 entry, this creates an
 /// empty left node and returns a synthetic separator key. This handles
 /// edge cases where large values don't fit even in an empty page.
+///
+/// # Errors
+///
+/// Returns an error if the page data is corrupted or the page type is invalid.
 pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitResult> {
     // Collect all entries from original
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -144,6 +148,11 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
 ///
 /// # Returns
 /// The separator key (first key of new node) and page ID of new node.
+///
+/// # Errors
+///
+/// Returns [`Error::PageFull`] if no valid split point can be found.
+/// Returns an error if the page data is corrupted.
 pub fn split_leaf_for_key(
     original: &mut Page,
     new_page: &mut Page,
@@ -279,6 +288,10 @@ pub fn split_leaf_for_key(
 ///
 /// # Returns
 /// The separator key (middle key, removed from both children) and new page ID.
+///
+/// # Errors
+///
+/// Returns an error if the page data is corrupted or the page type is invalid.
 pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSplitResult> {
     // Collect all entries from original: (key, left_child)
     let mut entries: Vec<(Vec<u8>, PageId)> = Vec::new();
@@ -322,12 +335,20 @@ pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSp
 }
 
 /// Check if a leaf node needs splitting based on remaining free space.
+///
+/// # Errors
+///
+/// Returns an error if the page type is not a B-tree leaf.
 pub fn leaf_needs_split(page: &Page, key: &[u8], value: &[u8]) -> Result<bool> {
     let node = LeafNodeRef::from_page(page)?;
     Ok(!node.can_insert(key, value))
 }
 
 /// Check if a branch node needs splitting.
+///
+/// # Errors
+///
+/// Returns an error if the page type is not a B-tree branch.
 pub fn branch_needs_split(page: &Page, key: &[u8]) -> Result<bool> {
     let node = BranchNodeRef::from_page(page)?;
     Ok(!node.can_insert(key))
@@ -337,6 +358,10 @@ pub fn branch_needs_split(page: &Page, key: &[u8]) -> Result<bool> {
 ///
 /// All entries from `right` are moved into `left`.
 /// Returns the key that was separating them in the parent.
+///
+/// # Errors
+///
+/// Returns an error if the page type is not a B-tree leaf or the page data is corrupted.
 pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
     // Collect all live entries from both pages.
     // By rebuilding from scratch, we reclaim dead space left by prior deletes.
@@ -375,6 +400,10 @@ pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
 }
 
 /// Calculate the fill factor of a leaf node (0.0 to 1.0).
+///
+/// # Errors
+///
+/// Returns an error if the page type is not a B-tree leaf.
 pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
     let node = LeafNodeRef::from_page(page)?;
     let count = node.cell_count() as usize;
@@ -403,6 +432,10 @@ pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
 /// Check whether two leaf nodes can be merged (combined entries fit in one page).
 ///
 /// Returns `true` if all entries from `right` can fit into `left`'s free space.
+///
+/// # Errors
+///
+/// Returns an error if either page type is not a B-tree leaf.
 pub fn can_merge_leaves(left: &Page, right: &Page) -> Result<bool> {
     let left_node = LeafNodeRef::from_page(left)?;
     let right_node = LeafNodeRef::from_page(right)?;

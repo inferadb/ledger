@@ -348,11 +348,21 @@ impl MultiRaftManager {
     }
 
     /// Get a shard group by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MultiRaftError::ShardNotFound`] if no shard with the given ID
+    /// is currently active.
     pub fn get_shard(&self, shard_id: ShardId) -> Result<Arc<ShardGroup>> {
         self.shards.read().get(&shard_id).cloned().ok_or(MultiRaftError::ShardNotFound { shard_id })
     }
 
-    /// Get the system shard (_system).
+    /// Get the system shard (`_system`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MultiRaftError::ShardNotFound`] if the system shard (ID 0)
+    /// has not been started.
     pub fn system_shard(&self) -> Result<Arc<ShardGroup>> {
         self.get_shard(ShardId::new(0))
     }
@@ -400,11 +410,17 @@ impl MultiRaftManager {
         router.get_routing(namespace_id).ok().map(|r| r.shard_id)
     }
 
-    /// Start the system shard (_system).
+    /// Start the system shard (`_system`).
     ///
     /// The system shard must be started before any data shards.
     /// It stores the namespace routing table and cluster metadata.
-    /// Also initializes the ShardRouter for namespace-to-shard routing.
+    /// Also initializes the `ShardRouter` for namespace-to-shard routing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MultiRaftError::Raft`] if `shard_id` is not 0,
+    /// [`MultiRaftError::ShardExists`] if the shard is already running,
+    /// or a storage/Raft error if initialization fails.
     pub async fn start_system_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
         if shard_config.shard_id != ShardId::new(0) {
             return Err(MultiRaftError::Raft {
@@ -428,6 +444,13 @@ impl MultiRaftManager {
     /// Start a data shard.
     ///
     /// Requires the system shard to be started first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MultiRaftError::SystemShardRequired`] if the system shard has
+    /// not been started, [`MultiRaftError::Raft`] if `shard_id` is 0,
+    /// [`MultiRaftError::ShardExists`] if the shard is already running,
+    /// or a storage/Raft error if initialization fails.
     pub async fn start_data_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
         // Verify system shard is running
         if !self.has_shard(ShardId::new(0)) {
@@ -692,6 +715,11 @@ impl MultiRaftManager {
     ///
     /// This gracefully shuts down the shard, stopping background jobs
     /// and removing it from the manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MultiRaftError::ShardNotFound`] if no shard with the given ID
+    /// is currently active.
     pub async fn stop_shard(&self, shard_id: ShardId) -> Result<()> {
         let shard = {
             let mut shards = self.shards.write();

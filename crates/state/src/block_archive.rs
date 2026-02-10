@@ -143,6 +143,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// Create a block archive with file-based segment storage.
     ///
     /// Use this for large deployments where blocks exceed inferadb-ledger-store's practical limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Io`] if creating the blocks directory fails.
     pub fn with_segment_files(db: Arc<Database<B>>, blocks_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&blocks_dir).context(IoSnafu)?;
         Ok(Self {
@@ -154,6 +158,12 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Append a block to the archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Codec`] if serialization of the block fails.
+    /// Returns [`BlockArchiveError::Store`] if the write transaction or commit fails.
+    /// Returns [`BlockArchiveError::Io`] if writing to a segment file fails.
     pub fn append_block(&self, block: &ShardBlock) -> Result<()> {
         let encoded = encode(block).context(CodecSnafu)?;
 
@@ -220,6 +230,12 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Read a block by shard height.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
+    /// Returns [`BlockArchiveError::Codec`] if deserialization of the block fails.
+    /// Returns [`BlockArchiveError::BlockNotFound`] if no block exists at the given height.
     pub fn read_block(&self, shard_height: u64) -> Result<ShardBlock> {
         let txn = self.db.read().context(StoreSnafu)?;
 
@@ -233,6 +249,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Find the shard height containing a specific vault block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
     pub fn find_shard_height(
         &self,
         namespace_id: NamespaceId,
@@ -257,6 +277,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Get the latest shard height in the archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
     pub fn latest_height(&self) -> Result<Option<u64>> {
         let txn = self.db.read().context(StoreSnafu)?;
 
@@ -273,6 +297,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Get the range of heights in the archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
     pub fn height_range(&self) -> Result<Option<(u64, u64)>> {
         let txn = self.db.read().context(StoreSnafu)?;
 
@@ -290,6 +318,11 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Read blocks in a range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if the read transaction or iteration fails.
+    /// Returns [`BlockArchiveError::Codec`] if deserialization of any block fails.
     pub fn read_range(&self, start: u64, end: u64) -> Result<Vec<ShardBlock>> {
         let txn = self.db.read().context(StoreSnafu)?;
         let mut blocks = Vec::new();
@@ -321,6 +354,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// Get the current compaction watermark.
     ///
     /// All blocks with height < watermark have been compacted (transaction bodies removed).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
     pub fn compaction_watermark(&self) -> Result<Option<u64>> {
         let txn = self.db.read().context(StoreSnafu)?;
 
@@ -341,6 +378,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Check if a block at the given height has been compacted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if reading the compaction watermark fails.
     pub fn is_compacted(&self, height: u64) -> Result<bool> {
         match self.compaction_watermark()? {
             Some(watermark) => Ok(height < watermark),
@@ -360,6 +401,11 @@ impl<B: StorageBackend> BlockArchive<B> {
     ///
     /// # Returns
     /// The number of blocks that were compacted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if any read/write transaction fails.
+    /// Returns [`BlockArchiveError::Codec`] if serialization or deserialization of blocks fails.
     pub fn compact_before(&self, before_height: u64) -> Result<u64> {
         let current_watermark = self.compaction_watermark()?.unwrap_or(0);
         if before_height <= current_watermark {
@@ -431,6 +477,10 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Get compaction statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlockArchiveError::Store`] if reading the watermark or height range fails.
     pub fn compaction_stats(&self) -> Result<CompactionStats> {
         let watermark = self.compaction_watermark()?;
         let range = self.height_range()?;

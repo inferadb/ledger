@@ -76,6 +76,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ///
     /// New databases are created with 16KB pages to support larger batch sizes.
     /// Existing databases retain their original page size for backwards compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` if the database file cannot be opened or created,
+    /// or if the cached vote/purge metadata cannot be loaded.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError<LedgerNodeId>> {
         // Try to open existing database, otherwise create new one with larger pages
         let db = if path.as_ref().exists() {
@@ -181,6 +186,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Load metadata values into caches.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` if the underlying database read or
+    /// deserialization of cached vote/purge metadata fails.
     pub(super) fn load_caches(&self) -> Result<(), StorageError<LedgerNodeId>> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 

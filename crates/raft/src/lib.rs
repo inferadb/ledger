@@ -17,6 +17,7 @@
 //! hidden from documentation. They may change without notice.
 
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
 //! ## Architecture Note
 //!

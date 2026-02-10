@@ -1,3 +1,5 @@
+//! Node and peer configuration for cluster bootstrap.
+
 use std::{net::SocketAddr, path::PathBuf};
 
 use schemars::JsonSchema;

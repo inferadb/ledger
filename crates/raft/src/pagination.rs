@@ -109,10 +109,12 @@ impl PageTokenCodec {
 
     /// Decode and validate a page token.
     ///
-    /// Returns an error if:
-    /// - The token is malformed or cannot be decoded
-    /// - The HMAC validation fails (tampering detected)
-    /// - The token version is not supported
+    /// # Errors
+    ///
+    /// Returns [`PageTokenError::InvalidFormat`] if the token is malformed or
+    /// cannot be decoded, [`PageTokenError::InvalidHmac`] if HMAC validation
+    /// fails (tampering detected), or [`PageTokenError::UnsupportedVersion`] if
+    /// the token version is not supported.
     pub fn decode(&self, encoded: &str) -> Result<PageToken, PageTokenError> {
         // Base64 decode
         let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| PageTokenError::InvalidFormat)?;

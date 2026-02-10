@@ -26,6 +26,12 @@ pub struct FileBackend {
 
 impl FileBackend {
     /// Open an existing database file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be opened or the header cannot be read.
+    /// Returns [`Error::InvalidMagic`] if the file is not an InferaDB database.
+    /// Returns [`Error::Corrupted`] if the header is malformed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_str = path.as_ref().display().to_string();
         let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
@@ -41,6 +47,12 @@ impl FileBackend {
     }
 
     /// Create a new database file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be created or written.
+    /// Returns [`Error::Corrupted`] if `page_size` is not a power of two or
+    /// falls outside the 512..=65536 range.
     pub fn create(path: impl AsRef<Path>, page_size: usize) -> Result<Self> {
         let path_str = path.as_ref().display().to_string();
 

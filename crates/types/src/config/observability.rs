@@ -1,3 +1,5 @@
+//! Hot key detection, audit logging, and metrics cardinality configuration.
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

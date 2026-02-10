@@ -28,14 +28,14 @@ use snafu::{ResultExt, Snafu};
 /// Error types for time-travel index operations.
 #[derive(Debug, Snafu)]
 pub enum TimeTravelError {
-    /// Error from storage operations.
+    /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
     Storage {
         /// The underlying inferadb-ledger-store error.
         source: inferadb_ledger_store::Error,
     },
 
-    /// Codec error.
+    /// Serialization or deserialization failed.
     #[snafu(display("Codec error: {source}"))]
     Codec {
         /// The underlying codec error.
@@ -146,6 +146,11 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     }
 
     /// Configure time-travel indexing for a vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Codec`] if config serialization fails.
+    /// Returns [`TimeTravelError::Storage`] if the write transaction or commit fails.
     pub fn configure_vault(&self, vault_id: u64, config: TimeTravelConfig) -> Result<()> {
         let serialized = encode(&config).context(CodecSnafu)?;
 
@@ -160,6 +165,11 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     }
 
     /// Get the configuration for a vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Storage`] if the read transaction fails.
+    /// Returns [`TimeTravelError::Codec`] if deserialization of the stored config fails.
     pub fn get_config(&self, vault_id: u64) -> Result<Option<TimeTravelConfig>> {
         // Check cache first
         if let Some(config) = self.config_cache.read().get(&vault_id) {
@@ -180,6 +190,11 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     }
 
     /// Check if time-travel is enabled for a vault and key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Storage`] or [`TimeTravelError::Codec`] if loading
+    /// the vault config fails.
     pub fn is_enabled(&self, vault_id: u64, key: &str) -> Result<bool> {
         match self.get_config(vault_id)? {
             Some(config) => Ok(config.should_index(key)),
@@ -188,6 +203,11 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     }
 
     /// Record a value change in the time-travel index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Storage`] if the write transaction or commit fails.
+    /// Returns [`TimeTravelError::Codec`] if serialization of the entry fails.
     pub fn record(
         &self,
         vault_id: u64,
@@ -217,6 +237,11 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     /// Get the value at a specific height.
     ///
     /// Returns the entry at or before the requested height.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Storage`] if the read transaction or range scan fails.
+    /// Returns [`TimeTravelError::Codec`] if deserialization of the stored entry fails.
     pub fn get_at_height(
         &self,
         vault_id: u64,
@@ -251,6 +276,11 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     }
 
     /// Get all historical entries for a key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Storage`] if the read transaction or range scan fails.
+    /// Returns [`TimeTravelError::Codec`] if deserialization of any stored entry fails.
     pub fn get_history(
         &self,
         vault_id: u64,
@@ -287,6 +317,12 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     }
 
     /// Prune old entries beyond the max history depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Storage`] if the read/write transaction, range scan,
+    /// or commit fails.
+    /// Returns [`TimeTravelError::Codec`] if loading the vault config fails.
     pub fn prune(&self, vault_id: u64, current_height: u64) -> Result<u64> {
         let config = match self.get_config(vault_id)? {
             Some(c) if c.max_history_depth > 0 => c,
@@ -339,6 +375,10 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
     }
 
     /// Get statistics for time-travel index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeTravelError::Storage`] if the read transaction or range scan fails.
     pub fn stats(&self, vault_id: u64) -> Result<TimeTravelStats> {
         let txn = self.db.read().context(StorageSnafu)?;
 

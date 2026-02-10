@@ -30,11 +30,15 @@ pub const API_VERSION_HEADER: &str = "x-ledger-api-version";
 
 /// Validates the API version from an incoming gRPC request.
 ///
-/// Returns `Ok(())` if the version is compatible, or a `tonic::Status`
-/// with `FAILED_PRECONDITION` if the client version is unsupported.
+/// Returns `Ok(())` if the version is compatible. Missing version headers
+/// are treated as version 1 for backwards compatibility during rollout.
 ///
-/// Missing version headers are treated as version 1 for backwards
-/// compatibility during rollout.
+/// # Errors
+///
+/// Returns `tonic::Status` with:
+/// - `INVALID_ARGUMENT` if the header is not valid ASCII or not a positive integer.
+/// - `FAILED_PRECONDITION` if the client version is below the server minimum or above the server
+///   current version.
 pub fn validate_api_version<T>(request: &tonic::Request<T>) -> Result<(), tonic::Status> {
     let version = match request.metadata().get(API_VERSION_HEADER) {
         Some(value) => {
