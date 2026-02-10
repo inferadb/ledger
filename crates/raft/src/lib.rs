@@ -9,7 +9,6 @@
 //! # Public API
 //!
 //! The stable public API surface consists of:
-//! - [`proto`] — generated protobuf types and gRPC service traits
 //! - [`trace_context`] — distributed tracing propagation helpers
 //! - [`metrics`] — Prometheus metric constants and recording helpers
 //! - [`LedgerTypeConfig`] — OpenRaft type configuration
