@@ -353,7 +353,7 @@ fn apply_jitter(duration: Duration, factor: f64) -> Duration {
     let min = base * (1.0 - factor);
     let max = base * (1.0 + factor);
 
-    let jittered = rand::Rng::random_range(&mut rand::rng(), min..=max);
+    let jittered = rand::RngExt::random_range(&mut rand::rng(), min..=max);
     Duration::from_secs_f64(jittered)
 }
 

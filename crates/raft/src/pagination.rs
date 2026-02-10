@@ -69,7 +69,7 @@ impl PageTokenCodec {
     ///
     /// Useful for testing or single-node deployments.
     pub fn with_random_key() -> Self {
-        use rand::RngCore;
+        use rand::Rng;
         let mut key = [0u8; HMAC_KEY_LENGTH];
         rand::rng().fill_bytes(&mut key);
         Self { key }

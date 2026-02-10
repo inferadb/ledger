@@ -6,7 +6,7 @@
 use std::{future::Future, time::Duration};
 
 use backon::{ExponentialBuilder, Retryable};
-use rand::Rng;
+use rand::RngExt;
 
 use crate::{
     config::RetryPolicy,

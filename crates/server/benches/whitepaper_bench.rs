@@ -168,7 +168,7 @@ fn bench_read_latency_random(c: &mut Criterion) {
     populate_vault(&state, vault_id, entity_count);
 
     // Pre-generate random indices
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     let random_indices: Vec<usize> =
         (0..10000).map(|_| rng.random_range(0..entity_count)).collect();
