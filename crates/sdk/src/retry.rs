@@ -255,7 +255,7 @@ where
     }
 }
 
-/// Apply jitter to a duration.
+/// Applies jitter to a duration.
 ///
 /// Jitter adds randomness in the range `[dur * (1 - factor), dur * (1 + factor)]`
 /// to prevent thundering herd when multiple clients retry simultaneously.

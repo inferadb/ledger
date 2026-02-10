@@ -91,7 +91,7 @@ pub struct VaultSnapshotMeta {
 }
 
 impl VaultSnapshotMeta {
-    /// Create a new vault snapshot metadata.
+    /// Creates a new vault snapshot metadata.
     pub fn new(
         vault_id: VaultId,
         vault_height: u64,
@@ -102,7 +102,7 @@ impl VaultSnapshotMeta {
         Self { vault_id, vault_height, state_root, bucket_roots: bucket_roots.to_vec(), key_count }
     }
 
-    /// Get bucket roots as a fixed-size array.
+    /// Returns bucket roots as a fixed-size array.
     ///
     /// Returns None if the Vec doesn't have exactly NUM_BUCKETS elements.
     pub fn bucket_roots_array(&self) -> Option<[Hash; NUM_BUCKETS]> {
@@ -192,7 +192,7 @@ impl Default for SnapshotChainParams {
 }
 
 impl Snapshot {
-    /// Create a new snapshot with chain verification linkage.
+    /// Creates a new snapshot with chain verification linkage.
     ///
     /// Per DESIGN.md §4.4, snapshots should include chain verification data
     /// to enable verification after block compaction.
@@ -227,7 +227,7 @@ impl Snapshot {
         Ok(Self { header, state })
     }
 
-    /// Create a simple snapshot without chain verification (for testing).
+    /// Creates a simple snapshot without chain verification (for testing).
     ///
     /// In production, prefer `new()` with proper chain parameters.
     #[cfg(test)]
@@ -240,22 +240,22 @@ impl Snapshot {
         Self::new(shard_id, shard_height, vault_states, state, SnapshotChainParams::default())
     }
 
-    /// Get the shard height of this snapshot.
+    /// Returns the shard height of this snapshot.
     pub fn shard_height(&self) -> u64 {
         self.header.shard_height
     }
 
-    /// Get vault metadata by vault_id.
+    /// Returns vault metadata by vault_id.
     pub fn get_vault_meta(&self, vault_id: VaultId) -> Option<&VaultSnapshotMeta> {
         self.header.vault_states.iter().find(|v| v.vault_id == vault_id)
     }
 
-    /// Get entities for a vault.
+    /// Returns entities for a vault.
     pub fn get_vault_entities(&self, vault_id: VaultId) -> Option<&Vec<Entity>> {
         self.state.vault_entities.get(&vault_id)
     }
 
-    /// Write snapshot to file with zstd compression.
+    /// Writes snapshot to file with zstd compression.
     ///
     /// # Errors
     ///
@@ -289,7 +289,7 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Read snapshot from file.
+    /// Reads snapshot from file.
     ///
     /// # Errors
     ///
@@ -357,7 +357,7 @@ pub fn snapshot_filename(shard_height: u64) -> String {
     format!("{:09}.snap", shard_height)
 }
 
-/// Parse shard height from snapshot filename.
+/// Parses shard height from snapshot filename.
 pub fn parse_snapshot_filename(filename: &str) -> Option<u64> {
     filename.strip_suffix(".snap").and_then(|s| s.parse().ok())
 }
@@ -371,17 +371,17 @@ pub struct SnapshotManager {
 }
 
 impl SnapshotManager {
-    /// Create a new snapshot manager.
+    /// Creates a new snapshot manager.
     pub fn new(snapshot_dir: PathBuf, max_snapshots: usize) -> Self {
         Self { snapshot_dir, max_snapshots }
     }
 
-    /// Get the snapshot directory path.
+    /// Returns the snapshot directory path.
     pub fn snapshot_dir(&self) -> &Path {
         &self.snapshot_dir
     }
 
-    /// Ensure the snapshot directory exists.
+    /// Ensures the snapshot directory exists.
     ///
     /// # Errors
     ///
@@ -391,7 +391,7 @@ impl SnapshotManager {
         Ok(())
     }
 
-    /// Save a snapshot.
+    /// Saves a snapshot.
     ///
     /// # Errors
     ///
@@ -411,7 +411,7 @@ impl SnapshotManager {
         Ok(path)
     }
 
-    /// Load the latest snapshot.
+    /// Loads the latest snapshot.
     ///
     /// # Errors
     ///
@@ -432,7 +432,7 @@ impl SnapshotManager {
         Ok(Some(Snapshot::read_from_file(&path)?))
     }
 
-    /// Load a snapshot by height.
+    /// Loads a snapshot by height.
     ///
     /// # Errors
     ///
@@ -442,7 +442,7 @@ impl SnapshotManager {
         Snapshot::read_from_file(&path)
     }
 
-    /// List available snapshot heights (sorted ascending).
+    /// Lists available snapshot heights (sorted ascending).
     ///
     /// # Errors
     ///
@@ -467,7 +467,7 @@ impl SnapshotManager {
         Ok(heights)
     }
 
-    /// Prune old snapshots, keeping only the most recent `max_snapshots`.
+    /// Prunes old snapshots, keeping only the most recent `max_snapshots`.
     fn prune(&self) -> Result<()> {
         let snapshots = self.list_snapshots()?;
 
@@ -485,7 +485,7 @@ impl SnapshotManager {
         Ok(())
     }
 
-    /// Find the latest snapshot at or before the given height.
+    /// Finds the latest snapshot at or before the given height.
     ///
     /// # Errors
     ///
@@ -682,7 +682,7 @@ mod tests {
         assert_eq!(loaded.header.chain_commitment.to_height, 1000);
     }
 
-    /// Test that consecutive snapshots form a valid chain.
+    /// Tests that consecutive snapshots form a valid chain.
     ///
     /// Snapshot N+1 references snapshot N's height and hash, creating a
     /// verifiable chain of state commitments.
@@ -766,7 +766,7 @@ mod tests {
         );
     }
 
-    /// Test that vault state roots are preserved across snapshot roundtrips
+    /// Tests that vault state roots are preserved across snapshot roundtrips
     /// with multiple vaults.
     ///
     /// Each vault maintains an independent state root in the snapshot, which

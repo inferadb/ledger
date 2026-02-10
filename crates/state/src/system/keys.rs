@@ -29,7 +29,7 @@ impl SystemKeys {
         format!("user:{}", user_id.value())
     }
 
-    /// Parse a user ID from a user key.
+    /// Parses a user ID from a user key.
     ///
     /// Returns `None` if the key doesn't match the expected pattern.
     pub fn parse_user_key(key: &str) -> Option<UserId> {
@@ -81,7 +81,7 @@ impl SystemKeys {
         format!("ns:{}", namespace_id.value())
     }
 
-    /// Parse a namespace ID from a namespace key.
+    /// Parses a namespace ID from a namespace key.
     pub fn parse_namespace_key(key: &str) -> Option<NamespaceId> {
         key.strip_prefix("ns:").and_then(|id| id.parse().ok())
     }
@@ -106,7 +106,7 @@ impl SystemKeys {
         format!("node:{node_id}")
     }
 
-    /// Parse a node ID from a node key.
+    /// Parses a node ID from a node key.
     pub fn parse_node_key(key: &str) -> Option<NodeId> {
         key.strip_prefix("node:").map(|id| id.to_string())
     }

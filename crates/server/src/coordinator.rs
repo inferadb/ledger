@@ -1,9 +1,9 @@
 //! Bootstrap coordination algorithm for multi-node cluster formation.
 //!
-//! This module implements the coordination algorithm that determines which node
-//! should bootstrap the cluster when multiple nodes start simultaneously. It
-//! uses Snowflake IDs to ensure deterministic leader election - the node with
-//! the lowest ID (earliest started) bootstraps while others wait to join.
+//! Determines which node should bootstrap the cluster when multiple nodes start
+//! simultaneously. Uses Snowflake IDs for deterministic leader election — the
+//! node with the lowest ID (earliest started) bootstraps while others wait to
+//! join.
 
 use std::{
     net::SocketAddr,
@@ -89,10 +89,10 @@ impl std::error::Error for CoordinatorError {}
 /// * `my_address` - This node's gRPC address
 /// * `config` - Server configuration with bootstrap and discovery settings
 ///
-/// # Returns
+/// # Errors
 ///
-/// A `BootstrapDecision` indicating what action this node should take, or
-/// a `CoordinatorError` if coordination fails.
+/// Returns [`CoordinatorError::Timeout`] if the expected number of peers
+/// is not discovered within the configured timeout.
 pub async fn coordinate_bootstrap(
     my_node_id: u64,
     my_address: &str,
@@ -162,7 +162,7 @@ pub async fn coordinate_bootstrap(
     }
 }
 
-/// Query multiple peers for their node info concurrently.
+/// Queries multiple peers for their node info concurrently.
 async fn query_peers(peer_addrs: &[SocketAddr], timeout: Duration) -> Vec<DiscoveredNode> {
     let mut discovered = Vec::new();
     for &addr in peer_addrs {
@@ -173,7 +173,7 @@ async fn query_peers(peer_addrs: &[SocketAddr], timeout: Duration) -> Vec<Discov
     discovered
 }
 
-/// Determine bootstrap decision when enough peers are found and none are cluster members.
+/// Determines bootstrap decision when enough peers are found and none are cluster members.
 fn make_bootstrap_decision(
     my_node_id: u64,
     my_address: &str,

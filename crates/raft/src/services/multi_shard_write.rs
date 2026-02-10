@@ -65,7 +65,7 @@ pub struct MultiShardWriteService {
 
 #[allow(clippy::result_large_err)]
 impl MultiShardWriteService {
-    /// Check all rate limit tiers (backpressure, namespace, client).
+    /// Checks all rate limit tiers (backpressure, namespace, client).
     fn check_rate_limit(
         &self,
         client_id: &str,
@@ -74,29 +74,29 @@ impl MultiShardWriteService {
         super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, namespace_id)
     }
 
-    /// Set input validation configuration for request field limits.
+    /// Sets input validation configuration for request field limits.
     #[must_use]
     pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
         self.validation_config = config;
         self
     }
 
-    /// Validate all operations in a proto operation list.
+    /// Validates all operations in a proto operation list.
     fn validate_operations(&self, operations: &[Operation]) -> Result<(), Status> {
         super::helpers::validate_operations(operations, &self.validation_config)
     }
 
-    /// Record key accesses from operations for hot key detection.
+    /// Records key accesses from operations for hot key detection.
     fn record_hot_keys(&self, vault_id: inferadb_ledger_types::VaultId, operations: &[Operation]) {
         super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault_id, operations);
     }
 
-    /// Compute a hash of operations for idempotency payload comparison.
+    /// Computes a hash of operations for idempotency payload comparison.
     fn hash_operations(operations: &[Operation]) -> Vec<u8> {
         super::helpers::hash_operations(operations)
     }
 
-    /// Generate inclusion proof for a write.
+    /// Generates inclusion proof for a write.
     fn generate_write_proof(
         &self,
         namespace_id: inferadb_ledger_types::NamespaceId,
@@ -134,7 +134,7 @@ impl MultiShardWriteService {
         }
     }
 
-    /// Build a ledger request from operations.
+    /// Builds a ledger request from operations.
     ///
     /// Server-assigned sequences: The transaction's sequence is set to 0 here;
     /// the actual sequence will be assigned by the Raft state machine at apply time.

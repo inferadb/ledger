@@ -42,23 +42,23 @@ pub struct TestNode {
 }
 
 impl TestNode {
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     pub fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.id)
     }
 
-    /// Get the current leader ID if known.
+    /// Returns the current leader ID if known.
     pub fn current_leader(&self) -> Option<u64> {
         self.raft.metrics().borrow().current_leader
     }
 
-    /// Get the current term.
+    /// Returns the current term.
     pub fn current_term(&self) -> u64 {
         self.raft.metrics().borrow().current_term
     }
 
-    /// Get the last applied log index.
+    /// Returns the last applied log index.
     pub fn last_applied(&self) -> u64 {
         self.raft.metrics().borrow().last_applied.map_or(0, |id| id.index)
     }
@@ -71,7 +71,7 @@ pub struct TestCluster {
 }
 
 impl TestCluster {
-    /// Create a new test cluster with the given number of nodes.
+    /// Creates a new test cluster with the given number of nodes.
     ///
     /// The first node bootstraps the cluster, and other nodes join via
     /// the AdminService's join_cluster RPC.
@@ -299,7 +299,7 @@ impl TestCluster {
         Self { nodes }
     }
 
-    /// Wait for a leader to be elected AND all nodes to agree.
+    /// Waits for a leader to be elected AND all nodes to agree.
     ///
     /// Returns the leader's node ID.
     pub async fn wait_for_leader(&self) -> u64 {
@@ -308,7 +308,7 @@ impl TestCluster {
             .expect("leader election timed out")
     }
 
-    /// Wait for a leader with timeout (any node reporting a leader).
+    /// Waits for a leader with timeout (any node reporting a leader).
     pub async fn wait_for_leader_timeout(&self, duration: Duration) -> Option<u64> {
         let start = tokio::time::Instant::now();
 
@@ -324,7 +324,7 @@ impl TestCluster {
         None
     }
 
-    /// Wait for ALL nodes to agree on the same leader.
+    /// Waits for ALL nodes to agree on the same leader.
     ///
     /// This is more robust than `wait_for_leader_timeout` as it ensures
     /// leader information has propagated to all nodes.
@@ -347,7 +347,7 @@ impl TestCluster {
         None
     }
 
-    /// Get the current leader node.
+    /// Returns the current leader node.
     ///
     /// Uses consensus from node metrics rather than relying on a single node.
     pub fn leader(&self) -> Option<&TestNode> {
@@ -358,22 +358,22 @@ impl TestCluster {
         self.nodes.iter().find(|n| n.id == leader_id)
     }
 
-    /// Get all follower nodes.
+    /// Returns all follower nodes.
     pub fn followers(&self) -> Vec<&TestNode> {
         self.nodes.iter().filter(|n| !n.is_leader()).collect()
     }
 
-    /// Get a node by ID.
+    /// Returns a node by ID.
     pub fn node(&self, id: u64) -> Option<&TestNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
-    /// Get all nodes.
+    /// Returns all nodes.
     pub fn nodes(&self) -> &[TestNode] {
         &self.nodes
     }
 
-    /// Wait for all nodes to have the same last applied index.
+    /// Waits for all nodes to have the same last applied index.
     #[allow(dead_code)]
     pub async fn wait_for_sync(&self, timeout_duration: Duration) -> bool {
         timeout(timeout_duration, async {
@@ -469,29 +469,29 @@ pub struct MultiShardTestNode {
 }
 
 impl MultiShardTestNode {
-    /// Get the system shard (shard 0).
+    /// Returns the system shard (shard 0).
     pub fn system_shard(&self) -> Arc<ShardGroup> {
         self.manager.system_shard().expect("system shard exists")
     }
 
-    /// Get a data shard by ID.
+    /// Returns a data shard by ID.
     pub fn shard(&self, shard_id: inferadb_ledger_types::ShardId) -> Option<Arc<ShardGroup>> {
         self.manager.get_shard(shard_id).ok()
     }
 
-    /// Get all shard IDs.
+    /// Returns all shard IDs.
     pub fn shard_ids(&self) -> Vec<inferadb_ledger_types::ShardId> {
         self.manager.list_shards()
     }
 
-    /// Check if this node is leader for the system shard.
+    /// Checks if this node is leader for the system shard.
     pub fn is_system_leader(&self) -> bool {
         let shard = self.system_shard();
         let metrics = shard.raft().metrics().borrow().clone();
         metrics.current_leader == Some(self.id)
     }
 
-    /// Get leader ID for the system shard.
+    /// Returns leader ID for the system shard.
     pub fn system_leader(&self) -> Option<u64> {
         let shard = self.system_shard();
         shard.raft().metrics().borrow().current_leader
@@ -526,7 +526,7 @@ pub struct MultiShardTestCluster {
 }
 
 impl MultiShardTestCluster {
-    /// Create a new multi-shard test cluster.
+    /// Creates a new multi-shard test cluster.
     ///
     /// # Arguments
     ///
@@ -647,37 +647,37 @@ impl MultiShardTestCluster {
         Self { nodes, num_shards: num_data_shards }
     }
 
-    /// Get all nodes.
+    /// Returns all nodes.
     pub fn nodes(&self) -> &[MultiShardTestNode] {
         &self.nodes
     }
 
-    /// Get a node by ID.
+    /// Returns a node by ID.
     pub fn node(&self, id: u64) -> Option<&MultiShardTestNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
-    /// Get the leader node for the system shard.
+    /// Returns the leader node for the system shard.
     pub fn system_leader(&self) -> Option<&MultiShardTestNode> {
         self.nodes.iter().find(|n| n.is_system_leader())
     }
 
-    /// Get any node (for client connections).
+    /// Returns any node (for client connections).
     pub fn any_node(&self) -> &MultiShardTestNode {
         &self.nodes[0]
     }
 
-    /// Get the number of data shards.
+    /// Returns the number of data shards.
     pub fn num_data_shards(&self) -> usize {
         self.num_shards
     }
 
-    /// Get all node addresses.
+    /// Returns all node addresses.
     pub fn addresses(&self) -> Vec<SocketAddr> {
         self.nodes.iter().map(|n| n.addr).collect()
     }
 
-    /// Wait for a leader to be elected on all shards.
+    /// Waits for a leader to be elected on all shards.
     pub async fn wait_for_leaders(&self, timeout_duration: Duration) -> bool {
         let start = tokio::time::Instant::now();
 
@@ -724,7 +724,7 @@ pub struct ExternalCluster {
 }
 
 impl ExternalCluster {
-    /// Read `LEDGER_ENDPOINTS` env var (comma-separated `http://host:port`).
+    /// Reads `LEDGER_ENDPOINTS` env var (comma-separated `http://host:port`).
     ///
     /// Returns `None` if the variable is unset, allowing tests to skip.
     pub fn from_env() -> Option<Self> {
@@ -739,12 +739,12 @@ impl ExternalCluster {
         Some(Self { endpoints })
     }
 
-    /// Get all cluster endpoints.
+    /// Returns all cluster endpoints.
     pub fn endpoints(&self) -> &[String] {
         &self.endpoints
     }
 
-    /// Get the first endpoint (convenience for single-endpoint operations).
+    /// Returns the first endpoint (convenience for single-endpoint operations).
     pub fn any_endpoint(&self) -> &str {
         &self.endpoints[0]
     }
@@ -789,7 +789,7 @@ impl ExternalCluster {
         Ok(response.into_inner())
     }
 
-    /// Find the leader's endpoint URL by matching leader address from
+    /// Finds the leader's endpoint URL by matching leader address from
     /// `GetClusterInfoResponse` against known endpoints.
     pub fn leader_endpoint_from_info(
         info: &inferadb_ledger_proto::proto::GetClusterInfoResponse,
@@ -802,7 +802,7 @@ impl ExternalCluster {
         endpoints.iter().find(|ep| ep.ends_with(leader_addr) || ep.contains(leader_addr)).cloned()
     }
 
-    /// Find non-leader endpoint URLs.
+    /// Finds non-leader endpoint URLs.
     pub fn non_leader_endpoints(
         info: &inferadb_ledger_proto::proto::GetClusterInfoResponse,
         endpoints: &[String],

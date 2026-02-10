@@ -31,22 +31,22 @@ use crate::{
 /// - Read-only providers for read transactions
 /// - Read-write providers for write transactions
 pub trait PageProvider {
-    /// Read a page by ID.
+    /// Reads a page by ID.
     fn read_page(&self, page_id: PageId) -> Result<Page>;
 
-    /// Write a page to the cache/storage.
+    /// Writes a page to the cache/storage.
     fn write_page(&mut self, page: Page);
 
-    /// Allocate a new page of the given type.
+    /// Allocates a new page of the given type.
     fn allocate_page(&mut self, page_type: PageType) -> Page;
 
-    /// Free a page for later reuse.
+    /// Frees a page for later reuse.
     fn free_page(&mut self, page_id: PageId);
 
-    /// Get the page size.
+    /// Returns the page size.
     fn page_size(&self) -> usize;
 
-    /// Get the current transaction ID.
+    /// Returns the current transaction ID.
     fn txn_id(&self) -> u64;
 }
 
@@ -73,17 +73,17 @@ pub struct BTree<P: PageProvider> {
 }
 
 impl<P: PageProvider> BTree<P> {
-    /// Create a new B-tree accessor.
+    /// Creates a new B-tree accessor.
     pub fn new(root_page: PageId, provider: P) -> Self {
         Self { provider, root_page, split_count: 0 }
     }
 
-    /// Number of page splits performed during operations on this BTree instance.
+    /// Returns the number of page splits performed during operations on this BTree instance.
     pub fn split_count(&self) -> u64 {
         self.split_count
     }
 
-    /// Compute the depth of the B-tree (0 = empty, 1 = root is leaf, 2+ = branches + leaf).
+    /// Computes the depth of the B-tree (0 = empty, 1 = root is leaf, 2+ = branches + leaf).
     ///
     /// Walks the leftmost path from root to leaf.
     ///
@@ -124,36 +124,36 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Check if the tree is empty.
+    /// Checks if the tree is empty.
     pub fn is_empty(&self) -> bool {
         self.root_page == 0
     }
 
-    /// Get the root page ID.
+    /// Returns the root page ID.
     pub fn root_page(&self) -> PageId {
         self.root_page
     }
 
-    /// Set the root page ID (called after split creates new root).
+    /// Sets the root page ID (called after split creates new root).
     pub fn set_root_page(&mut self, page_id: PageId) {
         self.root_page = page_id;
     }
 
-    /// Allocate and initialize a new leaf page.
+    /// Allocates and initialize a new leaf page.
     fn new_leaf_page(&mut self) -> Page {
         let mut page = self.provider.allocate_page(PageType::BTreeLeaf);
         LeafNode::init(&mut page);
         page
     }
 
-    /// Allocate and initialize a new branch page.
+    /// Allocates and initialize a new branch page.
     fn new_branch_page(&mut self, rightmost_child: PageId) -> Page {
         let mut page = self.provider.allocate_page(PageType::BTreeBranch);
         BranchNode::init(&mut page, rightmost_child);
         page
     }
 
-    /// Get a value by key.
+    /// Returns a value by key.
     ///
     /// Uses the leaf page's embedded bloom filter for fast negative lookups:
     /// if the bloom filter says "definitely absent," the binary search is skipped.
@@ -181,7 +181,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Find the leaf page that would contain the given key.
+    /// Finds the leaf page that would contain the given key.
     fn find_leaf(&self, key: &[u8]) -> Result<PageId> {
         let mut current = self.root_page;
 
@@ -206,7 +206,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Find the next leaf page after the one containing `key`.
+    /// Finds the next leaf page after the one containing `key`.
     ///
     /// Descends from the root tracking the path, then backtracks to find
     /// the nearest ancestor with a right sibling child. Returns `None` if
@@ -281,7 +281,7 @@ impl<P: PageProvider> BTree<P> {
         Ok(None)
     }
 
-    /// Find the leftmost leaf starting from a given page.
+    /// Finds the leftmost leaf starting from a given page.
     fn find_first_leaf_from(&self, start: PageId) -> Result<PageId> {
         let mut current = start;
         loop {
@@ -303,7 +303,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Insert a key-value pair into the B-tree.
+    /// Inserts a key-value pair into the B-tree.
     ///
     /// If the key already exists, its value is updated in-place.
     /// Returns the previous value if the key existed, or `None` for new keys.
@@ -465,7 +465,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Insert into leaf and split if necessary.
+    /// Inserts into leaf and split if necessary.
     ///
     /// This uses a key-aware split strategy: we find a split point that ensures
     /// the new key can fit in the correct side (based on ordering).
@@ -509,7 +509,7 @@ impl<P: PageProvider> BTree<P> {
         Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
 
-    /// Insert into branch and split if necessary.
+    /// Inserts into branch and split if necessary.
     ///
     /// # Arguments
     /// * `page` - The branch page to split
@@ -579,7 +579,7 @@ impl<P: PageProvider> BTree<P> {
         Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
 
-    /// Delete a key from the tree.
+    /// Deletes a key from the tree.
     ///
     /// Returns the value that was deleted, or None if key didn't exist.
     ///
@@ -622,7 +622,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Create an iterator over all entries in the tree.
+    /// Creates an iterator over all entries in the tree.
     ///
     /// # Errors
     ///
@@ -631,7 +631,7 @@ impl<P: PageProvider> BTree<P> {
         BTreeIterator::new(self, Range::all())
     }
 
-    /// Create an iterator over a range of entries.
+    /// Creates an iterator over a range of entries.
     ///
     /// # Errors
     ///
@@ -640,7 +640,7 @@ impl<P: PageProvider> BTree<P> {
         BTreeIterator::new(self, range)
     }
 
-    /// Get the first (smallest) key-value pair in the tree.
+    /// Returns the first (smallest) key-value pair in the tree.
     ///
     /// # Errors
     ///
@@ -662,7 +662,7 @@ impl<P: PageProvider> BTree<P> {
         Ok(Some((key.to_vec(), value.to_vec())))
     }
 
-    /// Get the last (largest) key-value pair in the tree.
+    /// Returns the last (largest) key-value pair in the tree.
     ///
     /// # Errors
     ///
@@ -685,7 +685,7 @@ impl<P: PageProvider> BTree<P> {
         Ok(Some((key.to_vec(), value.to_vec())))
     }
 
-    /// Find the leftmost (first) leaf in the tree.
+    /// Finds the leftmost (first) leaf in the tree.
     fn find_first_leaf(&self) -> Result<PageId> {
         let mut current = self.root_page;
 
@@ -708,7 +708,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Find the rightmost (last) leaf in the tree.
+    /// Finds the rightmost (last) leaf in the tree.
     fn find_last_leaf(&self) -> Result<PageId> {
         let mut current = self.root_page;
 
@@ -732,7 +732,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Compact the B+ tree by merging underfull leaf nodes.
+    /// Compacts the B+ tree by merging underfull leaf nodes.
     ///
     /// Walks all leaves left-to-right. When a leaf's fill factor is below
     /// `min_fill_factor`, attempts to merge it with its right sibling
@@ -875,7 +875,7 @@ impl<P: PageProvider> BTree<P> {
         Ok(stats)
     }
 
-    /// Collect (leaf_page_id, parent_page_id, child_index_in_parent) for all leaves.
+    /// Collects (leaf_page_id, parent_page_id, child_index_in_parent) for all leaves.
     ///
     /// `parent_page_id` is 0 for the root when the root is a leaf.
     /// `child_index_in_parent` is the index of the child pointer in the parent
@@ -921,7 +921,7 @@ impl<P: PageProvider> BTree<P> {
         Ok(())
     }
 
-    /// Find the separator index in a parent branch that separates left_id from right_id.
+    /// Finds the separator index in a parent branch that separates left_id from right_id.
     ///
     /// Returns `Some(idx)` where `child(idx) == left_id` and either
     /// `child(idx+1) == right_id` or `rightmost_child == right_id`.
@@ -1062,7 +1062,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         }
     }
 
-    /// Get the current key-value pair, if positioned (returns owned copies).
+    /// Returns the current key-value pair, if positioned (returns owned copies).
     ///
     /// # Errors
     ///
@@ -1089,7 +1089,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         }
     }
 
-    /// Move to next entry and return it.
+    /// Moves to next entry and return it.
     ///
     /// # Errors
     ///
@@ -1325,13 +1325,13 @@ mod tests {
         use super::*;
         use crate::btree::cursor::Range;
 
-        /// Generate a vector of unique keys (formatted for sort stability).
+        /// Generates a vector of unique keys (formatted for sort stability).
         fn arb_unique_keys(max_count: usize) -> impl Strategy<Value = Vec<String>> {
             proptest::collection::hash_set("[a-z]{1,4}", 1..max_count)
                 .prop_map(|s| s.into_iter().collect::<Vec<_>>())
         }
 
-        /// Generate key-value pairs with unique keys.
+        /// Generates key-value pairs with unique keys.
         fn arb_kv_pairs(max_count: usize) -> impl Strategy<Value = Vec<(String, Vec<u8>)>> {
             arb_unique_keys(max_count).prop_flat_map(|keys| {
                 let n = keys.len();
@@ -1392,7 +1392,7 @@ mod tests {
                 prop_assert_eq!(keys.len(), pairs.len());
             }
 
-            /// Delete removes keys and they become unretrievable.
+            /// Deletes removes keys and they become unretrievable.
             #[test]
             fn prop_delete_removes_keys(
                 pairs in arb_kv_pairs(100),
@@ -1433,7 +1433,7 @@ mod tests {
                 }
             }
 
-            /// Update overwrites value while keeping key present.
+            /// Updates overwrites value while keeping key present.
             #[test]
             fn prop_update_overwrites_value(
                 pairs in arb_kv_pairs(100),
@@ -1493,7 +1493,7 @@ mod tests {
                 prop_assert_eq!(count, pairs.len());
             }
 
-            /// Seek finds exact key or correct insertion position.
+            /// Seeks finds exact key or correct insertion position.
             #[test]
             fn prop_get_consistency_with_iteration(pairs in arb_kv_pairs(100)) {
                 let mut tree = make_tree();

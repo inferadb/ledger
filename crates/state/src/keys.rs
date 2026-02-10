@@ -19,7 +19,7 @@ pub struct StorageKey {
     pub local_key: Vec<u8>,
 }
 
-/// Encode a storage key with vault and bucket prefixes.
+/// Encodes a storage key with vault and bucket prefixes.
 ///
 /// Format: {vault_id:8BE}{bucket_id:1}{local_key:var}
 ///
@@ -34,7 +34,7 @@ pub fn encode_storage_key(vault_id: VaultId, local_key: &[u8]) -> Vec<u8> {
     key
 }
 
-/// Encode a key with explicit bucket_id (for range scans).
+/// Encodes a key with explicit bucket_id (for range scans).
 ///
 /// This is used for scanning all keys in a specific bucket.
 #[allow(dead_code)] // public API: reserved for bucket-based key encoding
@@ -46,12 +46,12 @@ pub fn encode_key_with_bucket(vault_id: VaultId, bucket_id: u8, local_key: &[u8]
     key
 }
 
-/// Create a prefix for scanning all keys in a vault.
+/// Creates a prefix for scanning all keys in a vault.
 pub fn vault_prefix(vault_id: VaultId) -> [u8; 8] {
     vault_id.value().to_be_bytes()
 }
 
-/// Create a prefix for scanning all keys in a specific bucket within a vault.
+/// Creates a prefix for scanning all keys in a specific bucket within a vault.
 pub fn bucket_prefix(vault_id: VaultId, bucket_id: u8) -> [u8; 9] {
     let mut prefix = [0u8; 9];
     prefix[..8].copy_from_slice(&vault_id.value().to_be_bytes());
@@ -59,7 +59,7 @@ pub fn bucket_prefix(vault_id: VaultId, bucket_id: u8) -> [u8; 9] {
     prefix
 }
 
-/// Decode a storage key into its components.
+/// Decodes a storage key into its components.
 ///
 /// Returns None if the key is too short.
 pub fn decode_storage_key(key: &[u8]) -> Option<StorageKey> {
@@ -74,7 +74,7 @@ pub fn decode_storage_key(key: &[u8]) -> Option<StorageKey> {
     Some(StorageKey { vault_id: VaultId::new(vault_id), bucket_id, local_key })
 }
 
-/// Encode a relationship key.
+/// Encodes a relationship key.
 ///
 /// Format: rel:{resource}#{relation}@{subject}
 #[allow(dead_code)] // public API: reserved for relationship key encoding
@@ -82,14 +82,14 @@ pub fn encode_relationship_key(resource: &str, relation: &str, subject: &str) ->
     format!("rel:{}#{}@{}", resource, relation, subject).into_bytes()
 }
 
-/// Encode an object index key.
+/// Encodes an object index key.
 ///
 /// Format: obj_idx:{resource}#{relation}
 pub fn encode_obj_index_key(resource: &str, relation: &str) -> Vec<u8> {
     format!("obj_idx:{}#{}", resource, relation).into_bytes()
 }
 
-/// Encode a subject index key.
+/// Encodes a subject index key.
 ///
 /// Format: subj_idx:{subject}
 pub fn encode_subj_index_key(subject: &str) -> Vec<u8> {

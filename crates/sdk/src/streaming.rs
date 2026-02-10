@@ -28,10 +28,10 @@ pub trait PositionTracker: Clone + Send + 'static {
     /// The item type being streamed.
     type Item;
 
-    /// Update position based on received item.
+    /// Updates position based on received item.
     fn update(&mut self, item: &Self::Item);
 
-    /// Get the current position for reconnection.
+    /// Returns the current position for reconnection.
     fn position(&self) -> u64;
 }
 
@@ -44,12 +44,12 @@ pub struct HeightTracker {
 }
 
 impl HeightTracker {
-    /// Create a new height tracker starting at the given height.
+    /// Creates a new height tracker starting at the given height.
     pub fn new(start_height: u64) -> Self {
         Self { last_height: start_height.saturating_sub(1) }
     }
 
-    /// Get the last seen height.
+    /// Returns the last seen height.
     pub fn last_height(&self) -> u64 {
         self.last_height
     }
@@ -140,7 +140,7 @@ where
     F: FnMut(u64) -> Fut + Send + 'static,
     Fut: Future<Output = Result<tonic::Streaming<T>>> + Send + 'static,
 {
-    /// Create a new reconnecting stream.
+    /// Creates a new reconnecting stream.
     ///
     /// # Arguments
     ///
@@ -163,7 +163,7 @@ where
         }
     }
 
-    /// Calculate backoff duration for current attempt.
+    /// Calculates backoff duration for current attempt.
     fn backoff_duration(&self) -> Duration {
         let base = self.retry_policy.initial_backoff;
         let multiplier = self.retry_policy.multiplier;
@@ -182,7 +182,7 @@ where
         apply_jitter(capped, jitter)
     }
 
-    /// Check if we should retry based on the error.
+    /// Checks if we should retry based on the error.
     fn should_retry(&self, status: &Status) -> bool {
         // Only retry on transient errors
         matches!(
@@ -337,7 +337,7 @@ where
     }
 }
 
-/// Apply jitter to a duration.
+/// Applies jitter to a duration.
 ///
 /// Jitter is applied as ±factor randomness, e.g., 100ms with 0.25 jitter
 /// produces a value in the range [75ms, 125ms].

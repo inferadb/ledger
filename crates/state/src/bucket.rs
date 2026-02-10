@@ -48,12 +48,12 @@ pub const NUM_BUCKETS: usize = 256;
 pub struct VaultCommitment {
     /// Root hash for each bucket (0-255).
     bucket_roots: [Hash; NUM_BUCKETS],
-    /// Set of buckets that need rehashing.
+    /// Sets of buckets that need rehashing.
     dirty_buckets: BTreeSet<u8>,
 }
 
 impl VaultCommitment {
-    /// Create a new vault commitment with all empty buckets.
+    /// Creates a new vault commitment with all empty buckets.
     ///
     /// All 256 bucket roots are initialized to `EMPTY_HASH`. Use
     /// [`mark_dirty_by_key`](Self::mark_dirty_by_key) after mutations, then
@@ -63,53 +63,53 @@ impl VaultCommitment {
         Self { bucket_roots: [EMPTY_HASH; NUM_BUCKETS], dirty_buckets: BTreeSet::new() }
     }
 
-    /// Create from existing bucket roots (e.g., from snapshot).
+    /// Creates from existing bucket roots (e.g., from snapshot).
     pub fn from_bucket_roots(bucket_roots: [Hash; NUM_BUCKETS]) -> Self {
         Self { bucket_roots, dirty_buckets: BTreeSet::new() }
     }
 
-    /// Mark a bucket as dirty based on a key.
+    /// Marks a bucket as dirty based on a key.
     pub fn mark_dirty_by_key(&mut self, local_key: &[u8]) {
         let bucket = bucket_id(local_key);
         self.dirty_buckets.insert(bucket);
     }
 
-    /// Mark a specific bucket as dirty.
+    /// Marks a specific bucket as dirty.
     pub fn mark_dirty(&mut self, bucket: u8) {
         self.dirty_buckets.insert(bucket);
     }
 
-    /// Check if any buckets are dirty.
+    /// Checks if any buckets are dirty.
     pub fn is_dirty(&self) -> bool {
         !self.dirty_buckets.is_empty()
     }
 
-    /// Get the set of dirty bucket IDs.
+    /// Returns the set of dirty bucket IDs.
     pub fn dirty_buckets(&self) -> &BTreeSet<u8> {
         &self.dirty_buckets
     }
 
-    /// Update a bucket's root hash.
+    /// Updates a bucket's root hash.
     pub fn set_bucket_root(&mut self, bucket: u8, root: Hash) {
         self.bucket_roots[bucket as usize] = root;
     }
 
-    /// Get a bucket's current root hash.
+    /// Returns a bucket's current root hash.
     pub fn bucket_root(&self, bucket: u8) -> Hash {
         self.bucket_roots[bucket as usize]
     }
 
-    /// Get all bucket roots.
+    /// Returns all bucket roots.
     pub fn bucket_roots(&self) -> &[Hash; NUM_BUCKETS] {
         &self.bucket_roots
     }
 
-    /// Clear dirty flags (call after computing state root).
+    /// Clears dirty flags (call after computing state root).
     pub fn clear_dirty(&mut self) {
         self.dirty_buckets.clear();
     }
 
-    /// Compute the vault's state root.
+    /// Computes the vault's state root.
     ///
     /// state_root = SHA-256(bucket_root\[0\] || ... || bucket_root\[255\])
     ///
@@ -119,7 +119,7 @@ impl VaultCommitment {
         sha256_concat(&self.bucket_roots)
     }
 
-    /// Compute a bucket's root hash from a list of entities.
+    /// Computes a bucket's root hash from a list of entities.
     ///
     /// Entities must be sorted by key in lexicographic order.
     /// Uses streaming hash with length-prefixed encoding per DESIGN.md.
@@ -148,25 +148,25 @@ pub struct BucketRootBuilder {
 }
 
 impl BucketRootBuilder {
-    /// Create a new builder for a specific bucket.
+    /// Creates a new builder for a specific bucket.
     pub fn new(bucket_id: u8) -> Self {
         Self { hasher: BucketHasher::new(), bucket_id }
     }
 
-    /// Get the bucket ID this builder is for.
+    /// Returns the bucket ID this builder is for.
     #[allow(dead_code)] // public API: accessor for bucket identification
     pub fn bucket_id(&self) -> u8 {
         self.bucket_id
     }
 
-    /// Add an entity to the bucket hash.
+    /// Adds an entity to the bucket hash.
     ///
     /// Entities should be added in lexicographic key order.
     pub fn add_entity(&mut self, entity: &Entity) {
         self.hasher.add_entity(entity);
     }
 
-    /// Finalize and return the bucket root hash.
+    /// Finalizes and return the bucket root hash.
     pub fn finalize(self) -> Hash {
         self.hasher.finalize()
     }

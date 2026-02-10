@@ -61,7 +61,7 @@ pub struct IntegrityScrubberJob<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
-    /// Create from a configuration struct.
+    /// Creates from a configuration struct.
     pub fn from_config(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
@@ -77,13 +77,13 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
         }
     }
 
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Run a single scrub cycle.
+    /// Runs a single scrub cycle.
     ///
     /// Scrubs a range of pages starting from the current cursor position,
     /// then verifies B-tree invariants.
@@ -180,7 +180,7 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
         }
     }
 
-    /// Start the integrity scrubber background task.
+    /// Starts the integrity scrubber background task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use inferadb_ledger_proto::proto;
 
-/// Build an [`ErrorDetails`] proto message from error attributes.
+/// Builds an [`ErrorDetails`] proto message from error attributes.
 ///
 /// Used by service helpers ([`super::helpers::check_rate_limit`],
 /// [`super::helpers::validate_operations`]) to construct structured error

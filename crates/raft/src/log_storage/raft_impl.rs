@@ -79,7 +79,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
         Ok(entries)
     }
 
-    /// Get log entries for replication.
+    /// Returns log entries for replication.
     ///
     /// OpenRaft contract: this must not return empty for non-empty range.
     /// If entries are purged, return error to trigger snapshot replication.

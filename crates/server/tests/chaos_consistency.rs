@@ -45,9 +45,9 @@ use turmoil_common::incoming_stream;
 /// Operation types for consistency checking.
 #[derive(Debug, Clone)]
 pub enum Operation {
-    /// Write operation with key and value.
+    /// Writes operation with key and value.
     Write { key: String, value: u64, node: u64 },
-    /// Read operation with key.
+    /// Reads operation with key.
     Read { key: String, node: u64, result: Option<u64> },
     /// Vote request received.
     VoteRequest { from: u64, to: u64, term: u64 },
@@ -72,7 +72,7 @@ impl OperationHistory {
         self.next_ts.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Verify linearizability of the history.
+    /// Verifies linearizability of the history.
     ///
     /// For each read, verify it returns either:
     /// - The value from the most recent committed write, or
@@ -108,7 +108,7 @@ impl OperationHistory {
         Ok(())
     }
 
-    /// Verify no committed writes were lost.
+    /// Verifies no committed writes were lost.
     pub fn verify_durability(&self) -> Result<(), ConsistencyViolation> {
         // Track all writes and verify they're all in final state
         // This is a simplified check - real Jepsen would verify against final reads
@@ -119,7 +119,7 @@ impl OperationHistory {
 /// Types of consistency violations.
 #[derive(Debug)]
 pub enum ConsistencyViolation {
-    /// Read returned a value from the future (not yet committed).
+    /// Reads returned a value from the future (not yet committed).
     FutureRead { key: String, read_value: u64, committed_value: u64 },
     /// A committed write was lost.
     LostWrite { key: String, value: u64 },
@@ -192,7 +192,7 @@ impl RaftService for SplitBrainDetectionService {
     }
 }
 
-/// Verify that a minority partition cannot elect a leader.
+/// Verifies that a minority partition cannot elect a leader.
 ///
 /// In a 5-node cluster, partitioning 2 nodes should prevent them from
 /// achieving quorum (3 votes needed). This test verifies split-brain
@@ -287,7 +287,7 @@ fn test_minority_cannot_elect_leader() {
     assert!(leaders.len() <= 1, "Split-brain detected! Multiple leaders: {:?}", leaders);
 }
 
-/// Test that writes to minority partition fail while majority continues.
+/// Tests that writes to minority partition fail while majority continues.
 ///
 /// This simulates a scenario where a client tries to write through a
 /// partitioned node. The write should fail because the node cannot
@@ -461,7 +461,7 @@ fn test_write_fails_in_minority_partition() {
     assert_eq!(successes, 2, "should have 2 successful writes");
 }
 
-/// Test consistency verification after partition healing.
+/// Tests consistency verification after partition healing.
 ///
 /// This simulates writes during a partition, then verifies that after
 /// the partition heals, all nodes converge to the same state.
@@ -667,7 +667,7 @@ impl SimulatedStateLayer {
     }
 }
 
-/// Test that state root mismatch is detected after bit flip.
+/// Tests that state root mismatch is detected after bit flip.
 ///
 /// Per DESIGN.md: "Every read can optionally verify against state_root"
 /// and "If state_root mismatch: follower halts and alerts"
@@ -709,7 +709,7 @@ fn test_bit_flip_detected_via_state_root_mismatch() {
     assert_eq!(leader_root_after, leader_root, "Leader state should be unchanged");
 }
 
-/// Test detection of corrupted entity value.
+/// Tests detection of corrupted entity value.
 ///
 /// Per DESIGN.md: "Background integrity checks: replay chain, verify state roots match"
 ///
@@ -762,7 +762,7 @@ impl std::fmt::Display for DiskFullError {
 
 impl std::error::Error for DiskFullError {}
 
-/// Test graceful degradation when disk is full.
+/// Tests graceful degradation when disk is full.
 ///
 /// Per DESIGN.md fault table: "Disk full | mock | Graceful degradation"
 ///
@@ -834,7 +834,7 @@ fn test_disk_full_graceful_degradation() {
     );
 }
 
-/// Test that requests complete through slow nodes.
+/// Tests that requests complete through slow nodes.
 ///
 /// Per DESIGN.md fault table: "Network delay | toxiproxy | Timeout handling"
 ///

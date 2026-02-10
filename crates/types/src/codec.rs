@@ -1,7 +1,7 @@
 //! Centralized serialization and deserialization functions.
 //!
-//! This module provides a unified interface for encoding and decoding data
-//! using postcard serialization, with consistent error handling via snafu.
+//! Provides a unified interface for encoding and decoding data using postcard
+//! serialization, with consistent error handling via snafu.
 
 use serde::{Serialize, de::DeserializeOwned};
 use snafu::{ResultExt, Snafu};

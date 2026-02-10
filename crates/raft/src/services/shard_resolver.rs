@@ -104,7 +104,7 @@ impl std::fmt::Debug for ShardContext {
 /// Implementors provide the mapping from namespace to the resources
 /// needed to handle requests for that namespace.
 pub trait ShardResolver: Send + Sync {
-    /// Resolve a namespace to its shard context.
+    /// Resolves a namespace to its shard context.
     ///
     /// Returns the Raft instance, state layer, and other resources
     /// for the shard that handles the given namespace.
@@ -116,7 +116,7 @@ pub trait ShardResolver: Send + Sync {
     /// - The shard is on a remote node and forwarding is not supported
     fn resolve(&self, namespace_id: NamespaceId) -> Result<ShardContext, Status>;
 
-    /// Resolve a namespace, supporting remote shards.
+    /// Resolves a namespace, supporting remote shards.
     ///
     /// Unlike `resolve()`, this method can return forwarding information
     /// when the namespace is on a remote shard, allowing services to
@@ -135,13 +135,13 @@ pub trait ShardResolver: Send + Sync {
         self.resolve(namespace_id).map(ResolveResult::Local)
     }
 
-    /// Get the system shard context.
+    /// Returns the system shard context.
     ///
     /// The system shard (shard 0) handles global operations like
     /// namespace creation and user management.
     fn system_shard(&self) -> Result<ShardContext, Status>;
 
-    /// Check if this resolver supports request forwarding.
+    /// Checks if this resolver supports request forwarding.
     ///
     /// Resolvers that can forward to remote shards return `true`.
     fn supports_forwarding(&self) -> bool {
@@ -161,7 +161,7 @@ pub struct SingleShardResolver {
 }
 
 impl SingleShardResolver {
-    /// Create a new single-shard resolver.
+    /// Creates a new single-shard resolver.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<StateLayer<FileBackend>>,
@@ -207,12 +207,12 @@ pub struct MultiShardResolver {
 }
 
 impl MultiShardResolver {
-    /// Create a new multi-shard resolver.
+    /// Creates a new multi-shard resolver.
     pub fn new(manager: Arc<MultiRaftManager>) -> Self {
         Self { manager }
     }
 
-    /// Get the ShardRouter for remote routing lookups.
+    /// Returns the ShardRouter for remote routing lookups.
     fn router(&self) -> Option<Arc<ShardRouter>> {
         self.manager.router()
     }

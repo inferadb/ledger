@@ -23,7 +23,7 @@ use serial_test::serial;
 // Idempotency Key Tests
 // =============================================================================
 
-/// Verify that reusing an idempotency key with a different payload returns
+/// Verifies that reusing an idempotency key with a different payload returns
 /// `IdempotencyKeyReused`.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -97,7 +97,7 @@ async fn test_idempotency_key_reuse_detection() {
     }
 }
 
-/// Test that two writes to the same vault with unique idempotency keys both succeed.
+/// Tests that two writes to the same vault with unique idempotency keys both succeed.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_same_vault_two_writes() {
@@ -165,7 +165,7 @@ async fn test_same_vault_two_writes() {
     }
 }
 
-/// Test writing only to vault 2 (no vault 1 involved).
+/// Tests writing only to vault 2 (no vault 1 involved).
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_only_vault_2() {
@@ -233,7 +233,7 @@ async fn test_only_vault_2() {
     }
 }
 
-/// Test writing to vault 2 first, then vault 1, then vault 2 again.
+/// Tests writing to vault 2 first, then vault 1, then vault 2 again.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_2_first_then_1_then_2() {
@@ -336,7 +336,7 @@ async fn test_vault_2_first_then_1_then_2() {
     }
 }
 
-/// Test that the server assigns monotonically increasing sequences across
+/// Tests that the server assigns monotonically increasing sequences across
 /// multiple vaults. Each vault has its own independent sequence counter.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -819,7 +819,7 @@ async fn test_follower_state_root_verification() {
 // DESIGN.md section 2.2: Raft Consensus with OpenRaft
 // =============================================================================
 
-/// Verify that idempotency detection works correctly across leader failover.
+/// Verifies that idempotency detection works correctly across leader failover.
 ///
 /// After a write succeeds on the original leader and the cluster fails over to
 /// a new leader, retrying the same idempotency key should return the cached

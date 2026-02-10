@@ -36,7 +36,7 @@ pub type Result<T> = std::result::Result<T, EntityError>;
 pub struct EntityStore;
 
 impl EntityStore {
-    /// Get an entity by key.
+    /// Returns an entity by key.
     ///
     /// # Errors
     ///
@@ -58,7 +58,7 @@ impl EntityStore {
         }
     }
 
-    /// Set an entity value.
+    /// Sets an entity value.
     ///
     /// # Errors
     ///
@@ -76,7 +76,7 @@ impl EntityStore {
         Ok(())
     }
 
-    /// Delete an entity.
+    /// Deletes an entity.
     ///
     /// # Errors
     ///
@@ -91,7 +91,7 @@ impl EntityStore {
         Ok(existed)
     }
 
-    /// Check if an entity exists.
+    /// Checks if an entity exists.
     ///
     /// # Errors
     ///
@@ -105,7 +105,7 @@ impl EntityStore {
         Ok(txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)?.is_some())
     }
 
-    /// List all entities in a vault with pagination.
+    /// Lists all entities in a vault with pagination.
     ///
     /// Returns entities sorted by key with their local keys.
     ///
@@ -149,7 +149,7 @@ impl EntityStore {
         Ok(entities)
     }
 
-    /// List all entities in a specific bucket within a vault.
+    /// Lists all entities in a specific bucket within a vault.
     ///
     /// Used for state root computation.
     ///
@@ -194,7 +194,7 @@ impl EntityStore {
         Ok(entities)
     }
 
-    /// Count entities in a vault.
+    /// Counts entities in a vault.
     ///
     /// # Errors
     ///
@@ -221,7 +221,7 @@ impl EntityStore {
         Ok(count)
     }
 
-    /// Scan entities with a key prefix within a vault.
+    /// Scans entities with a key prefix within a vault.
     ///
     /// # Errors
     ///

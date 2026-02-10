@@ -15,22 +15,22 @@ pub struct AppliedStateAccessor {
 }
 
 impl AppliedStateAccessor {
-    /// Get the current height for a vault.
+    /// Returns the current height for a vault.
     pub fn vault_height(&self, namespace_id: NamespaceId, vault_id: VaultId) -> u64 {
         self.state.read().vault_heights.get(&(namespace_id, vault_id)).copied().unwrap_or(0)
     }
 
-    /// Get the health status for a vault.
+    /// Returns the health status for a vault.
     pub fn vault_health(&self, namespace_id: NamespaceId, vault_id: VaultId) -> VaultHealthStatus {
         self.state.read().vault_health.get(&(namespace_id, vault_id)).cloned().unwrap_or_default()
     }
 
-    /// Get all vault heights (for GetTip when no specific vault is requested).
+    /// Returns all vault heights (for GetTip when no specific vault is requested).
     pub fn all_vault_heights(&self) -> HashMap<(NamespaceId, VaultId), u64> {
         self.state.read().vault_heights.clone()
     }
 
-    /// Get namespace metadata by ID.
+    /// Returns namespace metadata by ID.
     pub fn get_namespace(&self, namespace_id: NamespaceId) -> Option<NamespaceMeta> {
         use inferadb_ledger_state::system::NamespaceStatus;
         self.state
@@ -41,7 +41,7 @@ impl AppliedStateAccessor {
             .cloned()
     }
 
-    /// Get namespace metadata by name.
+    /// Returns namespace metadata by name.
     pub fn get_namespace_by_name(&self, name: &str) -> Option<NamespaceMeta> {
         use inferadb_ledger_state::system::NamespaceStatus;
         self.state
@@ -64,7 +64,7 @@ impl AppliedStateAccessor {
             .collect()
     }
 
-    /// Get vault metadata by ID.
+    /// Returns vault metadata by ID.
     pub fn get_vault(&self, namespace_id: NamespaceId, vault_id: VaultId) -> Option<VaultMeta> {
         self.state.read().vaults.get(&(namespace_id, vault_id)).filter(|v| !v.deleted).cloned()
     }
@@ -80,7 +80,7 @@ impl AppliedStateAccessor {
             .collect()
     }
 
-    /// Get the last committed sequence for a client.
+    /// Returns the last committed sequence for a client.
     ///
     /// Returns 0 if no sequence has been committed for this client.
     pub fn client_sequence(
@@ -97,12 +97,12 @@ impl AppliedStateAccessor {
             .unwrap_or(0)
     }
 
-    /// Get the current shard height (for snapshot info).
+    /// Returns the current shard height (for snapshot info).
     pub fn shard_height(&self) -> u64 {
         self.state.read().shard_height
     }
 
-    /// Get all vault metadata (for retention policy checks).
+    /// Returns all vault metadata (for retention policy checks).
     pub fn all_vaults(&self) -> HashMap<(NamespaceId, VaultId), VaultMeta> {
         self.state
             .read()
@@ -113,7 +113,7 @@ impl AppliedStateAccessor {
             .collect()
     }
 
-    /// Get the number of active (non-deleted) vaults in a namespace.
+    /// Returns the number of active (non-deleted) vaults in a namespace.
     pub fn vault_count(&self, namespace_id: NamespaceId) -> u32 {
         let count = self
             .state
@@ -129,14 +129,14 @@ impl AppliedStateAccessor {
         }
     }
 
-    /// Get cumulative estimated storage bytes for a namespace.
+    /// Returns cumulative estimated storage bytes for a namespace.
     ///
     /// Returns 0 if no data has been written to the namespace.
     pub fn namespace_storage_bytes(&self, namespace_id: NamespaceId) -> u64 {
         self.state.read().namespace_storage_bytes.get(&namespace_id).copied().unwrap_or(0)
     }
 
-    /// Get a snapshot of resource usage for a namespace.
+    /// Returns a snapshot of resource usage for a namespace.
     ///
     /// Combines `storage_bytes` and `vault_count` into a single struct
     /// for quota enforcement and capacity-planning APIs.
@@ -149,7 +149,7 @@ impl AppliedStateAccessor {
         NamespaceUsage { storage_bytes, vault_count: vault_count as u32 }
     }
 
-    /// Get the namespace quota (per-namespace override or None for server default).
+    /// Returns the namespace quota (per-namespace override or None for server default).
     pub fn namespace_quota(
         &self,
         namespace_id: NamespaceId,
@@ -157,7 +157,7 @@ impl AppliedStateAccessor {
         self.state.read().namespaces.get(&namespace_id).and_then(|ns| ns.quota.clone())
     }
 
-    /// Create an accessor from a pre-built state (for testing).
+    /// Creates an accessor from a pre-built state (for testing).
     #[cfg(test)]
     pub fn new_for_test(state: Arc<RwLock<AppliedState>>) -> Self {
         Self { state }

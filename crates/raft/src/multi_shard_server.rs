@@ -83,7 +83,7 @@ pub struct MultiShardLedgerServer {
 }
 
 impl MultiShardLedgerServer {
-    /// Start the gRPC server.
+    /// Starts the gRPC server.
     ///
     /// This method blocks until the server is shut down. If a `shutdown_rx`
     /// was provided via the builder, the server will stop when the signal
@@ -199,13 +199,13 @@ impl MultiShardLedgerServer {
         Ok(())
     }
 
-    /// Get the multi-raft manager.
+    /// Returns the multi-raft manager.
     #[must_use]
     pub fn manager(&self) -> &Arc<MultiRaftManager> {
         &self.manager
     }
 
-    /// Get the idempotency cache.
+    /// Returns the idempotency cache.
     #[must_use]
     pub fn idempotency(&self) -> &Arc<IdempotencyCache> {
         &self.idempotency

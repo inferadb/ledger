@@ -22,7 +22,7 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Create a namespace and return its ID.
+/// Creates a namespace and return its ID.
 async fn create_namespace(
     addr: std::net::SocketAddr,
     name: &str,
@@ -42,7 +42,7 @@ async fn create_namespace(
     Ok(namespace_id)
 }
 
-/// Create a vault in a namespace and return its ID.
+/// Creates a vault in a namespace and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -62,7 +62,7 @@ async fn create_vault(
     Ok(vault_id)
 }
 
-/// Write a key-value pair to a vault and return the block height.
+/// Writes a key-value pair to a vault and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,

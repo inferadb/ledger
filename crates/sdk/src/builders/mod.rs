@@ -33,7 +33,7 @@ pub use write::WriteBuilder;
 mod test_helpers {
     use crate::{ClientConfig, LedgerClient, ServerSource};
 
-    /// Create a `LedgerClient` for builder tests.
+    /// Creates a `LedgerClient` for builder tests.
     /// Connection to 127.0.0.1:1 won't succeed, but client construction
     /// does — we only test builder construction, not execution.
     pub(super) async fn test_client() -> LedgerClient {

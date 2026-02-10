@@ -1,6 +1,6 @@
 //! Core types, errors, and cryptographic primitives for InferaDB Ledger.
 //!
-//! This crate provides the foundational types used throughout the ledger:
+//! Provides the foundational types used throughout the ledger:
 //! - Newtype identifiers (`NamespaceId`, `VaultId`, `UserId`, `ShardId`)
 //! - Data structures for blocks, transactions, and operations
 //! - Configuration types with validated builders

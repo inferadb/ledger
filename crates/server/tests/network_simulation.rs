@@ -72,7 +72,7 @@ impl RaftService for MinimalRaftService {
     }
 }
 
-/// Start a minimal Raft server on the given turmoil host.
+/// Starts a minimal Raft server on the given turmoil host.
 async fn start_minimal_server(node_id: u64, counter: Arc<RpcCounter>) {
     let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
     let service = MinimalRaftService { node_id, counter };
@@ -84,7 +84,7 @@ async fn start_minimal_server(node_id: u64, counter: Arc<RpcCounter>) {
         .expect("server failed");
 }
 
-/// Create a Raft service client using turmoil's simulated network.
+/// Creates a Raft service client using turmoil's simulated network.
 async fn create_raft_client(
     host: &str,
 ) -> Result<
@@ -95,7 +95,7 @@ async fn create_raft_client(
     Ok(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(channel))
 }
 
-/// Test that network partitions block communication between nodes.
+/// Tests that network partitions block communication between nodes.
 ///
 /// This test creates a 3-node simulated cluster and verifies that:
 /// 1. Nodes can communicate before partition
@@ -216,7 +216,7 @@ fn test_network_partition_blocks_communication() {
     sim.run().expect("simulation should complete");
 }
 
-/// Test that writes to majority partition succeed while minority fails.
+/// Tests that writes to majority partition succeed while minority fails.
 ///
 /// This simulates the scenario where a 3-node cluster experiences a partition
 /// that isolates one node. The majority (2 nodes) should continue operating
@@ -400,7 +400,7 @@ fn test_majority_partition_continues_operating() {
     );
 }
 
-/// Test that messages are held and released correctly.
+/// Tests that messages are held and released correctly.
 ///
 /// This tests turmoil's message holding capability which can simulate
 /// network delays and buffering scenarios. Uses partition instead of hold
@@ -477,7 +477,7 @@ fn test_message_hold_and_release() {
     );
 }
 
-/// Test intermittent connectivity (flapping network).
+/// Tests intermittent connectivity (flapping network).
 ///
 /// This simulates a scenario where the network connection is unstable,
 /// going up and down repeatedly. Raft should handle this gracefully.
@@ -617,7 +617,7 @@ fn test_intermittent_connectivity() {
     assert!(received >= 1, "server should have received at least 1 request");
 }
 
-/// Test asymmetric network partition.
+/// Tests asymmetric network partition.
 ///
 /// This tests a scenario where node A can reach node B, but B cannot reach A.
 /// This can happen with certain firewall misconfigurations.
@@ -697,7 +697,7 @@ fn test_asymmetric_partition() {
     sim.run().expect("simulation should complete");
 }
 
-/// Test that connection timeouts are handled correctly.
+/// Tests that connection timeouts are handled correctly.
 ///
 /// This verifies that operations timeout gracefully when a node is unreachable
 /// rather than hanging indefinitely.

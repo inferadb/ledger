@@ -302,7 +302,7 @@ impl HotKeyDetector {
         state.window_start = Instant::now();
     }
 
-    /// Update detection thresholds at runtime.
+    /// Updates detection thresholds at runtime.
     ///
     /// Changes take effect on the next `record_access` call. The CMS
     /// structure (width, depth) and top-k size are not reconfigurable

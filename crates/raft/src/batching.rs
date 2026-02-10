@@ -45,7 +45,7 @@ pub struct BatchConfig {
     /// the incoming queue is empty rather than waiting for `batch_timeout`.
     /// This optimizes latency for interactive workloads.
     ///
-    /// Set to false for batch import workloads where throughput is more
+    /// Sets to false for batch import workloads where throughput is more
     /// important than latency.
     #[builder(default = true)]
     pub eager_commit: bool,
@@ -141,7 +141,7 @@ impl BatchState {
         self.pending.is_empty()
     }
 
-    /// Check if the batch should be flushed.
+    /// Checks if the batch should be flushed.
     ///
     /// Returns true if:
     /// 1. Batch size reached max_batch_size
@@ -172,7 +172,7 @@ impl BatchState {
         false
     }
 
-    /// Update tracking for eager commit detection.
+    /// Updates tracking for eager commit detection.
     /// Called at the start of each tick.
     fn update_tick_tracking(&mut self) {
         self.pending_at_last_tick = self.pending.len();
@@ -211,13 +211,13 @@ impl BatchWriterHandle {
         rx
     }
 
-    /// Get the current number of pending writes.
+    /// Returns the current number of pending writes.
     pub fn pending_count(&self) -> usize {
         self.state.lock().len()
     }
 }
 
-/// Batch writer that coalesces writes.
+/// Batches writer that coalesces writes.
 pub struct BatchWriter<F>
 where
     F: Fn(
@@ -242,17 +242,17 @@ where
         + Sync
         + 'static,
 {
-    /// Create a new batch writer.
+    /// Creates a new batch writer.
     pub fn new(config: BatchConfig, submit_fn: F) -> Self {
         Self { state: Arc::new(Mutex::new(BatchState::new())), config, submit_fn }
     }
 
-    /// Get a handle for submitting writes.
+    /// Returns a handle for submitting writes.
     pub fn handle(&self) -> BatchWriterHandle {
         BatchWriterHandle { state: self.state.clone(), config: self.config.clone() }
     }
 
-    /// Run the batch writer loop.
+    /// Runs the batch writer loop.
     ///
     /// This should be spawned as a background task.
     #[instrument(skip(self))]
@@ -299,7 +299,7 @@ where
         }
     }
 
-    /// Flush a batch of writes.
+    /// Flushes a batch of writes.
     async fn flush_batch(&self, batch: Vec<PendingWrite>, is_eager: bool) {
         let batch_size = batch.len();
         if batch_size == 0 {

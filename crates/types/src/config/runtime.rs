@@ -280,7 +280,7 @@ impl RuntimeConfig {
         Ok(())
     }
 
-    /// Compute field-level differences between two runtime configs.
+    /// Computes field-level differences between two runtime configs.
     ///
     /// Returns a list of [`ConfigChange`] with dotted field paths and
     /// old/new values serialized as JSON strings. Uses JSON-based recursive
@@ -308,7 +308,7 @@ impl RuntimeConfig {
         changes
     }
 
-    /// Compute the list of top-level section names that differ.
+    /// Computes the list of top-level section names that differ.
     ///
     /// Returns human-readable strings like `"rate_limit"` for backward
     /// compatibility with existing callers.

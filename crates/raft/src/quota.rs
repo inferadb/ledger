@@ -68,7 +68,7 @@ impl std::fmt::Display for QuotaExceeded {
 }
 
 impl QuotaChecker {
-    /// Create a new quota checker.
+    /// Creates a new quota checker.
     pub fn new(
         applied_state: AppliedStateAccessor,
         runtime_config: Option<RuntimeConfigHandle>,
@@ -76,7 +76,7 @@ impl QuotaChecker {
         Self { applied_state, runtime_config }
     }
 
-    /// Resolve the effective quota for a namespace.
+    /// Resolves the effective quota for a namespace.
     ///
     /// Returns the per-namespace override if set, otherwise the server-wide
     /// default from `RuntimeConfig`, or `None` if neither is configured.
@@ -97,7 +97,7 @@ impl QuotaChecker {
         None
     }
 
-    /// Check whether creating a new vault would exceed the namespace vault quota.
+    /// Checks whether creating a new vault would exceed the namespace vault quota.
     ///
     /// Returns `Ok(())` if the vault can be created or no quota is configured.
     ///
@@ -123,7 +123,7 @@ impl QuotaChecker {
         Ok(())
     }
 
-    /// Check whether a write operation's estimated payload would exceed
+    /// Checks whether a write operation's estimated payload would exceed
     /// the namespace storage quota.
     ///
     /// Compares `current_usage + estimated_bytes` against `max_storage_bytes`.

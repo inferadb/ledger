@@ -103,5 +103,5 @@ pub use page::{PAGE_HEADER_SIZE, Page, PageAllocator, PageCache};
 pub use tables::{Table, TableEntry, TableId};
 pub use types::{Key, KeyType, Value};
 
-/// Store format version.
+/// Stores format version.
 pub const VERSION: u16 = 1;

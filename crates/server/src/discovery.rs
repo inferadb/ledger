@@ -3,9 +3,9 @@
 //! Discovery enables nodes to find each other during cluster bootstrap.
 //! Nodes query DNS A records at the configured domain to discover peer IPs.
 //!
-//! This is optimized for Kubernetes headless Services, which create A records
-//! for each pod IP. Example: querying `ledger.default.svc.cluster.local` returns
-//! the IPs of all ledger pods.
+//! Optimized for Kubernetes headless Services, which create A records for each
+//! pod IP. Example: querying `ledger.default.svc.cluster.local` returns the IPs
+//! of all ledger pods.
 //!
 //! Discovery order:
 //! 1. Cached peers (from previous successful connections)
@@ -69,11 +69,11 @@ pub struct DiscoveredNode {
 struct CachedPeers {
     /// Unix timestamp (seconds since epoch) when this cache was written.
     cached_at: u64,
-    /// List of discovered peers from the last successful resolution.
+    /// Lists of discovered peers from the last successful resolution.
     peers: Vec<DiscoveredPeer>,
 }
 
-/// Resolve bootstrap peers using discovery methods.
+/// Resolves bootstrap peers using discovery methods.
 ///
 /// The `--peers` value is auto-detected:
 /// - File path (contains `/` or `\`, or ends with `.json`): Load from JSON file
@@ -125,7 +125,7 @@ pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
     addresses
 }
 
-/// Query a peer for its node identity information via GetNodeInfo RPC.
+/// Queries a peer for its node identity information via GetNodeInfo RPC.
 ///
 /// This function connects to a peer and retrieves its Snowflake ID, cluster
 /// membership status, and current Raft term. Used during bootstrap coordination
@@ -238,7 +238,7 @@ async fn dns_lookup(domain: &str, port: u16) -> Result<Vec<DiscoveredPeer>, Disc
     Ok(peers)
 }
 
-/// Load cached peers from file.
+/// Loads cached peers from file.
 fn load_cached_peers(path: &str, ttl_secs: u64) -> Result<Vec<DiscoveredPeer>, DiscoveryError> {
     let content =
         std::fs::read_to_string(path).map_err(|e| DiscoveryError::CacheRead(e.to_string()))?;
@@ -258,7 +258,7 @@ fn load_cached_peers(path: &str, ttl_secs: u64) -> Result<Vec<DiscoveredPeer>, D
     Ok(cached.peers)
 }
 
-/// Save discovered peers to cache file.
+/// Saves discovered peers to cache file.
 #[cfg(test)]
 fn save_cached_peers(path: &str, peers: &[DiscoveredPeer]) -> Result<(), DiscoveryError> {
     use std::path::Path;

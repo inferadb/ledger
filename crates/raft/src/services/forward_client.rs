@@ -51,7 +51,7 @@ pub struct ForwardClient {
 }
 
 impl ForwardClient {
-    /// Create a new forward client from a shard connection.
+    /// Creates a new forward client from a shard connection.
     pub fn new(connection: ShardConnection) -> Self {
         let channel = connection.channel;
         Self {
@@ -61,7 +61,7 @@ impl ForwardClient {
         }
     }
 
-    /// Create a new forward client from a channel directly.
+    /// Creates a new forward client from a channel directly.
     pub fn from_channel(channel: Channel, shard_id: ShardId) -> Self {
         Self {
             read_client: ReadServiceClient::new(channel.clone()),
@@ -70,12 +70,12 @@ impl ForwardClient {
         }
     }
 
-    /// Get the shard ID this client forwards to.
+    /// Returns the shard ID this client forwards to.
     pub fn shard_id(&self) -> ShardId {
         self.shard_id
     }
 
-    /// Create a gRPC request with trace context and deadline propagation.
+    /// Creates a gRPC request with trace context and deadline propagation.
     ///
     /// Injects W3C Trace Context headers (`traceparent`, `tracestate`) into
     /// the outgoing request metadata, enabling distributed trace continuity
@@ -104,7 +104,7 @@ impl ForwardClient {
     // Read Service Forwarding
     // ========================================================================
 
-    /// Forward a Read request to the remote shard.
+    /// Forwards a Read request to the remote shard.
     pub async fn forward_read(
         &mut self,
         request: ReadRequest,
@@ -119,7 +119,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a VerifiedRead request to the remote shard.
+    /// Forwards a VerifiedRead request to the remote shard.
     pub async fn forward_verified_read(
         &mut self,
         request: VerifiedReadRequest,
@@ -134,7 +134,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a HistoricalRead request to the remote shard.
+    /// Forwards a HistoricalRead request to the remote shard.
     pub async fn forward_historical_read(
         &mut self,
         request: HistoricalReadRequest,
@@ -149,7 +149,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a WatchBlocks request to the remote shard.
+    /// Forwards a WatchBlocks request to the remote shard.
     ///
     /// Note: This returns a streaming response that must be handled appropriately.
     pub async fn forward_watch_blocks(
@@ -166,7 +166,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a GetBlock request to the remote shard.
+    /// Forwards a GetBlock request to the remote shard.
     pub async fn forward_get_block(
         &mut self,
         request: GetBlockRequest,
@@ -181,7 +181,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a GetBlockRange request to the remote shard.
+    /// Forwards a GetBlockRange request to the remote shard.
     pub async fn forward_get_block_range(
         &mut self,
         request: GetBlockRangeRequest,
@@ -196,7 +196,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a GetTip request to the remote shard.
+    /// Forwards a GetTip request to the remote shard.
     pub async fn forward_get_tip(
         &mut self,
         request: GetTipRequest,
@@ -211,7 +211,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a GetClientState request to the remote shard.
+    /// Forwards a GetClientState request to the remote shard.
     pub async fn forward_get_client_state(
         &mut self,
         request: GetClientStateRequest,
@@ -226,7 +226,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a ListRelationships request to the remote shard.
+    /// Forwards a ListRelationships request to the remote shard.
     pub async fn forward_list_relationships(
         &mut self,
         request: ListRelationshipsRequest,
@@ -241,7 +241,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a ListResources request to the remote shard.
+    /// Forwards a ListResources request to the remote shard.
     pub async fn forward_list_resources(
         &mut self,
         request: ListResourcesRequest,
@@ -256,7 +256,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a ListEntities request to the remote shard.
+    /// Forwards a ListEntities request to the remote shard.
     pub async fn forward_list_entities(
         &mut self,
         request: ListEntitiesRequest,
@@ -275,7 +275,7 @@ impl ForwardClient {
     // Write Service Forwarding
     // ========================================================================
 
-    /// Forward a Write request to the remote shard.
+    /// Forwards a Write request to the remote shard.
     pub async fn forward_write(
         &mut self,
         request: WriteRequest,
@@ -290,7 +290,7 @@ impl ForwardClient {
         })
     }
 
-    /// Forward a BatchWrite request to the remote shard.
+    /// Forwards a BatchWrite request to the remote shard.
     pub async fn forward_batch_write(
         &mut self,
         request: BatchWriteRequest,

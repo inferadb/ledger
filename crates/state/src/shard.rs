@@ -62,7 +62,7 @@ pub enum ShardError {
 /// Result type for shard operations.
 pub type Result<T> = std::result::Result<T, ShardError>;
 
-/// Compute the hash of a snapshot header for chain linking.
+/// Computes the hash of a snapshot header for chain linking.
 ///
 /// Used to link snapshots together in a verifiable chain.
 fn compute_snapshot_header_hash(header: &crate::snapshot::SnapshotHeader) -> Hash {
@@ -113,7 +113,7 @@ pub struct ShardManager<B: StorageBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> ShardManager<B> {
-    /// Create a new shard manager.
+    /// Creates a new shard manager.
     pub fn new(
         shard_id: ShardId,
         db: Arc<Database<B>>,
@@ -132,27 +132,27 @@ impl<B: StorageBackend> ShardManager<B> {
         }
     }
 
-    /// Get the shard ID.
+    /// Returns the shard ID.
     pub fn shard_id(&self) -> ShardId {
         self.shard_id
     }
 
-    /// Get the current shard height.
+    /// Returns the current shard height.
     pub fn shard_height(&self) -> u64 {
         *self.shard_height.read()
     }
 
-    /// Get vault metadata.
+    /// Returns vault metadata.
     pub fn get_vault_meta(&self, vault_id: VaultId) -> Option<VaultMeta> {
         self.vault_meta.read().get(&vault_id).cloned()
     }
 
-    /// List all vaults in this shard.
+    /// Lists all vaults in this shard.
     pub fn list_vaults(&self) -> Vec<VaultId> {
         self.vault_meta.read().keys().copied().collect()
     }
 
-    /// Get vault health status.
+    /// Returns vault health status.
     pub fn vault_health(&self, vault_id: VaultId) -> Option<VaultHealth> {
         self.vault_meta.read().get(&vault_id).map(|m| m.health.clone())
     }
@@ -167,7 +167,7 @@ impl<B: StorageBackend> ShardManager<B> {
         &self.blocks
     }
 
-    /// Register a new vault in this shard.
+    /// Registers a new vault in this shard.
     pub fn register_vault(&self, namespace_id: NamespaceId, vault_id: VaultId) {
         let mut meta = self.vault_meta.write();
         meta.insert(
@@ -182,7 +182,7 @@ impl<B: StorageBackend> ShardManager<B> {
         );
     }
 
-    /// Apply a shard block.
+    /// Applies a shard block.
     ///
     /// This:
     /// 1. Applies operations to state
@@ -285,7 +285,7 @@ impl<B: StorageBackend> ShardManager<B> {
         Ok(())
     }
 
-    /// Create a snapshot of current state.
+    /// Creates a snapshot of current state.
     ///
     /// # Errors
     ///
@@ -334,7 +334,7 @@ impl<B: StorageBackend> ShardManager<B> {
         self.snapshots.save(&snapshot).context(SnapshotSnafu)
     }
 
-    /// Compute chain parameters for a new snapshot.
+    /// Computes chain parameters for a new snapshot.
     ///
     /// This computes the ChainCommitment covering all blocks since the previous
     /// snapshot, linking the new snapshot into the verification chain.
@@ -372,7 +372,7 @@ impl<B: StorageBackend> ShardManager<B> {
         })
     }
 
-    /// Get or compute the genesis hash for this shard.
+    /// Returns or compute the genesis hash for this shard.
     ///
     /// The genesis hash is the block hash of the first block (height 1).
     /// It's cached after first computation for efficiency.
@@ -399,7 +399,7 @@ impl<B: StorageBackend> ShardManager<B> {
         Ok(genesis)
     }
 
-    /// Restore from a snapshot.
+    /// Restores from a snapshot.
     ///
     /// # Errors
     ///
@@ -445,7 +445,7 @@ impl<B: StorageBackend> ShardManager<B> {
         Ok(())
     }
 
-    /// Recover from snapshot + block replay.
+    /// Recovers from snapshot + block replay.
     ///
     /// # Errors
     ///

@@ -47,8 +47,6 @@ use tracing::{debug, info, warn};
 // ============================================================================
 
 /// Errors that can occur during shard routing.
-// Snafu generates fields for context selectors
-#[allow(missing_docs)]
 #[derive(Debug, Snafu)]
 pub enum RoutingError {
     /// Namespace not found in routing table.
@@ -114,12 +112,12 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    /// Check if this cache entry is stale.
+    /// Checks if this cache entry is stale.
     fn is_stale(&self, ttl: Duration) -> bool {
         self.cached_at.elapsed() > ttl
     }
 
-    /// Convert to public RoutingInfo.
+    /// Converts to public RoutingInfo.
     fn to_routing_info(&self) -> RoutingInfo {
         RoutingInfo {
             shard_id: self.shard_id,
@@ -194,12 +192,12 @@ pub struct ShardRouter<B: StorageBackend + 'static = FileBackend> {
 }
 
 impl<B: StorageBackend + 'static> ShardRouter<B> {
-    /// Create a new shard router.
+    /// Creates a new shard router.
     pub fn new(system: Arc<SystemNamespaceService<B>>) -> Self {
         Self::with_config(system, RouterConfig::default())
     }
 
-    /// Create a new shard router with custom configuration.
+    /// Creates a new shard router with custom configuration.
     pub fn with_config(system: Arc<SystemNamespaceService<B>>, config: RouterConfig) -> Self {
         Self {
             system,
@@ -227,7 +225,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
             .await
     }
 
-    /// Get routing information for a namespace (public API).
+    /// Returns routing information for a namespace (public API).
     ///
     /// Returns the shard assignment and member nodes for the namespace.
     /// Uses cached data if fresh, otherwise queries `_system`.
@@ -240,7 +238,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         self.get_routing_internal(namespace_id).map(|entry| entry.to_routing_info())
     }
 
-    /// Get routing information for a namespace (internal).
+    /// Returns routing information for a namespace (internal).
     ///
     /// Uses cached data if fresh, otherwise queries `_system`.
     fn get_routing_internal(&self, namespace_id: NamespaceId) -> Result<CacheEntry> {
@@ -303,7 +301,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         Ok(entry)
     }
 
-    /// Get or create a connection to a shard.
+    /// Returns or create a connection to a shard.
     ///
     /// Returns an existing cached connection if available, otherwise creates a new one.
     /// The connection will be cached for future use.
@@ -327,7 +325,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         self.create_connection(shard_id, member_nodes, leader_hint).await
     }
 
-    /// Create a new connection to a shard.
+    /// Creates a new connection to a shard.
     async fn create_connection(
         &self,
         shard_id: ShardId,
@@ -401,7 +399,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         })
     }
 
-    /// Resolve a node ID to a socket address.
+    /// Resolves a node ID to a socket address.
     fn resolve_node_address(&self, node_id: &str) -> Result<SocketAddr> {
         // Try parsing as socket address first
         if let Ok(addr) = node_id.parse::<SocketAddr>() {
@@ -444,7 +442,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
     }
 
-    /// Update leader hint after successful request.
+    /// Updates leader hint after successful request.
     ///
     /// Call this when a response indicates the actual leader.
     pub fn update_leader_hint(&self, namespace_id: NamespaceId, leader_node: &str) {
@@ -457,7 +455,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
     }
 
-    /// Get routing statistics.
+    /// Returns routing statistics.
     pub fn stats(&self) -> RouterStats {
         let cache = self.cache.read();
         let connections = self.connections.read();
@@ -471,7 +469,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
     }
 
-    /// Clear all caches.
+    /// Clears all caches.
     ///
     /// Useful for testing or after cluster reconfiguration.
     pub fn clear(&self) {

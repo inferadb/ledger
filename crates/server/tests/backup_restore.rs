@@ -18,7 +18,7 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Create a namespace and return its ID.
+/// Creates a namespace and return its ID.
 async fn create_namespace(
     addr: std::net::SocketAddr,
     name: &str,
@@ -38,7 +38,7 @@ async fn create_namespace(
     Ok(namespace_id)
 }
 
-/// Create a vault in a namespace and return its ID.
+/// Creates a vault in a namespace and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -57,7 +57,7 @@ async fn create_vault(
     Ok(vault_id)
 }
 
-/// Write an entity and return the block height.
+/// Writes an entity and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -99,7 +99,7 @@ async fn write_entity(
     }
 }
 
-/// Create a backup and return the response.
+/// Creates a backup and return the response.
 async fn create_backup(
     addr: std::net::SocketAddr,
     tag: Option<&str>,
@@ -116,7 +116,7 @@ async fn create_backup(
     Ok(response)
 }
 
-/// List backups and return the list.
+/// Lists backups and return the list.
 async fn list_backups(
     addr: std::net::SocketAddr,
     limit: u32,
@@ -133,7 +133,7 @@ async fn list_backups(
 // Backup/Restore E2E Tests
 // ============================================================================
 
-/// Test full backup → list → verify metadata correctness.
+/// Tests full backup → list → verify metadata correctness.
 ///
 /// Creates data, takes a backup, lists backups, and verifies that the
 /// backup metadata (shard_height, size, checksum, tag) is accurate.
@@ -184,7 +184,7 @@ async fn test_backup_create_and_list_metadata() {
     assert!(info.created_at.is_some(), "should have creation timestamp");
 }
 
-/// Test backup during active writes.
+/// Tests backup during active writes.
 ///
 /// Writes are submitted concurrently with backup creation to verify
 /// that backup captures a consistent snapshot despite concurrent activity.
@@ -229,7 +229,7 @@ async fn test_backup_during_active_writes() {
     assert!(backup.size_bytes > 0, "backup should have content");
 }
 
-/// Test multiple backups with listing limit.
+/// Tests multiple backups with listing limit.
 ///
 /// Creates several backups and verifies that ListBackups respects the
 /// limit parameter and returns backups in the expected order.
@@ -274,7 +274,7 @@ async fn test_backup_list_with_limit() {
     assert!(all.len() >= 3, "should have at least 3 backups, got {}", all.len());
 }
 
-/// Test that backup produces a valid checksum.
+/// Tests that backup produces a valid checksum.
 ///
 /// The backup response includes a SHA-256 checksum that operators can
 /// use to verify backup integrity during transfers.

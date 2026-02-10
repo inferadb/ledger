@@ -344,7 +344,7 @@ impl GracefulShutdown {
         (Self { config, health_state, server_shutdown_tx: tx }, rx)
     }
 
-    /// Execute the graceful shutdown sequence.
+    /// Executes the graceful shutdown sequence.
     ///
     /// This method should be called when the node receives a termination signal
     /// (e.g., SIGTERM). It orchestrates the full shutdown sequence and then

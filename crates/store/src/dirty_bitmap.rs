@@ -21,12 +21,12 @@ pub struct DirtyBitmap {
 }
 
 impl DirtyBitmap {
-    /// Create an empty bitmap.
+    /// Creates an empty bitmap.
     pub fn new() -> Self {
         Self { words: Vec::new() }
     }
 
-    /// Mark a page as dirty.
+    /// Marks a page as dirty.
     pub fn mark(&mut self, page_id: PageId) {
         let word_idx = page_id as usize / BITS_PER_WORD;
         let bit_idx = page_id as usize % BITS_PER_WORD;
@@ -38,7 +38,7 @@ impl DirtyBitmap {
         self.words[word_idx] |= 1u64 << bit_idx;
     }
 
-    /// Check if a page is marked dirty.
+    /// Checks if a page is marked dirty.
     pub fn is_dirty(&self, page_id: PageId) -> bool {
         let word_idx = page_id as usize / BITS_PER_WORD;
         let bit_idx = page_id as usize % BITS_PER_WORD;
@@ -50,7 +50,7 @@ impl DirtyBitmap {
         (self.words[word_idx] & (1u64 << bit_idx)) != 0
     }
 
-    /// Return all dirty page IDs in ascending order.
+    /// Returns all dirty page IDs in ascending order.
     pub fn dirty_ids(&self) -> Vec<PageId> {
         let mut ids = Vec::new();
         for (word_idx, &word) in self.words.iter().enumerate() {
@@ -66,17 +66,17 @@ impl DirtyBitmap {
         ids
     }
 
-    /// Number of dirty pages.
+    /// Returns the number of dirty pages.
     pub fn count(&self) -> usize {
         self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
 
-    /// Clear all dirty flags.
+    /// Clears all dirty flags.
     pub fn clear(&mut self) {
         self.words.clear();
     }
 
-    /// Serialize the bitmap to bytes for persistence.
+    /// Serializes the bitmap to bytes for persistence.
     ///
     /// Format: `[word_count: u64][word_0: u64][word_1: u64]...`
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -88,7 +88,7 @@ impl DirtyBitmap {
         buf
     }
 
-    /// Deserialize a bitmap from bytes.
+    /// Deserializes a bitmap from bytes.
     ///
     /// Returns `None` if the data is malformed (truncated or invalid length).
     pub fn from_bytes(data: &[u8]) -> Option<Self> {

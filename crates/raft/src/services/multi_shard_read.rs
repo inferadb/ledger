@@ -54,17 +54,17 @@ pub struct MultiShardReadService {
 }
 
 impl MultiShardReadService {
-    /// Create a new multi-shard read service.
+    /// Creates a new multi-shard read service.
     pub fn new(resolver: Arc<dyn ShardResolver>) -> Self {
         Self { resolver, manager: None }
     }
 
-    /// Create a new multi-shard read service with forwarding support.
+    /// Creates a new multi-shard read service with forwarding support.
     pub fn with_manager(resolver: Arc<dyn ShardResolver>, manager: Arc<MultiRaftManager>) -> Self {
         Self { resolver, manager: Some(manager) }
     }
 
-    /// Get a forward client for a remote shard.
+    /// Returns a forward client for a remote shard.
     ///
     /// Creates a gRPC connection to the remote shard's leader (or any member if leader unknown).
     async fn get_forward_client(&self, remote: &RemoteShardInfo) -> Result<ForwardClient, Status> {
@@ -89,7 +89,7 @@ impl MultiShardReadService {
         Ok(ForwardClient::new(connection))
     }
 
-    /// Check consistency requirements for a read request.
+    /// Checks consistency requirements for a read request.
     fn check_consistency(&self, namespace_id: NamespaceId, consistency: i32) -> Result<(), Status> {
         let consistency =
             ReadConsistency::try_from(consistency).unwrap_or(ReadConsistency::Unspecified);
@@ -115,7 +115,7 @@ impl MultiShardReadService {
         }
     }
 
-    /// Process a historical read request locally using the shard's block archive.
+    /// Processes a historical read request locally using the shard's block archive.
     ///
     /// Replays state from blocks up to the requested height to reconstruct
     /// the entity's value at that point in time.
@@ -221,7 +221,7 @@ impl MultiShardReadService {
         }))
     }
 
-    /// Process a watch_blocks request locally using the shard's broadcast channel.
+    /// Processes a watch_blocks request locally using the shard's broadcast channel.
     async fn watch_blocks_local(
         &self,
         req: &WatchBlocksRequest,
@@ -314,7 +314,7 @@ impl MultiShardReadService {
         Ok(Response::new(Box::pin(combined)))
     }
 
-    /// Fetch historical block announcements from the block archive.
+    /// Fetches historical block announcements from the block archive.
     fn fetch_historical_announcements(
         &self,
         ctx: &crate::services::shard_resolver::ShardContext,
@@ -445,7 +445,7 @@ impl ReadService for MultiShardReadService {
         Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
     }
 
-    /// Batch read multiple keys in a single RPC call.
+    /// Batches read multiple keys in a single RPC call.
     #[instrument(skip(self, request), fields(namespace_id, vault_id, batch_size))]
     async fn batch_read(
         &self,

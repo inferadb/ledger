@@ -75,7 +75,6 @@ use crate::{
 // ============================================================================
 
 /// Errors that can occur during multi-raft operations.
-#[allow(missing_docs)]
 #[derive(Debug, Snafu)]
 pub enum MultiRaftError {
     /// Shard already exists.
@@ -137,7 +136,7 @@ pub struct MultiRaftConfig {
 }
 
 impl MultiRaftConfig {
-    /// Create a new configuration.
+    /// Creates a new configuration.
     pub fn new(data_dir: PathBuf, node_id: LedgerNodeId) -> Self {
         Self {
             data_dir,
@@ -149,7 +148,7 @@ impl MultiRaftConfig {
         }
     }
 
-    /// Get the data directory for a specific shard.
+    /// Returns the data directory for a specific shard.
     pub fn shard_dir(&self, shard_id: ShardId) -> PathBuf {
         if shard_id == ShardId::new(0) {
             self.data_dir.join("shards").join("_system")
@@ -176,7 +175,7 @@ pub struct ShardConfig {
 }
 
 impl ShardConfig {
-    /// Create configuration for the system shard.
+    /// Creates configuration for the system shard.
     pub fn system(node_id: LedgerNodeId, address: String) -> Self {
         Self {
             shard_id: ShardId::new(0),
@@ -186,12 +185,12 @@ impl ShardConfig {
         }
     }
 
-    /// Create configuration for a data shard.
+    /// Creates configuration for a data shard.
     pub fn data(shard_id: ShardId, initial_members: Vec<(LedgerNodeId, String)>) -> Self {
         Self { shard_id, initial_members, bootstrap: true, enable_background_jobs: true }
     }
 
-    /// Disable background jobs (useful for testing).
+    /// Disables background jobs (useful for testing).
     pub fn without_background_jobs(mut self) -> Self {
         self.enable_background_jobs = false;
         self
@@ -217,7 +216,7 @@ pub struct ShardBackgroundJobs {
 }
 
 impl ShardBackgroundJobs {
-    /// Create with no jobs (used when background_jobs disabled).
+    /// Creates with no jobs (used when background_jobs disabled).
     fn none() -> Self {
         Self {
             gc_handle: None,
@@ -271,48 +270,48 @@ pub struct ShardGroup {
 }
 
 impl ShardGroup {
-    /// Get the shard ID.
+    /// Returns the shard ID.
     pub fn shard_id(&self) -> ShardId {
         self.shard_id
     }
 
-    /// Get the Raft instance.
+    /// Returns the Raft instance.
     #[must_use]
     pub fn raft(&self) -> &Arc<Raft<LedgerTypeConfig>> {
         &self.raft
     }
 
-    /// Get the state layer.
+    /// Returns the state layer.
     #[must_use]
     pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
     }
 
-    /// Get the block archive.
+    /// Returns the block archive.
     #[must_use]
     pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
         &self.block_archive
     }
 
-    /// Get the applied state accessor.
+    /// Returns the applied state accessor.
     #[must_use]
     pub fn applied_state(&self) -> &AppliedStateAccessor {
         &self.applied_state
     }
 
-    /// Get the block announcements broadcast channel.
+    /// Returns the block announcements broadcast channel.
     #[must_use]
     pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
         &self.block_announcements
     }
 
-    /// Check if this node is the leader for this shard.
+    /// Checks if this node is the leader for this shard.
     pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(node_id)
     }
 
-    /// Get the current leader node ID, if known.
+    /// Returns the current leader node ID, if known.
     pub fn current_leader(&self) -> Option<LedgerNodeId> {
         self.raft.metrics().borrow().current_leader
     }
@@ -336,18 +335,18 @@ pub struct MultiRaftManager {
 }
 
 impl MultiRaftManager {
-    /// Create a new Multi-Raft Manager.
+    /// Creates a new Multi-Raft Manager.
     pub fn new(config: MultiRaftConfig) -> Self {
         Self { config, shards: RwLock::new(HashMap::new()), router: RwLock::new(None) }
     }
 
-    /// Get the configuration.
+    /// Returns the configuration.
     #[must_use]
     pub fn config(&self) -> &MultiRaftConfig {
         &self.config
     }
 
-    /// Get a shard group by ID.
+    /// Returns a shard group by ID.
     ///
     /// # Errors
     ///
@@ -357,7 +356,7 @@ impl MultiRaftManager {
         self.shards.read().get(&shard_id).cloned().ok_or(MultiRaftError::ShardNotFound { shard_id })
     }
 
-    /// Get the system shard (`_system`).
+    /// Returns the system shard (`_system`).
     ///
     /// # Errors
     ///
@@ -372,12 +371,12 @@ impl MultiRaftManager {
         self.shards.read().keys().copied().collect()
     }
 
-    /// Check if a shard is active.
+    /// Checks if a shard is active.
     pub fn has_shard(&self, shard_id: ShardId) -> bool {
         self.shards.read().contains_key(&shard_id)
     }
 
-    /// Get the shard router (if initialized).
+    /// Returns the shard router (if initialized).
     pub fn router(&self) -> Option<Arc<ShardRouter<FileBackend>>> {
         self.router.read().clone()
     }
@@ -401,7 +400,7 @@ impl MultiRaftManager {
         self.shards.read().get(&routing.shard_id).cloned()
     }
 
-    /// Get the shard ID for a namespace.
+    /// Returns the shard ID for a namespace.
     ///
     /// Looks up the namespace's shard assignment without checking
     /// if the shard is locally available.
@@ -410,7 +409,7 @@ impl MultiRaftManager {
         router.get_routing(namespace_id).ok().map(|r| r.shard_id)
     }
 
-    /// Start the system shard (`_system`).
+    /// Starts the system shard (`_system`).
     ///
     /// The system shard must be started before any data shards.
     /// It stores the namespace routing table and cluster metadata.
@@ -441,7 +440,7 @@ impl MultiRaftManager {
         Ok(shard)
     }
 
-    /// Start a data shard.
+    /// Starts a data shard.
     ///
     /// Requires the system shard to be started first.
     ///
@@ -467,7 +466,7 @@ impl MultiRaftManager {
         self.start_shard(shard_config).await
     }
 
-    /// Start a shard group.
+    /// Starts a shard group.
     async fn start_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
         let shard_id = shard_config.shard_id;
 
@@ -562,7 +561,7 @@ impl MultiRaftManager {
         Ok(shard_group)
     }
 
-    /// Start background jobs for a shard.
+    /// Starts background jobs for a shard.
     fn start_background_jobs(
         &self,
         shard_id: ShardId,
@@ -631,7 +630,7 @@ impl MultiRaftManager {
         }
     }
 
-    /// Open storage for a shard.
+    /// Opens storage for a shard.
     fn open_shard_storage(&self, shard_id: ShardId, shard_dir: &Path) -> Result<ShardStorage> {
         // Use larger pages for all databases to support larger batch sizes
         // This matches RAFT_PAGE_SIZE in RaftLogStore
@@ -684,7 +683,7 @@ impl MultiRaftManager {
         Ok((state, block_archive, log_store, block_announcements))
     }
 
-    /// Bootstrap a shard as a new cluster.
+    /// Bootstraps a shard as a new cluster.
     async fn bootstrap_shard(
         &self,
         raft: &Raft<LedgerTypeConfig>,
@@ -711,7 +710,7 @@ impl MultiRaftManager {
         Ok(())
     }
 
-    /// Stop a shard group.
+    /// Stops a shard group.
     ///
     /// This gracefully shuts down the shard, stopping background jobs
     /// and removing it from the manager.
@@ -742,7 +741,7 @@ impl MultiRaftManager {
         Ok(())
     }
 
-    /// Stop all shard groups.
+    /// Stops all shard groups.
     pub async fn shutdown(&self) {
         let shard_ids: Vec<ShardId> = self.list_shards();
 
@@ -796,7 +795,7 @@ impl MultiRaftManager {
         self.shutdown().await;
     }
 
-    /// Get statistics about the manager.
+    /// Returns statistics about the manager.
     pub fn stats(&self) -> MultiRaftStats {
         let shards = self.shards.read();
         let mut leader_count = 0;

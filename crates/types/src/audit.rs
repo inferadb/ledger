@@ -48,25 +48,25 @@ pub enum AuditOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
     // --- Data Mutations ---
-    /// Write transactions to a vault.
+    /// Writes transactions to a vault.
     Write,
     /// Batch write to one or more vaults.
     BatchWrite,
 
     // --- Namespace Lifecycle ---
-    /// Create a new namespace.
+    /// Creates a new namespace.
     CreateNamespace,
-    /// Delete a namespace.
+    /// Deletes a namespace.
     DeleteNamespace,
-    /// Suspend a namespace.
+    /// Suspends a namespace.
     SuspendNamespace,
     /// Resume a suspended namespace.
     ResumeNamespace,
 
     // --- Vault Lifecycle ---
-    /// Create a new vault.
+    /// Creates a new vault.
     CreateVault,
-    /// Delete a vault.
+    /// Deletes a vault.
     DeleteVault,
 
     // --- Cluster Operations ---
@@ -86,7 +86,7 @@ pub enum AuditAction {
     ForceGc,
 
     // --- Migration ---
-    /// Start namespace migration.
+    /// Starts namespace migration.
     StartMigration,
     /// Complete namespace migration.
     CompleteMigration,
@@ -139,12 +139,12 @@ pub struct AuditResource {
 }
 
 impl AuditResource {
-    /// Create a resource targeting a namespace.
+    /// Creates a resource targeting a namespace.
     pub fn namespace(namespace_id: NamespaceId) -> Self {
         Self { namespace_id: Some(namespace_id), vault_id: None, shard_id: None, detail: None }
     }
 
-    /// Create a resource targeting a vault within a namespace.
+    /// Creates a resource targeting a vault within a namespace.
     pub fn vault(namespace_id: NamespaceId, vault_id: VaultId) -> Self {
         Self {
             namespace_id: Some(namespace_id),
@@ -154,17 +154,17 @@ impl AuditResource {
         }
     }
 
-    /// Create a resource targeting a shard.
+    /// Creates a resource targeting a shard.
     pub fn shard(shard_id: ShardId) -> Self {
         Self { namespace_id: None, vault_id: None, shard_id: Some(shard_id), detail: None }
     }
 
-    /// Create a resource targeting the cluster.
+    /// Creates a resource targeting the cluster.
     pub fn cluster() -> Self {
         Self { namespace_id: None, vault_id: None, shard_id: None, detail: None }
     }
 
-    /// Add a detail string to the resource.
+    /// Adds a detail string to the resource.
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self

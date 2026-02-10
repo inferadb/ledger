@@ -4,7 +4,7 @@
 
 use tokio::signal;
 
-/// Wait for a shutdown signal (Ctrl-C or SIGTERM).
+/// Waits for a shutdown signal (Ctrl-C or SIGTERM).
 ///
 /// This function blocks until a shutdown signal is received.
 /// On Unix systems, it also handles SIGTERM for container environments.
@@ -45,29 +45,29 @@ pub async fn shutdown_signal() {
 /// - Raft state is flushed
 /// - Connections are closed cleanly
 pub struct ShutdownCoordinator {
-    /// Notify channel for shutdown signal.
+    /// Notifies channel for shutdown signal.
     notify: tokio::sync::broadcast::Sender<()>,
 }
 
 impl ShutdownCoordinator {
-    /// Create a new shutdown coordinator.
+    /// Creates a new shutdown coordinator.
     pub fn new() -> Self {
         let (notify, _) = tokio::sync::broadcast::channel(1);
         Self { notify }
     }
 
-    /// Subscribe to shutdown notifications.
+    /// Subscribes to shutdown notifications.
     #[allow(dead_code)] // utility for components to receive shutdown notifications
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
         self.notify.subscribe()
     }
 
-    /// Trigger shutdown.
+    /// Triggers shutdown.
     pub fn shutdown(&self) {
         let _ = self.notify.send(());
     }
 
-    /// Wait for shutdown signal and trigger coordinator.
+    /// Waits for shutdown signal and trigger coordinator.
     #[allow(dead_code)] // utility for graceful shutdown coordination
     pub async fn wait_for_signal(&self) {
         shutdown_signal().await;

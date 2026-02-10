@@ -28,13 +28,13 @@ pub struct RuntimeConfigHandle {
 }
 
 impl RuntimeConfigHandle {
-    /// Create a new handle with the given initial configuration.
+    /// Creates a new handle with the given initial configuration.
     #[must_use]
     pub fn new(config: RuntimeConfig) -> Self {
         Self { inner: Arc::new(ArcSwap::from_pointee(config)) }
     }
 
-    /// Load the current configuration.
+    /// Loads the current configuration.
     ///
     /// Returns a reference-counted snapshot. The returned `Arc` is valid
     /// even if the config is updated concurrently — callers see a consistent
@@ -48,6 +48,10 @@ impl RuntimeConfigHandle {
     ///
     /// Validates `new_config` before swapping. Returns the list of changed
     /// field paths (for audit logging) or a validation error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if validation of `new_config` fails.
     ///
     /// # Side Effects
     ///
@@ -138,7 +142,7 @@ impl RuntimeConfigHandle {
         self.inner.store(Arc::new(config));
     }
 
-    /// Log each config change as a structured event.
+    /// Logs each config change as a structured event.
     ///
     /// Emits one log line per changed field with `event=config_field_changed`,
     /// `field`, `old`, and `new` structured fields.

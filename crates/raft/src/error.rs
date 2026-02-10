@@ -9,9 +9,6 @@
 //! Snafu's derive macro. Instead of wrapping them directly, we capture the error
 //! message and preserve the semantic information in our error variants.
 
-// Snafu generates struct fields for context selectors that don't need documentation
-#![allow(missing_docs)]
-
 use inferadb_ledger_state::{BlockArchiveError, StateError};
 use snafu::{Backtrace, GenerateImplicitData, Snafu};
 
@@ -246,7 +243,7 @@ fn is_leadership_error(message: &str) -> bool {
         || lower.contains("no leader")
 }
 
-/// Classify a Raft error message into the appropriate `tonic::Status` code.
+/// Classifies a Raft error message into the appropriate `tonic::Status` code.
 ///
 /// Leadership-related errors → `UNAVAILABLE` (retryable)
 /// All other Raft errors → `INTERNAL` (not retryable)
@@ -259,17 +256,17 @@ pub fn classify_raft_error(message: &str) -> tonic::Status {
 }
 
 impl ServiceError {
-    /// Create a Raft error from any error type.
+    /// Creates a Raft error from any error type.
     pub fn raft<E: std::fmt::Debug>(err: E) -> Self {
         ServiceError::Raft { message: format!("{:?}", err), backtrace: Backtrace::generate() }
     }
 
-    /// Create an invalid argument error.
+    /// Creates an invalid argument error.
     pub fn invalid_arg(message: impl Into<String>) -> Self {
         ServiceError::InvalidArgument { message: message.into() }
     }
 
-    /// Create a resource not found error.
+    /// Creates a resource not found error.
     pub fn not_found(resource_type: impl Into<String>, identifier: impl Into<String>) -> Self {
         ServiceError::ResourceNotFound {
             resource_type: resource_type.into(),
@@ -277,27 +274,27 @@ impl ServiceError {
         }
     }
 
-    /// Create a precondition failed error.
+    /// Creates a precondition failed error.
     pub fn precondition(message: impl Into<String>) -> Self {
         ServiceError::PreconditionFailed { message: message.into() }
     }
 
-    /// Create a snapshot error.
+    /// Creates a snapshot error.
     pub fn snapshot(message: impl Into<String>) -> Self {
         ServiceError::Snapshot { message: message.into() }
     }
 
-    /// Create a rate limited error.
+    /// Creates a rate limited error.
     pub fn rate_limited(message: impl Into<String>, retry_after_ms: u64) -> Self {
         ServiceError::RateLimited { message: message.into(), retry_after_ms }
     }
 
-    /// Create a timeout error.
+    /// Creates a timeout error.
     pub fn timeout(message: impl Into<String>) -> Self {
         ServiceError::Timeout { message: message.into() }
     }
 
-    /// Create an unavailable error.
+    /// Creates an unavailable error.
     pub fn unavailable(message: impl Into<String>) -> Self {
         ServiceError::Unavailable { message: message.into() }
     }

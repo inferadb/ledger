@@ -37,7 +37,7 @@ pub struct HasKeys(());
 
 /// Fluent builder for batch read requests.
 ///
-/// Add keys using `.key()` or `.keys()`, optionally set consistency level,
+/// Adds keys using `.key()` or `.keys()`, optionally set consistency level,
 /// then call `.execute()` to submit.
 ///
 /// The type parameter `S` tracks whether keys have been added:
@@ -60,7 +60,7 @@ pub struct BatchReadBuilder<'a, S = NoKeys> {
 }
 
 impl<'a> BatchReadBuilder<'a, NoKeys> {
-    /// Create a new batch read builder targeting a namespace and optional vault.
+    /// Creates a new batch read builder targeting a namespace and optional vault.
     pub(crate) fn new(client: &'a LedgerClient, namespace_id: i64, vault_id: Option<i64>) -> Self {
         Self {
             client,
@@ -88,14 +88,14 @@ impl<'a, S> BatchReadBuilder<'a, S> {
         }
     }
 
-    /// Add a single key to read. This transitions the builder to `HasKeys`,
+    /// Adds a single key to read. This transitions the builder to `HasKeys`,
     /// guaranteeing at least one key is present for `.execute()`.
     pub fn key(mut self, key: impl Into<String>) -> BatchReadBuilder<'a, HasKeys> {
         self.keys.push(key.into());
         self.into_has_keys()
     }
 
-    /// Add multiple keys to read from an iterator.
+    /// Adds multiple keys to read from an iterator.
     ///
     /// This does **not** transition the type-state (an empty iterator adds
     /// no keys). Use `.key(first).keys(rest)` to guarantee at least one key.
@@ -119,7 +119,7 @@ impl<'a, S> BatchReadBuilder<'a, S> {
         self
     }
 
-    /// Attach a cancellation token for per-request cancellation.
+    /// Attaches a cancellation token for per-request cancellation.
     ///
     /// Cancelling the token will abort the in-flight request. Without this,
     /// the client-level cancellation token is used.

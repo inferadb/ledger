@@ -25,7 +25,7 @@ pub struct RaftServiceImpl {
 }
 
 impl RaftServiceImpl {
-    /// Create a new Raft service.
+    /// Creates a new Raft service.
     pub fn new(raft: Arc<Raft<LedgerTypeConfig>>) -> Self {
         Self { raft }
     }
@@ -208,12 +208,12 @@ pub struct MultiShardRaftService {
 }
 
 impl MultiShardRaftService {
-    /// Create a new multi-shard Raft service.
+    /// Creates a new multi-shard Raft service.
     pub fn new(manager: Arc<MultiRaftManager>) -> Self {
         Self { manager }
     }
 
-    /// Resolve shard ID to a Raft instance.
+    /// Resolves shard ID to a Raft instance.
     fn resolve_shard(&self, shard_id: Option<u64>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
         let shard_id = inferadb_ledger_types::ShardId::new(shard_id.unwrap_or(0) as u32);
         self.manager
@@ -404,7 +404,7 @@ mod tests {
         services::raft::{MultiShardRaftService, RaftServiceImpl},
     };
 
-    /// Create a RaftServiceImpl backed by a real single-node Raft instance.
+    /// Creates a RaftServiceImpl backed by a real single-node Raft instance.
     ///
     /// Uses MultiRaftManager to bootstrap a single system shard. The Raft
     /// instance runs a full consensus engine in-process with no networking.
@@ -435,7 +435,7 @@ mod tests {
         (service, manager, node_id, temp)
     }
 
-    /// Create a MultiShardRaftService with system + 1 data shard.
+    /// Creates a MultiShardRaftService with system + 1 data shard.
     async fn create_multi_shard_service()
     -> (MultiShardRaftService, Arc<MultiRaftManager>, u64, TestDir) {
         let temp = TestDir::new();
@@ -499,7 +499,7 @@ mod tests {
         }
     }
 
-    /// Get the current term from the Raft instance via the manager.
+    /// Returns the current term from the Raft instance via the manager.
     fn get_term(manager: &MultiRaftManager, shard_id: u32) -> u64 {
         manager
             .get_shard(ShardId::new(shard_id))
@@ -510,7 +510,7 @@ mod tests {
             .current_term
     }
 
-    /// Get the last applied index from the Raft instance.
+    /// Returns the last applied index from the Raft instance.
     fn get_applied(manager: &MultiRaftManager, shard_id: u32) -> u64 {
         manager
             .get_shard(ShardId::new(shard_id))

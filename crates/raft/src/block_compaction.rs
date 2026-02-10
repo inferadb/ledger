@@ -57,13 +57,13 @@ pub struct BlockCompactor<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> BlockCompactor<B> {
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Run a single compaction cycle.
+    /// Runs a single compaction cycle.
     ///
     /// Scans all vaults with COMPACTED retention mode and compacts blocks
     /// older than (current_height - retention_blocks).
@@ -175,7 +175,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
         }
     }
 
-    /// Start the block compactor background task.
+    /// Starts the block compactor background task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {

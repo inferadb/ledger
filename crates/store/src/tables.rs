@@ -74,7 +74,7 @@ impl TableId {
     /// Total number of tables.
     pub const COUNT: usize = 15;
 
-    /// Get the key type for this table.
+    /// Returns the key type for this table.
     #[inline]
     pub const fn key_type(self) -> KeyType {
         match self {
@@ -102,7 +102,7 @@ impl TableId {
         }
     }
 
-    /// Get the human-readable name for this table.
+    /// Returns the human-readable name for this table.
     #[inline]
     pub const fn name(self) -> &'static str {
         match self {
@@ -124,7 +124,7 @@ impl TableId {
         }
     }
 
-    /// Get all table IDs.
+    /// Returns all table IDs.
     pub const fn all() -> [TableId; Self::COUNT] {
         [
             Self::Entities,
@@ -145,7 +145,7 @@ impl TableId {
         ]
     }
 
-    /// Convert from u8 to TableId.
+    /// Converts from u8 to TableId.
     #[inline]
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -332,12 +332,12 @@ impl TableEntry {
     /// Size of a serialized table entry in bytes.
     pub const SIZE: usize = 1 + 8 + 8; // table_id + root_page + entry_count
 
-    /// Create a new empty table entry.
+    /// Creates a new empty table entry.
     pub fn empty(table_id: TableId) -> Self {
         Self { table_id, root_page: 0, entry_count: 0 }
     }
 
-    /// Serialize to bytes.
+    /// Serializes to bytes.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
         buf[0] = self.table_id as u8;
@@ -346,7 +346,7 @@ impl TableEntry {
         buf
     }
 
-    /// Deserialize from bytes.
+    /// Deserializes from bytes.
     pub fn from_bytes(buf: &[u8]) -> Option<Self> {
         if buf.len() < Self::SIZE {
             return None;

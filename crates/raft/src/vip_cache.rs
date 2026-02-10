@@ -71,7 +71,7 @@ impl Default for VipCacheConfig {
 }
 
 impl VipCacheConfig {
-    /// Create a disabled config for testing.
+    /// Creates a disabled config for testing.
     pub fn disabled() -> Self {
         Self {
             discovery_enabled: false,
@@ -116,12 +116,12 @@ pub struct VipCache {
 }
 
 impl VipCache {
-    /// Create a new VIP cache with static VIP namespaces.
+    /// Creates a new VIP cache with static VIP namespaces.
     pub fn new(static_vip_namespaces: Vec<i64>) -> Self {
         Self::with_config(static_vip_namespaces, VipCacheConfig::default())
     }
 
-    /// Create a VIP cache with custom configuration.
+    /// Creates a VIP cache with custom configuration.
     pub fn with_config(static_vip_namespaces: Vec<i64>, config: VipCacheConfig) -> Self {
         Self {
             config,
@@ -131,12 +131,12 @@ impl VipCache {
         }
     }
 
-    /// Create a disabled cache for testing (no VIPs).
+    /// Creates a disabled cache for testing (no VIPs).
     pub fn disabled() -> Self {
         Self::with_config(Vec::new(), VipCacheConfig::disabled())
     }
 
-    /// Check if a namespace is VIP.
+    /// Checks if a namespace is VIP.
     ///
     /// Returns true if:
     /// 1. Namespace is in the static VIP list (override), OR
@@ -161,7 +161,7 @@ impl VipCache {
         false
     }
 
-    /// Check if a namespace is VIP and whether the cache entry is stale.
+    /// Checks if a namespace is VIP and whether the cache entry is stale.
     ///
     /// Returns `(is_vip, is_stale)` tuple.
     pub fn is_vip_with_staleness(&self, namespace_id: i64) -> (bool, bool) {
@@ -183,7 +183,7 @@ impl VipCache {
         (false, true)
     }
 
-    /// Update the dynamic cache with VIP status for a namespace.
+    /// Updates the dynamic cache with VIP status for a namespace.
     ///
     /// This is called when VIP status is discovered from `_system`.
     pub fn update(&self, namespace_id: i64, is_vip: bool) {
@@ -213,7 +213,7 @@ impl VipCache {
         *last_refresh = Some(Instant::now());
     }
 
-    /// Check if the cache needs a full refresh.
+    /// Checks if the cache needs a full refresh.
     ///
     /// Returns true if:
     /// - Cache has never been refreshed, OR
@@ -230,7 +230,7 @@ impl VipCache {
         }
     }
 
-    /// Clear the dynamic cache.
+    /// Clears the dynamic cache.
     pub fn clear(&self) {
         let mut cache = self.dynamic_cache.write();
         cache.clear();
@@ -239,7 +239,7 @@ impl VipCache {
         *last_refresh = None;
     }
 
-    /// Get statistics about the cache.
+    /// Returns statistics about the cache.
     pub fn stats(&self) -> VipCacheStats {
         let cache = self.dynamic_cache.read();
         let stale_count = cache.values().filter(|e| e.is_stale(self.config.cache_ttl)).count();
@@ -251,17 +251,17 @@ impl VipCache {
         }
     }
 
-    /// Get the cache TTL.
+    /// Returns the cache TTL.
     pub fn cache_ttl(&self) -> Duration {
         self.config.cache_ttl
     }
 
-    /// Get the tag name used for VIP metadata.
+    /// Returns the tag name used for VIP metadata.
     pub fn tag_name(&self) -> &str {
         &self.config.tag_name
     }
 
-    /// Check if discovery is enabled.
+    /// Checks if discovery is enabled.
     pub fn discovery_enabled(&self) -> bool {
         self.config.discovery_enabled
     }
@@ -278,7 +278,7 @@ pub struct VipCacheStats {
     pub stale_entries: usize,
 }
 
-/// Create a VipCache from server configuration.
+/// Creates a VipCache from server configuration.
 ///
 /// This is a convenience function to create a cache from the
 /// `WideEventsConfig` configuration.

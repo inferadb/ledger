@@ -61,7 +61,7 @@ pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.node_id)
@@ -141,7 +141,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         Ok(())
     }
 
-    /// Run a single GC cycle.
+    /// Runs a single GC cycle.
     async fn run_cycle(&self) {
         // Only leader performs GC
         if !self.is_leader() {
@@ -181,7 +181,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         }
     }
 
-    /// Start the garbage collector background task.
+    /// Starts the garbage collector background task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {

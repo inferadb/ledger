@@ -18,21 +18,21 @@ use crate::{
     tracing::TraceContextInterceptor,
 };
 
-/// Read consistency level for read operations.
+/// Reads consistency level for read operations.
 ///
 /// Controls whether reads are served from any replica (eventual) or must
 /// go through the leader (linearizable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadConsistency {
-    /// Read from any replica (fastest, may be stale).
+    /// Reads from any replica (fastest, may be stale).
     #[default]
     Eventual,
-    /// Read from leader (strong consistency, higher latency).
+    /// Reads from leader (strong consistency, higher latency).
     Linearizable,
 }
 
 impl ReadConsistency {
-    /// Convert to proto enum value.
+    /// Converts to proto enum value.
     fn to_proto(self) -> proto::ReadConsistency {
         match self {
             ReadConsistency::Eventual => proto::ReadConsistency::Eventual,
@@ -112,7 +112,7 @@ pub struct BlockAnnouncement {
 }
 
 impl BlockAnnouncement {
-    /// Create a BlockAnnouncement from the proto type.
+    /// Creates a BlockAnnouncement from the proto type.
     fn from_proto(proto: proto::BlockAnnouncement) -> Self {
         let timestamp = proto.timestamp.map(|ts| {
             std::time::UNIX_EPOCH + std::time::Duration::new(ts.seconds as u64, ts.nanos as u32)
@@ -146,7 +146,7 @@ pub enum NamespaceStatus {
 }
 
 impl NamespaceStatus {
-    /// Create from proto enum value.
+    /// Creates from proto enum value.
     fn from_proto(value: i32) -> Self {
         match proto::NamespaceStatus::try_from(value) {
             Ok(proto::NamespaceStatus::Active) => NamespaceStatus::Active,
@@ -171,7 +171,7 @@ pub enum VaultStatus {
 }
 
 impl VaultStatus {
-    /// Create from proto enum value.
+    /// Creates from proto enum value.
     fn from_proto(value: i32) -> Self {
         match proto::VaultStatus::try_from(value) {
             Ok(proto::VaultStatus::Active) => VaultStatus::Active,
@@ -203,7 +203,7 @@ pub struct NamespaceInfo {
 }
 
 impl NamespaceInfo {
-    /// Create from proto response.
+    /// Creates from proto response.
     fn from_proto(proto: proto::GetNamespaceResponse) -> Self {
         Self {
             namespace_id: proto.namespace_id.map_or(0, |n| n.id),
@@ -239,7 +239,7 @@ pub struct VaultInfo {
 }
 
 impl VaultInfo {
-    /// Create from proto response.
+    /// Creates from proto response.
     fn from_proto(proto: proto::GetVaultResponse) -> Self {
         Self {
             namespace_id: proto.namespace_id.map_or(0, |n| n.id),
@@ -270,7 +270,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
-    /// Create from proto enum value.
+    /// Creates from proto enum value.
     fn from_proto(value: i32) -> Self {
         match proto::HealthStatus::try_from(value) {
             Ok(proto::HealthStatus::Healthy) => HealthStatus::Healthy,
@@ -295,7 +295,7 @@ pub struct HealthCheckResult {
 }
 
 impl HealthCheckResult {
-    /// Create from proto response.
+    /// Creates from proto response.
     fn from_proto(proto: proto::HealthCheckResponse) -> Self {
         Self {
             status: HealthStatus::from_proto(proto.status),
@@ -337,7 +337,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// Create from proto enum value.
+    /// Creates from proto enum value.
     fn from_proto(value: i32) -> Self {
         match proto::Direction::try_from(value) {
             Ok(proto::Direction::Left) => Direction::Left,
@@ -359,7 +359,7 @@ pub struct MerkleSibling {
 }
 
 impl MerkleSibling {
-    /// Create from proto type.
+    /// Creates from proto type.
     fn from_proto(proto: proto::MerkleSibling) -> Self {
         Self {
             hash: proto.hash.map(|h| h.value).unwrap_or_default(),
@@ -381,7 +381,7 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Create from proto type.
+    /// Creates from proto type.
     fn from_proto(proto: proto::MerkleProof) -> Self {
         Self {
             leaf_hash: proto.leaf_hash.map(|h| h.value).unwrap_or_default(),
@@ -389,7 +389,7 @@ impl MerkleProof {
         }
     }
 
-    /// Verify this proof against an expected state root.
+    /// Verifies this proof against an expected state root.
     ///
     /// Recomputes the root hash from the leaf through the sibling path and
     /// checks if it matches the expected root.
@@ -461,7 +461,7 @@ pub struct BlockHeader {
 }
 
 impl BlockHeader {
-    /// Create from proto type.
+    /// Creates from proto type.
     fn from_proto(proto: proto::BlockHeader) -> Self {
         let timestamp = proto.timestamp.map(|ts| {
             std::time::UNIX_EPOCH + std::time::Duration::new(ts.seconds as u64, ts.nanos as u32)
@@ -493,12 +493,12 @@ pub struct ChainProof {
 }
 
 impl ChainProof {
-    /// Create from proto type.
+    /// Creates from proto type.
     fn from_proto(proto: proto::ChainProof) -> Self {
         Self { headers: proto.headers.into_iter().map(BlockHeader::from_proto).collect() }
     }
 
-    /// Verify the chain of blocks links correctly.
+    /// Verifies the chain of blocks links correctly.
     ///
     /// Checks that each block's previous_hash matches the hash of the preceding block.
     ///
@@ -550,7 +550,7 @@ impl ChainProof {
 /// Controls which proofs to include and at what height to read.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyOpts {
-    /// Read at a specific block height (None = current height).
+    /// Reads at a specific block height (None = current height).
     pub at_height: Option<u64>,
     /// Include chain proof linking to a trusted height.
     pub include_chain_proof: bool,
@@ -559,12 +559,12 @@ pub struct VerifyOpts {
 }
 
 impl VerifyOpts {
-    /// Create options with default values (current height, no chain proof).
+    /// Creates options with default values (current height, no chain proof).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Read at a specific block height.
+    /// Reads at a specific block height.
     pub fn at_height(mut self, height: u64) -> Self {
         self.at_height = Some(height);
         self
@@ -597,7 +597,7 @@ pub struct PagedResult<T> {
 }
 
 impl<T> PagedResult<T> {
-    /// Check if there are more pages available.
+    /// Checks if there are more pages available.
     pub fn has_next_page(&self) -> bool {
         self.next_page_token.is_some()
     }
@@ -620,7 +620,7 @@ pub struct Entity {
 }
 
 impl Entity {
-    /// Convert from proto Entity.
+    /// Converts from proto Entity.
     pub fn from_proto(proto: proto::Entity) -> Self {
         Self {
             key: proto.key,
@@ -630,7 +630,7 @@ impl Entity {
         }
     }
 
-    /// Check if this entity has expired relative to a given timestamp.
+    /// Checks if this entity has expired relative to a given timestamp.
     pub fn is_expired_at(&self, now_secs: u64) -> bool {
         self.expires_at.is_some_and(|exp| exp <= now_secs)
     }
@@ -651,7 +651,7 @@ pub struct Relationship {
 }
 
 impl Relationship {
-    /// Create a new relationship.
+    /// Creates a new relationship.
     pub fn new(
         resource: impl Into<String>,
         relation: impl Into<String>,
@@ -660,7 +660,7 @@ impl Relationship {
         Self { resource: resource.into(), relation: relation.into(), subject: subject.into() }
     }
 
-    /// Convert from proto Relationship.
+    /// Converts from proto Relationship.
     pub fn from_proto(proto: proto::Relationship) -> Self {
         Self { resource: proto.resource, relation: proto.relation, subject: proto.subject }
     }
@@ -674,7 +674,7 @@ pub struct ListEntitiesOpts {
     /// Filter entities by key prefix (e.g., "user:", "session:").
     #[builder(into, default)]
     pub key_prefix: String,
-    /// Read at a specific block height (None = current).
+    /// Reads at a specific block height (None = current).
     pub at_height: Option<u64>,
     /// Include entities past their expiration time.
     #[builder(default)]
@@ -685,7 +685,7 @@ pub struct ListEntitiesOpts {
     /// Pagination token from previous response.
     #[builder(into)]
     pub page_token: Option<String>,
-    /// Read consistency level.
+    /// Reads consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
     /// Vault ID for vault-scoped entities (None = namespace-level, uses vault_id=0).
@@ -693,12 +693,12 @@ pub struct ListEntitiesOpts {
 }
 
 impl ListEntitiesOpts {
-    /// Create options with a key prefix filter.
+    /// Creates options with a key prefix filter.
     pub fn with_prefix(prefix: impl Into<String>) -> Self {
         Self { key_prefix: prefix.into(), ..Default::default() }
     }
 
-    /// Read at a specific block height.
+    /// Reads at a specific block height.
     pub fn at_height(mut self, height: u64) -> Self {
         self.at_height = Some(height);
         self
@@ -710,7 +710,7 @@ impl ListEntitiesOpts {
         self
     }
 
-    /// Set maximum results per page.
+    /// Sets maximum results per page.
     pub fn limit(mut self, limit: u32) -> Self {
         self.limit = limit;
         self
@@ -722,7 +722,7 @@ impl ListEntitiesOpts {
         self
     }
 
-    /// Set read consistency level.
+    /// Sets read consistency level.
     pub fn consistency(mut self, consistency: ReadConsistency) -> Self {
         self.consistency = consistency;
         self
@@ -756,7 +756,7 @@ pub struct ListRelationshipsOpts {
     /// Filter by subject (exact match).
     #[builder(into)]
     pub subject: Option<String>,
-    /// Read at a specific block height (None = current).
+    /// Reads at a specific block height (None = current).
     pub at_height: Option<u64>,
     /// Maximum number of results per page (0 = server default).
     #[builder(default)]
@@ -764,13 +764,13 @@ pub struct ListRelationshipsOpts {
     /// Pagination token from previous response.
     #[builder(into)]
     pub page_token: Option<String>,
-    /// Read consistency level.
+    /// Reads consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
 }
 
 impl ListRelationshipsOpts {
-    /// Create default options (no filters).
+    /// Creates default options (no filters).
     pub fn new() -> Self {
         Self::default()
     }
@@ -793,13 +793,13 @@ impl ListRelationshipsOpts {
         self
     }
 
-    /// Read at a specific block height.
+    /// Reads at a specific block height.
     pub fn at_height(mut self, height: u64) -> Self {
         self.at_height = Some(height);
         self
     }
 
-    /// Set maximum results per page.
+    /// Sets maximum results per page.
     pub fn limit(mut self, limit: u32) -> Self {
         self.limit = limit;
         self
@@ -811,7 +811,7 @@ impl ListRelationshipsOpts {
         self
     }
 
-    /// Set read consistency level.
+    /// Sets read consistency level.
     pub fn consistency(mut self, consistency: ReadConsistency) -> Self {
         self.consistency = consistency;
         self
@@ -832,7 +832,7 @@ pub struct ListResourcesOpts {
     /// Resource type prefix (e.g., "document" matches "document:*").
     #[builder(into, default)]
     pub resource_type: String,
-    /// Read at a specific block height (None = current).
+    /// Reads at a specific block height (None = current).
     pub at_height: Option<u64>,
     /// Maximum number of results per page (0 = server default).
     #[builder(default)]
@@ -840,24 +840,24 @@ pub struct ListResourcesOpts {
     /// Pagination token from previous response.
     #[builder(into)]
     pub page_token: Option<String>,
-    /// Read consistency level.
+    /// Reads consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
 }
 
 impl ListResourcesOpts {
-    /// Create options with a resource type filter.
+    /// Creates options with a resource type filter.
     pub fn with_type(resource_type: impl Into<String>) -> Self {
         Self { resource_type: resource_type.into(), ..Default::default() }
     }
 
-    /// Read at a specific block height.
+    /// Reads at a specific block height.
     pub fn at_height(mut self, height: u64) -> Self {
         self.at_height = Some(height);
         self
     }
 
-    /// Set maximum results per page.
+    /// Sets maximum results per page.
     pub fn limit(mut self, limit: u32) -> Self {
         self.limit = limit;
         self
@@ -869,7 +869,7 @@ impl ListResourcesOpts {
         self
     }
 
-    /// Set read consistency level.
+    /// Sets read consistency level.
     pub fn consistency(mut self, consistency: ReadConsistency) -> Self {
         self.consistency = consistency;
         self
@@ -921,7 +921,7 @@ pub struct VerifiedValue {
 }
 
 impl VerifiedValue {
-    /// Create from proto response.
+    /// Creates from proto response.
     fn from_proto(proto: proto::VerifiedReadResponse) -> Option<Self> {
         // Block header is required for verification
         let block_header = proto.block_header.map(BlockHeader::from_proto)?;
@@ -936,7 +936,7 @@ impl VerifiedValue {
         })
     }
 
-    /// Verify the value is authentic.
+    /// Verifies the value is authentic.
     ///
     /// Checks that the Merkle proof correctly links the value to the state root
     /// in the block header. If a chain proof is present, also verifies the
@@ -968,7 +968,7 @@ impl VerifiedValue {
 /// and [`Operation::create_relationship`] for authorization tuples.
 #[derive(Debug, Clone)]
 pub enum Operation {
-    /// Set an entity value (key-value write).
+    /// Sets an entity value (key-value write).
     SetEntity {
         /// Entity key (max 1024 bytes).
         key: String,
@@ -979,12 +979,12 @@ pub enum Operation {
         /// Optional conditional write.
         condition: Option<SetCondition>,
     },
-    /// Delete an entity.
+    /// Deletes an entity.
     DeleteEntity {
         /// Entity key to delete.
         key: String,
     },
-    /// Create an authorization relationship.
+    /// Creates an authorization relationship.
     CreateRelationship {
         /// Resource identifier (format: "type:id").
         resource: String,
@@ -993,7 +993,7 @@ pub enum Operation {
         /// Subject identifier (format: "type:id" or "type:id#relation").
         subject: String,
     },
-    /// Delete an authorization relationship.
+    /// Deletes an authorization relationship.
     DeleteRelationship {
         /// Resource identifier (format: "type:id").
         resource: String,
@@ -1021,7 +1021,7 @@ pub enum SetCondition {
 }
 
 impl Operation {
-    /// Create a set entity operation.
+    /// Creates a set entity operation.
     ///
     /// # Example
     ///
@@ -1033,7 +1033,7 @@ impl Operation {
         Operation::SetEntity { key: key.into(), value, expires_at: None, condition: None }
     }
 
-    /// Create a set entity operation with expiration.
+    /// Creates a set entity operation with expiration.
     ///
     /// # Arguments
     ///
@@ -1049,7 +1049,7 @@ impl Operation {
         }
     }
 
-    /// Create a conditional set entity operation.
+    /// Creates a conditional set entity operation.
     ///
     /// # Arguments
     ///
@@ -1065,12 +1065,12 @@ impl Operation {
         }
     }
 
-    /// Create a delete entity operation.
+    /// Creates a delete entity operation.
     pub fn delete_entity(key: impl Into<String>) -> Self {
         Operation::DeleteEntity { key: key.into() }
     }
 
-    /// Create a relationship.
+    /// Creates a relationship.
     ///
     /// # Arguments
     ///
@@ -1089,7 +1089,7 @@ impl Operation {
         }
     }
 
-    /// Delete a relationship.
+    /// Deletes a relationship.
     pub fn delete_relationship(
         resource: impl Into<String>,
         relation: impl Into<String>,
@@ -1102,10 +1102,14 @@ impl Operation {
         }
     }
 
-    /// Validate this operation against the given validation configuration.
+    /// Validates this operation against the given validation configuration.
     ///
     /// Checks field sizes and character whitelists. Call this before
     /// sending operations to the server for fast client-side validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValidationError` if key length, value size, or character constraints are violated.
     pub fn validate(
         &self,
         config: &inferadb_ledger_types::config::ValidationConfig,
@@ -1147,7 +1151,7 @@ impl Operation {
         }
     }
 
-    /// Convert to proto operation.
+    /// Converts to proto operation.
     fn to_proto(&self) -> proto::Operation {
         let op = match self {
             Operation::SetEntity { key, value, expires_at, condition } => {
@@ -1181,7 +1185,7 @@ impl Operation {
 }
 
 impl SetCondition {
-    /// Convert to proto set condition.
+    /// Converts to proto set condition.
     fn to_proto(&self) -> proto::SetCondition {
         let condition = match self {
             SetCondition::NotExists => proto::set_condition::Condition::NotExists(true),
@@ -1405,7 +1409,7 @@ impl LedgerClient {
     // Fluent Builders
     // =========================================================================
 
-    /// Create a fluent write builder for the given namespace and optional vault.
+    /// Creates a fluent write builder for the given namespace and optional vault.
     ///
     /// Chain operations and then call `.execute()` to submit:
     ///
@@ -1430,9 +1434,9 @@ impl LedgerClient {
         crate::builders::WriteBuilder::new(self, namespace_id, vault_id)
     }
 
-    /// Create a fluent batch read builder for the given namespace and optional vault.
+    /// Creates a fluent batch read builder for the given namespace and optional vault.
     ///
-    /// Add keys and then call `.execute()`:
+    /// Adds keys and then call `.execute()`:
     ///
     /// ```no_run
     /// # use inferadb_ledger_sdk::LedgerClient;
@@ -1456,9 +1460,9 @@ impl LedgerClient {
         crate::builders::BatchReadBuilder::new(self, namespace_id, vault_id)
     }
 
-    /// Create a fluent relationship query builder for the given namespace and vault.
+    /// Creates a fluent relationship query builder for the given namespace and vault.
     ///
-    /// Add filters and then call `.execute()`:
+    /// Adds filters and then call `.execute()`:
     ///
     /// ```no_run
     /// # use inferadb_ledger_sdk::LedgerClient;
@@ -1490,7 +1494,7 @@ impl LedgerClient {
     ///
     /// # Per-Request Cancellation
     ///
-    /// Create a child token and pass it to RPC methods that accept an
+    /// Creates a child token and pass it to RPC methods that accept an
     /// optional cancellation token. Cancelling the child token cancels
     /// only that request, not the entire client.
     ///
@@ -1693,7 +1697,7 @@ impl LedgerClient {
     // Read Operations
     // =========================================================================
 
-    /// Read a value by key with eventual consistency.
+    /// Reads a value by key with eventual consistency.
     ///
     /// Uses `EVENTUAL` consistency level, which reads from any replica for
     /// lowest latency. The value may be slightly stale if a write was just
@@ -1738,7 +1742,7 @@ impl LedgerClient {
             .await
     }
 
-    /// Read a value by key with linearizable (strong) consistency.
+    /// Reads a value by key with linearizable (strong) consistency.
     ///
     /// Uses `LINEARIZABLE` consistency level, which reads from the leader to
     /// guarantee the latest committed value. Has higher latency than eventual
@@ -1780,11 +1784,17 @@ impl LedgerClient {
             .await
     }
 
-    /// Read a value by key with a per-request cancellation token.
+    /// Reads a value by key with a per-request cancellation token.
     ///
     /// Like [`read`](Self::read) but accepts a [`CancellationToken`] that can
     /// cancel this specific request without shutting down the client. Returns
     /// `SdkError::Cancelled` if the token is cancelled before the RPC completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Cancelled` if the token is cancelled.
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the read fails after retry attempts.
     ///
     /// [`CancellationToken`]: tokio_util::sync::CancellationToken
     pub async fn read_with_token(
@@ -1804,12 +1814,19 @@ impl LedgerClient {
         .await
     }
 
-    /// Write a transaction with a per-request cancellation token.
+    /// Writes a transaction with a per-request cancellation token.
     ///
     /// Like [`write`](Self::write) but accepts a [`CancellationToken`] that can
     /// cancel this specific request. Note that cancellation is best-effort:
     /// the server may still commit the transaction if the cancellation races
     /// with the Raft commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Cancelled` if the token is cancelled.
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the write fails after retry attempts.
+    /// Returns `SdkError::Validation` if client-side validation fails.
     ///
     /// [`CancellationToken`]: tokio_util::sync::CancellationToken
     pub async fn write_with_token(
@@ -1829,6 +1846,12 @@ impl LedgerClient {
     /// Batch read with a per-request cancellation token.
     ///
     /// Like [`batch_read`](Self::batch_read) but accepts a cancellation token.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Cancelled` if the token is cancelled.
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the batch read fails after retry attempts.
     pub async fn batch_read_with_token(
         &self,
         namespace_id: i64,
@@ -1850,6 +1873,13 @@ impl LedgerClient {
     ///
     /// Like [`batch_write`](Self::batch_write) but accepts a cancellation token.
     /// Cancellation is best-effort — the server may still commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Cancelled` if the token is cancelled.
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the batch write fails after retry attempts.
+    /// Returns `SdkError::Validation` if client-side validation fails.
     pub async fn batch_write_with_token(
         &self,
         namespace_id: i64,
@@ -1938,6 +1968,10 @@ impl LedgerClient {
     ///
     /// Returns a vector of `(key, Option<value>)` pairs in the same order as
     /// the input keys. Missing keys have `None` values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batch read fails after retry attempts.
     pub async fn batch_read_consistent(
         &self,
         namespace_id: i64,
@@ -2072,7 +2106,7 @@ impl LedgerClient {
     // Write Operations
     // =========================================================================
 
-    /// Submit a write transaction to the ledger.
+    /// Submits a write transaction to the ledger.
     ///
     /// Writes are automatically idempotent via server-assigned sequence numbers.
     /// The server assigns monotonically increasing sequences at Raft commit time.
@@ -2267,7 +2301,7 @@ impl LedgerClient {
         }
     }
 
-    /// Convert TxId bytes to hex string.
+    /// Converts TxId bytes to hex string.
     fn tx_id_to_hex(tx_id: Option<proto::TxId>) -> String {
         use std::fmt::Write;
         tx_id
@@ -2303,7 +2337,7 @@ impl LedgerClient {
     // Batch Write Operations
     // =========================================================================
 
-    /// Submit a batch write transaction with all-or-nothing atomicity.
+    /// Submits a batch write transaction with all-or-nothing atomicity.
     ///
     /// A batch write groups multiple operation sets into a single atomic transaction.
     /// All operations are committed together in a single block, or none are applied
@@ -2522,7 +2556,7 @@ impl LedgerClient {
     // Streaming Operations
     // =============================================================================
 
-    /// Subscribe to block announcements for a vault.
+    /// Subscribes to block announcements for a vault.
     ///
     /// Returns a stream of [`BlockAnnouncement`] items that emits each time a new
     /// block is committed to the vault's chain. The stream automatically reconnects
@@ -2537,6 +2571,11 @@ impl LedgerClient {
     /// # Returns
     ///
     /// Returns a `Stream` that yields `Result<BlockAnnouncement>` items.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the initial stream connection fails.
     ///
     /// # Reconnection Behavior
     ///
@@ -2626,7 +2665,7 @@ impl LedgerClient {
         }))
     }
 
-    /// Create a WatchBlocks stream without reconnection logic.
+    /// Creates a WatchBlocks stream without reconnection logic.
     async fn create_watch_blocks_stream(
         &self,
         namespace_id: i64,
@@ -2655,7 +2694,7 @@ impl LedgerClient {
     // Admin Operations
     // =========================================================================
 
-    /// Create a new namespace.
+    /// Creates a new namespace.
     ///
     /// Creates a namespace with the given name. The namespace ID is assigned
     /// by the leader and returned in the response.
@@ -2726,7 +2765,7 @@ impl LedgerClient {
         .await
     }
 
-    /// Get information about a namespace by ID.
+    /// Returns information about a namespace by ID.
     ///
     /// # Arguments
     ///
@@ -2794,7 +2833,7 @@ impl LedgerClient {
         .await
     }
 
-    /// List all namespaces.
+    /// Lists all namespaces.
     ///
     /// Returns a list of all namespaces visible to this client.
     /// Admin operations typically have longer timeouts.
@@ -2859,7 +2898,7 @@ impl LedgerClient {
         .await
     }
 
-    /// Create a new vault in a namespace.
+    /// Creates a new vault in a namespace.
     ///
     /// Creates a vault within the specified namespace. The vault ID is assigned
     /// by the leader and returned in the response.
@@ -2941,7 +2980,7 @@ impl LedgerClient {
         .await
     }
 
-    /// Get information about a vault.
+    /// Returns information about a vault.
     ///
     /// # Arguments
     ///
@@ -3009,7 +3048,7 @@ impl LedgerClient {
         .await
     }
 
-    /// List all vaults on this node.
+    /// Lists all vaults on this node.
     ///
     /// Returns a list of all vaults that this node is hosting or participating in.
     ///
@@ -3074,7 +3113,7 @@ impl LedgerClient {
     // Health Operations
     // =========================================================================
 
-    /// Check node-level health.
+    /// Checks node-level health.
     ///
     /// Returns `true` if the node is healthy and has a leader elected.
     /// This is a simple health check suitable for load balancer probes.
@@ -3116,7 +3155,7 @@ impl LedgerClient {
         }
     }
 
-    /// Get detailed node-level health information.
+    /// Returns detailed node-level health information.
     ///
     /// Returns full health check result including status, message, and details.
     /// Use this for monitoring and diagnostics that need more than a simple boolean.
@@ -3178,7 +3217,7 @@ impl LedgerClient {
         .await
     }
 
-    /// Check health of a specific vault.
+    /// Checks health of a specific vault.
     ///
     /// Returns detailed health information for a specific vault, including
     /// block height, health status, and any divergence information.
@@ -3256,7 +3295,7 @@ impl LedgerClient {
     // Verified Read Operations
     // =========================================================================
 
-    /// Read a value with cryptographic proof for client-side verification.
+    /// Reads a value with cryptographic proof for client-side verification.
     ///
     /// Returns the value along with a Merkle proof that can be used to verify
     /// the value is authentic without trusting the server. The proof links
@@ -3272,6 +3311,11 @@ impl LedgerClient {
     /// # Returns
     ///
     /// `VerifiedValue` containing the value and proofs, or `None` if key not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the read fails after retry attempts.
     ///
     /// # Example
     ///
@@ -3348,7 +3392,7 @@ impl LedgerClient {
     // Query Operations
     // =========================================================================
 
-    /// List entities matching a key prefix.
+    /// Lists entities matching a key prefix.
     ///
     /// Returns a paginated list of entities with keys starting with the given prefix.
     /// Use the `next_page_token` to fetch additional pages.
@@ -3357,6 +3401,11 @@ impl LedgerClient {
     ///
     /// * `namespace_id` - Namespace containing the entities.
     /// * `opts` - Query options including prefix filter, pagination, and consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
     ///
     /// # Example
     ///
@@ -3438,7 +3487,7 @@ impl LedgerClient {
         .await
     }
 
-    /// List relationships in a vault with optional filters.
+    /// Lists relationships in a vault with optional filters.
     ///
     /// Returns a paginated list of relationships matching the filter criteria.
     /// All filter fields are optional; omitting a filter matches all values.
@@ -3448,6 +3497,11 @@ impl LedgerClient {
     /// * `namespace_id` - Namespace containing the vault.
     /// * `vault_id` - Vault containing the relationships.
     /// * `opts` - Query options including filters, pagination, and consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
     ///
     /// # Example
     ///
@@ -3529,7 +3583,7 @@ impl LedgerClient {
         .await
     }
 
-    /// List distinct resource IDs matching a type prefix.
+    /// Lists distinct resource IDs matching a type prefix.
     ///
     /// Returns a paginated list of unique resource identifiers that match the given
     /// type prefix (e.g., "document" matches "document:1", "document:2", etc.).
@@ -3539,6 +3593,11 @@ impl LedgerClient {
     /// * `namespace_id` - Namespace containing the vault.
     /// * `vault_id` - Vault containing the relationships.
     /// * `opts` - Query options including type filter, pagination, and consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
     ///
     /// # Example
     ///
@@ -3619,7 +3678,7 @@ impl LedgerClient {
         .await
     }
 
-    /// Create an AdminService client with compression and tracing settings.
+    /// Creates an AdminService client with compression and tracing settings.
     fn create_admin_client(
         channel: tonic::transport::Channel,
         compression_enabled: bool,
@@ -3638,7 +3697,7 @@ impl LedgerClient {
         }
     }
 
-    /// Create a HealthService client with compression and tracing settings.
+    /// Creates a HealthService client with compression and tracing settings.
     fn create_health_client(
         channel: tonic::transport::Channel,
         compression_enabled: bool,

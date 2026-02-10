@@ -10,7 +10,7 @@ use inferadb_ledger_raft::{HotKeyDetector, RateLimiter, RuntimeConfigHandle};
 use inferadb_ledger_types::config::RuntimeConfig;
 use tracing::{error, info, warn};
 
-/// Spawn a background task that reloads runtime config on SIGHUP.
+/// Spawns a background task that reloads runtime config on SIGHUP.
 ///
 /// The task runs until the process exits. On each SIGHUP:
 /// 1. Re-reads and parses the TOML config file
@@ -62,7 +62,7 @@ pub fn spawn_sighup_handler(
     });
 }
 
-/// Read and apply a runtime config file.
+/// Reads and apply a runtime config file.
 ///
 /// Returns the list of changed field paths, or an error if the file
 /// cannot be read, parsed, or validated.

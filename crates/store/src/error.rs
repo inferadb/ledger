@@ -73,7 +73,7 @@ pub enum Error {
     #[snafu(display("Out of space: cannot allocate more pages"))]
     OutOfSpace,
 
-    /// Write transaction already in progress.
+    /// Writes transaction already in progress.
     #[snafu(display("Write transaction already in progress"))]
     WriteTransactionInProgress,
 
@@ -142,7 +142,7 @@ pub enum PageType {
     BTreeLeaf = 2,
     /// Overflow page for large values.
     Overflow = 3,
-    /// Free list continuation page.
+    /// Frees list continuation page.
     FreeList = 4,
     /// Table directory page.
     TableDirectory = 5,

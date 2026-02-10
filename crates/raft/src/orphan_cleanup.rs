@@ -66,13 +66,13 @@ pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Get all deleted user IDs from _system namespace.
+    /// Returns all deleted user IDs from _system namespace.
     ///
     /// Returns user IDs where either:
     /// - User has deleted_at set
@@ -115,7 +115,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             .collect()
     }
 
-    /// Find orphaned memberships in a namespace.
+    /// Finds orphaned memberships in a namespace.
     ///
     /// Returns (key, user_id) pairs for memberships referencing deleted users.
     fn find_orphaned_memberships(
@@ -160,7 +160,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             .collect()
     }
 
-    /// Remove orphaned memberships from a namespace.
+    /// Removes orphaned memberships from a namespace.
     async fn remove_orphaned_memberships(
         &self,
         namespace_id: NamespaceId,
@@ -211,7 +211,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         Ok(count)
     }
 
-    /// Run a single cleanup cycle.
+    /// Runs a single cleanup cycle.
     async fn run_cycle(&self) {
         // Only leader performs cleanup
         if !self.is_leader() {
@@ -270,7 +270,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         }
     }
 
-    /// Start the orphan cleanup background task.
+    /// Starts the orphan cleanup background task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {

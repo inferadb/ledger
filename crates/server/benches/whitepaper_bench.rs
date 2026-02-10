@@ -55,7 +55,7 @@ const SCALE_ENTITY_COUNT: usize = 100_000; // Reduced for CI; full test uses 10M
 // Helpers
 // =============================================================================
 
-/// Create a state layer with optimal configuration.
+/// Creates a state layer with optimal configuration.
 fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
     let db =
         Database::<FileBackend>::create(temp_dir.path().join("bench.db")).expect("create database");
@@ -82,7 +82,7 @@ fn populate_vault(state: &StateLayer<FileBackend>, vault_id: VaultId, count: usi
     }
 }
 
-/// Collect latency samples and compute percentiles.
+/// Collects latency samples and compute percentiles.
 struct LatencyCollector {
     samples: Vec<Duration>,
 }

@@ -45,7 +45,7 @@ use crate::{
     wide_events::{OperationType, RequestContext, Sampler},
 };
 
-/// Read service implementation.
+/// Reads service implementation.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct ReadServiceImpl {
@@ -76,7 +76,7 @@ pub struct ReadServiceImpl {
 }
 
 impl ReadServiceImpl {
-    /// Check if this node is the current Raft leader.
+    /// Checks if this node is the current Raft leader.
     ///
     /// Returns false if Raft is not configured.
     fn is_leader(&self) -> bool {
@@ -89,7 +89,7 @@ impl ReadServiceImpl {
         }
     }
 
-    /// Check consistency requirements for a read request.
+    /// Checks consistency requirements for a read request.
     ///
     /// Returns Ok(()) if the request can proceed, or an error if consistency
     /// requirements cannot be met.
@@ -120,7 +120,7 @@ impl ReadServiceImpl {
         }
     }
 
-    /// Fetch block header from archive for a given vault height.
+    /// Fetches block header from archive for a given vault height.
     ///
     /// Returns None if the block is not found or archive is not available.
     fn get_block_header(
@@ -176,7 +176,7 @@ impl ReadServiceImpl {
         })
     }
 
-    /// Get block_hash and state_root for a vault at a given height.
+    /// Returns block_hash and state_root for a vault at a given height.
     ///
     /// Returns (block_hash, state_root) or (None, None) if not found.
     fn get_tip_hashes(
@@ -219,7 +219,7 @@ impl ReadServiceImpl {
         )
     }
 
-    /// Find and load the nearest snapshot for historical read optimization.
+    /// Finds and load the nearest snapshot for historical read optimization.
     ///
     /// Returns (start_height, snapshot_loaded):
     /// - If a suitable snapshot is found and loaded, returns (snapshot_vault_height + 1, true)
@@ -302,7 +302,7 @@ impl ReadServiceImpl {
         (1, false)
     }
 
-    /// Build a ChainProof linking blocks from trusted_height+1 to response_height.
+    /// Builds a ChainProof linking blocks from trusted_height+1 to response_height.
     ///
     /// The ChainProof allows clients to verify that the response_height block
     /// is part of the canonical chain descending from their trusted_height.
@@ -335,7 +335,7 @@ impl ReadServiceImpl {
         Some(inferadb_ledger_proto::proto::ChainProof { headers })
     }
 
-    /// Fetch historical block announcements from the block archive.
+    /// Fetches historical block announcements from the block archive.
     ///
     /// Used by watch_blocks to replay committed blocks before streaming new ones.
     fn fetch_historical_announcements(
@@ -515,7 +515,7 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
     }
 
-    /// Batch read multiple keys in a single RPC call.
+    /// Batches read multiple keys in a single RPC call.
     ///
     /// Amortizes network overhead across multiple reads for higher throughput.
     /// All reads use the same namespace/vault scope and consistency level.

@@ -52,7 +52,7 @@ pub struct IndexManager;
 
 #[allow(clippy::result_large_err)]
 impl IndexManager {
-    /// Add a subject to the object index.
+    /// Adds a subject to the object index.
     ///
     /// Key: `{vault_id}{bucket_id}obj_idx:{resource}#{relation}`
     /// Value: serialized list of subjects
@@ -88,7 +88,7 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Remove a subject from the object index.
+    /// Removes a subject from the object index.
     ///
     /// # Errors
     ///
@@ -126,7 +126,7 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Add a resource-relation pair to the subject index.
+    /// Adds a resource-relation pair to the subject index.
     ///
     /// Key: `{vault_id}{bucket_id}subj_idx:{subject}`
     /// Value: serialized list of (resource, relation) pairs
@@ -162,7 +162,7 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Remove a resource-relation pair from the subject index.
+    /// Removes a resource-relation pair from the subject index.
     ///
     /// # Errors
     ///
@@ -202,7 +202,7 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Get subjects for a resource and relation (object index lookup).
+    /// Returns subjects for a resource and relation (object index lookup).
     ///
     /// # Errors
     ///
@@ -227,7 +227,7 @@ impl IndexManager {
         }
     }
 
-    /// Get resource-relation pairs for a subject (subject index lookup).
+    /// Returns resource-relation pairs for a subject (subject index lookup).
     ///
     /// # Errors
     ///

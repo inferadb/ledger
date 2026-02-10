@@ -37,7 +37,7 @@ use snafu::{ResultExt, Snafu};
 /// Implementations must be `Send + Sync` for use across gRPC service handlers.
 /// The `log` method must ensure the event is durably persisted before returning.
 pub trait AuditLogger: Send + Sync {
-    /// Log an audit event.
+    /// Logs an audit event.
     ///
     /// Must ensure the event is durably persisted before returning.
     /// Returns an error if the event cannot be persisted.

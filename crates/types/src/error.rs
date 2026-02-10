@@ -1,6 +1,6 @@
 //! Error types for InferaDB Ledger using snafu.
 //!
-//! This module provides a unified error type hierarchy that captures:
+//! Defines a unified error type hierarchy that captures:
 //! - Storage errors (inferadb-ledger-store, I/O)
 //! - Consensus errors (Raft)
 //! - Validation errors (hash mismatches, divergence)
@@ -390,7 +390,7 @@ pub enum LedgerError {
     /// Entity not found at the given key.
     ///
     /// **Recovery**: Not retryable. This is expected for first reads.
-    /// Create the entity with a `SetEntity` operation first.
+    /// Creates the entity with a `SetEntity` operation first.
     #[snafu(display("Entity not found: {key}"))]
     EntityNotFound {
         /// Entity key.

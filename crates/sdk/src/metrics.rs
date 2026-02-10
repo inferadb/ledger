@@ -70,7 +70,7 @@ impl fmt::Display for ConnectionEvent {
 /// Implementations must be `Send + Sync` since the SDK shares a single
 /// metrics instance across all client clones and background tasks.
 pub trait SdkMetrics: Send + Sync + fmt::Debug {
-    /// Record the outcome of a completed request.
+    /// Records the outcome of a completed request.
     ///
     /// Called once per successful top-level operation (after retries resolve).
     ///
@@ -81,7 +81,7 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
         let _ = (method, duration, success);
     }
 
-    /// Record a retry attempt.
+    /// Records a retry attempt.
     ///
     /// Called once per retry attempt (not the initial attempt).
     ///
@@ -92,7 +92,7 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
         let _ = (method, attempt, error_type);
     }
 
-    /// Record a circuit breaker state transition.
+    /// Records a circuit breaker state transition.
     ///
     /// Called whenever a circuit breaker changes state.
     ///
@@ -102,7 +102,7 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
         let _ = (endpoint, state);
     }
 
-    /// Record a connection lifecycle event.
+    /// Records a connection lifecycle event.
     ///
     /// - `endpoint`: The server endpoint URL.
     /// - `event`: The connection event type.

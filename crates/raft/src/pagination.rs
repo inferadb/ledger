@@ -57,7 +57,7 @@ pub struct PageTokenCodec {
 }
 
 impl PageTokenCodec {
-    /// Create a new codec with the given key.
+    /// Creates a new codec with the given key.
     ///
     /// The key should be randomly generated at node startup and kept secret.
     /// Different nodes can have different keys (pagination is node-local).
@@ -65,7 +65,7 @@ impl PageTokenCodec {
         Self { key }
     }
 
-    /// Create a codec with a random key.
+    /// Creates a codec with a random key.
     ///
     /// Useful for testing or single-node deployments.
     pub fn with_random_key() -> Self {
@@ -75,7 +75,7 @@ impl PageTokenCodec {
         Self { key }
     }
 
-    /// Encode a page token to an opaque string.
+    /// Encodes a page token to an opaque string.
     pub fn encode(&self, token: &PageToken) -> String {
         // Serialize the token - postcard encoding of simple structs is infallible
         let token_bytes = match encode(token) {
@@ -107,7 +107,7 @@ impl PageTokenCodec {
         URL_SAFE_NO_PAD.encode(&bytes)
     }
 
-    /// Decode and validate a page token.
+    /// Decodes and validate a page token.
     ///
     /// # Errors
     ///
@@ -146,7 +146,7 @@ impl PageTokenCodec {
         Ok(encoded_token.token)
     }
 
-    /// Validate that a token matches the current request context.
+    /// Validates that a token matches the current request context.
     ///
     /// Returns an error if:
     /// - namespace_id doesn't match
@@ -170,7 +170,7 @@ impl PageTokenCodec {
         Ok(())
     }
 
-    /// Compute a query hash for filter parameters.
+    /// Computes a query hash for filter parameters.
     ///
     /// Uses SeaHash for fast, deterministic hashing of query parameters.
     pub fn compute_query_hash(params: &[u8]) -> [u8; 8] {

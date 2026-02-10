@@ -72,17 +72,17 @@ pub struct TimeTravelConfig {
 }
 
 impl TimeTravelConfig {
-    /// Create a new config with time-travel enabled for all keys.
+    /// Creates a new config with time-travel enabled for all keys.
     pub fn enabled() -> Self {
         Self { enabled: true, ..Default::default() }
     }
 
-    /// Create a config with time-travel enabled for specific key prefixes.
+    /// Creates a config with time-travel enabled for specific key prefixes.
     pub fn with_prefixes(prefixes: Vec<String>) -> Self {
         Self { enabled: true, key_prefixes: prefixes, max_history_depth: 0 }
     }
 
-    /// Check if a key should be indexed.
+    /// Checks if a key should be indexed.
     pub fn should_index(&self, key: &str) -> bool {
         if !self.enabled {
             return false;
@@ -118,7 +118,7 @@ fn make_index_key(vault_id: u64, key: &str, height: u64) -> Vec<u8> {
     buf
 }
 
-/// Parse an index key back into components.
+/// Parses an index key back into components.
 fn parse_index_key(key: &[u8]) -> Option<(u64, u64, u64)> {
     if key.len() != 24 {
         return None;
@@ -140,12 +140,12 @@ pub struct TimeTravelIndex<B: StorageBackend> {
 }
 
 impl<B: StorageBackend> TimeTravelIndex<B> {
-    /// Create a new time-travel index manager.
+    /// Creates a new time-travel index manager.
     pub fn new(db: Arc<Database<B>>) -> Self {
         Self { db, config_cache: RwLock::new(std::collections::HashMap::new()) }
     }
 
-    /// Configure time-travel indexing for a vault.
+    /// Configures time-travel indexing for a vault.
     ///
     /// # Errors
     ///
@@ -164,7 +164,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         Ok(())
     }
 
-    /// Get the configuration for a vault.
+    /// Returns the configuration for a vault.
     ///
     /// # Errors
     ///
@@ -189,7 +189,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         }
     }
 
-    /// Check if time-travel is enabled for a vault and key.
+    /// Checks if time-travel is enabled for a vault and key.
     ///
     /// # Errors
     ///
@@ -202,7 +202,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         }
     }
 
-    /// Record a value change in the time-travel index.
+    /// Records a value change in the time-travel index.
     ///
     /// # Errors
     ///
@@ -234,7 +234,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         Ok(())
     }
 
-    /// Get the value at a specific height.
+    /// Returns the value at a specific height.
     ///
     /// Returns the entry at or before the requested height.
     ///
@@ -275,7 +275,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         Ok(None)
     }
 
-    /// Get all historical entries for a key.
+    /// Returns all historical entries for a key.
     ///
     /// # Errors
     ///
@@ -316,7 +316,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         Ok(entries)
     }
 
-    /// Prune old entries beyond the max history depth.
+    /// Prunes old entries beyond the max history depth.
     ///
     /// # Errors
     ///
@@ -374,7 +374,7 @@ impl<B: StorageBackend> TimeTravelIndex<B> {
         Ok(pruned)
     }
 
-    /// Get statistics for time-travel index.
+    /// Returns statistics for time-travel index.
     ///
     /// # Errors
     ///

@@ -48,12 +48,12 @@ struct HyperLogLog {
 }
 
 impl HyperLogLog {
-    /// Create a new empty HyperLogLog estimator.
+    /// Creates a new empty HyperLogLog estimator.
     fn new() -> Self {
         Self { registers: Box::new([0u8; M]) }
     }
 
-    /// Insert an element (the hash of a label set key).
+    /// Inserts an element (the hash of a label set key).
     fn insert(&mut self, hash: u64) {
         let index = (hash >> HASH_BITS) as usize;
         let remaining = hash << P | (1 << (P - 1)); // Ensure at least 1 bit set
@@ -63,7 +63,7 @@ impl HyperLogLog {
         }
     }
 
-    /// Estimate the number of distinct elements inserted.
+    /// Estimates the number of distinct elements inserted.
     fn estimate(&self) -> u64 {
         // Standard HyperLogLog: harmonic mean of 2^(-register) values
         let mut sum = 0.0_f64;
@@ -99,14 +99,14 @@ impl HyperLogLog {
 pub struct CardinalityBudget {
     /// Per-metric-family HyperLogLog estimators.
     estimators: DashMap<String, HyperLogLog>,
-    /// Emit WARN log when estimated cardinality reaches this count.
+    /// Emits WARN log when estimated cardinality reaches this count.
     warn_threshold: AtomicU32,
     /// Drop observations when estimated cardinality exceeds this count.
     max_threshold: AtomicU32,
 }
 
 impl CardinalityBudget {
-    /// Create a new cardinality budget with the given thresholds.
+    /// Creates a new cardinality budget with the given thresholds.
     pub fn new(warn_cardinality: u32, max_cardinality: u32) -> Self {
         Self {
             estimators: DashMap::new(),
@@ -115,7 +115,7 @@ impl CardinalityBudget {
         }
     }
 
-    /// Check whether a metric observation with the given label set should be allowed.
+    /// Checks whether a metric observation with the given label set should be allowed.
     ///
     /// Returns `true` if the observation is within budget, `false` if it should
     /// be dropped (cardinality exceeded `max_cardinality`).
@@ -153,13 +153,13 @@ impl CardinalityBudget {
         true
     }
 
-    /// Update thresholds at runtime (called on config reload).
+    /// Updates thresholds at runtime (called on config reload).
     pub fn update_thresholds(&self, warn_cardinality: u32, max_cardinality: u32) {
         self.warn_threshold.store(warn_cardinality, Ordering::Relaxed);
         self.max_threshold.store(max_cardinality, Ordering::Relaxed);
     }
 
-    /// Get the current estimated cardinality for a specific metric family.
+    /// Returns the current estimated cardinality for a specific metric family.
     ///
     /// Returns `None` if the metric has never been observed.
     #[cfg(test)]

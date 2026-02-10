@@ -68,7 +68,7 @@ pub struct WriteBuilder<'a, S = NoOps> {
 }
 
 impl<'a> WriteBuilder<'a, NoOps> {
-    /// Create a new write builder targeting a namespace and optional vault.
+    /// Creates a new write builder targeting a namespace and optional vault.
     pub(crate) fn new(client: &'a LedgerClient, namespace_id: i64, vault_id: Option<i64>) -> Self {
         Self {
             client,
@@ -96,7 +96,7 @@ impl<'a, S> WriteBuilder<'a, S> {
         }
     }
 
-    /// Set an entity value.
+    /// Sets an entity value.
     ///
     /// If a condition was set via `.if_not_exists()`, `.if_exists()`,
     /// `.if_version()`, or `.if_value_equals()`, it is consumed by this call.
@@ -111,7 +111,7 @@ impl<'a, S> WriteBuilder<'a, S> {
         self.into_has_ops()
     }
 
-    /// Set an entity value with a TTL expiration.
+    /// Sets an entity value with a TTL expiration.
     ///
     /// If a condition was previously set, it is consumed by this call.
     pub fn set_with_expiry(
@@ -130,13 +130,13 @@ impl<'a, S> WriteBuilder<'a, S> {
         self.into_has_ops()
     }
 
-    /// Delete an entity by key.
+    /// Deletes an entity by key.
     pub fn delete(mut self, key: impl Into<String>) -> WriteBuilder<'a, HasOps> {
         self.operations.push(Operation::DeleteEntity { key: key.into() });
         self.into_has_ops()
     }
 
-    /// Create an authorization relationship.
+    /// Creates an authorization relationship.
     pub fn create_relationship(
         mut self,
         resource: impl Into<String>,
@@ -151,7 +151,7 @@ impl<'a, S> WriteBuilder<'a, S> {
         self.into_has_ops()
     }
 
-    /// Delete an authorization relationship.
+    /// Deletes an authorization relationship.
     pub fn delete_relationship(
         mut self,
         resource: impl Into<String>,
@@ -193,7 +193,7 @@ impl<'a, S> WriteBuilder<'a, S> {
         self
     }
 
-    /// Attach a cancellation token for per-request cancellation.
+    /// Attaches a cancellation token for per-request cancellation.
     ///
     /// Cancelling the token will abort the in-flight write. Without this,
     /// the client-level cancellation token is used.
@@ -204,7 +204,7 @@ impl<'a, S> WriteBuilder<'a, S> {
 }
 
 impl<'a> WriteBuilder<'a, HasOps> {
-    /// Submit the accumulated operations as a single atomic write.
+    /// Submits the accumulated operations as a single atomic write.
     ///
     /// Uses the client's retry and metrics infrastructure. The write is
     /// idempotent — retries reuse the same server-generated idempotency key.
@@ -226,7 +226,7 @@ impl<'a> WriteBuilder<'a, HasOps> {
     }
 }
 
-/// Extract operations from a builder for testing purposes.
+/// Extracts operations from a builder for testing purposes.
 /// Available only in test builds.
 #[cfg(test)]
 impl<'a, S> WriteBuilder<'a, S> {

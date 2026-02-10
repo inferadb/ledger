@@ -14,7 +14,7 @@ use crate::error::PageId;
 /// Pages are allocated from a free list. When the free list is empty,
 /// new pages are allocated by extending the file.
 pub struct PageAllocator {
-    /// Free pages available for reuse.
+    /// Frees pages available for reuse.
     free_pages: Mutex<Vec<PageId>>,
     /// Next page ID to allocate if free list is empty.
     next_page: Mutex<PageId>,
@@ -23,7 +23,7 @@ pub struct PageAllocator {
 }
 
 impl PageAllocator {
-    /// Create a new allocator.
+    /// Creates a new allocator.
     pub fn new(page_size: usize, initial_next_page: PageId) -> Self {
         Self {
             free_pages: Mutex::new(Vec::new()),
@@ -32,7 +32,7 @@ impl PageAllocator {
         }
     }
 
-    /// Allocate a new page.
+    /// Allocates a new page.
     ///
     /// Returns a page ID. Prefers reusing freed pages over allocating new ones.
     pub fn allocate(&self) -> PageId {
@@ -48,7 +48,7 @@ impl PageAllocator {
         page_id
     }
 
-    /// Free a page for later reuse.
+    /// Frees a page for later reuse.
     ///
     /// The page will be added to the free list and may be returned
     /// by a future `allocate()` call.
@@ -56,53 +56,53 @@ impl PageAllocator {
         self.free_pages.lock().push(page_id);
     }
 
-    /// Free multiple pages at once.
+    /// Frees multiple pages at once.
     pub fn free_batch(&self, page_ids: &[PageId]) {
         let mut free_pages = self.free_pages.lock();
         free_pages.extend_from_slice(page_ids);
     }
 
-    /// Get the next page ID that would be allocated (for file size calculation).
+    /// Returns the next page ID that would be allocated (for file size calculation).
     pub fn next_page_id(&self) -> PageId {
         *self.next_page.lock()
     }
 
-    /// Set the next page ID (used during recovery).
+    /// Sets the next page ID (used during recovery).
     pub fn set_next_page(&self, page_id: PageId) {
         *self.next_page.lock() = page_id;
     }
 
-    /// Get the number of free pages in the free list.
+    /// Returns the number of free pages in the free list.
     pub fn free_page_count(&self) -> usize {
         self.free_pages.lock().len()
     }
 
-    /// Get the total number of pages (allocated + free).
+    /// Returns the total number of pages (allocated + free).
     pub fn total_pages(&self) -> PageId {
         self.next_page_id()
     }
 
-    /// Clear the free list (used during recovery before rebuilding).
+    /// Clears the free list (used during recovery before rebuilding).
     pub fn clear_free_list(&self) {
         self.free_pages.lock().clear();
     }
 
-    /// Initialize free list from a list of free page IDs (used during recovery).
+    /// Initializes free list from a list of free page IDs (used during recovery).
     pub fn init_free_list(&self, free_pages: Vec<PageId>) {
         *self.free_pages.lock() = free_pages;
     }
 
-    /// Get a copy of the current free list (for debugging/testing).
+    /// Returns a copy of the current free list (for debugging/testing).
     pub fn get_free_list(&self) -> Vec<PageId> {
         self.free_pages.lock().clone()
     }
 
-    /// Get page size.
+    /// Returns page size.
     pub fn page_size(&self) -> usize {
         self.page_size
     }
 
-    /// Calculate required file size in bytes for current allocation state.
+    /// Calculates required file size in bytes for current allocation state.
     pub fn required_file_size(&self, header_size: usize) -> u64 {
         let next_page = self.next_page_id();
         header_size as u64 + (next_page * self.page_size as u64)

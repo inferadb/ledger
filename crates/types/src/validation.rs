@@ -34,7 +34,7 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// Validate an entity key against configured limits and character whitelist.
+/// Validates an entity key against configured limits and character whitelist.
 ///
 /// Entity keys must:
 /// - Be non-empty
@@ -75,7 +75,7 @@ pub fn validate_key(key: &str, config: &ValidationConfig) -> Result<(), Validati
     Ok(())
 }
 
-/// Validate an entity value against configured size limits.
+/// Validates an entity value against configured size limits.
 ///
 /// Values must not exceed `config.max_value_bytes`.
 ///
@@ -96,7 +96,7 @@ pub fn validate_value(value: &[u8], config: &ValidationConfig) -> Result<(), Val
     Ok(())
 }
 
-/// Validate a namespace name against configured limits and DNS-safe whitelist.
+/// Validates a namespace name against configured limits and DNS-safe whitelist.
 ///
 /// Namespace names must:
 /// - Be non-empty
@@ -147,7 +147,7 @@ pub fn validate_namespace_name(
     Ok(())
 }
 
-/// Validate a relationship string (resource, relation, or subject).
+/// Validates a relationship string (resource, relation, or subject).
 ///
 /// Relationship strings must:
 /// - Be non-empty
@@ -193,7 +193,7 @@ pub fn validate_relationship_string(
     Ok(())
 }
 
-/// Validate the number of operations in a write request.
+/// Validates the number of operations in a write request.
 ///
 /// # Errors
 ///
@@ -221,7 +221,7 @@ pub fn validate_operations_count(
     Ok(())
 }
 
-/// Validate the total payload size of a batch of operations.
+/// Validates the total payload size of a batch of operations.
 ///
 /// # Errors
 ///
@@ -243,17 +243,17 @@ pub fn validate_batch_payload_bytes(
     Ok(())
 }
 
-/// Check if a character is allowed in entity keys.
+/// Checks if a character is allowed in entity keys.
 fn is_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '_' | '.' | '-')
 }
 
-/// Check if a character is allowed in namespace names.
+/// Checks if a character is allowed in namespace names.
 fn is_namespace_char(c: char) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
 }
 
-/// Check if a character is allowed in relationship strings.
+/// Checks if a character is allowed in relationship strings.
 fn is_relationship_char(c: char) -> bool {
     is_key_char(c) || c == '#'
 }

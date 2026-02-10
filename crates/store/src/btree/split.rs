@@ -65,7 +65,7 @@ pub struct BranchSplitResult {
     pub separator_key: Vec<u8>,
 }
 
-/// Split a leaf node, moving roughly half the entries to the new node.
+/// Splits a leaf node, moving roughly half the entries to the new node.
 ///
 /// # Arguments
 /// * `original` - The original leaf page (will be modified to contain left half)
@@ -135,7 +135,7 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
     Ok(LeafSplitResult { new_page_id: new_page.id, separator_key })
 }
 
-/// Split a leaf node with awareness of the key being inserted.
+/// Splits a leaf node with awareness of the key being inserted.
 ///
 /// This finds a split point that ensures the new key can fit in the correct
 /// side based on B-tree ordering (key < separator goes left, key >= separator goes right).
@@ -276,7 +276,7 @@ pub fn split_leaf_for_key(
     Err(Error::PageFull)
 }
 
-/// Split a branch node, moving roughly half the entries to the new node.
+/// Splits a branch node, moving roughly half the entries to the new node.
 ///
 /// Branch splits are different from leaf splits:
 /// - The middle key is promoted (not copied) to the parent
@@ -334,7 +334,7 @@ pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSp
     Ok(BranchSplitResult { new_page_id: new_page.id, separator_key })
 }
 
-/// Check if a leaf node needs splitting based on remaining free space.
+/// Checks if a leaf node needs splitting based on remaining free space.
 ///
 /// # Errors
 ///
@@ -344,7 +344,7 @@ pub fn leaf_needs_split(page: &Page, key: &[u8], value: &[u8]) -> Result<bool> {
     Ok(!node.can_insert(key, value))
 }
 
-/// Check if a branch node needs splitting.
+/// Checks if a branch node needs splitting.
 ///
 /// # Errors
 ///
@@ -354,7 +354,7 @@ pub fn branch_needs_split(page: &Page, key: &[u8]) -> Result<bool> {
     Ok(!node.can_insert(key))
 }
 
-/// Merge two leaf nodes (for deletion, when underfull).
+/// Merges two leaf nodes (for deletion, when underfull).
 ///
 /// All entries from `right` are moved into `left`.
 /// Returns the key that was separating them in the parent.
@@ -399,7 +399,7 @@ pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
     Ok(())
 }
 
-/// Calculate the fill factor of a leaf node (0.0 to 1.0).
+/// Calculates the fill factor of a leaf node (0.0 to 1.0).
 ///
 /// # Errors
 ///
@@ -429,7 +429,7 @@ pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
     Ok(live_bytes as f64 / total_content as f64)
 }
 
-/// Check whether two leaf nodes can be merged (combined entries fit in one page).
+/// Checks whether two leaf nodes can be merged (combined entries fit in one page).
 ///
 /// Returns `true` if all entries from `right` can fit into `left`'s free space.
 ///

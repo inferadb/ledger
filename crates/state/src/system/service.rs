@@ -69,7 +69,7 @@ pub struct SystemNamespaceService<B: StorageBackend> {
 }
 
 impl<B: StorageBackend> SystemNamespaceService<B> {
-    /// Create a new system namespace service.
+    /// Creates a new system namespace service.
     pub fn new(state: Arc<StateLayer<B>>) -> Self {
         Self { state }
     }
@@ -78,7 +78,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // Sequence Counters
     // =========================================================================
 
-    /// Get the next value from a sequence counter and increment it.
+    /// Returns the next value from a sequence counter and increment it.
     ///
     /// If the counter doesn't exist, initializes it to `start_value`.
     pub fn next_sequence(&self, key: &str, start_value: i64) -> Result<i64> {
@@ -110,13 +110,13 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         Ok(current)
     }
 
-    /// Get the next namespace ID.
+    /// Returns the next namespace ID.
     pub fn next_namespace_id(&self) -> Result<NamespaceId> {
         // Start at 1 because 0 is reserved for _system
         self.next_sequence(SystemKeys::NAMESPACE_SEQ_KEY, 1).map(NamespaceId::new)
     }
 
-    /// Get the next vault ID.
+    /// Returns the next vault ID.
     pub fn next_vault_id(&self) -> Result<VaultId> {
         self.next_sequence(SystemKeys::VAULT_SEQ_KEY, 1).map(VaultId::new)
     }
@@ -125,7 +125,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // Node Operations
     // =========================================================================
 
-    /// Register a node in the cluster.
+    /// Registers a node in the cluster.
     pub fn register_node(&self, node: &NodeInfo) -> Result<()> {
         let key = SystemKeys::node_key(&node.node_id);
         let value = encode(node).context(CodecSnafu)?;
@@ -137,7 +137,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         Ok(())
     }
 
-    /// Get a node by ID.
+    /// Returns a node by ID.
     pub fn get_node(&self, node_id: &NodeId) -> Result<Option<NodeInfo>> {
         let key = SystemKeys::node_key(node_id);
 
@@ -152,7 +152,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         }
     }
 
-    /// List all registered nodes.
+    /// Lists all registered nodes.
     pub fn list_nodes(&self) -> Result<Vec<NodeInfo>> {
         let entities = self
             .state
@@ -169,7 +169,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         Ok(nodes)
     }
 
-    /// Remove a node from the cluster.
+    /// Removes a node from the cluster.
     pub fn remove_node(&self, node_id: &NodeId) -> Result<bool> {
         let key = SystemKeys::node_key(node_id);
         let ops = vec![Operation::DeleteEntity { key }];
@@ -183,7 +183,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // Namespace Registry Operations
     // =========================================================================
 
-    /// Register a new namespace.
+    /// Registers a new namespace.
     pub fn register_namespace(&self, registry: &NamespaceRegistry) -> Result<()> {
         let key = SystemKeys::namespace_key(registry.namespace_id);
         let value = encode(registry).context(CodecSnafu)?;
@@ -207,7 +207,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         Ok(())
     }
 
-    /// Get a namespace by ID.
+    /// Returns a namespace by ID.
     pub fn get_namespace(&self, namespace_id: NamespaceId) -> Result<Option<NamespaceRegistry>> {
         let key = SystemKeys::namespace_key(namespace_id);
 
@@ -222,7 +222,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         }
     }
 
-    /// Get a namespace by name.
+    /// Returns a namespace by name.
     pub fn get_namespace_by_name(&self, name: &str) -> Result<Option<NamespaceRegistry>> {
         let index_key = SystemKeys::namespace_name_index_key(name);
 
@@ -243,7 +243,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         }
     }
 
-    /// List all namespaces.
+    /// Lists all namespaces.
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceRegistry>> {
         let entities = self
             .state
@@ -260,7 +260,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         Ok(namespaces)
     }
 
-    /// Update namespace status.
+    /// Updates namespace status.
     pub fn update_namespace_status(
         &self,
         namespace_id: NamespaceId,
@@ -283,12 +283,12 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // Shard Routing
     // =========================================================================
 
-    /// Get the shard ID for a namespace.
+    /// Returns the shard ID for a namespace.
     pub fn get_shard_for_namespace(&self, namespace_id: NamespaceId) -> Result<Option<ShardId>> {
         self.get_namespace(namespace_id).map(|opt| opt.map(|r| r.shard_id))
     }
 
-    /// Assign a namespace to a shard.
+    /// Assigns a namespace to a shard.
     pub fn assign_namespace_to_shard(
         &self,
         namespace_id: NamespaceId,

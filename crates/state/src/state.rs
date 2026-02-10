@@ -105,12 +105,12 @@ pub struct StateLayer<B: StorageBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> StateLayer<B> {
-    /// Create a new state layer backed by the given database.
+    /// Creates a new state layer backed by the given database.
     pub fn new(db: Arc<Database<B>>) -> Self {
         Self { db, vault_commitments: RwLock::new(HashMap::new()) }
     }
 
-    /// Get database-level statistics for metrics collection.
+    /// Returns database-level statistics for metrics collection.
     pub fn database_stats(&self) -> DatabaseStats {
         self.db.stats()
     }
@@ -120,7 +120,7 @@ impl<B: StorageBackend> StateLayer<B> {
         &self.db
     }
 
-    /// Get B-tree depths for all non-empty tables.
+    /// Returns B-tree depths for all non-empty tables.
     ///
     /// Opens a read transaction internally to walk each table's B-tree.
     ///
@@ -143,7 +143,7 @@ impl<B: StorageBackend> StateLayer<B> {
         f(commitment)
     }
 
-    /// Apply a batch of operations to a vault's state.
+    /// Applies a batch of operations to a vault's state.
     ///
     /// Executes all operations atomically within a single write transaction.
     /// Returns a `WriteStatus` for each operation indicating whether it was
@@ -348,7 +348,7 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(statuses)
     }
 
-    /// Clear all entities and relationships for a vault.
+    /// Clears all entities and relationships for a vault.
     ///
     /// Used during vault recovery to reset state before replay.
     ///
@@ -448,7 +448,7 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(())
     }
 
-    /// Get an entity by key.
+    /// Returns an entity by key.
     ///
     /// # Errors
     ///
@@ -467,7 +467,7 @@ impl<B: StorageBackend> StateLayer<B> {
         }
     }
 
-    /// Check if a relationship exists.
+    /// Checks if a relationship exists.
     ///
     /// # Errors
     ///
@@ -488,7 +488,7 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(txn.get::<tables::Relationships>(&storage_key).context(StoreSnafu)?.is_some())
     }
 
-    /// Compute state root for a vault, updating dirty bucket roots.
+    /// Computes state root for a vault, updating dirty bucket roots.
     ///
     /// This scans only the dirty buckets and recomputes their roots,
     /// then returns SHA-256(bucket_roots[0..256]).
@@ -564,7 +564,7 @@ impl<B: StorageBackend> StateLayer<B> {
         }))
     }
 
-    /// Load bucket roots from stored vault metadata.
+    /// Loads bucket roots from stored vault metadata.
     ///
     /// Called during startup/recovery to restore commitment state.
     pub fn load_vault_commitment(&self, vault_id: VaultId, bucket_roots: [Hash; NUM_BUCKETS]) {
@@ -573,12 +573,12 @@ impl<B: StorageBackend> StateLayer<B> {
             .insert(vault_id, VaultCommitment::from_bucket_roots(bucket_roots));
     }
 
-    /// Get the current bucket roots for a vault (for persistence).
+    /// Returns the current bucket roots for a vault (for persistence).
     pub fn get_bucket_roots(&self, vault_id: VaultId) -> Option<[Hash; NUM_BUCKETS]> {
         self.vault_commitments.read().get(&vault_id).map(|c| *c.bucket_roots())
     }
 
-    /// Compact all B+ tree tables, merging underfull leaf nodes.
+    /// Compacts all B+ tree tables, merging underfull leaf nodes.
     ///
     /// Returns aggregate compaction statistics across all tables.
     ///
@@ -592,7 +592,7 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(stats)
     }
 
-    /// List subjects for a given resource and relation.
+    /// Lists subjects for a given resource and relation.
     ///
     /// # Errors
     ///
@@ -608,7 +608,7 @@ impl<B: StorageBackend> StateLayer<B> {
         IndexManager::get_subjects(&txn, vault_id, resource, relation).context(IndexSnafu)
     }
 
-    /// List resource-relation pairs for a given subject.
+    /// Lists resource-relation pairs for a given subject.
     ///
     /// # Errors
     ///
@@ -623,7 +623,7 @@ impl<B: StorageBackend> StateLayer<B> {
         IndexManager::get_resources(&txn, vault_id, subject).context(IndexSnafu)
     }
 
-    /// List all entities in a vault with optional prefix filter.
+    /// Lists all entities in a vault with optional prefix filter.
     ///
     /// Returns up to `limit` entities. Use `start_after` for pagination.
     ///
@@ -696,7 +696,7 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(entities)
     }
 
-    /// List all relationships in a vault.
+    /// Lists all relationships in a vault.
     ///
     /// Returns up to `limit` relationships. Use `start_after` for pagination.
     ///
@@ -1337,23 +1337,23 @@ mod tests {
 
         use super::*;
 
-        /// Generate an arbitrary entity key (short identifiers for efficiency).
+        /// Generates an arbitrary entity key (short identifiers for efficiency).
         fn arb_key() -> impl Strategy<Value = String> {
             proptest::string::string_regex("[a-z][a-z0-9]{0,7}").expect("valid regex")
         }
 
-        /// Generate an arbitrary entity value (small byte arrays).
+        /// Generates an arbitrary entity value (small byte arrays).
         fn arb_value() -> impl Strategy<Value = Vec<u8>> {
             proptest::collection::vec(any::<u8>(), 0..32)
         }
 
-        /// Generate an arbitrary resource identifier.
+        /// Generates an arbitrary resource identifier.
         fn arb_resource() -> impl Strategy<Value = String> {
             (arb_key(), prop::sample::select(vec!["doc", "folder", "project"]))
                 .prop_map(|(id, typ)| format!("{}:{}", typ, id))
         }
 
-        /// Generate an arbitrary relation name.
+        /// Generates an arbitrary relation name.
         fn arb_relation() -> impl Strategy<Value = String> {
             prop::sample::select(vec![
                 "viewer".to_string(),
@@ -1363,13 +1363,13 @@ mod tests {
             ])
         }
 
-        /// Generate an arbitrary subject identifier.
+        /// Generates an arbitrary subject identifier.
         fn arb_subject() -> impl Strategy<Value = String> {
             (arb_key(), prop::sample::select(vec!["user", "group", "team"]))
                 .prop_map(|(id, typ)| format!("{}:{}", typ, id))
         }
 
-        /// Generate an arbitrary Operation.
+        /// Generates an arbitrary Operation.
         fn arb_operation() -> impl Strategy<Value = Operation> {
             prop_oneof![
                 // SetEntity (most common)
@@ -1393,7 +1393,7 @@ mod tests {
             ]
         }
 
-        /// Generate a sequence of operations (1 to 20 operations per test).
+        /// Generates a sequence of operations (1 to 20 operations per test).
         fn arb_operation_sequence() -> impl Strategy<Value = Vec<Operation>> {
             proptest::collection::vec(arb_operation(), 1..20)
         }

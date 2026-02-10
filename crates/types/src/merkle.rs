@@ -13,7 +13,7 @@ pub struct MerkleTree {
 }
 
 impl MerkleTree {
-    /// Build a merkle tree from leaf hashes.
+    /// Builds a merkle tree from leaf hashes.
     ///
     /// For empty input, the root is EMPTY_HASH.
     pub fn from_leaves(leaves: &[Hash]) -> Self {
@@ -21,14 +21,14 @@ impl MerkleTree {
         Self { tree, leaves: leaves.to_vec() }
     }
 
-    /// Get the merkle root.
+    /// Returns the merkle root.
     ///
     /// Returns EMPTY_HASH for empty trees.
     pub fn root(&self) -> Hash {
         self.tree.root().unwrap_or(EMPTY_HASH)
     }
 
-    /// Generate a proof for the leaf at the given index.
+    /// Generates a proof for the leaf at the given index.
     pub fn proof(&self, index: usize) -> Option<MerkleProof> {
         if index >= self.leaves.len() {
             return None;
@@ -45,7 +45,7 @@ impl MerkleTree {
         })
     }
 
-    /// Number of leaves in the tree.
+    /// Returns the number of leaves in the tree.
     pub fn len(&self) -> usize {
         self.leaves.len()
     }
@@ -70,10 +70,10 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Verify the proof against an expected root.
+    /// Verifies the proof against an expected root.
     ///
-    /// Note: This requires knowing the total number of leaves in the tree.
-    /// Use `verify_with_leaf_count` if you have the original leaf count.
+    /// Walks up the tree using the proof hashes and leaf index to recompute
+    /// the root. Only produces correct results for power-of-2 leaf counts.
     pub fn verify(&self, expected_root: &Hash) -> bool {
         if self.proof_hashes.is_empty() {
             // Single-element tree: leaf hash equals root
@@ -107,7 +107,7 @@ impl MerkleProof {
     }
 }
 
-/// Compute merkle root from leaf hashes.
+/// Computes merkle root from leaf hashes.
 ///
 /// Convenience function when you don't need the full tree or proofs.
 pub fn merkle_root(leaves: &[Hash]) -> Hash {
@@ -226,7 +226,7 @@ mod tests {
 
         use super::*;
 
-        /// Generate leaf data with power-of-2 count.
+        /// Generates leaf data with power-of-2 count.
         ///
         /// Our manual `MerkleProof::verify()` uses index/2 walk which only
         /// produces correct results for perfect binary trees (power-of-2 leaf count).
@@ -241,7 +241,7 @@ mod tests {
             })
         }
 
-        /// Generate leaf data with arbitrary count (for determinism tests
+        /// Generates leaf data with arbitrary count (for determinism tests
         /// that don't rely on proof verification).
         fn arb_leaf_data(max_leaves: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
             proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..64), 1..max_leaves)

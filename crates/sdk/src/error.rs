@@ -61,7 +61,7 @@ fn format_idempotency(
     s
 }
 
-/// Extract a string metadata value from a gRPC status metadata map.
+/// Extracts a string metadata value from a gRPC status metadata map.
 fn extract_metadata(metadata: &tonic::metadata::MetadataMap, key: &str) -> Option<String> {
     metadata.get(key).and_then(|v| v.to_str().ok()).map(String::from)
 }
@@ -247,7 +247,7 @@ pub enum SdkError {
         original_tx_id: Option<String>,
     },
 
-    /// Write was already committed (idempotent retry detected).
+    /// Writes was already committed (idempotent retry detected).
     ///
     /// This is not an error - the original write succeeded. The SDK returns
     /// success with the original transaction details when this is detected.
@@ -304,7 +304,7 @@ pub enum SdkError {
     InvalidUrl {
         /// The invalid URL.
         url: String,
-        /// Parse error description.
+        /// Parses error description.
         message: String,
     },
 
@@ -509,7 +509,7 @@ impl From<tonic::Status> for SdkError {
     }
 }
 
-/// Decode [`ServerErrorDetails`] from gRPC `Status.details` bytes.
+/// Decodes [`ServerErrorDetails`] from gRPC `Status.details` bytes.
 ///
 /// Returns `None` if the bytes are empty or cannot be decoded as an
 /// `ErrorDetails` proto message.
@@ -1039,7 +1039,7 @@ mod tests {
 
     // --- ErrorDetails decoding tests ---
 
-    /// Build a tonic::Status with binary-encoded ErrorDetails in its details field.
+    /// Builds a tonic::Status with binary-encoded ErrorDetails in its details field.
     fn status_with_error_details(
         code: Code,
         message: &str,

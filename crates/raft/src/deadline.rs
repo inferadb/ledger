@@ -27,7 +27,7 @@ const GRPC_TIMEOUT_HEADER: &str = "grpc-timeout";
 /// proposals that will time out before they can commit.
 const NEAR_DEADLINE_THRESHOLD: Duration = Duration::from_millis(100);
 
-/// Extract the remaining gRPC deadline from an incoming request's metadata.
+/// Extracts the remaining gRPC deadline from an incoming request's metadata.
 ///
 /// Parses the `grpc-timeout` header per the
 /// [gRPC over HTTP/2 spec](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md).
@@ -36,7 +36,7 @@ pub fn extract_deadline<T>(request: &Request<T>) -> Option<Duration> {
     extract_deadline_from_metadata(request.metadata())
 }
 
-/// Extract the remaining gRPC deadline from a metadata map.
+/// Extracts the remaining gRPC deadline from a metadata map.
 ///
 /// Useful when the request has already been consumed (e.g., after
 /// `request.metadata().clone()` followed by `request.into_inner()`).
@@ -46,7 +46,7 @@ pub fn extract_deadline_from_metadata(metadata: &tonic::metadata::MetadataMap) -
     parse_grpc_timeout(s)
 }
 
-/// Compute the effective timeout for a Raft proposal.
+/// Computes the effective timeout for a Raft proposal.
 ///
 /// Returns the minimum of the server-configured `proposal_timeout` and
 /// the client's gRPC deadline (if present). This ensures that the server
@@ -58,7 +58,7 @@ pub fn effective_timeout(proposal_timeout: Duration, grpc_deadline: Option<Durat
     }
 }
 
-/// Reject requests whose remaining deadline is below the near-deadline threshold.
+/// Rejects requests whose remaining deadline is below the near-deadline threshold.
 ///
 /// Returns `Ok(())` if the request has sufficient remaining time or no deadline.
 ///
@@ -80,7 +80,7 @@ pub fn check_near_deadline<T>(request: &Request<T>) -> Result<(), Status> {
     Ok(())
 }
 
-/// Compute the remaining deadline to propagate to a forwarded request.
+/// Computes the remaining deadline to propagate to a forwarded request.
 ///
 /// If the incoming request has a gRPC deadline, returns the remaining time
 /// (clamped to a minimum of 1ms to avoid zero-duration timeouts).
@@ -92,7 +92,7 @@ pub fn forwarding_timeout(grpc_deadline: Option<Duration>, default_timeout: Dura
     }
 }
 
-/// Parse the `grpc-timeout` header value per the gRPC spec.
+/// Parses the `grpc-timeout` header value per the gRPC spec.
 ///
 /// Format: `{value}{unit}` where unit is one of: H (hours), M (minutes),
 /// S (seconds), m (milliseconds), u (microseconds), n (nanoseconds).

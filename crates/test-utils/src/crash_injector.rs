@@ -90,7 +90,7 @@ pub struct CrashInjector {
 }
 
 impl CrashInjector {
-    /// Create a new crash injector targeting the specified crash point.
+    /// Creates a new crash injector targeting the specified crash point.
     pub fn new(crash_point: CrashPoint) -> Arc<Self> {
         Arc::new(Self {
             crash_point,
@@ -102,7 +102,7 @@ impl CrashInjector {
         })
     }
 
-    /// Arm the injector so it will trigger on the next matching operation.
+    /// Arms the injector so it will trigger on the next matching operation.
     ///
     /// The injector starts disarmed to allow initial setup operations
     /// (creating the database, writing initial data) without interference.
@@ -114,17 +114,17 @@ impl CrashInjector {
         self.armed.store(true, Ordering::SeqCst);
     }
 
-    /// Disarm the injector.
+    /// Disarms the injector.
     pub fn disarm(&self) {
         self.armed.store(false, Ordering::SeqCst);
     }
 
-    /// Check if the crash has been triggered.
+    /// Checks if the crash has been triggered.
     pub fn has_crashed(&self) -> bool {
         self.crashed.load(Ordering::SeqCst)
     }
 
-    /// Record a sync operation and check if a crash should occur.
+    /// Records a sync operation and check if a crash should occur.
     ///
     /// Returns `true` if the crash should be triggered at this point.
     pub fn on_sync(&self) -> bool {
@@ -154,7 +154,7 @@ impl CrashInjector {
         should_crash
     }
 
-    /// Record a header write operation and check if a crash should occur.
+    /// Records a header write operation and check if a crash should occur.
     ///
     /// Returns `true` if the crash should be triggered at this point.
     pub fn on_header_write(&self) -> bool {
@@ -178,7 +178,7 @@ impl CrashInjector {
         should_crash
     }
 
-    /// Record a page write operation and check if a crash should occur.
+    /// Records a page write operation and check if a crash should occur.
     ///
     /// Returns `true` if the crash should be triggered at this point.
     /// The `page_threshold` parameter controls after how many page writes to crash.
@@ -201,17 +201,17 @@ impl CrashInjector {
         should_crash
     }
 
-    /// Get the configured crash point.
+    /// Returns the configured crash point.
     pub fn crash_point(&self) -> CrashPoint {
         self.crash_point
     }
 
-    /// Get the number of sync operations observed.
+    /// Returns the number of sync operations observed.
     pub fn sync_count(&self) -> u32 {
         self.sync_count.load(Ordering::SeqCst)
     }
 
-    /// Get the number of header write operations observed.
+    /// Returns the number of header write operations observed.
     pub fn header_write_count(&self) -> u32 {
         self.header_write_count.load(Ordering::SeqCst)
     }

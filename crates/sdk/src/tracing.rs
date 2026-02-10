@@ -49,7 +49,7 @@ pub struct TraceConfig {
 }
 
 impl TraceConfig {
-    /// Create a new `TraceConfig` with tracing enabled.
+    /// Creates a new `TraceConfig` with tracing enabled.
     ///
     /// When enabled, the SDK will:
     /// 1. Extract trace context from the current OpenTelemetry span (if present)
@@ -60,7 +60,7 @@ impl TraceConfig {
         Self { enabled: true }
     }
 
-    /// Check if trace context propagation is enabled.
+    /// Checks if trace context propagation is enabled.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -80,13 +80,13 @@ pub struct TraceContextInterceptor {
 }
 
 impl TraceContextInterceptor {
-    /// Create a new interceptor from trace configuration (without timeout).
+    /// Creates a new interceptor from trace configuration (without timeout).
     #[cfg(test)]
     pub fn new(config: &TraceConfig) -> Self {
         Self { enabled: config.enabled, request_timeout: None }
     }
 
-    /// Create a new interceptor with request timeout propagation.
+    /// Creates a new interceptor with request timeout propagation.
     ///
     /// When set, every outgoing request will include a `grpc-timeout` header
     /// so the server can extract the client's deadline and avoid processing
@@ -140,7 +140,7 @@ const API_VERSION_HEADER: &str = "x-ledger-api-version";
 /// API version sent by this SDK. Must match server's supported range.
 const API_VERSION_VALUE: &str = "1";
 
-/// Extract trace context from the current tracing span, if OpenTelemetry context is present.
+/// Extracts trace context from the current tracing span, if OpenTelemetry context is present.
 ///
 /// Returns `None` if:
 /// - No current span exists

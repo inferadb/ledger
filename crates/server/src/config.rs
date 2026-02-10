@@ -80,7 +80,7 @@ impl Default for WideEventsSamplingConfig {
 }
 
 impl WideEventsSamplingConfig {
-    /// Create a disabled sampling config (samples nothing except errors).
+    /// Creates a disabled sampling config (samples nothing except errors).
     #[allow(dead_code)] // reserved for future use when wide events can be selectively disabled
     pub fn disabled() -> Self {
         Self {
@@ -95,7 +95,7 @@ impl WideEventsSamplingConfig {
         }
     }
 
-    /// Create a config for testing (samples everything).
+    /// Creates a config for testing (samples everything).
     pub fn for_test() -> Self {
         Self {
             error_rate: 1.0,
@@ -109,7 +109,7 @@ impl WideEventsSamplingConfig {
         }
     }
 
-    /// Validate sampling configuration.
+    /// Validates sampling configuration.
     ///
     /// # Errors
     ///
@@ -247,12 +247,12 @@ impl Default for OtelConfig {
 }
 
 impl OtelConfig {
-    /// Create a config for testing with OTEL disabled.
+    /// Creates a config for testing with OTEL disabled.
     pub fn for_test() -> Self {
         Self::default()
     }
 
-    /// Validate OTEL configuration.
+    /// Validates OTEL configuration.
     ///
     /// # Errors
     ///
@@ -363,12 +363,12 @@ impl Default for VipConfig {
 }
 
 impl VipConfig {
-    /// Create a config for testing with discovery disabled.
+    /// Creates a config for testing with discovery disabled.
     pub fn for_test() -> Self {
         Self { discovery_enabled: false, cache_ttl_secs: 60, tag_name: "vip".to_string() }
     }
 
-    /// Validate VIP configuration.
+    /// Validates VIP configuration.
     ///
     /// # Errors
     ///
@@ -408,7 +408,7 @@ fn default_vip_tag_name() -> String {
 ///
 /// # Environment Variables
 ///
-/// Configure via environment variables with the `INFERADB__LEDGER__WIDE_EVENTS__` prefix:
+/// Configures via environment variables with the `INFERADB__LEDGER__WIDE_EVENTS__` prefix:
 ///
 /// ```bash
 /// INFERADB__LEDGER__WIDE_EVENTS__ENABLED=true
@@ -429,7 +429,7 @@ pub struct WideEventsConfig {
     #[builder(default)]
     pub sampling: WideEventsSamplingConfig,
 
-    /// List of VIP namespace IDs with elevated sampling rates.
+    /// Lists of VIP namespace IDs with elevated sampling rates.
     /// These are static overrides that always receive VIP treatment.
     #[serde(default)]
     #[builder(default)]
@@ -460,7 +460,7 @@ impl Default for WideEventsConfig {
 }
 
 impl WideEventsConfig {
-    /// Create a config for testing with all sampling enabled.
+    /// Creates a config for testing with all sampling enabled.
     pub fn for_test() -> Self {
         Self {
             enabled: true,
@@ -471,7 +471,7 @@ impl WideEventsConfig {
         }
     }
 
-    /// Validate wide events configuration.
+    /// Validates wide events configuration.
     ///
     /// # Errors
     ///
@@ -582,7 +582,7 @@ pub struct Config {
     /// Address to listen on for gRPC.
     ///
     /// Defaults to 127.0.0.1:50051 (localhost only) for security.
-    /// Set to 0.0.0.0:50051 or a specific IP to accept remote connections.
+    /// Sets to 0.0.0.0:50051 or a specific IP to accept remote connections.
     #[arg(long = "listen", env = "INFERADB__LEDGER__LISTEN", default_value = DEFAULT_LISTEN_ADDR)]
     #[builder(default = default_listen_addr())]
     pub listen_addr: SocketAddr,
@@ -623,7 +623,7 @@ pub struct Config {
     #[builder(skip)]
     pub single: bool,
 
-    /// Join an existing cluster (wait to be added via AdminService).
+    /// Joins an existing cluster (wait to be added via AdminService).
     /// Mutually exclusive with --single and --cluster.
     #[arg(long, group = "bootstrap_mode")]
     #[serde(skip)]
@@ -790,7 +790,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Create a configuration for testing.
+    /// Creates a configuration for testing.
     ///
     /// Uses single-node mode by default for simple test scenarios.
     /// Writes the given node_id to the data directory for deterministic,
@@ -812,7 +812,7 @@ impl Config {
         }
     }
 
-    /// Create a configuration for single-node deployments.
+    /// Creates a configuration for single-node deployments.
     ///
     /// Sets single-node mode for immediate bootstrap without coordination.
     /// Primarily for testing or development scenarios.
@@ -821,7 +821,7 @@ impl Config {
         Self { single: true, join: false, cluster: None, ..Self::default() }
     }
 
-    /// Get the effective bootstrap_expect value.
+    /// Returns the effective bootstrap_expect value.
     ///
     /// Computed from the bootstrap mode flags:
     /// - `--single` → 1
@@ -854,7 +854,7 @@ impl Config {
         self.data_dir.is_none()
     }
 
-    /// Resolve the data directory, creating an ephemeral one if needed.
+    /// Resolves the data directory, creating an ephemeral one if needed.
     ///
     /// If `data_dir` is configured, returns it directly. Otherwise, creates
     /// a unique temporary directory using a Snowflake ID for uniqueness.
@@ -882,7 +882,7 @@ impl Config {
         }
     }
 
-    /// Get the node ID for this server.
+    /// Returns the node ID for this server.
     ///
     /// Loads an existing node ID from `{data_dir}/node_id`, or generates a new
     /// Snowflake ID and persists it. The ID is reused across restarts to maintain
@@ -902,7 +902,7 @@ impl Config {
         })
     }
 
-    /// Validate the configuration.
+    /// Validates the configuration.
     ///
     /// Validates bootstrap mode settings and wide events configuration:
     /// - `--single`: Single-node deployment
@@ -1022,7 +1022,7 @@ pub enum ConfigAction {
     Example,
 }
 
-/// Generate JSON Schema for the runtime configuration.
+/// Generates JSON Schema for the runtime configuration.
 ///
 /// Uses schemars to derive the schema from `RuntimeConfig` and its
 /// nested types. All fields that derive `JsonSchema` are included.
@@ -1032,7 +1032,7 @@ pub fn generate_runtime_config_schema() -> String {
     serde_json::to_string_pretty(&schema).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
 }
 
-/// Generate a fully-commented example TOML configuration file.
+/// Generates a fully-commented example TOML configuration file.
 ///
 /// Serializes `RuntimeConfig::default()` to TOML and prepends each
 /// section with descriptive comments.

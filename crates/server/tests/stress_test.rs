@@ -80,7 +80,7 @@ struct StressConfig {
     max_concurrent_writes: usize,
     /// Maximum concurrent read requests (can be higher since reads are fast).
     max_concurrent_reads: usize,
-    /// Track write locations (namespace/vault) for multi-shard verification.
+    /// Tracks write locations (namespace/vault) for multi-shard verification.
     track_write_locations: bool,
 }
 
@@ -101,7 +101,7 @@ impl Default for StressConfig {
     }
 }
 
-/// Extract leader address from a forwarding error message.
+/// Extracts leader address from a forwarding error message.
 ///
 /// Error format varies - may have escaped or unescaped quotes:
 /// - Unescaped: addr: "127.0.0.1:50187"
@@ -151,9 +151,9 @@ struct StressMetrics {
     write_errors: AtomicU64,
     /// Total read errors.
     read_errors: AtomicU64,
-    /// Write latencies in microseconds.
+    /// Writes latencies in microseconds.
     write_latencies: Mutex<Vec<u64>>,
-    /// Read latencies in microseconds.
+    /// Reads latencies in microseconds.
     read_latencies: Mutex<Vec<u64>>,
     /// Values written (key -> value) for consistency verification.
     written_values: Mutex<HashMap<String, Vec<u8>>>,
@@ -292,7 +292,7 @@ impl StressMetrics {
         self.written_values.lock().insert(key, value);
     }
 
-    /// Record a write with its namespace/vault location for multi-shard verification.
+    /// Records a write with its namespace/vault location for multi-shard verification.
     fn record_write_with_location(
         &self,
         latency: Duration,
@@ -415,7 +415,7 @@ impl StressMetrics {
     }
 }
 
-/// Write worker that sends write requests to the leader.
+/// Writes worker that sends write requests to the leader.
 ///
 /// Uses `BatchWrite` RPC when batch_size > 1 to amortize Raft consensus overhead
 /// across multiple operations. This is the key to achieving high throughput.
@@ -695,7 +695,7 @@ async fn write_worker(
     }
 }
 
-/// Read worker that sends read requests to a node.
+/// Reads worker that sends read requests to a node.
 ///
 /// Uses BatchRead API when read_batch_size > 1 to amortize gRPC overhead.
 /// Connection pooling via tonic's keep-alive prevents reconnection overhead.
@@ -817,7 +817,7 @@ async fn read_worker(
     }
 }
 
-/// Verify consistency of written values by reading them back.
+/// Verifies consistency of written values by reading them back.
 async fn verify_consistency(
     leader_addr: SocketAddr,
     config: &StressConfig,
@@ -915,7 +915,7 @@ async fn verify_consistency(
     }
 }
 
-/// Verify consistency of written values across multiple shards.
+/// Verifies consistency of written values across multiple shards.
 ///
 /// Unlike single-shard verification, this reads from the correct namespace/vault
 /// for each key based on where it was written.

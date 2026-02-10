@@ -43,12 +43,12 @@ pub struct PageHeader {
 }
 
 impl PageHeader {
-    /// Create a new page header.
+    /// Creates a new page header.
     pub fn new(page_type: PageType, txn_id: u64) -> Self {
         Self { page_type, flags: 0, item_count: 0, checksum: 0, txn_id }
     }
 
-    /// Serialize header to bytes.
+    /// Serializes header to bytes.
     pub fn to_bytes(&self) -> [u8; PAGE_HEADER_SIZE] {
         let mut buf = [0u8; PAGE_HEADER_SIZE];
         buf[0] = self.page_type as u8;
@@ -59,7 +59,7 @@ impl PageHeader {
         buf
     }
 
-    /// Deserialize header from bytes.
+    /// Deserializes header from bytes.
     ///
     /// # Errors
     ///
@@ -92,7 +92,7 @@ pub struct Page {
 }
 
 impl Page {
-    /// Create a new empty page.
+    /// Creates a new empty page.
     pub fn new(id: PageId, page_size: usize, page_type: PageType, txn_id: u64) -> Self {
         let mut data = vec![0u8; page_size];
         let header = PageHeader::new(page_type, txn_id);
@@ -101,12 +101,12 @@ impl Page {
         Self { id, data, dirty: true }
     }
 
-    /// Create a page from raw bytes read from storage.
+    /// Creates a page from raw bytes read from storage.
     pub fn from_bytes(id: PageId, data: Vec<u8>) -> Self {
         Self { id, data, dirty: false }
     }
 
-    /// Get the page header.
+    /// Returns the page header.
     ///
     /// # Errors
     ///
@@ -115,7 +115,7 @@ impl Page {
         PageHeader::from_bytes(&self.data)
     }
 
-    /// Get the page type.
+    /// Returns the page type.
     ///
     /// # Errors
     ///
@@ -124,7 +124,7 @@ impl Page {
         Ok(self.header()?.page_type)
     }
 
-    /// Get the item count.
+    /// Returns the item count.
     ///
     /// # Errors
     ///
@@ -133,24 +133,24 @@ impl Page {
         Ok(self.header()?.item_count)
     }
 
-    /// Set the item count.
+    /// Sets the item count.
     pub fn set_item_count(&mut self, count: u16) {
         self.data[2..4].copy_from_slice(&count.to_le_bytes());
         self.dirty = true;
     }
 
-    /// Get the content portion of the page (after header).
+    /// Returns the content portion of the page (after header).
     pub fn content(&self) -> &[u8] {
         &self.data[PAGE_HEADER_SIZE..]
     }
 
-    /// Get mutable content portion.
+    /// Returns mutable content portion.
     pub fn content_mut(&mut self) -> &mut [u8] {
         self.dirty = true;
         &mut self.data[PAGE_HEADER_SIZE..]
     }
 
-    /// Compute and update the checksum using XXH3-64 (truncated to 32 bits).
+    /// Computes and update the checksum using XXH3-64 (truncated to 32 bits).
     ///
     /// Uses XXH3-64 for better hash quality and performance on modern CPUs,
     /// truncated to 32 bits to maintain format compatibility with existing pages.
@@ -161,7 +161,7 @@ impl Page {
         self.data[4..8].copy_from_slice(&checksum.to_le_bytes());
     }
 
-    /// Verify the page checksum using XXH3-64 (truncated to 32 bits).
+    /// Verifies the page checksum using XXH3-64 (truncated to 32 bits).
     pub fn verify_checksum(&self) -> bool {
         let stored_checksum = u32::from_le_bytes(self.data[4..8].try_into().unwrap());
         let hash64 = xxhash_rust::xxh3::xxh3_64(&self.data[PAGE_HEADER_SIZE..]);
@@ -169,12 +169,12 @@ impl Page {
         stored_checksum == computed_checksum
     }
 
-    /// Get the page size.
+    /// Returns the page size.
     pub fn size(&self) -> usize {
         self.data.len()
     }
 
-    /// Get the usable content size (total size minus header).
+    /// Returns the usable content size (total size minus header).
     pub fn content_size(&self) -> usize {
         self.data.len() - PAGE_HEADER_SIZE
     }

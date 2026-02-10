@@ -90,7 +90,7 @@ pub struct CreateOrgInput {
     pub existing_user_id: Option<UserId>,
 }
 
-/// Create Organization saga record.
+/// Creates Organization saga record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrgSaga {
     /// Unique saga identifier.
@@ -110,7 +110,7 @@ pub struct CreateOrgSaga {
 }
 
 impl CreateOrgSaga {
-    /// Create a new saga in Pending state.
+    /// Creates a new saga in Pending state.
     pub fn new(id: SagaId, input: CreateOrgInput) -> Self {
         let now = Utc::now();
         Self {
@@ -124,7 +124,7 @@ impl CreateOrgSaga {
         }
     }
 
-    /// Check if the saga is complete (success or permanently failed).
+    /// Checks if the saga is complete (success or permanently failed).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.state,
@@ -134,7 +134,7 @@ impl CreateOrgSaga {
         )
     }
 
-    /// Check if the saga is ready for retry.
+    /// Checks if the saga is ready for retry.
     pub fn is_ready_for_retry(&self) -> bool {
         if self.is_terminal() {
             return false;
@@ -145,14 +145,14 @@ impl CreateOrgSaga {
         }
     }
 
-    /// Calculate next backoff duration using exponential backoff.
+    /// Calculates next backoff duration using exponential backoff.
     pub fn next_backoff(&self) -> Duration {
         let base = Duration::from_secs(1);
         let backoff = base * 2u32.saturating_pow(self.retries as u32);
         std::cmp::min(backoff, MAX_BACKOFF)
     }
 
-    /// Increment retry count and set next retry time.
+    /// Increments retry count and set next retry time.
     pub fn schedule_retry(&mut self) {
         self.retries = self.retries.saturating_add(1);
         let backoff = self.next_backoff();
@@ -168,7 +168,7 @@ impl CreateOrgSaga {
         self.next_retry_at = None; // Clear retry on successful transition
     }
 
-    /// Mark as failed with error.
+    /// Marks as failed with error.
     ///
     /// After MAX_RETRIES failures, transitions to terminal Failed state.
     pub fn fail(&mut self, step: u8, error: String) {
@@ -227,11 +227,11 @@ pub enum DeleteUserSagaState {
 pub struct DeleteUserInput {
     /// User to delete.
     pub user_id: UserId,
-    /// List of namespace IDs where user has memberships.
+    /// Lists of namespace IDs where user has memberships.
     pub namespace_ids: Vec<NamespaceId>,
 }
 
-/// Delete User saga record.
+/// Deletes User saga record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteUserSaga {
     /// Unique saga identifier.
@@ -251,7 +251,7 @@ pub struct DeleteUserSaga {
 }
 
 impl DeleteUserSaga {
-    /// Create a new saga in Pending state.
+    /// Creates a new saga in Pending state.
     pub fn new(id: SagaId, input: DeleteUserInput) -> Self {
         let now = Utc::now();
         Self {
@@ -265,7 +265,7 @@ impl DeleteUserSaga {
         }
     }
 
-    /// Check if the saga is complete.
+    /// Checks if the saga is complete.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.state,
@@ -273,7 +273,7 @@ impl DeleteUserSaga {
         )
     }
 
-    /// Check if ready for retry.
+    /// Checks if ready for retry.
     pub fn is_ready_for_retry(&self) -> bool {
         if self.is_terminal() {
             return false;
@@ -284,14 +284,14 @@ impl DeleteUserSaga {
         }
     }
 
-    /// Calculate next backoff.
+    /// Calculates next backoff.
     pub fn next_backoff(&self) -> Duration {
         let base = Duration::from_secs(1);
         let backoff = base * 2u32.saturating_pow(self.retries as u32);
         std::cmp::min(backoff, MAX_BACKOFF)
     }
 
-    /// Schedule retry.
+    /// Schedules retry.
     pub fn schedule_retry(&mut self) {
         self.retries = self.retries.saturating_add(1);
         let backoff = self.next_backoff();
@@ -307,7 +307,7 @@ impl DeleteUserSaga {
         self.next_retry_at = None;
     }
 
-    /// Mark as failed with error.
+    /// Marks as failed with error.
     ///
     /// After MAX_RETRIES failures, transitions to terminal Failed state.
     pub fn fail(&mut self, step: u8, error: String) {
@@ -331,23 +331,23 @@ impl DeleteUserSaga {
 /// Type of saga.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SagaType {
-    /// Create organization saga.
+    /// Creates organization saga.
     CreateOrg,
-    /// Delete user saga.
+    /// Deletes user saga.
     DeleteUser,
 }
 
 /// Generic saga record that wraps specific saga types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Saga {
-    /// Create organization saga.
+    /// Creates organization saga.
     CreateOrg(CreateOrgSaga),
-    /// Delete user saga.
+    /// Deletes user saga.
     DeleteUser(DeleteUserSaga),
 }
 
 impl Saga {
-    /// Get the saga ID.
+    /// Returns the saga ID.
     pub fn id(&self) -> &str {
         match self {
             Saga::CreateOrg(s) => &s.id,
@@ -355,7 +355,7 @@ impl Saga {
         }
     }
 
-    /// Get the saga type.
+    /// Returns the saga type.
     pub fn saga_type(&self) -> SagaType {
         match self {
             Saga::CreateOrg(_) => SagaType::CreateOrg,
@@ -363,7 +363,7 @@ impl Saga {
         }
     }
 
-    /// Check if the saga is in a terminal state.
+    /// Checks if the saga is in a terminal state.
     pub fn is_terminal(&self) -> bool {
         match self {
             Saga::CreateOrg(s) => s.is_terminal(),
@@ -371,7 +371,7 @@ impl Saga {
         }
     }
 
-    /// Check if the saga is ready for retry.
+    /// Checks if the saga is ready for retry.
     pub fn is_ready_for_retry(&self) -> bool {
         match self {
             Saga::CreateOrg(s) => s.is_ready_for_retry(),
@@ -379,7 +379,7 @@ impl Saga {
         }
     }
 
-    /// Get created_at timestamp.
+    /// Returns created_at timestamp.
     pub fn created_at(&self) -> DateTime<Utc> {
         match self {
             Saga::CreateOrg(s) => s.created_at,
@@ -387,7 +387,7 @@ impl Saga {
         }
     }
 
-    /// Get updated_at timestamp.
+    /// Returns updated_at timestamp.
     pub fn updated_at(&self) -> DateTime<Utc> {
         match self {
             Saga::CreateOrg(s) => s.updated_at,
@@ -395,7 +395,7 @@ impl Saga {
         }
     }
 
-    /// Get retry count.
+    /// Returns retry count.
     pub fn retries(&self) -> u8 {
         match self {
             Saga::CreateOrg(s) => s.retries,
@@ -403,12 +403,12 @@ impl Saga {
         }
     }
 
-    /// Serialize to JSON bytes.
+    /// Serializes to JSON bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }
 
-    /// Deserialize from JSON bytes.
+    /// Deserializes from JSON bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
     }

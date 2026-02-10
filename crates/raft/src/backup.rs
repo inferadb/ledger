@@ -154,7 +154,7 @@ pub struct BackupManager {
 }
 
 impl BackupManager {
-    /// Create a new backup manager.
+    /// Creates a new backup manager.
     ///
     /// # Errors
     ///
@@ -167,7 +167,7 @@ impl BackupManager {
         Ok(Self { backup_dir, retention_count: config.retention_count })
     }
 
-    /// Create a backup from the given snapshot.
+    /// Creates a backup from the given snapshot.
     ///
     /// Writes the snapshot to the backup directory and creates a metadata sidecar.
     /// Returns the backup metadata. Old backups are pruned according to the
@@ -269,7 +269,7 @@ impl BackupManager {
         Ok(backups)
     }
 
-    /// Load a backup snapshot by backup ID.
+    /// Loads a backup snapshot by backup ID.
     ///
     /// Reads the backup file and verifies its integrity (checksum validation
     /// is performed by `Snapshot::read_from_file`).
@@ -288,7 +288,7 @@ impl BackupManager {
         Snapshot::read_from_file(&backup_path).context(SnapshotSnafu)
     }
 
-    /// Get metadata for a specific backup.
+    /// Returns metadata for a specific backup.
     ///
     /// # Errors
     ///
@@ -337,7 +337,7 @@ impl BackupManager {
         Ok(())
     }
 
-    /// Get the backup directory path.
+    /// Returns the backup directory path.
     pub fn backup_dir(&self) -> &Path {
         &self.backup_dir
     }
@@ -353,7 +353,7 @@ const PAGE_BACKUP_VERSION: u32 = 1;
 const PAGE_BACKUP_EXT: &str = ".pagebackup";
 
 impl BackupManager {
-    /// Create an incremental page-level backup containing only dirty pages.
+    /// Creates an incremental page-level backup containing only dirty pages.
     ///
     /// The base backup must exist and be a full backup. The incremental file
     /// contains a header followed by `(page_id, page_data)` entries for each
@@ -449,7 +449,7 @@ impl BackupManager {
         Ok(metadata)
     }
 
-    /// Encode page data into the page-level backup binary format.
+    /// Encodes page data into the page-level backup binary format.
     ///
     /// Format:
     /// ```text
@@ -508,7 +508,7 @@ impl BackupManager {
         buf
     }
 
-    /// Decode a page-level backup file, verifying its checksum.
+    /// Decodes a page-level backup file, verifying its checksum.
     ///
     /// Returns the decoded header and page entries.
     ///
@@ -547,7 +547,7 @@ impl BackupManager {
         Self::decode_page_backup(data)
     }
 
-    /// Decode page backup binary data (without the trailing checksum).
+    /// Decodes page backup binary data (without the trailing checksum).
     fn decode_page_backup(data: &[u8]) -> Result<PageBackupData> {
         let mut pos = 0;
 
@@ -638,7 +638,7 @@ impl BackupManager {
         Ok(PageBackupData { shard_height, page_size, table_roots, base_backup_id, pages })
     }
 
-    /// Resolve the full backup chain for a given backup ID.
+    /// Resolves the full backup chain for a given backup ID.
     ///
     /// For a full backup, returns just that ID. For an incremental backup,
     /// walks the `base_backup_id` chain back to the full backup and returns
@@ -741,7 +741,7 @@ impl BackupManager {
         Ok(last_height)
     }
 
-    /// Create a full page-level backup of the entire database.
+    /// Creates a full page-level backup of the entire database.
     ///
     /// Exports all live (non-free, non-zero) pages into the page backup format.
     /// After a successful backup, the caller should clear the database's dirty
@@ -839,7 +839,7 @@ pub fn record_backup_created(shard_height: u64, size_bytes: u64) {
     metrics::gauge!("ledger_backup_last_size_bytes").set(size_bytes as f64);
 }
 
-/// Record a backup failure.
+/// Records a backup failure.
 pub fn record_backup_failed() {
     metrics::counter!("ledger_backup_failures_total").increment(1);
 }
@@ -869,7 +869,7 @@ pub struct BackupJob {
 }
 
 impl BackupJob {
-    /// Start the backup job as a background task.
+    /// Starts the backup job as a background task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = interval(self.interval);

@@ -96,7 +96,7 @@ pub struct WriteProof {
     pub tx_proof: proto::MerkleProof,
 }
 
-/// Generate a write proof by fetching the committed block from the archive.
+/// Generates a write proof by fetching the committed block from the archive.
 ///
 /// This is the main entry point for proof generation after a write commits.
 /// It fetches the block, extracts the vault entry, and generates proofs.
@@ -166,7 +166,7 @@ pub fn generate_write_proof(
 // Low-Level Proof Utilities
 // ============================================================================
 
-/// Generate a merkle proof for a transaction at the given index.
+/// Generates a merkle proof for a transaction at the given index.
 ///
 /// Returns `None` if the index is out of bounds or the transaction list is empty.
 pub fn generate_tx_proof(
@@ -187,7 +187,7 @@ pub fn generate_tx_proof(
     Some((&internal_proof).into())
 }
 
-/// Generate a merkle proof for a transaction by its ID.
+/// Generates a merkle proof for a transaction by its ID.
 ///
 /// Searches the transaction list for a matching ID and generates a proof.
 /// Returns `None` if the transaction is not found.
@@ -205,7 +205,7 @@ pub fn generate_tx_proof_by_id(
 
 use inferadb_ledger_types::{bucket_id, sha256_concat};
 
-/// Generate a state proof for an entity.
+/// Generates a state proof for an entity.
 ///
 /// State proofs allow clients to verify entity existence against the state_root
 /// without trusting the server. Unlike Merkle proofs, state proofs require
@@ -272,7 +272,7 @@ pub enum StateProofVerification {
     ),
 }
 
-/// Verify a state proof against an expected state root.
+/// Verifies a state proof against an expected state root.
 ///
 /// This performs client-side verification of a state proof:
 /// 1. Verify `bucket_id == seahash(key) % 256`

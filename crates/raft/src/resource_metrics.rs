@@ -50,7 +50,7 @@ pub struct ResourceMetricsCollector<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
-    /// Run a single collection cycle.
+    /// Runs a single collection cycle.
     fn collect(&self) {
         self.collect_disk_metrics();
         self.collect_database_metrics();
@@ -105,7 +105,7 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
         }
     }
 
-    /// Start the background collection task.
+    /// Starts the background collection task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
@@ -129,7 +129,7 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
     }
 }
 
-/// Get disk space (total bytes, free bytes) for the filesystem containing `path`.
+/// Returns disk space (total bytes, free bytes) for the filesystem containing `path`.
 ///
 /// Uses `fs2` for safe, cross-platform filesystem space queries.
 fn disk_space(path: &Path) -> Option<(u64, u64)> {

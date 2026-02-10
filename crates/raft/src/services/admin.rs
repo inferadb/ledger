@@ -96,28 +96,28 @@ pub struct AdminServiceImpl {
 }
 
 impl AdminServiceImpl {
-    /// Add audit logger for compliance event tracking.
+    /// Adds audit logger for compliance event tracking.
     #[must_use]
     pub fn with_audit_logger(mut self, logger: Arc<dyn crate::audit::AuditLogger>) -> Self {
         self.audit_logger = Some(logger);
         self
     }
 
-    /// Set input validation configuration for request field limits.
+    /// Sets input validation configuration for request field limits.
     #[must_use]
     pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
         self.validation_config = config;
         self
     }
 
-    /// Set the maximum time to wait for Raft proposals.
+    /// Sets the maximum time to wait for Raft proposals.
     #[must_use]
     pub fn with_proposal_timeout(mut self, timeout: Duration) -> Self {
         self.proposal_timeout = timeout;
         self
     }
 
-    /// Set the runtime configuration handle for hot-reloadable settings.
+    /// Sets the runtime configuration handle for hot-reloadable settings.
     #[must_use]
     pub fn with_runtime_config(
         mut self,
@@ -131,7 +131,7 @@ impl AdminServiceImpl {
         self
     }
 
-    /// Set the backup manager and snapshot manager for backup/restore operations.
+    /// Sets the backup manager and snapshot manager for backup/restore operations.
     #[must_use]
     pub fn with_backup(
         mut self,
@@ -143,14 +143,14 @@ impl AdminServiceImpl {
         self
     }
 
-    /// Set the per-namespace resource quota checker.
+    /// Sets the per-namespace resource quota checker.
     #[must_use]
     pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
         self.quota_checker = Some(checker);
         self
     }
 
-    /// Build an audit event for an admin operation.
+    /// Builds an audit event for an admin operation.
     fn build_audit_event(
         &self,
         action: AuditAction,
@@ -170,7 +170,7 @@ impl AdminServiceImpl {
         )
     }
 
-    /// Emit an audit event and record the corresponding Prometheus metric.
+    /// Emits an audit event and record the corresponding Prometheus metric.
     fn emit_audit_event(&self, event: &AuditEvent) {
         super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
     }
@@ -1633,7 +1633,7 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
-    /// Get node information for pre-bootstrap coordination.
+    /// Returns node information for pre-bootstrap coordination.
     ///
     /// Returns the node's identity information including Snowflake ID, address,
     /// cluster membership status, and current Raft term. This RPC is available
@@ -2694,7 +2694,7 @@ impl AdminService for AdminServiceImpl {
     }
 }
 
-/// Compute the hash of a vault block entry for chain verification.
+/// Computes the hash of a vault block entry for chain verification.
 ///
 /// The vault block hash commits to all content: height, previous hash,
 /// transactions (via tx_merkle_root), and state root.

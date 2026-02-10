@@ -415,7 +415,11 @@ impl Default for HealthCheckConfig {
 }
 
 impl HealthCheckConfig {
-    /// Validate an existing config (e.g., after deserialization).
+    /// Validates an existing config (e.g., after deserialization).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is zero.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.dependency_check_timeout_secs == 0 {
             return Err(ConfigError::Validation {

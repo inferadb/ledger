@@ -47,12 +47,12 @@ pub struct GrpcRaftNetwork {
 }
 
 impl GrpcRaftNetwork {
-    /// Create a new gRPC Raft network.
+    /// Creates a new gRPC Raft network.
     pub fn new() -> Self {
         Self { clients: Arc::new(RwLock::new(HashMap::new())) }
     }
 
-    /// Get or create a client connection to a peer node.
+    /// Returns or create a client connection to a peer node.
     async fn get_client(
         &self,
         target: LedgerNodeId,
@@ -89,12 +89,12 @@ pub struct GrpcRaftNetworkFactory {
 }
 
 impl GrpcRaftNetworkFactory {
-    /// Create a new network factory.
+    /// Creates a new network factory.
     pub fn new() -> Self {
         Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs: true }
     }
 
-    /// Create a new network factory with trace context injection configured.
+    /// Creates a new network factory with trace context injection configured.
     pub fn with_trace_config(trace_raft_rpcs: bool) -> Self {
         Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs }
     }
@@ -129,7 +129,7 @@ pub struct GrpcRaftNetworkConnection {
 }
 
 impl GrpcRaftNetworkConnection {
-    /// Create a gRPC request with optional trace context injection.
+    /// Creates a gRPC request with optional trace context injection.
     fn make_request<T>(&self, message: T) -> Request<T> {
         let mut request = Request::new(message);
         if self.trace_raft_rpcs {

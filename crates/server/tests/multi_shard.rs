@@ -19,7 +19,7 @@ use common::{MultiShardTestCluster, create_admin_client, create_read_client, cre
 // Test Helpers
 // ============================================================================
 
-/// Create a namespace on a multi-shard cluster and return its ID.
+/// Creates a namespace on a multi-shard cluster and return its ID.
 async fn create_namespace(
     addr: std::net::SocketAddr,
     name: &str,
@@ -39,7 +39,7 @@ async fn create_namespace(
     Ok(namespace_id)
 }
 
-/// Create a vault in a namespace and return its ID.
+/// Creates a vault in a namespace and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -58,7 +58,7 @@ async fn create_vault(
     Ok(vault_id)
 }
 
-/// Write an entity and return the block height.
+/// Writes an entity and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -100,7 +100,7 @@ async fn write_entity(
     }
 }
 
-/// Read an entity from a vault.
+/// Reads an entity from a vault.
 async fn read_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -124,7 +124,7 @@ async fn read_entity(
 // Multi-Shard Integration Tests
 // ============================================================================
 
-/// Test that writes to a namespace are routed to the correct shard and readable.
+/// Tests that writes to a namespace are routed to the correct shard and readable.
 ///
 /// Exercises the full write→route→Raft→apply→read path through gRPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -151,7 +151,7 @@ async fn test_multi_shard_write_and_read() {
     assert_eq!(value, Some(b"value1".to_vec()), "should read back written value");
 }
 
-/// Test that multiple namespaces on different shards are isolated.
+/// Tests that multiple namespaces on different shards are isolated.
 ///
 /// Writes to namespace A should not be visible in namespace B, even if both
 /// are served by the same node.
@@ -186,7 +186,7 @@ async fn test_multi_shard_namespace_isolation() {
     assert_eq!(val_b, Some(b"value-b".to_vec()), "ns B should have its own value");
 }
 
-/// Test batch writes through the multi-shard service.
+/// Tests batch writes through the multi-shard service.
 ///
 /// Verifies that BatchWrite routes correctly and applies atomically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -259,7 +259,7 @@ async fn test_multi_shard_batch_write() {
     assert_eq!(val2, Some(b"batch-val-2".to_vec()), "second batch key should be readable");
 }
 
-/// Test idempotency across multi-shard writes.
+/// Tests idempotency across multi-shard writes.
 ///
 /// Same client_id + idempotency_key should return cached result on retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -318,7 +318,7 @@ async fn test_multi_shard_write_idempotency() {
     }
 }
 
-/// Test that writes to a non-existent namespace return an appropriate error.
+/// Tests that writes to a non-existent namespace return an appropriate error.
 ///
 /// The multi-shard service should reject writes for namespaces that haven't
 /// been created, rather than silently dropping them or panicking.
@@ -386,7 +386,7 @@ async fn test_multi_shard_write_nonexistent_namespace() {
     }
 }
 
-/// Test concurrent writes to multiple namespaces across shards.
+/// Tests concurrent writes to multiple namespaces across shards.
 ///
 /// Verifies that writes to different namespaces can proceed in parallel
 /// without interfering with each other.

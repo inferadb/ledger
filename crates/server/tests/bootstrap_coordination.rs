@@ -20,7 +20,7 @@ use inferadb_ledger_server::{
 use inferadb_ledger_test_utils::TestDir;
 use serial_test::serial;
 
-/// Test single-node bootstrap with `bootstrap_expect=1`.
+/// Tests single-node bootstrap with `bootstrap_expect=1`.
 ///
 /// Verifies that a single node can bootstrap immediately when configured
 /// with `bootstrap_expect=1`.
@@ -81,7 +81,7 @@ async fn test_single_node_bootstrap() {
     server_handle.abort();
 }
 
-/// Test node restart preserves ID and rejoins cluster.
+/// Tests node restart preserves ID and rejoins cluster.
 ///
 /// Verifies that when a node restarts:
 /// 1. It loads the existing Snowflake ID from disk
@@ -183,7 +183,7 @@ async fn test_node_restart_preserves_id() {
     assert_eq!(first_id, second_id, "node ID should be preserved across restarts");
 }
 
-/// Test that load_or_generate_node_id generates unique IDs.
+/// Tests that load_or_generate_node_id generates unique IDs.
 ///
 /// This is a unit test placed here because it verifies the behavior
 /// that enables coordinated bootstrap (earlier nodes get lower IDs).
@@ -205,7 +205,7 @@ async fn test_snowflake_ids_are_time_ordered_across_nodes() {
     assert!(id2 > id1, "ID generated later should be higher: {} vs {}", id1, id2);
 }
 
-/// Test that the TestCluster properly uses coordinated bootstrap.
+/// Tests that the TestCluster properly uses coordinated bootstrap.
 ///
 /// This verifies that the existing test infrastructure works correctly
 /// with the coordinated bootstrap system.
@@ -243,7 +243,7 @@ async fn test_three_node_cluster_uses_coordinated_bootstrap() {
     }
 }
 
-/// Test that late joiner detects existing cluster via is_cluster_member.
+/// Tests that late joiner detects existing cluster via is_cluster_member.
 ///
 /// When a node starts and discovers peers that are already cluster members,
 /// it should return JoinExisting decision (via is_cluster_member=true).
@@ -325,7 +325,7 @@ async fn test_late_joiner_finds_existing_cluster() {
     leader_handle.abort();
 }
 
-/// Test join mode (bootstrap_expect=0) starts without bootstrapping.
+/// Tests join mode (bootstrap_expect=0) starts without bootstrapping.
 ///
 /// Verifies that a node with bootstrap_expect=0 starts successfully but
 /// does not initialize a Raft cluster - it waits to be added via AdminService.

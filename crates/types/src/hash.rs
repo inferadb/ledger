@@ -26,7 +26,7 @@ pub const EMPTY_HASH: Hash = [
 /// Used ONLY for genesis block previous_hash per DESIGN.md line 710.
 pub const ZERO_HASH: Hash = [0u8; 32];
 
-/// Compute SHA-256 hash of arbitrary data.
+/// Computes SHA-256 hash of arbitrary data.
 #[inline]
 pub fn sha256(data: &[u8]) -> Hash {
     let mut hasher = Sha256::new();
@@ -34,7 +34,7 @@ pub fn sha256(data: &[u8]) -> Hash {
     hasher.finalize().into()
 }
 
-/// Compute SHA-256 hash by concatenating multiple hash inputs.
+/// Computes SHA-256 hash by concatenating multiple hash inputs.
 ///
 /// Used for state root computation: SHA-256(bucket_root\[0\] || ... || bucket_root\[255\]).
 pub fn sha256_concat(hashes: &[Hash]) -> Hash {
@@ -54,7 +54,7 @@ pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
     a.ct_eq(b).into()
 }
 
-/// Compute block header hash per DESIGN.md fixed 148-byte encoding.
+/// Computes block header hash per DESIGN.md fixed 148-byte encoding.
 ///
 /// Encoding layout (DESIGN.md lines 695-708):
 /// - height: 8 bytes (u64 BE)
@@ -119,7 +119,7 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
     sha256(&buf)
 }
 
-/// Compute transaction hash per DESIGN.md canonical binary encoding.
+/// Computes transaction hash per DESIGN.md canonical binary encoding.
 ///
 /// Encoding includes:
 /// - id: 16 bytes
@@ -239,12 +239,12 @@ pub struct BucketHasher {
 }
 
 impl BucketHasher {
-    /// Create a new bucket hasher.
+    /// Creates a new bucket hasher.
     pub fn new() -> Self {
         Self { hasher: Sha256::new(), has_entries: false }
     }
 
-    /// Add an entity to the bucket hash.
+    /// Adds an entity to the bucket hash.
     ///
     /// Per DESIGN.md lines 803-815:
     /// - key_len: u32 LE
@@ -270,7 +270,7 @@ impl BucketHasher {
         self.hasher.update(entity.version.to_be_bytes());
     }
 
-    /// Finalize and return the bucket root hash.
+    /// Finalizes and return the bucket root hash.
     ///
     /// Returns EMPTY_HASH for empty buckets per DESIGN.md line 660.
     pub fn finalize(self) -> Hash {
@@ -284,7 +284,7 @@ impl Default for BucketHasher {
     }
 }
 
-/// Assign a key to a bucket using seahash.
+/// Assigns a key to a bucket using seahash.
 ///
 /// Per DESIGN.md: bucket_id = seahash(key) % 256
 #[inline]
@@ -292,7 +292,7 @@ pub fn bucket_id(key: &[u8]) -> u8 {
     (seahash::hash(key) % 256) as u8
 }
 
-/// Compute the Merkle root of a list of transactions.
+/// Computes the Merkle root of a list of transactions.
 ///
 /// Per DESIGN.md: binary merkle tree where each leaf is SHA-256(tx).
 /// Returns EMPTY_HASH for an empty transaction list.
@@ -308,7 +308,7 @@ pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
     crate::merkle::merkle_root(&leaves)
 }
 
-/// Compute a deterministic hash for a vault entry's cryptographic commitments.
+/// Computes a deterministic hash for a vault entry's cryptographic commitments.
 ///
 /// This hash is used to identify a vault entry across all Raft nodes.
 /// It uses only deterministic fields that are identical on all nodes:
@@ -344,7 +344,7 @@ pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
     hasher.finalize().into()
 }
 
-/// Compute a ChainCommitment for a range of blocks.
+/// Computes a ChainCommitment for a range of blocks.
 ///
 /// Per DESIGN.md §4.4: Proves snapshot's lineage without requiring full block replay.
 /// - `accumulated_header_hash`: Sequential hash chain of all block headers

@@ -26,7 +26,7 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Create a namespace and return its ID.
+/// Creates a namespace and return its ID.
 async fn create_namespace(
     addr: std::net::SocketAddr,
     name: &str,
@@ -46,7 +46,7 @@ async fn create_namespace(
     Ok(namespace_id)
 }
 
-/// Create a vault in a namespace and return its ID.
+/// Creates a vault in a namespace and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -66,7 +66,7 @@ async fn create_vault(
     Ok(vault_id)
 }
 
-/// Write a key-value pair to a vault.
+/// Writes a key-value pair to a vault.
 async fn write_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -108,7 +108,7 @@ async fn write_entity(
     }
 }
 
-/// Read an entity from a vault.
+/// Reads an entity from a vault.
 async fn read_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -132,7 +132,7 @@ async fn read_entity(
 // Vault Isolation Tests
 // ============================================================================
 
-/// Test that data written to one vault cannot be read from another vault.
+/// Tests that data written to one vault cannot be read from another vault.
 ///
 /// This is the fundamental isolation guarantee: each vault is a separate
 /// data container with its own independent key space.
@@ -178,7 +178,7 @@ async fn test_vault_isolation_same_namespace() {
     assert_eq!(value_b, b"value-from-vault-b", "Vault B should have its own value");
 }
 
-/// Test that data in vault A is not visible when reading from vault B.
+/// Tests that data in vault A is not visible when reading from vault B.
 #[serial]
 #[tokio::test]
 async fn test_vault_isolation_key_not_found() {
@@ -206,7 +206,7 @@ async fn test_vault_isolation_key_not_found() {
     assert!(value.is_none(), "Key from vault A should NOT be visible in vault B");
 }
 
-/// Test isolation with multiple keys across multiple vaults.
+/// Tests isolation with multiple keys across multiple vaults.
 #[serial]
 #[tokio::test]
 async fn test_multi_vault_isolation() {
@@ -258,7 +258,7 @@ async fn test_multi_vault_isolation() {
 // Namespace Isolation Tests
 // ============================================================================
 
-/// Test that vaults in different namespaces are isolated.
+/// Tests that vaults in different namespaces are isolated.
 ///
 /// Even though vault IDs are globally unique, namespaces provide an
 /// organizational boundary. This test verifies the isolation model.
@@ -307,7 +307,7 @@ async fn test_namespace_isolation() {
     assert_eq!(value_2, b"beta-data");
 }
 
-/// Test behavior when accessing a vault with a mismatched namespace_id.
+/// Tests behavior when accessing a vault with a mismatched namespace_id.
 ///
 /// DESIGN NOTE: Since vault_ids are globally unique (generated from a global
 /// sequence counter), the vault_id alone is sufficient to identify data.
@@ -374,7 +374,7 @@ async fn test_vault_id_is_authoritative_identifier() {
 // Concurrent Access Tests
 // ============================================================================
 
-/// Test concurrent writes to different vaults are isolated.
+/// Tests concurrent writes to different vaults are isolated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_vault_writes() {
     let cluster = TestCluster::new(1).await;
@@ -450,7 +450,7 @@ async fn test_concurrent_vault_writes() {
 // Vault ID Uniqueness Tests
 // ============================================================================
 
-/// Verify that vault IDs are monotonically increasing and globally unique.
+/// Verifies that vault IDs are monotonically increasing and globally unique.
 #[serial]
 #[tokio::test]
 async fn test_vault_id_global_uniqueness() {
@@ -505,7 +505,7 @@ async fn test_vault_id_global_uniqueness() {
 // Multi-Node Isolation Tests
 // ============================================================================
 
-/// Test that vault isolation is maintained across cluster replication.
+/// Tests that vault isolation is maintained across cluster replication.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_isolation_across_replicas() {
     let cluster = TestCluster::new(3).await;
@@ -552,7 +552,7 @@ async fn test_isolation_across_replicas() {
 // Edge Cases
 // ============================================================================
 
-/// Test that empty vaults are properly isolated (no data leakage).
+/// Tests that empty vaults are properly isolated (no data leakage).
 #[serial]
 #[tokio::test]
 async fn test_empty_vault_isolation() {
@@ -579,7 +579,7 @@ async fn test_empty_vault_isolation() {
     assert!(value.is_none(), "Empty vault B should have no data from A");
 }
 
-/// Test that deletion in one vault doesn't affect another.
+/// Tests that deletion in one vault doesn't affect another.
 #[serial]
 #[tokio::test]
 async fn test_deletion_isolation() {

@@ -2139,7 +2139,7 @@ mod tests {
     // - Floating point operations that vary by platform
     // - Any external I/O that could vary between nodes
 
-    /// Verify same input sequence produces identical outputs on independent state machines.
+    /// Verifies same input sequence produces identical outputs on independent state machines.
     ///
     /// This is the fundamental Raft invariant: if two nodes apply the same log entries
     /// in the same order, they MUST produce identical state.
@@ -2245,7 +2245,7 @@ mod tests {
         );
     }
 
-    /// Verify ID generation is deterministic across state machines.
+    /// Verifies ID generation is deterministic across state machines.
     ///
     /// IDs are assigned by the leader during log application. All nodes must
     /// generate the same IDs for the same sequence of requests.
@@ -2291,7 +2291,7 @@ mod tests {
         assert_eq!(user_id_a2, user_id_b2, "Second user ID must match");
     }
 
-    /// Verify block hashes are deterministic.
+    /// Verifies block hashes are deterministic.
     ///
     /// The same (namespace, vault, height) must always produce the same block hash.
     #[tokio::test]
@@ -2315,7 +2315,7 @@ mod tests {
         assert_ne!(hash_a, hash_c, "Different inputs should produce different hashes");
     }
 
-    /// Verify vault height tracking is deterministic.
+    /// Verifies vault height tracking is deterministic.
     ///
     /// Writes to the same vault must increment height consistently across nodes.
     #[tokio::test]
@@ -2364,7 +2364,7 @@ mod tests {
         );
     }
 
-    /// Verify interleaved operations across multiple vaults are deterministic.
+    /// Verifies interleaved operations across multiple vaults are deterministic.
     ///
     /// Real workloads have writes to multiple vaults interleaved. The state
     /// machine must handle this deterministically.
@@ -2449,7 +2449,7 @@ mod tests {
         assert_eq!(state_a.vault_heights, state_b.vault_heights);
     }
 
-    /// Verify state can be serialized and deserialized deterministically.
+    /// Verifies state can be serialized and deserialized deterministically.
     ///
     /// Snapshots must serialize to the same bytes on all nodes for the same state.
     #[tokio::test]
@@ -2480,7 +2480,7 @@ mod tests {
         assert_eq!(restored_a.vault_heights, restored_b.vault_heights);
     }
 
-    /// Verify that sequence counters start at well-defined values.
+    /// Verifies that sequence counters start at well-defined values.
     ///
     /// All nodes must start with the same initial counter values.
     #[test]

@@ -29,7 +29,7 @@ use crate::{
 // IP Address Validation
 // =============================================================================
 
-/// Check if an IPv4 address is a private/internal address.
+/// Checks if an IPv4 address is a private/internal address.
 ///
 /// Private ranges per RFC 1918:
 /// - 10.0.0.0/8 (Class A)
@@ -70,7 +70,7 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     false
 }
 
-/// Check if an IPv6 address is a private/internal address.
+/// Checks if an IPv6 address is a private/internal address.
 ///
 /// Private ranges:
 /// - fd00::/8 (Unique Local Addresses - typical for WireGuard)
@@ -108,7 +108,7 @@ fn is_private_ipv6(ip: Ipv6Addr) -> bool {
     false
 }
 
-/// Validate that an IP address string is a private/WireGuard address.
+/// Validates that an IP address string is a private/WireGuard address.
 ///
 /// Returns Ok(()) if valid, Err with reason if invalid.
 fn validate_private_ip(addr: &str) -> Result<(), String> {
@@ -139,7 +139,7 @@ fn validate_private_ip(addr: &str) -> Result<(), String> {
     }
 }
 
-/// Validate all addresses in a peer announcement.
+/// Validates all addresses in a peer announcement.
 ///
 /// All addresses must be private/WireGuard IPs.
 #[allow(clippy::result_large_err)] // tonic::Status is external, can't box it
@@ -186,14 +186,14 @@ pub struct DiscoveryServiceImpl {
 }
 
 impl DiscoveryServiceImpl {
-    /// Update the last state update timestamp.
+    /// Updates the last state update timestamp.
     ///
     /// Should be called after applying Raft entries.
     pub fn mark_state_updated(&self) {
         *self.last_state_update.write() = std::time::Instant::now();
     }
 
-    /// Check if this node is a voter (participates in consensus).
+    /// Checks if this node is a voter (participates in consensus).
     ///
     /// Returns true if this node is in the voter set, or if node_id is not
     /// configured (assume voter behavior as fallback).
@@ -210,7 +210,7 @@ impl DiscoveryServiceImpl {
         membership.voter_ids().any(|id| id == node_id)
     }
 
-    /// Check if the local state cache is stale (for learners).
+    /// Checks if the local state cache is stale (for learners).
     ///
     /// Voters always have fresh state; learners check time since last update.
     fn is_cache_stale(&self) -> bool {
@@ -224,7 +224,7 @@ impl DiscoveryServiceImpl {
         last_update.elapsed() > self.learner_cache_ttl
     }
 
-    /// Get the current leader's node ID (for forwarding from stale learners).
+    /// Returns the current leader's node ID (for forwarding from stale learners).
     fn get_leader_hint(&self) -> Option<String> {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader.map(|id| id.to_string())
@@ -241,13 +241,13 @@ impl DiscoveryServiceImpl {
         tracker.prune_stale()
     }
 
-    /// Get the number of tracked peers.
+    /// Returns the number of tracked peers.
     pub fn peer_count(&self) -> usize {
         let tracker = self.peer_tracker.read();
         tracker.peer_count()
     }
 
-    /// Get the maintenance interval from the peer tracker config.
+    /// Returns the maintenance interval from the peer tracker config.
     pub fn maintenance_interval(&self) -> std::time::Duration {
         let tracker = self.peer_tracker.read();
         tracker.maintenance_interval()

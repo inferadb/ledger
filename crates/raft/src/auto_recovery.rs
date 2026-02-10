@@ -117,7 +117,7 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.node_id)
@@ -130,7 +130,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         std::cmp::min(delay, self.config.max_retry_delay)
     }
 
-    /// Check if a recovering vault is ready for retry.
+    /// Checks if a recovering vault is ready for retry.
     fn is_ready_for_retry(&self, started_at: i64, attempt: u8) -> bool {
         let now = chrono::Utc::now().timestamp();
         let elapsed = Duration::from_secs((now - started_at).max(0) as u64);
@@ -169,7 +169,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         needs_recovery
     }
 
-    /// Attempt to recover a single vault.
+    /// Attempts to recover a single vault.
     ///
     /// This involves:
     /// 1. Finding the latest usable snapshot
@@ -415,7 +415,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         Ok(computed_root)
     }
 
-    /// Find the optimal starting point for recovery.
+    /// Finds the optimal starting point for recovery.
     fn find_recovery_start_point(
         &self,
         _namespace_id: NamespaceId,
@@ -439,7 +439,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         Ok((1, inferadb_ledger_types::ZERO_HASH))
     }
 
-    /// Propose a vault health update through Raft.
+    /// Proposes a vault health update through Raft.
     #[allow(clippy::too_many_arguments)]
     async fn propose_health_update(
         &self,
@@ -482,7 +482,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         }
     }
 
-    /// Run the auto-recovery job.
+    /// Runs the auto-recovery job.
     ///
     /// This should be spawned as a background task. It will run until
     /// the shutdown signal is received.
@@ -588,7 +588,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         }
     }
 
-    /// Start the auto-recovery job as a background task.
+    /// Starts the auto-recovery job as a background task.
     ///
     /// Returns a handle to the spawned task. The task runs until dropped.
     /// For graceful shutdown, use `run()` with a shutdown channel instead.

@@ -18,7 +18,7 @@ use crate::types::{LedgerRequest, LedgerResponse, SystemRequest};
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
-    /// Apply a single request and return the response plus optional vault entry.
+    /// Applies a single request and return the response plus optional vault entry.
     ///
     /// For Write requests, this also returns a VaultEntry that should be included
     /// in the ShardBlock. The caller is responsible for collecting these entries
@@ -710,7 +710,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         }
     }
 
-    /// Compute a deterministic hash for a vault entry.
+    /// Computes a deterministic hash for a vault entry.
     ///
     /// Uses only the cryptographic commitments from the entry, not runtime
     /// metadata like timestamp or proposer. This ensures all Raft nodes
@@ -719,7 +719,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         inferadb_ledger_types::vault_entry_hash(entry)
     }
 
-    /// Compute a simple block hash (used in tests).
+    /// Computes a simple block hash (used in tests).
     #[allow(dead_code)] // reserved for block hash computation in state machine
     pub(super) fn compute_block_hash(
         &self,

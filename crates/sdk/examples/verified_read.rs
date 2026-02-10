@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Convert bytes to hex string for display
+/// Converts bytes to hex string for display
 fn hex_string(bytes: &[u8]) -> String {
     use std::fmt::Write;
     if bytes.is_empty() {

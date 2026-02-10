@@ -32,17 +32,17 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
-    /// Create an empty bloom filter with all bits clear.
+    /// Creates an empty bloom filter with all bits clear.
     pub fn new() -> Self {
         Self { bits: [0u8; BLOOM_FILTER_SIZE] }
     }
 
-    /// Create a bloom filter from a fixed-size byte array (infallible).
+    /// Creates a bloom filter from a fixed-size byte array (infallible).
     pub fn from_array(data: &[u8; BLOOM_FILTER_SIZE]) -> Self {
         Self { bits: *data }
     }
 
-    /// Create a bloom filter from raw bytes.
+    /// Creates a bloom filter from raw bytes.
     ///
     /// Returns `None` if the slice length doesn't match `BLOOM_FILTER_SIZE`.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
@@ -54,12 +54,12 @@ impl BloomFilter {
         Some(Self { bits })
     }
 
-    /// Return the raw byte representation.
+    /// Returns the raw byte representation.
     pub fn to_bytes(&self) -> &[u8; BLOOM_FILTER_SIZE] {
         &self.bits
     }
 
-    /// Insert a key into the filter.
+    /// Inserts a key into the filter.
     pub fn insert(&mut self, key: &[u8]) {
         let (h1, h2) = Self::hash_pair(key);
         for i in 0..NUM_HASHES {
@@ -68,7 +68,7 @@ impl BloomFilter {
         }
     }
 
-    /// Test whether a key might be in the set.
+    /// Tests whether a key might be in the set.
     ///
     /// Returns `false` if the key is definitely absent (true negative).
     /// Returns `true` if the key might be present (could be a false positive).
@@ -83,12 +83,12 @@ impl BloomFilter {
         true
     }
 
-    /// Check if the filter is empty (no bits set).
+    /// Checks if the filter is empty (no bits set).
     pub fn is_empty(&self) -> bool {
         self.bits.iter().all(|&b| b == 0)
     }
 
-    /// Compute double-hash pair from a key using SipHash-derived hashing.
+    /// Computes double-hash pair from a key using SipHash-derived hashing.
     ///
     /// Uses two independent hash values derived from the key bytes.
     /// The approach splits a 128-bit hash into two 64-bit halves.
@@ -111,7 +111,7 @@ impl BloomFilter {
         (h1, h2)
     }
 
-    /// Compute the bit index for the i-th hash function using double hashing.
+    /// Computes the bit index for the i-th hash function using double hashing.
     fn bit_index(h1: u64, h2: u64, i: usize) -> usize {
         (h1.wrapping_add((i as u64).wrapping_mul(h2)) % (BLOOM_BITS as u64)) as usize
     }

@@ -42,7 +42,7 @@ struct CacheEntry {
 }
 
 impl PageCache {
-    /// Create a new cache with the given capacity.
+    /// Creates a new cache with the given capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
             pages: RwLock::new(HashMap::with_capacity(capacity)),
@@ -54,7 +54,7 @@ impl PageCache {
         }
     }
 
-    /// Get a page from the cache.
+    /// Returns a page from the cache.
     ///
     /// Returns a clone of the page if found, None otherwise.
     pub fn get(&self, page_id: PageId) -> Option<Page> {
@@ -69,7 +69,7 @@ impl PageCache {
         }
     }
 
-    /// Insert a page into the cache.
+    /// Inserts a page into the cache.
     ///
     /// May evict an existing clean page if the cache is full.
     /// If all pages are dirty, allows temporary growth beyond capacity
@@ -114,7 +114,7 @@ impl PageCache {
         pages.insert(page_id, CacheEntry { page, accessed: true });
     }
 
-    /// Remove a page from the cache.
+    /// Removes a page from the cache.
     pub fn remove(&self, page_id: PageId) -> Option<Page> {
         let mut pages = self.pages.write();
         let mut page_order = self.page_order.write();
@@ -127,7 +127,7 @@ impl PageCache {
         }
     }
 
-    /// Evict one page using clock algorithm.
+    /// Evicts one page using clock algorithm.
     ///
     /// IMPORTANT: Never evicts dirty pages to prevent data loss. If all pages
     /// are dirty, returns false and the caller must flush before retrying.
@@ -185,41 +185,41 @@ impl PageCache {
         }
     }
 
-    /// Clear all cached pages.
+    /// Clears all cached pages.
     pub fn clear(&self) {
         self.pages.write().clear();
         self.page_order.write().clear();
         *self.clock_hand.write() = 0;
     }
 
-    /// Get the number of cached pages.
+    /// Returns the number of cached pages.
     pub fn len(&self) -> usize {
         self.pages.read().len()
     }
 
-    /// Check if the cache is empty.
+    /// Checks if the cache is empty.
     pub fn is_empty(&self) -> bool {
         self.pages.read().is_empty()
     }
 
-    /// Check if a page is in the cache.
+    /// Checks if a page is in the cache.
     pub fn contains(&self, page_id: PageId) -> bool {
         self.pages.read().contains_key(&page_id)
     }
 
-    /// Get all dirty pages (for flushing).
+    /// Returns all dirty pages (for flushing).
     pub fn dirty_pages(&self) -> Vec<Page> {
         self.pages.read().values().filter(|e| e.page.dirty).map(|e| e.page.clone()).collect()
     }
 
-    /// Mark a page as clean (after flushing).
+    /// Marks a page as clean (after flushing).
     pub fn mark_clean(&self, page_id: PageId) {
         if let Some(entry) = self.pages.write().get_mut(&page_id) {
             entry.page.dirty = false;
         }
     }
 
-    /// Get cache statistics.
+    /// Returns cache statistics.
     pub fn stats(&self) -> CacheStats {
         let pages = self.pages.read();
         CacheStats {
@@ -252,12 +252,12 @@ mod tests {
     use super::*;
     use crate::error::PageType;
 
-    /// Create a dirty page (newly allocated, not yet flushed).
+    /// Creates a dirty page (newly allocated, not yet flushed).
     fn make_dirty_page(id: PageId) -> Page {
         Page::new(id, 4096, PageType::BTreeLeaf, 1)
     }
 
-    /// Create a clean page (simulates page loaded from disk).
+    /// Creates a clean page (simulates page loaded from disk).
     fn make_clean_page(id: PageId) -> Page {
         Page::from_bytes(id, vec![0u8; 4096])
     }

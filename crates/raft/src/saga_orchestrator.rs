@@ -73,13 +73,13 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Load all pending sagas from _system namespace.
+    /// Loads all pending sagas from _system namespace.
     fn load_pending_sagas(&self) -> Vec<Saga> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
@@ -115,7 +115,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             .collect()
     }
 
-    /// Save a saga back to storage.
+    /// Saves a saga back to storage.
     async fn save_saga(&self, saga: &Saga) -> Result<(), SagaError> {
         let key = format!("{}{}", SAGA_KEY_PREFIX, saga.id());
         let value = serde_json::to_vec(saga).context(SerializationSnafu)?;
@@ -148,7 +148,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         Ok(())
     }
 
-    /// Execute a single step of a CreateOrg saga.
+    /// Executes a single step of a CreateOrg saga.
     // Allow: serde_json::json! macro uses unwrap internally for key insertion,
     // but with string literal keys this is infallible.
     #[allow(clippy::disallowed_methods)]
@@ -259,7 +259,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
-    /// Execute a single step of a DeleteUser saga.
+    /// Executes a single step of a DeleteUser saga.
     // Allow: serde_json::json! macro uses unwrap internally for key insertion,
     // but with string literal keys this is infallible.
     #[allow(clippy::disallowed_methods)]
@@ -359,7 +359,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
-    /// Allocate a new sequence ID from _system.
+    /// Allocates a new sequence ID from _system.
     async fn allocate_sequence_id(&self, entity_type: &str) -> Result<i64, SagaError> {
         let seq_key = format!("_meta:seq:{}", entity_type);
 
@@ -408,7 +408,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         Ok(next_id)
     }
 
-    /// Write an entity to storage through Raft.
+    /// Writes an entity to storage through Raft.
     async fn write_entity(
         &self,
         namespace_id: NamespaceId,
@@ -448,7 +448,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         Ok(())
     }
 
-    /// Delete an entity from storage through Raft.
+    /// Deletes an entity from storage through Raft.
     async fn delete_entity(
         &self,
         namespace_id: NamespaceId,
@@ -480,7 +480,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         Ok(())
     }
 
-    /// Execute a single saga.
+    /// Executes a single saga.
     async fn execute_saga(&self, mut saga: Saga) {
         let saga_id = saga.id().to_string();
         let saga_type = saga.saga_type();
@@ -537,7 +537,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
-    /// Run a single poll cycle.
+    /// Runs a single poll cycle.
     async fn run_cycle(&self) {
         // Only leader executes sagas
         if !self.is_leader() {
@@ -560,7 +560,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
-    /// Start the saga orchestrator background task.
+    /// Starts the saga orchestrator background task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {

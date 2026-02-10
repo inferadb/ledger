@@ -10,7 +10,7 @@
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_state::system::NamespaceStatus;
 
-/// Convert a domain `NamespaceStatus` to its proto representation.
+/// Converts a domain `NamespaceStatus` to its proto representation.
 pub(crate) fn namespace_status_to_proto(status: NamespaceStatus) -> proto::NamespaceStatus {
     match status {
         NamespaceStatus::Active => proto::NamespaceStatus::Active,

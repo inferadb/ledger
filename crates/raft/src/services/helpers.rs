@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{metrics, rate_limit::RateLimiter};
 
-/// Emit an audit event and record the corresponding Prometheus metric.
+/// Emits an audit event and record the corresponding Prometheus metric.
 ///
 /// If the audit logger is not configured, this is a no-op (only metrics recorded).
 /// If the audit log write fails, logs a warning but does not propagate the error —
@@ -46,7 +46,7 @@ pub(crate) fn emit_audit_event(
     }
 }
 
-/// Build an audit event with standard fields.
+/// Builds an audit event with standard fields.
 ///
 /// The `operations_count` field is set for write-path events and `None` for admin events.
 pub(crate) fn build_audit_event(
@@ -71,7 +71,7 @@ pub(crate) fn build_audit_event(
     }
 }
 
-/// Check all rate limit tiers (backpressure, namespace, client).
+/// Checks all rate limit tiers (backpressure, namespace, client).
 ///
 /// Returns `Status::resource_exhausted` with `retry-after-ms` metadata and
 /// structured [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) if rejected.
@@ -126,7 +126,7 @@ pub(crate) fn check_rate_limit(
     Ok(())
 }
 
-/// Check whether creating a new vault would exceed the namespace vault quota.
+/// Checks whether creating a new vault would exceed the namespace vault quota.
 ///
 /// Returns `Status::resource_exhausted` with structured
 /// [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) including current/max values if the
@@ -172,7 +172,7 @@ pub(crate) fn check_vault_quota(
     Ok(())
 }
 
-/// Check whether a write operation's estimated payload would exceed
+/// Checks whether a write operation's estimated payload would exceed
 /// the namespace storage quota.
 ///
 /// `estimated_bytes` is the sum of key + value sizes for all operations.
@@ -221,7 +221,7 @@ pub(crate) fn check_storage_quota(
     Ok(())
 }
 
-/// Estimate the total byte size of operations for storage quota checking.
+/// Estimates the total byte size of operations for storage quota checking.
 ///
 /// Sums key + value sizes across all operations. This is an estimate —
 /// exact storage accounting is deferred to Task 6 (Namespace Resource Accounting).
@@ -258,7 +258,7 @@ pub(crate) fn estimate_operations_bytes(
     total
 }
 
-/// Validate all operations in a proto operation list.
+/// Validates all operations in a proto operation list.
 ///
 /// Checks per-operation field limits (key/value size, character whitelist)
 /// and aggregate limits (operations count, total payload size). Returns
@@ -320,7 +320,7 @@ pub(crate) fn validate_operations(
     Ok(())
 }
 
-/// Record key accesses from operations for hot key detection.
+/// Records key accesses from operations for hot key detection.
 ///
 /// Extracts entity/relationship keys from each operation and feeds them
 /// to the hot key detector. This runs after rate limiting but before
@@ -347,7 +347,7 @@ pub(crate) fn record_hot_keys(
     }
 }
 
-/// Build a validation error `Status` with structured [`ErrorDetails`].
+/// Builds a validation error `Status` with structured [`ErrorDetails`].
 ///
 /// Wraps `Status::invalid_argument` with a binary-encoded `ErrorDetails`
 /// containing `AppInvalidArgument` code and recovery guidance.
@@ -364,7 +364,7 @@ fn validation_status(message: impl Into<String>) -> Status {
     Status::with_details(tonic::Code::InvalidArgument, message, encoded.into())
 }
 
-/// Compute a hash of operations for idempotency payload comparison.
+/// Computes a hash of operations for idempotency payload comparison.
 ///
 /// Uses a simple concatenation of operation fields to create a deterministic
 /// byte sequence that can be hashed with seahash.

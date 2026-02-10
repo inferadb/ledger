@@ -61,7 +61,7 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
-    /// Open or create a new log store at the given path.
+    /// Opens or create a new log store at the given path.
     ///
     /// This creates a basic log store without StateLayer or BlockArchive integration.
     /// Use `with_state_layer` and `with_block_archive` to add those capabilities.
@@ -72,7 +72,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Max supported: 64KB. Minimum: 512 bytes (must be power of 2).
     pub const RAFT_PAGE_SIZE: usize = 16 * 1024; // 16KB
 
-    /// Open or create a Raft log storage database.
+    /// Opens or create a Raft log storage database.
     ///
     /// New databases are created with 16KB pages to support larger batch sizes.
     /// Existing databases retain their original page size for backwards compatibility.
@@ -117,26 +117,26 @@ impl<B: StorageBackend> RaftLogStore<B> {
         Ok(store)
     }
 
-    /// Configure the state layer for transaction application.
+    /// Configures the state layer for transaction application.
     pub fn with_state_layer(mut self, state_layer: Arc<StateLayer<B>>) -> Self {
         self.state_layer = Some(state_layer);
         self
     }
 
-    /// Configure the block archive for permanent block storage.
+    /// Configures the block archive for permanent block storage.
     pub fn with_block_archive(mut self, block_archive: Arc<BlockArchive<B>>) -> Self {
         self.block_archive = Some(block_archive);
         self
     }
 
-    /// Configure shard metadata.
+    /// Configures shard metadata.
     pub fn with_shard_config(mut self, shard_id: ShardId, node_id: String) -> Self {
         self.shard_id = shard_id;
         self.node_id = node_id;
         self
     }
 
-    /// Configure the block announcements broadcast channel.
+    /// Configures the block announcements broadcast channel.
     ///
     /// When set, the log store will broadcast `BlockAnnouncement` messages
     /// after each successful block commit in `apply_to_state_machine`.
@@ -148,27 +148,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self
     }
 
-    /// Get a reference to the block announcements sender (if configured).
+    /// Returns a reference to the block announcements sender (if configured).
     pub fn block_announcements(&self) -> Option<&broadcast::Sender<BlockAnnouncement>> {
         self.block_announcements.as_ref()
     }
 
-    /// Get the current shard height.
+    /// Returns the current shard height.
     pub fn current_shard_height(&self) -> u64 {
         self.shard_chain.read().height
     }
 
-    /// Get a reference to the state layer (if configured).
+    /// Returns a reference to the state layer (if configured).
     pub fn state_layer(&self) -> Option<&Arc<StateLayer<B>>> {
         self.state_layer.as_ref()
     }
 
-    /// Get a reference to the block archive (if configured).
+    /// Returns a reference to the block archive (if configured).
     pub fn block_archive(&self) -> Option<&Arc<BlockArchive<B>>> {
         self.block_archive.as_ref()
     }
 
-    /// Get an accessor for reading applied state.
+    /// Returns an accessor for reading applied state.
     ///
     /// This accessor can be cloned and passed to services that need to read
     /// vault heights and health status.
@@ -176,7 +176,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         AppliedStateAccessor { state: self.applied_state.clone() }
     }
 
-    /// Check if this log store has been previously initialized.
+    /// Checks if this log store has been previously initialized.
     ///
     /// Returns `true` if a vote has been saved, indicating that Raft consensus
     /// has been started at some point. Used for auto-detection of whether to
@@ -185,7 +185,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self.vote_cache.read().is_some()
     }
 
-    /// Load metadata values into caches.
+    /// Loads metadata values into caches.
     ///
     /// # Errors
     ///
@@ -227,7 +227,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         Ok(())
     }
 
-    /// Get the last log entry.
+    /// Returns the last log entry.
     pub(super) fn get_last_entry(
         &self,
     ) -> Result<Option<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {

@@ -42,7 +42,7 @@ pub struct IdempotencyKey {
 }
 
 impl IdempotencyKey {
-    /// Create a new idempotency key.
+    /// Creates a new idempotency key.
     pub fn new(
         namespace_id: i64,
         vault_id: i64,
@@ -52,7 +52,7 @@ impl IdempotencyKey {
         Self { namespace_id, vault_id, client_id, idempotency_key }
     }
 
-    /// Create a new idempotency key from a byte slice.
+    /// Creates a new idempotency key from a byte slice.
     ///
     /// Returns `None` if the slice is not exactly 16 bytes.
     #[allow(dead_code)]
@@ -115,14 +115,14 @@ pub struct IdempotencyCache {
 }
 
 impl IdempotencyCache {
-    /// Create a new idempotency cache.
+    /// Creates a new idempotency cache.
     pub fn new() -> Self {
         let cache = Cache::builder().max_capacity(MAX_CACHE_SIZE).time_to_live(ENTRY_TTL).build();
 
         Self { cache }
     }
 
-    /// Check if a request is a duplicate.
+    /// Checks if a request is a duplicate.
     ///
     /// Returns:
     /// - `NewRequest` if the idempotency key is not in the cache
@@ -150,7 +150,7 @@ impl IdempotencyCache {
         }
     }
 
-    /// Insert a new result into the cache.
+    /// Inserts a new result into the cache.
     ///
     /// Capacity management and TTL eviction are handled automatically by moka.
     pub fn insert(
@@ -166,7 +166,7 @@ impl IdempotencyCache {
         self.cache.insert(key, CachedResult { request_hash, result });
     }
 
-    /// Check and insert in one operation.
+    /// Checks and insert in one operation.
     ///
     /// Returns:
     /// - `NewRequest` if the key was not in cache (and the result has been inserted)
@@ -200,14 +200,14 @@ impl IdempotencyCache {
         check_result
     }
 
-    /// Get the current number of entries in the cache.
+    /// Returns the current number of entries in the cache.
     ///
     /// Note: This is an approximation as moka performs lazy eviction.
     pub fn len(&self) -> usize {
         self.cache.entry_count() as usize
     }
 
-    /// Check if the cache is empty.
+    /// Checks if the cache is empty.
     pub fn is_empty(&self) -> bool {
         self.cache.entry_count() == 0
     }

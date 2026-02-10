@@ -130,7 +130,7 @@ pub struct BlockArchive<B: StorageBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> BlockArchive<B> {
-    /// Create a new block archive backed by inferadb-ledger-store.
+    /// Creates a new block archive backed by inferadb-ledger-store.
     pub fn new(db: Arc<Database<B>>) -> Self {
         Self {
             db,
@@ -140,7 +140,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Create a block archive with file-based segment storage.
+    /// Creates a block archive with file-based segment storage.
     ///
     /// Use this for large deployments where blocks exceed inferadb-ledger-store's practical limits.
     ///
@@ -229,7 +229,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         Ok(())
     }
 
-    /// Read a block by shard height.
+    /// Reads a block by shard height.
     ///
     /// # Errors
     ///
@@ -248,7 +248,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Find the shard height containing a specific vault block.
+    /// Finds the shard height containing a specific vault block.
     ///
     /// # Errors
     ///
@@ -276,7 +276,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Get the latest shard height in the archive.
+    /// Returns the latest shard height in the archive.
     ///
     /// # Errors
     ///
@@ -296,7 +296,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Get the range of heights in the archive.
+    /// Returns the range of heights in the archive.
     ///
     /// # Errors
     ///
@@ -317,7 +317,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Read blocks in a range.
+    /// Reads blocks in a range.
     ///
     /// # Errors
     ///
@@ -351,7 +351,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     // Block Compaction
     // =========================================================================
 
-    /// Get the current compaction watermark.
+    /// Returns the current compaction watermark.
     ///
     /// All blocks with height < watermark have been compacted (transaction bodies removed).
     ///
@@ -377,7 +377,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Check if a block at the given height has been compacted.
+    /// Checks if a block at the given height has been compacted.
     ///
     /// # Errors
     ///
@@ -389,7 +389,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Compact all blocks before the given height.
+    /// Compacts all blocks before the given height.
     ///
     /// Per DESIGN.md §4.4: After compaction, transaction bodies are removed but:
     /// - Block headers are preserved (state_root, tx_merkle_root, previous_hash)
@@ -476,7 +476,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         Ok(compacted_count)
     }
 
-    /// Get compaction statistics.
+    /// Returns compaction statistics.
     ///
     /// # Errors
     ///
@@ -505,7 +505,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         })
     }
 
-    /// Get segment file path.
+    /// Returns segment file path.
     ///
     /// # Panics
     /// Panics if `blocks_dir` is not set (only called when segment files are enabled).
@@ -518,7 +518,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 }
 
-/// Encode vault block index key.
+/// Encodes vault block index key.
 ///
 /// Format: {namespace_id:8BE}{vault_id:8BE}{vault_height:8BE}
 fn encode_vault_block_index_key(

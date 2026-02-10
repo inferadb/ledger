@@ -110,7 +110,7 @@ pub struct LedgerServer {
 }
 
 impl LedgerServer {
-    /// Start the gRPC server.
+    /// Starts the gRPC server.
     ///
     /// This method blocks until the server is shut down. If a `shutdown_rx`
     /// was provided via the builder, the server will stop when the signal
@@ -281,37 +281,37 @@ impl LedgerServer {
         Ok(())
     }
 
-    /// Get the Raft instance.
+    /// Returns the Raft instance.
     #[must_use]
     pub fn raft(&self) -> &Arc<Raft<LedgerTypeConfig>> {
         &self.raft
     }
 
-    /// Get the state layer.
+    /// Returns the state layer.
     #[must_use]
     pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
     }
 
-    /// Get the idempotency cache.
+    /// Returns the idempotency cache.
     #[must_use]
     pub fn idempotency(&self) -> &Arc<IdempotencyCache> {
         &self.idempotency
     }
 
-    /// Get the block announcements sender (for broadcasting new blocks).
+    /// Returns the block announcements sender (for broadcasting new blocks).
     #[must_use]
     pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
         &self.block_announcements
     }
 
-    /// Get the applied state accessor.
+    /// Returns the applied state accessor.
     #[must_use]
     pub fn applied_state(&self) -> &AppliedStateAccessor {
         &self.applied_state
     }
 
-    /// Get the block archive.
+    /// Returns the block archive.
     #[must_use]
     pub fn block_archive(&self) -> Option<&Arc<BlockArchive<FileBackend>>> {
         self.block_archive.as_ref()

@@ -28,7 +28,7 @@ use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, RetryPolicy, Se
 // External Cluster Helpers
 // ============================================================================
 
-/// Read `LEDGER_ENDPOINTS` env var. Returns `None` if not set.
+/// Reads `LEDGER_ENDPOINTS` env var. Returns `None` if not set.
 fn require_external_cluster() -> Option<Vec<String>> {
     let raw = std::env::var("LEDGER_ENDPOINTS").ok()?;
     let endpoints: Vec<String> =
@@ -57,7 +57,7 @@ macro_rules! require_cluster {
     };
 }
 
-/// Create a `LedgerClient` connected to all cluster endpoints.
+/// Creates a `LedgerClient` connected to all cluster endpoints.
 async fn create_sdk_client(endpoints: &[String], client_id: &str) -> LedgerClient {
     let config = ClientConfig::builder()
         .servers(ServerSource::from_static(endpoints.iter().cloned()))
@@ -77,7 +77,7 @@ async fn create_sdk_client(endpoints: &[String], client_id: &str) -> LedgerClien
     LedgerClient::new(config).await.expect("client creation")
 }
 
-/// Create a `LedgerClient` connected to a single specific endpoint.
+/// Creates a `LedgerClient` connected to a single specific endpoint.
 async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> LedgerClient {
     let config = ClientConfig::builder()
         .servers(ServerSource::from_static([endpoint.to_string()]))
@@ -97,7 +97,7 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
     LedgerClient::new(config).await.expect("client creation")
 }
 
-/// Create a test namespace and vault, returning (namespace_id, vault_id).
+/// Creates a test namespace and vault, returning (namespace_id, vault_id).
 async fn setup_test_namespace_vault(client: &LedgerClient) -> (i64, i64) {
     let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
     let ns_id = client.create_namespace(&ns_name).await.expect("create namespace");
@@ -105,7 +105,7 @@ async fn setup_test_namespace_vault(client: &LedgerClient) -> (i64, i64) {
     (ns_id, vault_info.vault_id)
 }
 
-/// Find the leader endpoint via `GetClusterInfo`.
+/// Finds the leader endpoint via `GetClusterInfo`.
 async fn find_leader_endpoint(endpoints: &[String]) -> String {
     for endpoint in endpoints {
         let mut client =
@@ -127,7 +127,7 @@ async fn find_leader_endpoint(endpoints: &[String]) -> String {
     panic!("no leader found in cluster");
 }
 
-/// Find non-leader endpoints via `GetClusterInfo`.
+/// Finds non-leader endpoints via `GetClusterInfo`.
 async fn find_non_leader_endpoints(endpoints: &[String]) -> Vec<String> {
     for endpoint in endpoints {
         if let Ok(mut client) = AdminServiceClient::connect(endpoint.clone()).await
@@ -155,7 +155,7 @@ async fn find_non_leader_endpoints(endpoints: &[String]) -> Vec<String> {
 // E2E Tests: Write/Read Cycle
 // ============================================================================
 
-/// Test write → read cycle.
+/// Tests write → read cycle.
 #[tokio::test]
 async fn test_write_read_cycle() {
     let endpoints = require_cluster!();
@@ -178,7 +178,7 @@ async fn test_write_read_cycle() {
     assert_eq!(read_result, Some(b"Alice Data".to_vec()), "should read back written value");
 }
 
-/// Test multiple writes and reads.
+/// Tests multiple writes and reads.
 #[tokio::test]
 async fn test_multiple_writes_reads() {
     let endpoints = require_cluster!();
@@ -203,7 +203,7 @@ async fn test_multiple_writes_reads() {
     }
 }
 
-/// Test batch read functionality.
+/// Tests batch read functionality.
 #[tokio::test]
 async fn test_batch_read() {
     let endpoints = require_cluster!();
@@ -240,7 +240,7 @@ async fn test_batch_read() {
 // E2E Tests: Replication
 // ============================================================================
 
-/// Test that writes to the leader replicate to followers.
+/// Tests that writes to the leader replicate to followers.
 ///
 /// Writes via a leader-connected client, then reads from each non-leader
 /// endpoint to verify Raft replication is working.
@@ -289,7 +289,7 @@ async fn test_write_replication_to_followers() {
     }
 }
 
-/// Test write replicates to all nodes.
+/// Tests write replicates to all nodes.
 #[tokio::test]
 async fn test_three_node_write_replication() {
     let endpoints = require_cluster!();
@@ -331,7 +331,7 @@ async fn test_three_node_write_replication() {
 // E2E Tests: Multiple Sessions
 // ============================================================================
 
-/// Test multiple client sessions with independent IDs.
+/// Tests multiple client sessions with independent IDs.
 #[tokio::test]
 async fn test_multiple_client_sessions() {
     let endpoints = require_cluster!();
@@ -366,7 +366,7 @@ async fn test_multiple_client_sessions() {
 // E2E Tests: Streaming
 // ============================================================================
 
-/// Test watch_blocks stream setup.
+/// Tests watch_blocks stream setup.
 #[tokio::test]
 async fn test_watch_blocks_stream_setup() {
     let endpoints = require_cluster!();
@@ -384,7 +384,7 @@ async fn test_watch_blocks_stream_setup() {
 // E2E Tests: Persistence
 // ============================================================================
 
-/// Test that data persists across client sessions.
+/// Tests that data persists across client sessions.
 #[tokio::test]
 async fn test_data_persistence_across_sessions() {
     let endpoints = require_cluster!();
@@ -433,7 +433,7 @@ async fn test_data_persistence_across_sessions() {
 // E2E Tests: Admin Operations
 // ============================================================================
 
-/// Test admin operations (namespace/vault lifecycle).
+/// Tests admin operations (namespace/vault lifecycle).
 #[tokio::test]
 async fn test_admin_operations() {
     let endpoints = require_cluster!();
@@ -465,7 +465,7 @@ async fn test_admin_operations() {
 // E2E Tests: Health Check
 // ============================================================================
 
-/// Test health check endpoints.
+/// Tests health check endpoints.
 #[tokio::test]
 async fn test_health_check() {
     let endpoints = require_cluster!();

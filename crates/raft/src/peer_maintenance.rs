@@ -37,7 +37,7 @@ pub struct PeerMaintenance {
 }
 
 impl PeerMaintenance {
-    /// Run a single maintenance cycle.
+    /// Runs a single maintenance cycle.
     fn run_cycle(&self) {
         let pruned = self.discovery.prune_stale_peers();
         let remaining = self.discovery.peer_count();
@@ -53,7 +53,7 @@ impl PeerMaintenance {
         }
     }
 
-    /// Start the maintenance background task.
+    /// Starts the maintenance background task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {

@@ -39,14 +39,14 @@ pub const FORMAT_VERSION: u16 = 2;
 
 /// Storage backend trait for abstracting file I/O.
 pub trait StorageBackend: Send + Sync {
-    /// Read the database header (768 bytes).
+    /// Reads the database header (768 bytes).
     ///
     /// # Errors
     ///
     /// Returns `Error::Io` if the read fails.
     fn read_header(&self) -> Result<Vec<u8>>;
 
-    /// Write the database header.
+    /// Writes the database header.
     ///
     /// # Errors
     ///
@@ -54,14 +54,14 @@ pub trait StorageBackend: Send + Sync {
     /// Returns `Error::Corrupted` if the header size is incorrect.
     fn write_header(&self, header: &[u8]) -> Result<()>;
 
-    /// Read a page by its ID.
+    /// Reads a page by its ID.
     ///
     /// # Errors
     ///
     /// Returns `Error::Io` if the read fails.
     fn read_page(&self, page_id: PageId) -> Result<Vec<u8>>;
 
-    /// Write a page at the given ID.
+    /// Writes a page at the given ID.
     ///
     /// # Errors
     ///
@@ -69,31 +69,31 @@ pub trait StorageBackend: Send + Sync {
     /// Returns `Error::Corrupted` if the data size does not match the page size.
     fn write_page(&self, page_id: PageId, data: &[u8]) -> Result<()>;
 
-    /// Flush all writes to durable storage.
+    /// Flushes all writes to durable storage.
     ///
     /// # Errors
     ///
     /// Returns `Error::Io` if the sync fails.
     fn sync(&self) -> Result<()>;
 
-    /// Get the current file size in bytes.
+    /// Returns the current file size in bytes.
     ///
     /// # Errors
     ///
     /// Returns `Error::Io` if the metadata query fails.
     fn file_size(&self) -> Result<u64>;
 
-    /// Extend the file to accommodate more pages.
+    /// Extends the file to accommodate more pages.
     ///
     /// # Errors
     ///
     /// Returns `Error::Io` if the file cannot be extended.
     fn extend(&self, new_size: u64) -> Result<()>;
 
-    /// Get the page size for this backend.
+    /// Returns the page size for this backend.
     fn page_size(&self) -> usize;
 
-    /// Calculate the byte offset for a page ID.
+    /// Calculates the byte offset for a page ID.
     fn page_offset(&self, page_id: PageId) -> u64 {
         HEADER_SIZE as u64 + (page_id * self.page_size() as u64)
     }
@@ -125,7 +125,7 @@ impl CommitSlot {
     /// Size of checksum-protected region (48 bytes = 6 × 8-byte fields before checksum).
     const CHECKSUMMED_SIZE: usize = 40;
 
-    /// Serialize the slot to bytes.
+    /// Serializes the slot to bytes.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
 
@@ -143,7 +143,7 @@ impl CommitSlot {
         buf
     }
 
-    /// Deserialize from bytes.
+    /// Deserializes from bytes.
     pub fn from_bytes(buf: &[u8]) -> Option<Self> {
         if buf.len() < Self::SIZE {
             return None;
@@ -159,7 +159,7 @@ impl CommitSlot {
         })
     }
 
-    /// Verify the checksum of this slot.
+    /// Verifies the checksum of this slot.
     pub fn verify_checksum(&self) -> bool {
         let buf = self.to_bytes();
         let expected = xxhash_rust::xxh3::xxh3_64(&buf[0..Self::CHECKSUMMED_SIZE]);
@@ -219,9 +219,9 @@ pub struct DatabaseHeader {
     pub reserved: [u8; 4],
     /// God byte: bit 0 = primary slot, bit 1 = recovery required.
     pub god_byte: u8,
-    /// Commit slot 0.
+    /// Commits slot 0.
     pub slot0: CommitSlot,
-    /// Commit slot 1.
+    /// Commits slot 1.
     pub slot1: CommitSlot,
 }
 
@@ -238,7 +238,7 @@ impl DatabaseHeader {
     /// Bit mask for recovery required flag in god byte.
     pub const GOD_BYTE_RECOVERY_MASK: u8 = 0x02;
 
-    /// Create a new empty header.
+    /// Creates a new empty header.
     pub fn new(page_size_power: u8) -> Self {
         Self {
             magic: *MAGIC,
@@ -251,42 +251,42 @@ impl DatabaseHeader {
         }
     }
 
-    /// Get the index of the primary (active) slot.
+    /// Returns the index of the primary (active) slot.
     pub fn primary_slot_index(&self) -> usize {
         (self.god_byte & Self::GOD_BYTE_SLOT_MASK) as usize
     }
 
-    /// Get the index of the secondary (inactive) slot.
+    /// Returns the index of the secondary (inactive) slot.
     pub fn secondary_slot_index(&self) -> usize {
         1 - self.primary_slot_index()
     }
 
-    /// Get a reference to the primary (active) commit slot.
+    /// Returns a reference to the primary (active) commit slot.
     pub fn primary_slot(&self) -> &CommitSlot {
         if self.primary_slot_index() == 0 { &self.slot0 } else { &self.slot1 }
     }
 
-    /// Get a mutable reference to the secondary (inactive) commit slot.
+    /// Returns a mutable reference to the secondary (inactive) commit slot.
     pub fn secondary_slot_mut(&mut self) -> &mut CommitSlot {
         if self.secondary_slot_index() == 0 { &mut self.slot0 } else { &mut self.slot1 }
     }
 
-    /// Get a reference to a slot by index.
+    /// Returns a reference to a slot by index.
     pub fn slot(&self, index: usize) -> &CommitSlot {
         if index == 0 { &self.slot0 } else { &self.slot1 }
     }
 
-    /// Check if recovery is required (unclean shutdown detected).
+    /// Checks if recovery is required (unclean shutdown detected).
     pub fn recovery_required(&self) -> bool {
         (self.god_byte & Self::GOD_BYTE_RECOVERY_MASK) != 0
     }
 
-    /// Flip the primary slot (toggle bit 0 of god byte).
+    /// Flips the primary slot (toggle bit 0 of god byte).
     pub fn flip_primary_slot(&mut self) {
         self.god_byte ^= Self::GOD_BYTE_SLOT_MASK;
     }
 
-    /// Set the recovery required flag.
+    /// Sets the recovery required flag.
     pub fn set_recovery_required(&mut self, required: bool) {
         if required {
             self.god_byte |= Self::GOD_BYTE_RECOVERY_MASK;
@@ -295,7 +295,7 @@ impl DatabaseHeader {
         }
     }
 
-    /// Serialize the header to bytes.
+    /// Serializes the header to bytes.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
 
@@ -316,7 +316,7 @@ impl DatabaseHeader {
         buf
     }
 
-    /// Deserialize from bytes.
+    /// Deserializes from bytes.
     ///
     /// # Errors
     ///
@@ -357,7 +357,7 @@ impl DatabaseHeader {
         Ok(Self { magic, version, page_size_power, reserved, god_byte, slot0, slot1 })
     }
 
-    /// Validate the header and determine which slot to use.
+    /// Validates the header and determine which slot to use.
     ///
     /// Returns the index of the valid primary slot, or an error if both are corrupt.
     /// If the indicated primary slot has an invalid checksum, tries the secondary.
@@ -386,7 +386,7 @@ impl DatabaseHeader {
         Err(Error::Corrupted { reason: "Both commit slots have invalid checksums".to_string() })
     }
 
-    /// Get the page size in bytes.
+    /// Returns the page size in bytes.
     pub fn page_size(&self) -> usize {
         1 << self.page_size_power
     }

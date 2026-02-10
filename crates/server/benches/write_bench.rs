@@ -16,7 +16,7 @@ use inferadb_ledger_types::{Operation, VaultId};
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
-/// Create a test state layer.
+/// Creates a test state layer.
 fn create_state_layer(temp_dir: &TempDir) -> StateLayer<FileBackend> {
     let db =
         Database::<FileBackend>::create(temp_dir.path().join("test.db")).expect("create database");

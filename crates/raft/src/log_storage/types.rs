@@ -132,7 +132,7 @@ impl Default for SequenceCounters {
 }
 
 impl SequenceCounters {
-    /// Create new counters with initial values.
+    /// Creates new counters with initial values.
     pub fn new() -> Self {
         Self {
             namespace: NamespaceId::new(1),
@@ -143,35 +143,35 @@ impl SequenceCounters {
         }
     }
 
-    /// Get and increment the next namespace ID.
+    /// Returns and increment the next namespace ID.
     pub fn next_namespace(&mut self) -> NamespaceId {
         let id = self.namespace;
         self.namespace = NamespaceId::new(id.value() + 1);
         id
     }
 
-    /// Get and increment the next vault ID.
+    /// Returns and increment the next vault ID.
     pub fn next_vault(&mut self) -> VaultId {
         let id = self.vault;
         self.vault = VaultId::new(id.value() + 1);
         id
     }
 
-    /// Get and increment the next user ID.
+    /// Returns and increment the next user ID.
     pub fn next_user(&mut self) -> i64 {
         let id = self.user;
         self.user += 1;
         id
     }
 
-    /// Get and increment the next user email ID.
+    /// Returns and increment the next user email ID.
     pub fn next_user_email(&mut self) -> i64 {
         let id = self.user_email;
         self.user_email += 1;
         id
     }
 
-    /// Get and increment the next email verification token ID.
+    /// Returns and increment the next email verification token ID.
     pub fn next_email_verify(&mut self) -> i64 {
         let id = self.email_verify;
         self.email_verify += 1;
@@ -179,7 +179,7 @@ impl SequenceCounters {
     }
 }
 
-/// Select the least-loaded shard for a new namespace.
+/// Selects the least-loaded shard for a new namespace.
 ///
 /// Returns the shard with the fewest active (non-deleted) namespaces.
 /// Tie-breaker: lowest shard_id wins.
@@ -209,7 +209,7 @@ pub fn select_least_loaded_shard(namespaces: &HashMap<NamespaceId, NamespaceMeta
         .unwrap_or(ShardId::new(0))
 }
 
-/// Estimate the net storage delta (in bytes) for a batch of transactions.
+/// Estimates the net storage delta (in bytes) for a batch of transactions.
 ///
 /// Sets and relationship creates add bytes (key + value sizes).
 /// Deletes subtract bytes (key sizes only — we don't know the old value size).

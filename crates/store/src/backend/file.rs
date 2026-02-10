@@ -1,4 +1,4 @@
-//! File-based storage backend using memory-mapped I/O.
+//! File-based storage backend using standard file I/O.
 
 use std::{
     fs::{File, OpenOptions},
@@ -13,7 +13,7 @@ use crate::error::{Error, PageId, Result};
 
 /// File-based storage backend.
 ///
-/// Uses memory-mapped I/O for efficient page access with explicit fsync for durability.
+/// Uses standard file I/O (read/write/seek) for page access with explicit fsync for durability.
 pub struct FileBackend {
     /// The underlying file.
     file: RwLock<File>,
@@ -25,7 +25,7 @@ pub struct FileBackend {
 }
 
 impl FileBackend {
-    /// Open an existing database file.
+    /// Opens an existing database file.
     ///
     /// # Errors
     ///
@@ -46,7 +46,7 @@ impl FileBackend {
         Ok(Self { file: RwLock::new(file_guard), page_size: header.page_size(), path: path_str })
     }
 
-    /// Create a new database file.
+    /// Creates a new database file.
     ///
     /// # Errors
     ///
@@ -80,7 +80,7 @@ impl FileBackend {
         Ok(Self { file: RwLock::new(file_guard), page_size, path: path_str })
     }
 
-    /// Get the file for direct operations.
+    /// Returns the file for direct operations.
     fn with_file<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut File) -> Result<T>,
@@ -89,7 +89,7 @@ impl FileBackend {
         f(&mut file)
     }
 
-    /// Get the file for read operations.
+    /// Returns the file for read operations.
     fn with_file_read<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&File) -> Result<T>,

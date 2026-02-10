@@ -87,7 +87,7 @@ impl Default for CachedSystemState {
 }
 
 impl CachedSystemState {
-    /// Check if the cache is considered fresh.
+    /// Checks if the cache is considered fresh.
     pub fn is_fresh(&self, ttl: Duration) -> bool {
         self.last_updated.elapsed() < ttl
     }
@@ -120,12 +120,12 @@ pub struct LearnerRefreshJob {
 }
 
 impl LearnerRefreshJob {
-    /// Get a reference to the cached state.
+    /// Returns a reference to the cached state.
     pub fn cached_state(&self) -> Arc<RwLock<CachedSystemState>> {
         self.cached_state.clone()
     }
 
-    /// Check if this node is a learner (not a voter).
+    /// Checks if this node is a learner (not a voter).
     fn is_learner(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         let membership = metrics.membership_config.membership();
@@ -134,7 +134,7 @@ impl LearnerRefreshJob {
         !membership.voter_ids().any(|id| id == self.node_id)
     }
 
-    /// Get list of voter addresses from Raft membership.
+    /// Returns list of voter addresses from Raft membership.
     fn get_voter_addresses(&self) -> Vec<(LedgerNodeId, String)> {
         let metrics = self.raft.metrics().borrow().clone();
         let membership = metrics.membership_config.membership();
@@ -207,7 +207,7 @@ impl LearnerRefreshJob {
         }
     }
 
-    /// Attempt to refresh from any available voter.
+    /// Attempts to refresh from any available voter.
     ///
     /// Tries to refresh from a randomly selected voter. If that fails,
     /// tries other voters until one succeeds or all fail.
@@ -253,7 +253,7 @@ impl LearnerRefreshJob {
         Err(last_error.unwrap_or_else(|| "No voters available".to_string()))
     }
 
-    /// Run the learner refresh job.
+    /// Runs the learner refresh job.
     ///
     /// This should be spawned as a background task on learner nodes.
     /// It will periodically refresh state from voters until shutdown.
@@ -327,7 +327,7 @@ impl LearnerRefreshJob {
         }
     }
 
-    /// Start the learner refresh job as a background task.
+    /// Starts the learner refresh job as a background task.
     ///
     /// Returns a handle to the spawned task. The task runs until dropped.
     /// For graceful shutdown, use `run()` with a shutdown channel instead.

@@ -30,7 +30,7 @@ use inferadb_ledger_sdk::{
 };
 use tokio::runtime::Runtime;
 
-/// Create a runtime for async benchmarks.
+/// Creates a runtime for async benchmarks.
 fn create_runtime() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -38,7 +38,7 @@ fn create_runtime() -> Runtime {
         .expect("Failed to create runtime")
 }
 
-/// Create a client connected to the mock server.
+/// Creates a client connected to the mock server.
 async fn create_client_for_mock(endpoint: &str) -> LedgerClient {
     let config = ClientConfig::builder()
         .servers(ServerSource::from_static([endpoint]))

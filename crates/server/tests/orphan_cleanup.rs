@@ -19,7 +19,7 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Create a namespace and return its ID.
+/// Creates a namespace and return its ID.
 async fn create_namespace(
     addr: std::net::SocketAddr,
     name: &str,
@@ -39,7 +39,7 @@ async fn create_namespace(
     Ok(namespace_id)
 }
 
-/// Write an entity to a specific namespace.
+/// Writes an entity to a specific namespace.
 async fn write_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -79,7 +79,7 @@ async fn write_entity(
     }
 }
 
-/// Read an entity from a namespace.
+/// Reads an entity from a namespace.
 async fn read_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -103,7 +103,7 @@ async fn read_entity(
 // Orphan Cleanup Tests
 // ============================================================================
 
-/// Test that orphan cleanup job starts and runs without errors.
+/// Tests that orphan cleanup job starts and runs without errors.
 #[serial]
 #[tokio::test]
 async fn test_orphan_cleanup_job_starts() {
@@ -124,7 +124,7 @@ async fn test_orphan_cleanup_job_starts() {
     assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
 }
 
-/// Test that orphan cleanup only runs on leader.
+/// Tests that orphan cleanup only runs on leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_orphan_cleanup_leader_only() {
     let cluster = TestCluster::new(3).await;
@@ -142,7 +142,7 @@ async fn test_orphan_cleanup_leader_only() {
     assert_eq!(leader_id, new_leader_id, "leader should not have changed");
 }
 
-/// Test detection of deleted users.
+/// Tests detection of deleted users.
 ///
 /// Per DESIGN.md: Users with deleted_at or status=DELETED/DELETING are considered deleted.
 #[serial]
@@ -228,7 +228,7 @@ async fn test_deleted_user_detection() {
     assert!(active_user.get("deleted_at").is_none(), "Active user should not have deleted_at");
 }
 
-/// Test membership data format for orphan detection.
+/// Tests membership data format for orphan detection.
 #[serial]
 #[tokio::test]
 async fn test_membership_data_format() {
@@ -264,7 +264,7 @@ async fn test_membership_data_format() {
     assert_eq!(membership.get("role").and_then(|r| r.as_str()), Some("member"));
 }
 
-/// Test that orphan cleanup respects system namespace boundaries.
+/// Tests that orphan cleanup respects system namespace boundaries.
 ///
 /// Cleanup should skip the _system namespace (namespace_id = 0).
 #[serial]
@@ -299,7 +299,7 @@ async fn test_orphan_cleanup_skips_system_namespace() {
     assert_eq!(member.get("user_id").and_then(|v| v.as_i64()), Some(9999));
 }
 
-/// Test orphan cleanup handles empty namespaces gracefully.
+/// Tests orphan cleanup handles empty namespaces gracefully.
 #[serial]
 #[tokio::test]
 async fn test_orphan_cleanup_handles_empty_namespace() {
@@ -318,7 +318,7 @@ async fn test_orphan_cleanup_handles_empty_namespace() {
     assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
 }
 
-/// Test concurrent background jobs don't interfere.
+/// Tests concurrent background jobs don't interfere.
 #[serial]
 #[tokio::test]
 async fn test_orphan_cleanup_with_concurrent_jobs() {

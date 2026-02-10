@@ -85,48 +85,48 @@ impl Default for ClusterMembership {
 }
 
 impl ClusterMembership {
-    /// Create a new empty cluster membership.
+    /// Creates a new empty cluster membership.
     pub fn new() -> Self {
         Self { nodes: HashMap::new() }
     }
 
-    /// Create cluster membership from a list of nodes.
+    /// Creates cluster membership from a list of nodes.
     pub fn from_nodes(nodes: Vec<NodeInfo>) -> Self {
         let nodes = nodes.into_iter().map(|n| (n.node_id.clone(), n)).collect();
         Self { nodes }
     }
 
-    /// Get the number of nodes in the cluster.
+    /// Returns the number of nodes in the cluster.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    /// Check if the cluster is empty.
+    /// Checks if the cluster is empty.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
-    /// Get a node by ID.
+    /// Returns a node by ID.
     pub fn get(&self, node_id: &NodeId) -> Option<&NodeInfo> {
         self.nodes.get(node_id)
     }
 
-    /// Get all nodes.
+    /// Returns all nodes.
     pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> {
         self.nodes.values()
     }
 
-    /// Count the number of Voter nodes.
+    /// Counts the number of Voter nodes.
     pub fn voter_count(&self) -> usize {
         self.nodes.values().filter(|n| matches!(n.role, NodeRole::Voter)).count()
     }
 
-    /// Count the number of Learner nodes.
+    /// Counts the number of Learner nodes.
     pub fn learner_count(&self) -> usize {
         self.nodes.values().filter(|n| matches!(n.role, NodeRole::Learner)).count()
     }
 
-    /// Get all Voter node IDs.
+    /// Returns all Voter node IDs.
     pub fn voters(&self) -> Vec<NodeId> {
         self.nodes
             .values()
@@ -135,7 +135,7 @@ impl ClusterMembership {
             .collect()
     }
 
-    /// Get all Learner node IDs.
+    /// Returns all Learner node IDs.
     pub fn learners(&self) -> Vec<NodeId> {
         self.nodes
             .values()
@@ -144,7 +144,7 @@ impl ClusterMembership {
             .collect()
     }
 
-    /// Determine the role for a new node joining the cluster.
+    /// Determines the role for a new node joining the cluster.
     ///
     /// If there are fewer than MAX_VOTERS voters, the new node becomes a Voter.
     /// Otherwise, it becomes a Learner.
@@ -152,7 +152,7 @@ impl ClusterMembership {
         if self.voter_count() < MAX_VOTERS { NodeRole::Voter } else { NodeRole::Learner }
     }
 
-    /// Add a new node to the cluster.
+    /// Adds a new node to the cluster.
     ///
     /// The node's role is automatically determined based on current voter count.
     pub fn add_node(&mut self, mut node: NodeInfo) {
@@ -160,21 +160,21 @@ impl ClusterMembership {
         self.nodes.insert(node.node_id.clone(), node);
     }
 
-    /// Remove a node from the cluster.
+    /// Removes a node from the cluster.
     ///
     /// Returns the removed node if it existed.
     pub fn remove_node(&mut self, node_id: &NodeId) -> Option<NodeInfo> {
         self.nodes.remove(node_id)
     }
 
-    /// Update a node's heartbeat timestamp.
+    /// Updates a node's heartbeat timestamp.
     pub fn update_heartbeat(&mut self, node_id: &NodeId, timestamp: DateTime<Utc>) {
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.last_heartbeat = timestamp;
         }
     }
 
-    /// Promote the oldest healthy Learner to Voter.
+    /// Promotes the oldest healthy Learner to Voter.
     ///
     /// Called when a Voter is removed and we need to maintain voter count.
     /// Returns the promoted node ID if a Learner was promoted.
@@ -204,7 +204,7 @@ impl ClusterMembership {
         learner_to_promote
     }
 
-    /// Demote the newest Voter to Learner.
+    /// Demotes the newest Voter to Learner.
     ///
     /// Used when rebalancing the cluster or when a higher-priority node joins.
     /// Returns the demoted node ID if a Voter was demoted.
@@ -231,7 +231,7 @@ impl ClusterMembership {
         voter_to_demote
     }
 
-    /// Find nodes that haven't sent a heartbeat within the timeout period.
+    /// Finds nodes that haven't sent a heartbeat within the timeout period.
     pub fn find_stale_nodes(&self, timeout: chrono::Duration, now: DateTime<Utc>) -> Vec<NodeId> {
         self.nodes
             .iter()

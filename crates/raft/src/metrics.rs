@@ -99,7 +99,7 @@ const LEARNER_VOTER_ERRORS: &str = "ledger_learner_voter_errors_total";
 // Write Service Metrics
 // =============================================================================
 
-/// Record a write operation.
+/// Records a write operation.
 #[inline]
 pub fn record_write(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
@@ -107,7 +107,7 @@ pub fn record_write(success: bool, latency_secs: f64) {
     histogram!(WRITES_LATENCY, "status" => status).record(latency_secs);
 }
 
-/// Record a batch write operation.
+/// Records a batch write operation.
 #[inline]
 pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
@@ -116,13 +116,13 @@ pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
     histogram!(BATCH_SIZE).record(batch_size as f64);
 }
 
-/// Record a rate limit exceeded event (legacy, namespace-only).
+/// Records a rate limit exceeded event (legacy, namespace-only).
 #[inline]
 pub fn record_rate_limit_exceeded(namespace_id: i64) {
     counter!(RATE_LIMIT_EXCEEDED, "namespace_id" => namespace_id.to_string()).increment(1);
 }
 
-/// Record a rate limit rejection with level and reason labels.
+/// Records a rate limit rejection with level and reason labels.
 ///
 /// Per PRD Task 4: `ledger_rate_limit_rejected_total{level, reason}`.
 #[inline]
@@ -135,7 +135,7 @@ pub fn record_rate_limit_rejected(level: &str, reason: &str) {
 // Read Service Metrics
 // =============================================================================
 
-/// Record a read operation.
+/// Records a read operation.
 #[inline]
 pub fn record_read(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
@@ -143,7 +143,7 @@ pub fn record_read(success: bool, latency_secs: f64) {
     histogram!(READS_LATENCY, "status" => status).record(latency_secs);
 }
 
-/// Record a verified read operation.
+/// Records a verified read operation.
 #[inline]
 pub fn record_verified_read(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
@@ -155,43 +155,43 @@ pub fn record_verified_read(success: bool, latency_secs: f64) {
 // Raft Consensus Metrics
 // =============================================================================
 
-/// Record a Raft proposal submission.
+/// Records a Raft proposal submission.
 #[inline]
 pub fn record_raft_proposal() {
     counter!(RAFT_PROPOSALS_TOTAL).increment(1);
 }
 
-/// Record a Raft proposal that timed out before committing.
+/// Records a Raft proposal that timed out before committing.
 #[inline]
 pub fn record_raft_proposal_timeout() {
     counter!(RAFT_PROPOSAL_TIMEOUTS_TOTAL).increment(1);
 }
 
-/// Set the number of pending Raft proposals.
+/// Sets the number of pending Raft proposals.
 #[inline]
 pub fn set_pending_proposals(count: usize) {
     gauge!(RAFT_PROPOSALS_PENDING).set(count as f64);
 }
 
-/// Record Raft apply latency.
+/// Records Raft apply latency.
 #[inline]
 pub fn record_raft_apply_latency(latency_secs: f64) {
     histogram!(RAFT_APPLY_LATENCY).record(latency_secs);
 }
 
-/// Set the current Raft commit index.
+/// Sets the current Raft commit index.
 #[inline]
 pub fn set_raft_commit_index(index: u64) {
     gauge!(RAFT_COMMIT_INDEX).set(index as f64);
 }
 
-/// Set the current Raft term.
+/// Sets the current Raft term.
 #[inline]
 pub fn set_raft_term(term: u64) {
     gauge!(RAFT_TERM).set(term as f64);
 }
 
-/// Set whether this node is the Raft leader.
+/// Sets whether this node is the Raft leader.
 #[inline]
 pub fn set_is_leader(is_leader: bool) {
     gauge!(RAFT_LEADER).set(if is_leader { 1.0 } else { 0.0 });
@@ -201,7 +201,7 @@ pub fn set_is_leader(is_leader: bool) {
 // State Machine Metrics
 // =============================================================================
 
-/// Record a state root computation.
+/// Records a state root computation.
 #[inline]
 pub fn record_state_root_computation(vault_id: i64, latency_secs: f64) {
     let vault_label = vault_id.to_string();
@@ -209,7 +209,7 @@ pub fn record_state_root_computation(vault_id: i64, latency_secs: f64) {
     histogram!(STATE_ROOT_LATENCY, "vault_id" => vault_label).record(latency_secs);
 }
 
-/// Set the number of dirty buckets for a vault.
+/// Sets the number of dirty buckets for a vault.
 #[inline]
 pub fn set_dirty_buckets(vault_id: i64, count: usize) {
     let vault_label = vault_id.to_string();
@@ -220,14 +220,14 @@ pub fn set_dirty_buckets(vault_id: i64, count: usize) {
 // Storage Metrics
 // =============================================================================
 
-/// Record bytes written to storage.
+/// Records bytes written to storage.
 #[inline]
 pub fn record_storage_write(bytes: usize) {
     counter!(STORAGE_BYTES_WRITTEN).increment(bytes as u64);
     counter!(STORAGE_OPERATIONS, "op" => "write").increment(1);
 }
 
-/// Record bytes read from storage.
+/// Records bytes read from storage.
 #[inline]
 pub fn record_storage_read(bytes: usize) {
     counter!(STORAGE_BYTES_READ).increment(bytes as u64);
@@ -238,7 +238,7 @@ pub fn record_storage_read(bytes: usize) {
 // Snapshot Metrics
 // =============================================================================
 
-/// Record a snapshot creation.
+/// Records a snapshot creation.
 #[inline]
 pub fn record_snapshot_created(size_bytes: usize, latency_secs: f64) {
     counter!(SNAPSHOTS_CREATED).increment(1);
@@ -246,7 +246,7 @@ pub fn record_snapshot_created(size_bytes: usize, latency_secs: f64) {
     histogram!(SNAPSHOT_CREATE_LATENCY).record(latency_secs);
 }
 
-/// Record a snapshot restore.
+/// Records a snapshot restore.
 #[inline]
 pub fn record_snapshot_restore(latency_secs: f64) {
     histogram!(SNAPSHOT_RESTORE_LATENCY).record(latency_secs);
@@ -256,25 +256,25 @@ pub fn record_snapshot_restore(latency_secs: f64) {
 // Idempotency Cache Metrics
 // =============================================================================
 
-/// Record an idempotency cache hit.
+/// Records an idempotency cache hit.
 #[inline]
 pub fn record_idempotency_hit() {
     counter!(IDEMPOTENCY_HITS).increment(1);
 }
 
-/// Record an idempotency cache miss.
+/// Records an idempotency cache miss.
 #[inline]
 pub fn record_idempotency_miss() {
     counter!(IDEMPOTENCY_MISSES).increment(1);
 }
 
-/// Set the current idempotency cache size.
+/// Sets the current idempotency cache size.
 #[inline]
 pub fn set_idempotency_cache_size(size: usize) {
     gauge!(IDEMPOTENCY_SIZE).set(size as f64);
 }
 
-/// Record idempotency cache evictions.
+/// Records idempotency cache evictions.
 #[inline]
 pub fn record_idempotency_evictions(count: usize) {
     counter!(IDEMPOTENCY_EVICTIONS).increment(count as u64);
@@ -296,7 +296,7 @@ pub fn decrement_connections() {
     gauge!(ACTIVE_CONNECTIONS).decrement(1.0);
 }
 
-/// Record a gRPC request.
+/// Records a gRPC request.
 ///
 /// The `error_class` label classifies errors by cause for error-budget tracking:
 /// `"timeout"`, `"unavailable"`, `"permission_denied"`, `"validation"`, `"internal"`,
@@ -323,7 +323,7 @@ pub fn record_grpc_request(
     .record(latency_secs);
 }
 
-/// Classify a gRPC status code into an error class label for metrics.
+/// Classifies a gRPC status code into an error class label for metrics.
 ///
 /// Returns one of: `"none"`, `"timeout"`, `"unavailable"`, `"permission_denied"`,
 /// `"validation"`, `"rate_limited"`, `"internal"`.
@@ -347,20 +347,20 @@ pub fn error_class_from_grpc_code(code: tonic::Code) -> &'static str {
 // Batching Metrics
 // =============================================================================
 
-/// Record a batch coalesce event.
+/// Records a batch coalesce event.
 #[inline]
 pub fn record_batch_coalesce(size: usize) {
     counter!(BATCH_COALESCE_TOTAL).increment(1);
     histogram!(BATCH_COALESCE_SIZE).record(size as f64);
 }
 
-/// Record batch flush latency.
+/// Records batch flush latency.
 #[inline]
 pub fn record_batch_flush(latency_secs: f64) {
     histogram!(BATCH_FLUSH_LATENCY).record(latency_secs);
 }
 
-/// Record an eager commit (batch flushed due to queue draining).
+/// Records an eager commit (batch flushed due to queue draining).
 ///
 /// Per DESIGN.md §6.3: Eager commits occur when the incoming queue drains
 /// and the batch is flushed immediately rather than waiting for timeout.
@@ -369,7 +369,7 @@ pub fn record_eager_commit() {
     counter!(BATCH_EAGER_COMMITS_TOTAL).increment(1);
 }
 
-/// Record a timeout commit (batch flushed due to deadline).
+/// Records a timeout commit (batch flushed due to deadline).
 #[inline]
 pub fn record_timeout_commit() {
     counter!(BATCH_TIMEOUT_COMMITS_TOTAL).increment(1);
@@ -379,7 +379,7 @@ pub fn record_timeout_commit() {
 // Recovery Metrics
 // =============================================================================
 
-/// Record a successful vault recovery.
+/// Records a successful vault recovery.
 #[inline]
 pub fn record_recovery_success(namespace_id: i64, vault_id: i64) {
     counter!(
@@ -390,7 +390,7 @@ pub fn record_recovery_success(namespace_id: i64, vault_id: i64) {
     .increment(1);
 }
 
-/// Record a failed vault recovery attempt.
+/// Records a failed vault recovery attempt.
 #[inline]
 pub fn record_recovery_failure(namespace_id: i64, vault_id: i64, reason: &str) {
     counter!(
@@ -402,7 +402,7 @@ pub fn record_recovery_failure(namespace_id: i64, vault_id: i64, reason: &str) {
     .increment(1);
 }
 
-/// Record a determinism bug detection (critical alert).
+/// Records a determinism bug detection (critical alert).
 #[inline]
 pub fn record_determinism_bug(namespace_id: i64, vault_id: i64) {
     counter!(
@@ -413,7 +413,7 @@ pub fn record_determinism_bug(namespace_id: i64, vault_id: i64) {
     .increment(1);
 }
 
-/// Record a divergence recovery attempt with outcome.
+/// Records a divergence recovery attempt with outcome.
 #[inline]
 pub fn record_recovery_attempt(namespace_id: i64, vault_id: i64, attempt: u8, outcome: &str) {
     counter!(
@@ -426,7 +426,7 @@ pub fn record_recovery_attempt(namespace_id: i64, vault_id: i64, attempt: u8, ou
     .increment(1);
 }
 
-/// Set the vault health gauge for a specific vault.
+/// Sets the vault health gauge for a specific vault.
 ///
 /// State values: 0 = healthy, 1 = diverged, 2 = recovering.
 #[inline]
@@ -450,7 +450,7 @@ pub fn set_vault_health(namespace_id: i64, vault_id: i64, state: &str) {
 // Learner Refresh Metrics
 // =============================================================================
 
-/// Record a learner refresh attempt.
+/// Records a learner refresh attempt.
 #[inline]
 pub fn record_learner_refresh(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
@@ -458,7 +458,7 @@ pub fn record_learner_refresh(success: bool, latency_secs: f64) {
     histogram!(LEARNER_REFRESH_LATENCY, "status" => status).record(latency_secs);
 }
 
-/// Record a learner cache staleness event.
+/// Records a learner cache staleness event.
 ///
 /// This is incremented when a learner's cached state becomes stale
 /// and requires refresh from a voter.
@@ -467,7 +467,7 @@ pub fn record_learner_cache_stale() {
     counter!(LEARNER_CACHE_STALENESS).increment(1);
 }
 
-/// Record a voter connection error during learner refresh.
+/// Records a voter connection error during learner refresh.
 #[inline]
 pub fn record_learner_voter_error(voter_id: u64, error_type: &str) {
     counter!(
@@ -488,7 +488,7 @@ const SERIALIZATION_POSTCARD_ENCODE: &str = "ledger_serialization_postcard_encod
 const SERIALIZATION_POSTCARD_DECODE: &str = "ledger_serialization_postcard_decode_seconds";
 const SERIALIZATION_BYTES: &str = "ledger_serialization_bytes";
 
-/// Record proto decoding latency (gRPC request → internal types).
+/// Records proto decoding latency (gRPC request → internal types).
 ///
 /// This measures the time to convert protobuf messages to internal Rust types,
 /// which is part of the write path hot loop.
@@ -498,7 +498,7 @@ pub fn record_proto_decode(latency_secs: f64, operation: &str) {
         .record(latency_secs);
 }
 
-/// Record postcard encoding latency (internal types → Raft log).
+/// Records postcard encoding latency (internal types → Raft log).
 ///
 /// This measures serialization time when appending entries to the Raft log.
 /// Per DESIGN.md architecture: internal types are postcard-serialized for
@@ -509,7 +509,7 @@ pub fn record_postcard_encode(latency_secs: f64, entry_type: &str) {
         .record(latency_secs);
 }
 
-/// Record postcard decoding latency (Raft log → internal types).
+/// Records postcard decoding latency (Raft log → internal types).
 ///
 /// This measures deserialization time when reading entries from the Raft log,
 /// used during log replay and snapshot restoration.
@@ -519,7 +519,7 @@ pub fn record_postcard_decode(latency_secs: f64, entry_type: &str) {
         .record(latency_secs);
 }
 
-/// Record serialization size in bytes.
+/// Records serialization size in bytes.
 ///
 /// Useful for correlating latency with payload size and detecting
 /// unexpectedly large serialized payloads.
@@ -536,7 +536,7 @@ pub fn record_serialization_bytes(bytes: usize, direction: &str, entry_type: &st
 // Audit logging metrics
 const AUDIT_EVENTS_TOTAL: &str = "ledger_audit_events_total";
 
-/// Record an audit event for Prometheus tracking.
+/// Records an audit event for Prometheus tracking.
 ///
 /// Tracks the total number of audit events by action and outcome.
 /// This is called by the audit integration layer after each operation.
@@ -555,7 +555,7 @@ const BTREE_COMPACTION_RUNS_TOTAL: &str = "ledger_btree_compaction_runs_total";
 const BTREE_COMPACTION_PAGES_MERGED: &str = "ledger_btree_compaction_pages_merged";
 const BTREE_COMPACTION_PAGES_FREED: &str = "ledger_btree_compaction_pages_freed";
 
-/// Record a B+ tree compaction run.
+/// Records a B+ tree compaction run.
 ///
 /// Tracks the number of compaction cycles and the pages merged/freed.
 #[inline]
@@ -570,7 +570,7 @@ pub fn record_btree_compaction(pages_merged: u64, pages_freed: u64) {
 /// Hot key detection events.
 const HOT_KEY_DETECTED_TOTAL: &str = "ledger_hot_key_detected_total";
 
-/// Record a hot key detection event.
+/// Records a hot key detection event.
 ///
 /// Called whenever a key's access rate exceeds the configured threshold.
 /// Labels include vault_id and a hash of the key (not the key itself,
@@ -593,7 +593,7 @@ pub fn record_hot_key_detected(
 
 // ─── SLI/SLO Metrics ──────────────────────────────────────────
 
-/// Batch writer queue depth gauge.
+/// Batches writer queue depth gauge.
 const BATCH_QUEUE_DEPTH: &str = "ledger_batch_queue_depth";
 
 /// Rate limiter queue depth gauge (pending proposals tracked by backpressure tier).
@@ -605,7 +605,7 @@ const CLUSTER_QUORUM_STATUS: &str = "ledger_cluster_quorum_status";
 /// Leader election counter.
 const LEADER_ELECTIONS_TOTAL: &str = "ledger_leader_elections_total";
 
-/// Set the current batch writer queue depth.
+/// Sets the current batch writer queue depth.
 ///
 /// Tracks how many write operations are pending in the batch writer,
 /// serving as a leading indicator of write saturation.
@@ -614,7 +614,7 @@ pub fn set_batch_queue_depth(depth: usize) {
     gauge!(BATCH_QUEUE_DEPTH).set(depth as f64);
 }
 
-/// Set the current rate limiter queue depth.
+/// Sets the current rate limiter queue depth.
 ///
 /// Tracks the number of pending proposals seen by the rate limiter's
 /// backpressure tier, indicating write pipeline saturation.
@@ -623,7 +623,7 @@ pub fn set_rate_limit_queue_depth(depth: u64) {
     gauge!(RATE_LIMIT_QUEUE_DEPTH).set(depth as f64);
 }
 
-/// Set the cluster quorum status.
+/// Sets the cluster quorum status.
 ///
 /// - `1.0` — a leader is elected and the cluster has quorum
 /// - `0.0` — no leader, quorum lost
@@ -632,7 +632,7 @@ pub fn set_cluster_quorum_status(has_quorum: bool) {
     gauge!(CLUSTER_QUORUM_STATUS).set(if has_quorum { 1.0 } else { 0.0 });
 }
 
-/// Record a leader election event.
+/// Records a leader election event.
 ///
 /// Should be called when a Raft term change is detected, indicating
 /// a new leader election has occurred.
@@ -673,7 +673,7 @@ const COMPACTION_LAG_BLOCKS: &str = "ledger_compaction_lag_blocks";
 /// Snapshot total disk bytes gauge.
 const SNAPSHOT_DISK_BYTES: &str = "ledger_snapshot_disk_bytes";
 
-/// Set disk space metrics.
+/// Sets disk space metrics.
 ///
 /// Updates total, free, and used disk bytes for the data directory's filesystem.
 #[inline]
@@ -683,7 +683,7 @@ pub fn set_disk_bytes(total: u64, free: u64) {
     gauge!(DISK_BYTES_USED).set((total.saturating_sub(free)) as f64);
 }
 
-/// Set page cache counters.
+/// Sets page cache counters.
 ///
 /// Reports cumulative cache hit/miss totals and current cache size.
 #[inline]
@@ -693,19 +693,19 @@ pub fn set_page_cache_metrics(hits: u64, misses: u64, size: usize) {
     gauge!(PAGE_CACHE_SIZE).set(size as f64);
 }
 
-/// Set B-tree depth for a given table.
+/// Sets B-tree depth for a given table.
 #[inline]
 pub fn set_btree_depth(table: &str, depth: u32) {
     gauge!(BTREE_DEPTH, "table" => table.to_string()).set(f64::from(depth));
 }
 
-/// Set B-tree page splits total.
+/// Sets B-tree page splits total.
 #[inline]
 pub fn set_btree_page_splits(total: u64) {
     counter!(BTREE_PAGE_SPLITS_TOTAL).absolute(total);
 }
 
-/// Set compaction lag blocks gauge.
+/// Sets compaction lag blocks gauge.
 ///
 /// Tracks the number of free pages (reclaimable space) as a proxy for
 /// compaction backlog. High values indicate that compaction is falling behind.
@@ -714,7 +714,7 @@ pub fn set_compaction_lag_blocks(blocks: usize) {
     gauge!(COMPACTION_LAG_BLOCKS).set(blocks as f64);
 }
 
-/// Set snapshot total disk bytes.
+/// Sets snapshot total disk bytes.
 ///
 /// Tracks the total disk space used by all snapshots in the snapshot directory.
 #[inline]
@@ -743,17 +743,17 @@ pub struct Timer {
 }
 
 impl Timer {
-    /// Create a new timer.
+    /// Creates a new timer.
     pub fn new<F: FnOnce(f64) + Send + 'static>(record_fn: F) -> Self {
         Self { start: Instant::now(), record_fn: Some(Box::new(record_fn)) }
     }
 
-    /// Get elapsed time in seconds.
+    /// Returns elapsed time in seconds.
     pub fn elapsed_secs(&self) -> f64 {
         self.start.elapsed().as_secs_f64()
     }
 
-    /// Stop the timer and return elapsed time without recording.
+    /// Stops the timer and return elapsed time without recording.
     pub fn stop(mut self) -> f64 {
         self.record_fn = None;
         self.elapsed_secs()
@@ -770,13 +770,13 @@ impl Drop for Timer {
 
 // ─── Integrity Scrubber Metrics ──────────────────────────────
 
-/// Record the number of pages checked in a scrub cycle.
+/// Records the number of pages checked in a scrub cycle.
 #[inline]
 pub fn record_integrity_pages_checked(count: u64) {
     counter!(INTEGRITY_PAGES_CHECKED).increment(count);
 }
 
-/// Record the number of integrity errors detected in a scrub cycle.
+/// Records the number of integrity errors detected in a scrub cycle.
 ///
 /// Labels by error type: "checksum" for data corruption, "structural" for
 /// B-tree invariant violations.
@@ -785,7 +785,7 @@ pub fn record_integrity_errors(error_type: &str, count: u64) {
     counter!(INTEGRITY_ERRORS, "error_type" => error_type.to_string()).increment(count);
 }
 
-/// Record the duration of a scrub cycle in seconds.
+/// Records the duration of a scrub cycle in seconds.
 #[inline]
 pub fn record_integrity_scan_duration(duration_secs: f64) {
     histogram!(INTEGRITY_SCAN_DURATION).record(duration_secs);
@@ -802,7 +802,7 @@ const NAMESPACE_OPERATIONS_TOTAL: &str = "ledger_namespace_operations_total";
 /// Per-namespace operation latency histogram.
 const NAMESPACE_LATENCY_SECONDS: &str = "ledger_namespace_latency_seconds";
 
-/// Set the current cumulative storage bytes for a namespace.
+/// Sets the current cumulative storage bytes for a namespace.
 ///
 /// Cardinality is bounded by the number of namespaces, which is
 /// operator-controlled (typically < 100 in production).
@@ -811,7 +811,7 @@ pub fn set_namespace_storage_bytes(namespace_id: i64, bytes: u64) {
     gauge!(NAMESPACE_STORAGE_BYTES, "namespace_id" => namespace_id.to_string()).set(bytes as f64);
 }
 
-/// Record a namespace-level operation (read, write, or admin).
+/// Records a namespace-level operation (read, write, or admin).
 ///
 /// Increments `ledger_namespace_operations_total{namespace_id, operation}`.
 #[inline]
@@ -824,7 +824,7 @@ pub fn record_namespace_operation(namespace_id: i64, operation: &str) {
     .increment(1);
 }
 
-/// Record per-namespace operation latency.
+/// Records per-namespace operation latency.
 ///
 /// Records into `ledger_namespace_latency_seconds{namespace_id, operation}`.
 #[inline]
@@ -861,7 +861,7 @@ const BACKGROUND_JOB_RUNS_TOTAL: &str = "ledger_background_job_runs_total";
 /// - `backup`: backups created
 const BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL: &str = "ledger_background_job_items_processed_total";
 
-/// Record the duration of a background job cycle.
+/// Records the duration of a background job cycle.
 #[inline]
 pub fn record_background_job_duration(job: &str, duration_secs: f64) {
     histogram!(
@@ -871,7 +871,7 @@ pub fn record_background_job_duration(job: &str, duration_secs: f64) {
     .record(duration_secs);
 }
 
-/// Record a completed background job cycle.
+/// Records a completed background job cycle.
 ///
 /// `result` must be `"success"` or `"failure"` — bounded cardinality.
 #[inline]
@@ -884,7 +884,7 @@ pub fn record_background_job_run(job: &str, result: &str) {
     .increment(1);
 }
 
-/// Record items processed by a background job cycle.
+/// Records items processed by a background job cycle.
 #[inline]
 pub fn record_background_job_items(job: &str, count: u64) {
     counter!(
@@ -903,7 +903,7 @@ pub fn record_background_job_items(job: &str, count: u64) {
 /// families in the application (typically < 100).
 const CARDINALITY_OVERFLOW_TOTAL: &str = "ledger_metrics_cardinality_overflow_total";
 
-/// Record that a metric observation was dropped due to cardinality overflow.
+/// Records that a metric observation was dropped due to cardinality overflow.
 #[inline]
 pub fn record_cardinality_overflow(metric_name: &str) {
     counter!(
@@ -913,17 +913,17 @@ pub fn record_cardinality_overflow(metric_name: &str) {
     .increment(1);
 }
 
-/// Create a timer for write operations.
+/// Creates a timer for write operations.
 pub fn write_timer() -> Timer {
     Timer::new(|secs| record_write(true, secs))
 }
 
-/// Create a timer for read operations.
+/// Creates a timer for read operations.
 pub fn read_timer() -> Timer {
     Timer::new(|secs| record_read(true, secs))
 }
 
-/// Create a timer for Raft apply operations.
+/// Creates a timer for Raft apply operations.
 pub fn raft_apply_timer() -> Timer {
     Timer::new(record_raft_apply_latency)
 }

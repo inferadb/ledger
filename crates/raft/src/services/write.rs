@@ -39,7 +39,7 @@ use crate::{
     wide_events::{OperationType, RequestContext, Sampler},
 };
 
-/// Classify a batch writer error into the appropriate `tonic::Status`.
+/// Classifies a batch writer error into the appropriate `tonic::Status`.
 ///
 /// `BatchError::RaftError` may contain leadership-related messages that
 /// should map to `UNAVAILABLE` (retryable) instead of `INTERNAL`.
@@ -51,7 +51,7 @@ fn classify_batch_error(err: &BatchError) -> Status {
     }
 }
 
-/// Write service implementation.
+/// Writes service implementation.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct WriteServiceImpl {
@@ -68,7 +68,7 @@ pub struct WriteServiceImpl {
     /// Accessor for applied state (client sequences for gap detection).
     #[builder(default)]
     applied_state: Option<AppliedStateAccessor>,
-    /// Handle for submitting writes to the batch writer.
+    /// Handles for submitting writes to the batch writer.
     ///
     /// Per DESIGN.md §6.3: Writes are coalesced into batches and submitted
     /// as single Raft proposals for improved throughput.
@@ -107,7 +107,7 @@ pub struct WriteServiceImpl {
 
 #[allow(clippy::result_large_err)]
 impl WriteServiceImpl {
-    /// Create a write service with batching enabled.
+    /// Creates a write service with batching enabled.
     ///
     /// Per DESIGN.md §6.3: Batching coalesces multiple writes into single
     /// Raft proposals for improved throughput.
@@ -178,7 +178,7 @@ impl WriteServiceImpl {
         (service, run_future)
     }
 
-    /// Create a write service with block archive and batching enabled.
+    /// Creates a write service with block archive and batching enabled.
     pub fn with_block_archive_and_batching(
         raft: Arc<Raft<LedgerTypeConfig>>,
         idempotency: Arc<IdempotencyCache>,
@@ -190,28 +190,28 @@ impl WriteServiceImpl {
         (service, run_future)
     }
 
-    /// Add per-namespace rate limiting to an existing service.
+    /// Adds per-namespace rate limiting to an existing service.
     #[must_use]
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
         self
     }
 
-    /// Add applied state accessor for sequence gap detection.
+    /// Adds applied state accessor for sequence gap detection.
     #[must_use]
     pub fn with_applied_state(mut self, applied_state: AppliedStateAccessor) -> Self {
         self.applied_state = Some(applied_state);
         self
     }
 
-    /// Add audit logger for compliance event tracking.
+    /// Adds audit logger for compliance event tracking.
     #[must_use]
     pub fn with_audit_logger(mut self, logger: Arc<dyn crate::audit::AuditLogger>) -> Self {
         self.audit_logger = Some(logger);
         self
     }
 
-    /// Add hot key detector for identifying frequently accessed keys.
+    /// Adds hot key detector for identifying frequently accessed keys.
     #[must_use]
     pub fn with_hot_key_detector(
         mut self,
@@ -221,28 +221,28 @@ impl WriteServiceImpl {
         self
     }
 
-    /// Set input validation configuration for request field limits.
+    /// Sets input validation configuration for request field limits.
     #[must_use]
     pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
         self.validation_config = config;
         self
     }
 
-    /// Set the maximum time to wait for a Raft proposal to commit.
+    /// Sets the maximum time to wait for a Raft proposal to commit.
     #[must_use]
     pub fn with_proposal_timeout(mut self, timeout: Duration) -> Self {
         self.proposal_timeout = timeout;
         self
     }
 
-    /// Set the per-namespace resource quota checker.
+    /// Sets the per-namespace resource quota checker.
     #[must_use]
     pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
         self.quota_checker = Some(checker);
         self
     }
 
-    /// Validate all operations in a proto operation list.
+    /// Validates all operations in a proto operation list.
     fn validate_operations(
         &self,
         operations: &[inferadb_ledger_proto::proto::Operation],
@@ -250,12 +250,12 @@ impl WriteServiceImpl {
         super::helpers::validate_operations(operations, &self.validation_config)
     }
 
-    /// Emit an audit event and record the corresponding Prometheus metric.
+    /// Emits an audit event and record the corresponding Prometheus metric.
     fn emit_audit_event(&self, event: &AuditEvent) {
         super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
     }
 
-    /// Build an audit event for a write-path operation.
+    /// Builds an audit event for a write-path operation.
     fn build_audit_event(
         &self,
         action: AuditAction,
@@ -276,12 +276,12 @@ impl WriteServiceImpl {
         )
     }
 
-    /// Check all rate limit tiers (backpressure, namespace, client).
+    /// Checks all rate limit tiers (backpressure, namespace, client).
     fn check_rate_limit(&self, client_id: &str, namespace_id: NamespaceId) -> Result<(), Status> {
         super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, namespace_id)
     }
 
-    /// Record key accesses from operations for hot key detection.
+    /// Records key accesses from operations for hot key detection.
     fn record_hot_keys(
         &self,
         vault_id: VaultId,
@@ -290,7 +290,7 @@ impl WriteServiceImpl {
         super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault_id, operations);
     }
 
-    /// Map a failed SetCondition to the appropriate WriteErrorCode.
+    /// Maps a failed SetCondition to the appropriate WriteErrorCode.
     ///
     /// Per DESIGN.md §6.1 and proto WriteErrorCode:
     /// - MustNotExist failed → KEY_EXISTS (key already exists)
@@ -333,7 +333,7 @@ impl WriteServiceImpl {
         }
     }
 
-    /// Convert bytes to hex string for wide event logging.
+    /// Converts bytes to hex string for wide event logging.
     fn bytes_to_hex(bytes: &[u8]) -> String {
         bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
             let _ = write!(acc, "{b:02x}");
@@ -341,7 +341,7 @@ impl WriteServiceImpl {
         })
     }
 
-    /// Extract operation type names from proto operations for wide event logging.
+    /// Extracts operation type names from proto operations for wide event logging.
     fn extract_operation_types(
         operations: &[inferadb_ledger_proto::proto::Operation],
     ) -> Vec<&'static str> {
@@ -384,12 +384,12 @@ impl WriteServiceImpl {
             .sum()
     }
 
-    /// Compute a hash of operations for idempotency payload comparison.
+    /// Computes a hash of operations for idempotency payload comparison.
     fn hash_operations(operations: &[inferadb_ledger_proto::proto::Operation]) -> Vec<u8> {
         super::helpers::hash_operations(operations)
     }
 
-    /// Generate block header and transaction proof for a committed write.
+    /// Generates block header and transaction proof for a committed write.
     ///
     /// Returns (block_header, tx_proof) if successful, (None, None) on error.
     /// Errors are logged with context for debugging.
@@ -426,7 +426,7 @@ impl WriteServiceImpl {
         }
     }
 
-    /// Convert proto operations to LedgerRequest.
+    /// Converts proto operations to LedgerRequest.
     ///
     /// Server-assigned sequences: The transaction's sequence is set to 0 here;
     /// the actual sequence will be assigned by the Raft state machine at apply time.

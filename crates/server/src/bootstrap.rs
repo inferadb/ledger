@@ -463,7 +463,7 @@ async fn bootstrap_cluster_multi(
     Ok(())
 }
 
-/// Wait for this node to be added to the cluster by another node.
+/// Waits for this node to be added to the cluster by another node.
 ///
 /// This is used during coordinated bootstrap when this node is not the lowest-ID
 /// node. The lowest-ID node will bootstrap and then add other members via Raft.
@@ -517,7 +517,7 @@ async fn wait_for_cluster_join(
     }
 }
 
-/// Join an existing cluster by contacting a peer.
+/// Joins an existing cluster by contacting a peer.
 ///
 /// Uses discovery (DNS A records + cached peers) to find cluster entry points.
 /// The node contacts discovered peers and requests to be added to the cluster.
@@ -559,7 +559,7 @@ pub async fn join_cluster(
     Err(BootstrapError::Join("Failed to join cluster via any discovered peer".to_string()))
 }
 
-/// Attempt to join the cluster via a specific peer address.
+/// Attempts to join the cluster via a specific peer address.
 async fn try_join_via_peer(
     node_id: u64,
     my_address: &str,

@@ -52,7 +52,7 @@ fn make_write_request(
     }
 }
 
-/// Extract block_height from a WriteResponse, panics if not a success.
+/// Extracts block_height from a WriteResponse, panics if not a success.
 fn extract_block_height(response: inferadb_ledger_proto::proto::WriteResponse) -> u64 {
     match response.result {
         Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => s.block_height,
@@ -83,7 +83,7 @@ async fn read_entity(
     response.into_inner().value
 }
 
-/// Test that a committed write survives leader failover.
+/// Tests that a committed write survives leader failover.
 ///
 /// This is the fundamental consistency guarantee: once a write is acknowledged
 /// by the leader, it must be durable even if the leader crashes immediately after.
@@ -124,7 +124,7 @@ async fn test_committed_write_survives_leader_crash() {
     assert_eq!(value, Some(b"chaos-value".to_vec()), "follower should have the committed write");
 }
 
-/// Test that writes are still readable after a new leader is elected.
+/// Tests that writes are still readable after a new leader is elected.
 ///
 /// Simulates a scenario where:
 /// 1. Write is committed under leader A
@@ -174,7 +174,7 @@ async fn test_read_consistency_after_leader_change() {
     }
 }
 
-/// Test that writes to a 3-node cluster succeed with 2 nodes available.
+/// Tests that writes to a 3-node cluster succeed with 2 nodes available.
 ///
 /// This tests fault tolerance: a 3-node cluster can tolerate 1 failure.
 #[serial]
@@ -212,7 +212,7 @@ async fn test_writes_succeed_with_one_node_down() {
     assert_eq!(value2, Some(b"value2".to_vec()));
 }
 
-/// Test that all nodes agree on block height after multiple writes.
+/// Tests that all nodes agree on block height after multiple writes.
 ///
 /// This verifies the determinism property: all nodes applying the same
 /// log entries should arrive at the same state.
@@ -255,7 +255,7 @@ async fn test_deterministic_block_height_across_nodes() {
     );
 }
 
-/// Test that concurrent writes from multiple clients are all applied.
+/// Tests that concurrent writes from multiple clients are all applied.
 ///
 /// This tests that the Raft log correctly serializes concurrent writes
 /// and all writes are eventually visible.
@@ -321,7 +321,7 @@ async fn test_concurrent_writes_all_applied() {
     );
 }
 
-/// Test that rapid succession of writes doesn't cause data loss.
+/// Tests that rapid succession of writes doesn't cause data loss.
 ///
 /// This stress tests the batching and commit pipeline.
 #[serial]
@@ -367,7 +367,7 @@ async fn test_rapid_writes_no_data_loss() {
     );
 }
 
-/// Test that the cluster maintains term agreement during normal operation.
+/// Tests that the cluster maintains term agreement during normal operation.
 ///
 /// Term disagreement would indicate split-brain or election issues.
 #[serial]
@@ -398,7 +398,7 @@ async fn test_term_agreement_maintained() {
 // Note: Vault and namespace isolation tests are in write_read.rs.
 // These chaos tests focus on leader failover and replication consistency.
 
-/// Test that overwriting a key works correctly across the cluster.
+/// Tests that overwriting a key works correctly across the cluster.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_key_overwrite_consistency() {
@@ -428,7 +428,7 @@ async fn test_key_overwrite_consistency() {
     }
 }
 
-/// Test that large batches of writes are applied correctly.
+/// Tests that large batches of writes are applied correctly.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_large_batch_writes() {

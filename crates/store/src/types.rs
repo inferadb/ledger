@@ -29,10 +29,10 @@ pub trait Key: Sized {
     /// The key type discriminant.
     const KEY_TYPE: KeyType;
 
-    /// Encode the key into a byte buffer.
+    /// Encodes the key into a byte buffer.
     fn encode(&self, buf: &mut Vec<u8>);
 
-    /// Decode a key from a byte slice.
+    /// Decodes a key from a byte slice.
     fn decode(buf: &[u8]) -> Option<Self>;
 
     /// Compare two encoded keys lexicographically.
@@ -44,10 +44,10 @@ pub trait Key: Sized {
 
 /// Trait for types that can be used as values in store tables.
 pub trait Value: Sized {
-    /// Encode the value into a byte buffer.
+    /// Encodes the value into a byte buffer.
     fn encode(&self, buf: &mut Vec<u8>);
 
-    /// Decode a value from a byte slice.
+    /// Decodes a value from a byte slice.
     fn decode(buf: &[u8]) -> Option<Self>;
 
     /// Returns the encoded size of this value.
@@ -256,21 +256,21 @@ impl Value for u64 {
 // Encoding Utilities
 // ============================================================================
 
-/// Encode a length-prefixed byte slice (used for variable-length fields).
+/// Encodes a length-prefixed byte slice (used for variable-length fields).
 pub fn encode_length_prefixed(data: &[u8], buf: &mut Vec<u8>) {
     // Use varint encoding for length (1-5 bytes for lengths up to 4GB)
     encode_varint(data.len() as u32, buf);
     buf.extend_from_slice(data);
 }
 
-/// Decode a length-prefixed byte slice.
+/// Decodes a length-prefixed byte slice.
 pub fn decode_length_prefixed(buf: &[u8]) -> Option<(&[u8], usize)> {
     let (len, varint_size) = decode_varint(buf)?;
     let total_size = varint_size + len as usize;
     if buf.len() >= total_size { Some((&buf[varint_size..total_size], total_size)) } else { None }
 }
 
-/// Encode a u32 as a varint (1-5 bytes).
+/// Encodes a u32 as a varint (1-5 bytes).
 pub fn encode_varint(mut value: u32, buf: &mut Vec<u8>) {
     loop {
         if value < 0x80 {
@@ -282,7 +282,7 @@ pub fn encode_varint(mut value: u32, buf: &mut Vec<u8>) {
     }
 }
 
-/// Decode a varint from a byte slice. Returns (value, bytes_consumed).
+/// Decodes a varint from a byte slice. Returns (value, bytes_consumed).
 pub fn decode_varint(buf: &[u8]) -> Option<(u32, usize)> {
     let mut value: u32 = 0;
     let mut shift = 0;

@@ -46,7 +46,7 @@ pub struct TraceContext {
 }
 
 impl TraceContext {
-    /// Generate a new trace context with a random trace ID and span ID.
+    /// Generates a new trace context with a random trace ID and span ID.
     ///
     /// Used when no incoming trace context exists.
     pub fn new() -> Self {
@@ -59,7 +59,7 @@ impl TraceContext {
         }
     }
 
-    /// Create a child span context, inheriting the trace ID and using the
+    /// Creates a child span context, inheriting the trace ID and using the
     /// current span ID as the parent.
     pub fn child(&self) -> Self {
         Self {
@@ -71,12 +71,12 @@ impl TraceContext {
         }
     }
 
-    /// Check if the sampled flag is set.
+    /// Checks if the sampled flag is set.
     pub fn is_sampled(&self) -> bool {
         self.trace_flags & TRACE_FLAG_SAMPLED != 0
     }
 
-    /// Format as W3C traceparent header value.
+    /// Formats as W3C traceparent header value.
     pub fn to_traceparent(&self) -> String {
         format!("00-{}-{}-{:02x}", self.trace_id, self.span_id, self.trace_flags)
     }
@@ -94,7 +94,7 @@ impl fmt::Display for TraceContext {
     }
 }
 
-/// Generate a random 32-character hex trace ID (16 bytes).
+/// Generates a random 32-character hex trace ID (16 bytes).
 fn generate_trace_id() -> String {
     // Use two UUIDs concatenated for 32 hex chars
     let uuid = Uuid::new_v4();
@@ -102,19 +102,19 @@ fn generate_trace_id() -> String {
     hex_encode(bytes)
 }
 
-/// Generate a random 16-character hex span ID (8 bytes).
+/// Generates a random 16-character hex span ID (8 bytes).
 fn generate_span_id() -> String {
     let uuid = Uuid::new_v4();
     let bytes = &uuid.as_bytes()[..8];
     hex_encode(bytes)
 }
 
-/// Encode bytes as lowercase hex string.
+/// Encodes bytes as lowercase hex string.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Parse error for trace context extraction.
+/// Parses error for trace context extraction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     /// Header value is not valid ASCII.
@@ -143,7 +143,7 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// Extract trace context from gRPC metadata.
+/// Extracts trace context from gRPC metadata.
 ///
 /// If the `traceparent` header is present and valid, extracts the trace context.
 /// Returns `None` if the header is missing.
@@ -164,7 +164,7 @@ pub fn extract_from_metadata(metadata: &MetadataMap) -> Result<Option<TraceConte
     parse_traceparent(traceparent, trace_state).map(Some)
 }
 
-/// Parse a W3C traceparent header value.
+/// Parses a W3C traceparent header value.
 ///
 /// Format: `{version}-{trace_id}-{parent_id}-{trace_flags}`
 fn parse_traceparent(
@@ -247,7 +247,7 @@ pub fn inject_into_metadata(metadata: &mut MetadataMap, context: &TraceContext) 
     }
 }
 
-/// Extract or generate trace context from gRPC metadata.
+/// Extracts or generate trace context from gRPC metadata.
 ///
 /// If valid trace context exists, returns it. If the header is missing or
 /// malformed, generates a new trace context. Logs a warning for malformed

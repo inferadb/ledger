@@ -150,7 +150,7 @@ impl MockState {
         }
     }
 
-    /// Check if we should inject an unavailable error, decrementing counter if so.
+    /// Checks if we should inject an unavailable error, decrementing counter if so.
     fn should_inject_unavailable(&self) -> bool {
         loop {
             let current = self.unavailable_count.load(Ordering::SeqCst);
@@ -167,7 +167,7 @@ impl MockState {
         }
     }
 
-    /// Get delay to inject (if any).
+    /// Returns delay to inject (if any).
     async fn maybe_delay(&self) {
         let delay_ms = self.delay_ms.load(Ordering::SeqCst);
         if delay_ms > 0 {
@@ -175,7 +175,7 @@ impl MockState {
         }
     }
 
-    /// Apply configured delay and check for injected errors.
+    /// Applies configured delay and check for injected errors.
     ///
     /// Combines `maybe_delay()` and `should_inject_unavailable()` into a single call.
     async fn check_injection(&self) -> Result<(), Status> {
@@ -200,16 +200,25 @@ pub struct MockLedgerServer {
 }
 
 impl MockLedgerServer {
-    /// Start a new mock server on an ephemeral port.
+    /// Starts a new mock server on an ephemeral port.
     ///
     /// Returns the server handle which provides the endpoint address and control methods.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Connection` if binding to an ephemeral port fails.
     pub async fn start() -> crate::Result<Self> {
         Self::start_on_port(0).await
     }
 
-    /// Start a new mock server on a specific port.
+    /// Starts a new mock server on a specific port.
     ///
     /// Use port 0 to let the OS assign an ephemeral port.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Config` if the port is invalid.
+    /// Returns `SdkError::Connection` if binding to the specified port fails.
     pub async fn start_on_port(port: u16) -> crate::Result<Self> {
         let state = Arc::new(MockState::new());
 
@@ -260,20 +269,20 @@ impl MockLedgerServer {
         Ok(Self { state, endpoint, shutdown_tx: Some(shutdown_tx) })
     }
 
-    /// Get the endpoint URL for connecting to this server.
+    /// Returns the endpoint URL for connecting to this server.
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    /// Set an entity value for read tests.
+    /// Sets an entity value for read tests.
     ///
     /// The entity will be stored with a version of 1 and no expiration.
     pub fn set_entity(&self, namespace_id: i64, vault_id: i64, key: &str, value: &[u8]) {
         self.set_entity_with_options(namespace_id, vault_id, key, value, 1, None);
     }
 
-    /// Set an entity value with full options.
+    /// Sets an entity value with full options.
     pub fn set_entity_with_options(
         &self,
         namespace_id: i64,
@@ -290,13 +299,13 @@ impl MockLedgerServer {
         );
     }
 
-    /// Remove an entity from storage.
+    /// Removes an entity from storage.
     pub fn remove_entity(&self, namespace_id: i64, vault_id: i64, key: &str) {
         let mut entities = self.state.entities.write();
         entities.remove(&(namespace_id, vault_id, key.to_string()));
     }
 
-    /// Set the last committed sequence for a client.
+    /// Sets the last committed sequence for a client.
     ///
     /// Used to test idempotency behavior (ALREADY_COMMITTED, SEQUENCE_GAP).
     pub fn set_client_state(&self, namespace_id: i64, vault_id: i64, client_id: &str, seq: u64) {
@@ -304,7 +313,7 @@ impl MockLedgerServer {
         sequences.insert((namespace_id, vault_id, client_id.to_string()), seq);
     }
 
-    /// Get the last committed sequence for a client.
+    /// Returns the last committed sequence for a client.
     pub fn get_client_state(
         &self,
         namespace_id: i64,
@@ -315,36 +324,36 @@ impl MockLedgerServer {
         sequences.get(&(namespace_id, vault_id, client_id.to_string())).copied()
     }
 
-    /// Inject UNAVAILABLE errors for the next N requests.
+    /// Injects UNAVAILABLE errors for the next N requests.
     ///
     /// Each request will decrement this counter and return UNAVAILABLE until it reaches 0.
     pub fn inject_unavailable(&self, count: usize) {
         self.state.unavailable_count.store(count, Ordering::SeqCst);
     }
 
-    /// Inject a delay for all subsequent requests.
+    /// Injects a delay for all subsequent requests.
     ///
-    /// Set to 0 to disable delay.
+    /// Sets to 0 to disable delay.
     pub fn inject_delay(&self, millis: u64) {
         self.state.delay_ms.store(millis, Ordering::SeqCst);
     }
 
-    /// Get the total number of write requests received.
+    /// Returns the total number of write requests received.
     pub fn write_count(&self) -> usize {
         self.state.write_count.load(Ordering::SeqCst)
     }
 
-    /// Get the total number of read requests received.
+    /// Returns the total number of read requests received.
     pub fn read_count(&self) -> usize {
         self.state.read_count.load(Ordering::SeqCst)
     }
 
-    /// Get the current mock block height.
+    /// Returns the current mock block height.
     pub fn block_height(&self) -> u64 {
         self.state.block_height.load(Ordering::SeqCst)
     }
 
-    /// Add a relationship for query tests.
+    /// Adds a relationship for query tests.
     pub fn add_relationship(
         &self,
         namespace_id: i64,
@@ -362,7 +371,7 @@ impl MockLedgerServer {
         });
     }
 
-    /// Add a namespace for admin tests.
+    /// Adds a namespace for admin tests.
     pub fn add_namespace(&self, namespace_id: i64, name: &str, shard_id: u32) {
         let mut namespaces = self.state.namespaces.write();
         namespaces.insert(
@@ -375,7 +384,7 @@ impl MockLedgerServer {
         );
     }
 
-    /// Add a vault for admin tests.
+    /// Adds a vault for admin tests.
     pub fn add_vault(&self, namespace_id: i64, vault_id: i64) {
         let mut vaults = self.state.vaults.write();
         vaults.insert(
@@ -388,7 +397,7 @@ impl MockLedgerServer {
         );
     }
 
-    /// Add peer info for discovery tests.
+    /// Adds peer info for discovery tests.
     pub fn add_peer(&self, node_id: &str, addresses: Vec<String>, grpc_port: u32) {
         let mut peers = self.state.peers.write();
         peers.push(proto::PeerInfo {
@@ -399,7 +408,7 @@ impl MockLedgerServer {
         });
     }
 
-    /// Reset all state to initial values.
+    /// Resets all state to initial values.
     pub fn reset(&self) {
         self.state.entities.write().clear();
         self.state.client_sequences.write().clear();

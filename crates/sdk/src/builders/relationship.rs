@@ -58,7 +58,7 @@ pub struct RelationshipQueryBuilder<'a> {
 }
 
 impl<'a> RelationshipQueryBuilder<'a> {
-    /// Create a new relationship query builder.
+    /// Creates a new relationship query builder.
     pub(crate) fn new(client: &'a LedgerClient, namespace_id: i64, vault_id: i64) -> Self {
         Self {
             client,
@@ -92,7 +92,7 @@ impl<'a> RelationshipQueryBuilder<'a> {
         self
     }
 
-    /// Read at a specific block height for point-in-time queries.
+    /// Reads at a specific block height for point-in-time queries.
     pub fn at_height(mut self, height: u64) -> Self {
         self.at_height = Some(height);
         self

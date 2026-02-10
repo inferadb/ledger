@@ -28,7 +28,7 @@ pub struct TestDir {
 }
 
 impl TestDir {
-    /// Create a new temporary directory.
+    /// Creates a new temporary directory.
     ///
     /// # Panics
     ///
@@ -45,7 +45,7 @@ impl TestDir {
         self.inner.path()
     }
 
-    /// Join a relative path to the temporary directory.
+    /// Joins a relative path to the temporary directory.
     ///
     /// This is a convenience method equivalent to `dir.path().join(path)`.
     #[must_use]

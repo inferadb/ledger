@@ -69,7 +69,7 @@ pub struct DataDirLock {
 }
 
 impl DataDirLock {
-    /// Acquire an exclusive lock on the data directory.
+    /// Acquires an exclusive lock on the data directory.
     ///
     /// Creates a `.lock` file in the data directory and acquires an exclusive
     /// lock on it. If another process already holds the lock, this returns
@@ -146,13 +146,13 @@ impl DataDirLock {
         }
     }
 
-    /// Get the path to the lock file.
+    /// Returns the path to the lock file.
     #[must_use]
     pub fn lock_path(&self) -> &Path {
         &self.path
     }
 
-    /// Get the data directory path (parent of lock file).
+    /// Returns the data directory path (parent of lock file).
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         self.path.parent().unwrap_or(Path::new("."))

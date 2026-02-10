@@ -23,12 +23,12 @@ pub struct InMemoryBackend {
 }
 
 impl InMemoryBackend {
-    /// Create a new in-memory backend with default page size.
+    /// Creates a new in-memory backend with default page size.
     pub fn new() -> Self {
         Self::with_page_size(DEFAULT_PAGE_SIZE)
     }
 
-    /// Create a new in-memory backend with specified page size.
+    /// Creates a new in-memory backend with specified page size.
     pub fn with_page_size(page_size: usize) -> Self {
         // Ensure page size is power of 2
         assert!(
@@ -49,12 +49,12 @@ impl InMemoryBackend {
         }
     }
 
-    /// Get the number of pages currently stored.
+    /// Returns the number of pages currently stored.
     pub fn page_count(&self) -> usize {
         self.pages.read().len()
     }
 
-    /// Clear all data (for testing).
+    /// Clears all data (for testing).
     pub fn clear(&self) {
         self.pages.write().clear();
         *self.file_size.write() = HEADER_SIZE as u64;

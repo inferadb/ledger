@@ -107,7 +107,7 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// Create a new token bucket starting at full capacity.
+    /// Creates a new token bucket starting at full capacity.
     fn new(capacity: u64, refill_rate: f64) -> Self {
         Self {
             tokens_millis: capacity * 1000,
@@ -140,7 +140,7 @@ impl TokenBucket {
         }
     }
 
-    /// Estimate milliseconds until the next token is available.
+    /// Estimates milliseconds until the next token is available.
     fn retry_after_ms(&self) -> u64 {
         if self.refill_rate <= 0.0 {
             return 1000;
@@ -197,7 +197,7 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    /// Create a new multi-level rate limiter.
+    /// Creates a new multi-level rate limiter.
     ///
     /// # Arguments
     ///
@@ -226,14 +226,21 @@ impl RateLimiter {
         }
     }
 
-    /// Check all rate limit tiers for an incoming request.
+    /// Checks all rate limit tiers for an incoming request.
     ///
-    /// Check order ensures shared tokens are not wasted by per-client rejections:
+    /// Checks order ensures shared tokens are not wasted by per-client rejections:
     /// 1. Global backpressure (no token consumption — atomic threshold check)
     /// 2. Per-client token bucket (most specific, checked before shared namespace bucket)
     /// 3. Per-namespace token bucket (shared resource, only consumed after client passes)
     ///
     /// Returns `Ok(())` if allowed, `Err(RateLimitRejection)` with retry hint if rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RateLimitRejection`] when any tier rejects the request:
+    /// - **Backpressure**: Raft pending proposals exceed the configured threshold.
+    /// - **Client**: Per-client token bucket is exhausted.
+    /// - **Namespace**: Per-namespace token bucket is exhausted.
     pub fn check(
         &self,
         client_id: &str,
@@ -301,7 +308,7 @@ impl RateLimiter {
         Ok(())
     }
 
-    /// Update the pending Raft proposal count for backpressure calculation.
+    /// Updates the pending Raft proposal count for backpressure calculation.
     ///
     /// Called externally by the Raft metrics observer.
     /// Also emits the `ledger_rate_limit_queue_depth` gauge for SLI monitoring.
@@ -310,17 +317,17 @@ impl RateLimiter {
         crate::metrics::set_rate_limit_queue_depth(count);
     }
 
-    /// Get the current pending proposal count.
+    /// Returns the current pending proposal count.
     pub fn pending_proposals(&self) -> u64 {
         self.pending_proposals.load(Ordering::Relaxed)
     }
 
-    /// Total number of rejected requests across all tiers.
+    /// Returns the total number of rejected requests across all tiers.
     pub fn rejected_count(&self) -> u64 {
         self.rejected_count.load(Ordering::Relaxed)
     }
 
-    /// Remove stale entries that haven't been accessed recently.
+    /// Removes stale entries that haven't been accessed recently.
     ///
     /// Call periodically to prevent unbounded memory growth from departed
     /// clients or decommissioned namespaces.
@@ -336,21 +343,21 @@ impl RateLimiter {
         }
     }
 
-    /// Get the current token count for a specific namespace (for testing/metrics).
+    /// Returns the current token count for a specific namespace (for testing/metrics).
     #[cfg(test)]
     fn namespace_tokens(&self, namespace_id: NamespaceId) -> Option<u64> {
         let buckets = self.namespace_buckets.lock();
         buckets.get(&namespace_id).map(|b| b.tokens_millis / 1000)
     }
 
-    /// Get the current token count for a specific client (for testing/metrics).
+    /// Returns the current token count for a specific client (for testing/metrics).
     #[cfg(test)]
     fn client_tokens(&self, client_id: &str) -> Option<u64> {
         let buckets = self.client_buckets.lock();
         buckets.get(client_id).map(|b| b.tokens_millis / 1000)
     }
 
-    /// Update rate limiter configuration at runtime.
+    /// Updates rate limiter configuration at runtime.
     ///
     /// Atomically updates all threshold fields. Existing token buckets retain
     /// their current token counts — only new buckets created after this call

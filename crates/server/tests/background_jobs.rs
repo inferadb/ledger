@@ -41,7 +41,7 @@ macro_rules! require_cluster {
 // Auto-Recovery Tests
 // ============================================================================
 
-/// Test that the cluster is healthy (auto-recovery job hasn't crashed anything).
+/// Tests that the cluster is healthy (auto-recovery job hasn't crashed anything).
 #[tokio::test]
 async fn test_auto_recovery_job_starts() {
     let cluster = require_cluster!();
@@ -80,7 +80,7 @@ async fn test_auto_recovery_job_starts() {
     );
 }
 
-/// Test vault creation and health tracking.
+/// Tests vault creation and health tracking.
 #[tokio::test]
 async fn test_vault_health_tracking() {
     let cluster = require_cluster!();
@@ -141,7 +141,7 @@ async fn test_vault_health_tracking() {
 // Learner Refresh Tests
 // ============================================================================
 
-/// Test that nodes are healthy (learner refresh job hasn't crashed anything).
+/// Tests that nodes are healthy (learner refresh job hasn't crashed anything).
 #[tokio::test]
 async fn test_learner_refresh_job_starts() {
     let cluster = require_cluster!();
@@ -167,7 +167,7 @@ async fn test_learner_refresh_job_starts() {
     }
 }
 
-/// Test that all nodes in a 3-node cluster are voters.
+/// Tests that all nodes in a 3-node cluster are voters.
 #[tokio::test]
 async fn test_voter_detection() {
     let cluster = require_cluster!();
@@ -189,7 +189,7 @@ async fn test_voter_detection() {
     }
 }
 
-/// Test that namespace data is replicated to all nodes (learner cache initialization).
+/// Tests that namespace data is replicated to all nodes (learner cache initialization).
 #[tokio::test]
 async fn test_learner_cache_initialization() {
     let cluster = require_cluster!();
@@ -238,7 +238,7 @@ async fn test_learner_cache_initialization() {
 // Combined Background Job Tests
 // ============================================================================
 
-/// Test that all background jobs run concurrently without interfering with
+/// Tests that all background jobs run concurrently without interfering with
 /// cluster stability. All nodes should agree on the same leader.
 #[tokio::test]
 async fn test_concurrent_background_jobs() {
@@ -296,7 +296,7 @@ async fn test_concurrent_background_jobs() {
     );
 }
 
-/// Test that leadership is stable (auto-recovery doesn't trigger spurious elections).
+/// Tests that leadership is stable (auto-recovery doesn't trigger spurious elections).
 #[tokio::test]
 async fn test_recovery_only_on_leader() {
     let cluster = require_cluster!();

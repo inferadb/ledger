@@ -206,13 +206,13 @@ pub fn shutdown_otel() {
     }
 }
 
-/// Check if OTEL export is enabled and initialized.
+/// Checks if OTEL export is enabled and initialized.
 #[inline]
 pub fn is_otel_enabled() -> bool {
     TRACER_PROVIDER.get().is_some()
 }
 
-/// Get the tracer for creating spans.
+/// Returns the tracer for creating spans.
 ///
 /// Returns `None` if OTEL is not initialized.
 pub fn get_tracer() -> Option<opentelemetry_sdk::trace::Tracer> {
@@ -289,7 +289,7 @@ pub struct SpanAttributes {
 }
 
 impl SpanAttributes {
-    /// Convert attributes to OpenTelemetry KeyValue pairs.
+    /// Converts attributes to OpenTelemetry KeyValue pairs.
     pub fn to_key_values(&self) -> Vec<KeyValue> {
         let mut attrs = Vec::with_capacity(32);
 
@@ -436,7 +436,7 @@ pub fn export_span(
     drop(span); // Dropping the span ends it
 }
 
-/// Parse a 32-character hex trace ID into bytes.
+/// Parses a 32-character hex trace ID into bytes.
 fn parse_trace_id(hex: &str) -> Result<[u8; 16], ()> {
     if hex.len() != 32 {
         return Err(());
@@ -449,7 +449,7 @@ fn parse_trace_id(hex: &str) -> Result<[u8; 16], ()> {
     Ok(bytes)
 }
 
-/// Parse a 16-character hex span ID into bytes.
+/// Parses a 16-character hex span ID into bytes.
 fn parse_span_id(hex: &str) -> Result<[u8; 8], ()> {
     if hex.len() != 16 {
         return Err(());
@@ -462,7 +462,7 @@ fn parse_span_id(hex: &str) -> Result<[u8; 8], ()> {
     Ok(bytes)
 }
 
-/// Get the hostname for resource attributes.
+/// Returns the hostname for resource attributes.
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))

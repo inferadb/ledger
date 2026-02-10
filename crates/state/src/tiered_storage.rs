@@ -80,19 +80,39 @@ pub trait StorageBackend: Send + Sync {
     /// The tier this backend represents.
     fn tier(&self) -> StorageTier;
 
-    /// Check if a snapshot exists at the given height.
+    /// Checks if a snapshot exists at the given height.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
     fn exists(&self, height: u64) -> Result<bool>;
 
-    /// Store a snapshot.
+    /// Stores a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be written to storage.
     fn store(&self, snapshot: &Snapshot) -> Result<()>;
 
-    /// Load a snapshot by height.
+    /// Loads a snapshot by height.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be read or does not exist.
     fn load(&self, height: u64) -> Result<Snapshot>;
 
-    /// Delete a snapshot.
+    /// Deletes a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be deleted from storage.
     fn delete(&self, height: u64) -> Result<()>;
 
-    /// List all available snapshot heights.
+    /// Lists all available snapshot heights.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage backend cannot be queried.
     fn list(&self) -> Result<Vec<u64>>;
 }
 
@@ -102,7 +122,7 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    /// Create a new local storage backend.
+    /// Creates a new local storage backend.
     pub fn new(snapshot_dir: PathBuf, max_snapshots: usize) -> Self {
         Self { manager: SnapshotManager::new(snapshot_dir, max_snapshots) }
     }
@@ -168,7 +188,7 @@ pub struct ObjectStorageBackend {
 }
 
 impl ObjectStorageBackend {
-    /// Create a new object storage backend from a URL.
+    /// Creates a new object storage backend from a URL.
     ///
     /// # Supported URLs
     ///
@@ -191,6 +211,11 @@ impl ObjectStorageBackend {
     /// Azure:
     /// - `AZURE_STORAGE_ACCOUNT_NAME` - Storage account name
     /// - `AZURE_STORAGE_ACCOUNT_KEY` - Storage account key
+    ///
+    /// # Errors
+    ///
+    /// Returns `TieredStorageError::ObjectStorage` if the URL is invalid, the scheme is
+    /// unsupported, required credentials are missing, or no tokio runtime is available.
     pub fn new(url: &str) -> Result<Self> {
         let parsed = Url::parse(url).map_err(|e| TieredStorageError::ObjectStorage {
             message: format!("Invalid URL '{}': {}", url, e),
@@ -216,7 +241,7 @@ impl ObjectStorageBackend {
         })
     }
 
-    /// Create a test-only in-memory backend (for unit tests).
+    /// Creates a test-only in-memory backend (for unit tests).
     #[cfg(test)]
     #[allow(clippy::expect_used)] // Acceptable in test code - panic on failure is fine
     pub fn new_test(bucket: String, prefix: String) -> Self {
@@ -240,7 +265,7 @@ impl ObjectStorageBackend {
         }
     }
 
-    /// Create object store from parsed URL.
+    /// Creates object store from parsed URL.
     fn create_store_from_url(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
         let scheme = url.scheme();
 
@@ -258,7 +283,7 @@ impl ObjectStorageBackend {
         }
     }
 
-    /// Create S3 object store.
+    /// Creates S3 object store.
     fn create_s3_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
         let bucket = url.host_str().ok_or_else(|| TieredStorageError::ObjectStorage {
             message: "S3 URL must include bucket name as host".to_string(),
@@ -291,7 +316,7 @@ impl ObjectStorageBackend {
         Ok((Arc::new(store), ObjectPath::from(prefix)))
     }
 
-    /// Create GCS object store.
+    /// Creates GCS object store.
     fn create_gcs_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
         let bucket = url.host_str().ok_or_else(|| TieredStorageError::ObjectStorage {
             message: "GCS URL must include bucket name as host".to_string(),
@@ -314,7 +339,7 @@ impl ObjectStorageBackend {
         Ok((Arc::new(store), ObjectPath::from(prefix)))
     }
 
-    /// Create Azure Blob object store.
+    /// Creates Azure Blob object store.
     fn create_azure_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
         let container = url.host_str().ok_or_else(|| TieredStorageError::ObjectStorage {
             message: "Azure URL must include container name as host".to_string(),
@@ -343,7 +368,7 @@ impl ObjectStorageBackend {
         Ok((Arc::new(store), ObjectPath::from(prefix)))
     }
 
-    /// Create local filesystem object store.
+    /// Creates local filesystem object store.
     fn create_local_store(url: &Url) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
         let path = url.path();
 
@@ -531,7 +556,7 @@ impl StorageBackend for ObjectStorageBackend {
     }
 }
 
-/// Parse snapshot height from filename.
+/// Parses snapshot height from filename.
 ///
 /// Expected format: `000000100.snap` -> 100
 fn parse_snapshot_height(filename: &str) -> Option<u64> {
@@ -596,12 +621,12 @@ pub struct TieredSnapshotManager {
 }
 
 impl TieredSnapshotManager {
-    /// Create a new tiered manager with only hot tier.
+    /// Creates a new tiered manager with only hot tier.
     pub fn new_hot_only(hot: Box<dyn StorageBackend>, config: TieredConfig) -> Self {
         Self { hot, warm: None, cold: None, config, locations: RwLock::new(HashMap::new()) }
     }
 
-    /// Create a new tiered manager with hot and warm tiers.
+    /// Creates a new tiered manager with hot and warm tiers.
     pub fn new_with_warm(
         hot: Box<dyn StorageBackend>,
         warm: Box<dyn StorageBackend>,
@@ -610,7 +635,11 @@ impl TieredSnapshotManager {
         Self { hot, warm: Some(warm), cold: None, config, locations: RwLock::new(HashMap::new()) }
     }
 
-    /// Store a snapshot in the hot tier.
+    /// Stores a snapshot in the hot tier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the hot tier backend fails to store the snapshot.
     pub fn store(&self, snapshot: &Snapshot) -> Result<()> {
         let height = snapshot.shard_height();
         self.hot.store(snapshot)?;
@@ -618,9 +647,14 @@ impl TieredSnapshotManager {
         Ok(())
     }
 
-    /// Load a snapshot from any tier.
+    /// Loads a snapshot from any tier.
     ///
     /// Tries hot tier first, then warm, then cold.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TieredStorageError::SnapshotNotFound` if no tier contains the snapshot.
+    /// Returns other errors if a backend operation fails while checking or loading.
     pub fn load(&self, height: u64) -> Result<Snapshot> {
         // Check cache first
         if let Some(tier) = self.locations.read().get(&height).copied() {
@@ -650,7 +684,7 @@ impl TieredSnapshotManager {
         Err(TieredStorageError::SnapshotNotFound { height })
     }
 
-    /// Load from a specific tier.
+    /// Loads from a specific tier.
     fn load_from_tier(&self, height: u64, tier: StorageTier) -> Result<Snapshot> {
         match tier {
             StorageTier::Hot => self.hot.load(height),
@@ -667,7 +701,11 @@ impl TieredSnapshotManager {
         }
     }
 
-    /// List all snapshots across all tiers.
+    /// Lists all snapshots across all tiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tier backend fails to list its snapshots.
     pub fn list_all(&self) -> Result<Vec<SnapshotLocation>> {
         let mut locations = Vec::new();
 
@@ -699,10 +737,15 @@ impl TieredSnapshotManager {
         Ok(locations)
     }
 
-    /// Demote snapshots from hot to warm tier.
+    /// Demotes snapshots from hot to warm tier.
     ///
     /// Keeps only `config.hot_count` snapshots in hot tier,
     /// moving older ones to warm tier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if listing, loading, storing, or deleting snapshots fails
+    /// during the demotion process.
     pub fn demote_to_warm(&self) -> Result<u64> {
         let warm = match &self.warm {
             Some(w) => w,
@@ -737,15 +780,23 @@ impl TieredSnapshotManager {
         Ok(demoted)
     }
 
-    /// Find the best snapshot for a given target height.
+    /// Finds the best snapshot for a given target height.
     ///
     /// Returns the highest snapshot at or below the target height.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if listing snapshots across tiers fails.
     pub fn find_snapshot_for(&self, target_height: u64) -> Result<Option<u64>> {
         let all = self.list_all()?;
         Ok(all.into_iter().filter(|l| l.height <= target_height).map(|l| l.height).max())
     }
 
-    /// Get the tier where a snapshot is stored.
+    /// Returns the tier where a snapshot is stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if checking snapshot existence in any tier fails.
     pub fn get_tier(&self, height: u64) -> Result<Option<StorageTier>> {
         if let Some(tier) = self.locations.read().get(&height).copied() {
             return Ok(Some(tier));
@@ -916,7 +967,7 @@ mod tests {
         assert!(matches!(result, Err(TieredStorageError::SnapshotNotFound { height: 999 })));
     }
 
-    /// Test the real ObjectStorageBackend with local filesystem.
+    /// Tests the real ObjectStorageBackend with local filesystem.
     ///
     /// This test validates the actual integration with `object_store` crate,
     /// using `file://` URLs which work identically to S3/GCS/Azure.
@@ -965,7 +1016,7 @@ mod tests {
         assert_eq!(heights, vec![100, 300, 400]);
     }
 
-    /// Test tiered manager with real object storage backend (local filesystem).
+    /// Tests tiered manager with real object storage backend (local filesystem).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_tiered_manager_with_real_object_storage() {
         let temp = TempDir::new().expect("create temp dir");

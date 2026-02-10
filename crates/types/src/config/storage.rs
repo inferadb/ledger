@@ -304,7 +304,14 @@ impl Default for IntegrityConfig {
 
 #[bon::bon]
 impl IntegrityConfig {
-    /// Create a new integrity scrubber configuration with validation.
+    /// Creates a new integrity scrubber configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `scrub_interval_secs` < 60
+    /// - `pages_per_cycle_percent` is not in (0.0, 100.0]
+    /// - `full_scan_period_secs` < `scrub_interval_secs`
     #[builder]
     pub fn new(
         #[builder(default = default_scrub_interval_secs())] scrub_interval_secs: u64,
@@ -316,7 +323,11 @@ impl IntegrityConfig {
         Ok(config)
     }
 
-    /// Validate an existing configuration (e.g., after deserialization).
+    /// Validates an existing configuration (e.g., after deserialization).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.scrub_interval_secs < 60 {
             return Err(ConfigError::Validation {
@@ -395,7 +406,14 @@ pub struct BackupConfig {
 
 #[bon::bon]
 impl BackupConfig {
-    /// Create a new backup configuration with validation.
+    /// Creates a new backup configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `destination` is empty
+    /// - `retention_count` is 0
+    /// - `interval_secs` < 60 when `enabled` is true
     #[builder]
     pub fn new(
         #[builder(into)] destination: String,
@@ -421,7 +439,11 @@ impl BackupConfig {
         Ok(Self { destination, retention_count, enabled, interval_secs })
     }
 
-    /// Validate an existing backup configuration (e.g., after deserialization).
+    /// Validates an existing backup configuration (e.g., after deserialization).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.destination.is_empty() {
             return Err(ConfigError::Validation {

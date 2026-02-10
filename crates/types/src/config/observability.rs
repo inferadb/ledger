@@ -336,7 +336,9 @@ impl Default for MetricsCardinalityConfig {
 
 #[bon::bon]
 impl MetricsCardinalityConfig {
-    /// Create a new cardinality config with validation.
+    /// Creates a new cardinality config with validation.
+    ///
+    /// # Errors
     ///
     /// Returns [`ConfigError::Validation`] if `warn_cardinality >= max_cardinality`
     /// or either value is zero.
@@ -352,7 +354,12 @@ impl MetricsCardinalityConfig {
 }
 
 impl MetricsCardinalityConfig {
-    /// Validate an existing configuration (e.g., after deserialization).
+    /// Validates an existing configuration (e.g., after deserialization).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if either value is zero or
+    /// `warn_cardinality >= max_cardinality`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.warn_cardinality == 0 {
             return Err(ConfigError::Validation {

@@ -106,7 +106,7 @@ pub struct Database<B: StorageBackend> {
     pending_frees: Mutex<PendingFrees>,
     /// Configuration.
     config: DatabaseConfig,
-    /// Write lock to ensure only one write transaction at a time.
+    /// Writes lock to ensure only one write transaction at a time.
     write_lock: std::sync::Mutex<()>,
     /// Total B-tree page splits since database creation.
     page_splits: AtomicU64,
@@ -118,7 +118,7 @@ pub struct Database<B: StorageBackend> {
 }
 
 impl Database<FileBackend> {
-    /// Open an existing database at the given path.
+    /// Opens an existing database at the given path.
     ///
     /// Recovers committed state from the dual-slot header. If the recovery
     /// flag is set (crash detected), the free list is rebuilt automatically.
@@ -142,7 +142,7 @@ impl Database<FileBackend> {
         Self::from_backend(backend, config)
     }
 
-    /// Create a new database at the given path with default configuration.
+    /// Creates a new database at the given path with default configuration.
     ///
     /// Uses 4KB pages, 1024-entry cache, and sync-on-commit.
     /// For custom settings, use [`create_with_config`](Self::create_with_config).
@@ -167,7 +167,7 @@ impl Database<FileBackend> {
         Self::create_with_config(path, DatabaseConfig::default())
     }
 
-    /// Create a new database with custom configuration.
+    /// Creates a new database with custom configuration.
     ///
     /// # Errors
     ///
@@ -180,7 +180,7 @@ impl Database<FileBackend> {
 }
 
 impl Database<InMemoryBackend> {
-    /// Create a new in-memory database.
+    /// Creates a new in-memory database.
     ///
     /// Useful for testing and ephemeral workloads. Data is lost on drop.
     ///
@@ -208,7 +208,7 @@ impl Database<InMemoryBackend> {
         Self::open_in_memory_with_config(DatabaseConfig::default())
     }
 
-    /// Create a new in-memory database with custom configuration.
+    /// Creates a new in-memory database with custom configuration.
     ///
     /// # Errors
     ///
@@ -220,7 +220,7 @@ impl Database<InMemoryBackend> {
 }
 
 impl<B: StorageBackend> Database<B> {
-    /// Create a database from an existing backend.
+    /// Creates a database from an existing backend.
     fn from_backend(backend: B, config: DatabaseConfig) -> Result<Self> {
         let cache = PageCache::new(config.cache_size);
 
@@ -268,7 +268,7 @@ impl<B: StorageBackend> Database<B> {
         Ok(db)
     }
 
-    /// Load committed state from disk (header + table directory).
+    /// Loads committed state from disk (header + table directory).
     ///
     /// Uses dual-slot commit validation: tries primary slot first, falls back
     /// to secondary if primary is corrupt (indicates crash during commit).
@@ -338,7 +338,7 @@ impl<B: StorageBackend> Database<B> {
         ))
     }
 
-    /// Persist committed state to disk using dual-slot commit for crash safety.
+    /// Persists committed state to disk using dual-slot commit for crash safety.
     ///
     /// # Dual-Slot Commit Protocol
     ///
@@ -442,7 +442,7 @@ impl<B: StorageBackend> Database<B> {
         Ok(())
     }
 
-    /// Rebuild the free list by scanning all reachable pages.
+    /// Rebuilds the free list by scanning all reachable pages.
     ///
     /// This is called during recovery to restore the free list after a crash.
     /// The algorithm:
@@ -477,7 +477,7 @@ impl<B: StorageBackend> Database<B> {
         Ok(())
     }
 
-    /// Persist the free list to disk as a linked list of pages.
+    /// Persists the free list to disk as a linked list of pages.
     ///
     /// Each free page stores the next free page ID at offset 0.
     /// Returns the head of the list (first free page), or 0 if empty.
@@ -500,7 +500,7 @@ impl<B: StorageBackend> Database<B> {
         Ok(free_pages[0])
     }
 
-    /// Load the free list from disk by walking the linked list.
+    /// Loads the free list from disk by walking the linked list.
     ///
     /// Returns the list of free page IDs, or empty if head is 0.
     fn load_free_list(
@@ -636,7 +636,7 @@ impl<B: StorageBackend> Database<B> {
         })
     }
 
-    /// Get database statistics.
+    /// Returns database statistics.
     pub fn stats(&self) -> DatabaseStats {
         let cache_stats = self.cache.stats();
         let allocator = self.allocator.lock();
@@ -653,12 +653,12 @@ impl<B: StorageBackend> Database<B> {
         }
     }
 
-    /// Record a B-tree page split event.
+    /// Records a B-tree page split event.
     pub fn record_page_split(&self) {
         self.page_splits.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Get B-tree depths for all non-empty tables.
+    /// Returns B-tree depths for all non-empty tables.
     ///
     /// Opens a read transaction internally to walk each table's B-tree.
     /// Returns `(table_name, depth)` pairs.
@@ -672,7 +672,7 @@ impl<B: StorageBackend> Database<B> {
         txn.table_depths()
     }
 
-    /// Read a raw page bypassing cache, for integrity verification.
+    /// Reads a raw page bypassing cache, for integrity verification.
     ///
     /// Returns the page without caching it. The caller is responsible for
     /// checksum verification via [`Page::verify_checksum()`].
@@ -692,29 +692,29 @@ impl<B: StorageBackend> Database<B> {
         Ok(Page::from_bytes(page_id, data))
     }
 
-    /// Total number of pages allocated (including free pages).
+    /// Returns the total number of pages allocated (including free pages).
     pub fn total_page_count(&self) -> PageId {
         self.allocator.lock().next_page_id()
     }
 
-    /// IDs of pages currently on the free list.
+    /// Returns IDs of pages currently on the free list.
     pub fn free_page_ids(&self) -> Vec<PageId> {
         self.allocator.lock().get_free_list()
     }
 
-    /// Root page IDs for each table, indexed by `TableId`.
+    /// Returns root page IDs for each table, indexed by `TableId`.
     ///
     /// A root of 0 indicates an empty table.
     pub fn table_root_pages(&self) -> [PageId; TableId::COUNT] {
         self.committed_state.load().table_roots
     }
 
-    /// Configured page size in bytes.
+    /// Returns the configured page size in bytes.
     pub fn page_size(&self) -> usize {
         self.config.page_size
     }
 
-    /// Write raw page data directly to the backend, bypassing cache and checksums.
+    /// Writes raw page data directly to the backend, bypassing cache and checksums.
     ///
     /// Intended for testing only — allows injecting corruption for integrity
     /// scrubber verification. Not hidden from docs since test-utils crate needs it.
@@ -730,20 +730,20 @@ impl<B: StorageBackend> Database<B> {
         Ok(())
     }
 
-    /// Page IDs modified since the last backup checkpoint.
+    /// Returns page IDs modified since the last backup checkpoint.
     ///
-    /// Returns dirty page IDs in ascending order. Used by incremental backup
-    /// to determine which pages to include in the delta.
+    /// Returned in ascending order. Used by incremental backup to determine
+    /// which pages to include in the delta.
     pub fn dirty_page_ids(&self) -> Vec<PageId> {
         self.dirty_bitmap.lock().dirty_ids()
     }
 
-    /// Number of pages marked dirty since the last backup.
+    /// Returns the number of pages marked dirty since the last backup.
     pub fn dirty_page_count(&self) -> usize {
         self.dirty_bitmap.lock().count()
     }
 
-    /// Clear the dirty bitmap after a successful backup.
+    /// Clears the dirty bitmap after a successful backup.
     ///
     /// Called by the backup system after writing all dirty pages to a backup
     /// file. Subsequent writes will be tracked for the next incremental backup.
@@ -751,7 +751,7 @@ impl<B: StorageBackend> Database<B> {
         self.dirty_bitmap.lock().clear();
     }
 
-    /// Serialize the dirty bitmap for persistence.
+    /// Serializes the dirty bitmap for persistence.
     ///
     /// The bitmap can be stored alongside the database and reloaded on restart
     /// to maintain incremental backup state across server restarts.
@@ -759,7 +759,7 @@ impl<B: StorageBackend> Database<B> {
         self.dirty_bitmap.lock().to_bytes()
     }
 
-    /// Restore the dirty bitmap from previously serialized bytes.
+    /// Restores the dirty bitmap from previously serialized bytes.
     ///
     /// Call during database open to resume incremental backup tracking.
     /// Invalid data is silently ignored (bitmap stays empty).
@@ -812,7 +812,7 @@ impl<B: StorageBackend> Database<B> {
         Ok(())
     }
 
-    /// Read a page from cache or backend.
+    /// Reads a page from cache or backend.
     fn read_page(&self, page_id: PageId) -> Result<Page> {
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
@@ -837,19 +837,19 @@ impl<B: StorageBackend> Database<B> {
         Ok(page)
     }
 
-    /// Allocate a new page.
+    /// Allocates a new page.
     fn allocate_page(&self, page_type: PageType, txn_id: u64) -> Page {
         let page_id = self.allocator.lock().allocate();
         Page::new(page_id, self.config.page_size, page_type, txn_id)
     }
 
-    /// Free a page for later reuse.
+    /// Frees a page for later reuse.
     fn free_page(&self, page_id: PageId) {
         self.allocator.lock().free(page_id);
         self.cache.remove(page_id);
     }
 
-    /// Attempt to free pages that are no longer referenced by any reader.
+    /// Attempts to free pages that are no longer referenced by any reader.
     ///
     /// This is the garbage collection pass for COW - old pages can only be
     /// freed once all readers that might reference them have finished.
@@ -866,7 +866,7 @@ impl<B: StorageBackend> Database<B> {
         }
     }
 
-    /// Write a page to the backend.
+    /// Writes a page to the backend.
     fn write_page_to_backend(&self, page: &Page) -> Result<()> {
         let mut page = page.clone();
         page.update_checksum();
@@ -876,7 +876,7 @@ impl<B: StorageBackend> Database<B> {
         Ok(())
     }
 
-    /// Flush all dirty pages to disk (without sync).
+    /// Flushes all dirty pages to disk (without sync).
     ///
     /// Caller is responsible for calling sync() afterward if durability is needed.
     fn flush_pages(&self) -> Result<()> {
@@ -902,7 +902,7 @@ pub struct DatabaseStats {
     pub cached_pages: usize,
     /// Dirty pages pending write.
     pub dirty_pages: usize,
-    /// Free pages available for reuse.
+    /// Frees pages available for reuse.
     pub free_pages: usize,
     /// Total page cache hits since creation.
     pub cache_hits: u64,
@@ -928,7 +928,7 @@ pub struct ReadTransaction<'db, B: StorageBackend> {
 }
 
 impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
-    /// Get a value by key from a table.
+    /// Returns a value by key from a table.
     ///
     /// # Errors
     ///
@@ -951,7 +951,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         btree.get(&key_bytes)
     }
 
-    /// Check if a key exists in a table.
+    /// Checks if a key exists in a table.
     ///
     /// # Errors
     ///
@@ -963,7 +963,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         Ok(self.get::<T>(key)?.is_some())
     }
 
-    /// Get the first (smallest key) entry in a table.
+    /// Returns the first (smallest key) entry in a table.
     ///
     /// # Errors
     ///
@@ -979,7 +979,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         btree.first()
     }
 
-    /// Get the last (largest key) entry in a table.
+    /// Returns the last (largest key) entry in a table.
     ///
     /// # Errors
     ///
@@ -995,7 +995,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         btree.last()
     }
 
-    /// Iterate over all entries in a table.
+    /// Iterates over all entries in a table.
     ///
     /// Returns an iterator that yields (key, value) pairs in key order.
     ///
@@ -1007,7 +1007,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         TableIterator::new(self.db, root, &self.page_cache)
     }
 
-    /// Iterate over a range of entries in a table.
+    /// Iterates over a range of entries in a table.
     ///
     /// The range is specified as (start_key, end_key) where start is inclusive
     /// and end is exclusive.
@@ -1037,7 +1037,7 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         TableIterator::with_range(self.db, root, &self.page_cache, start_bytes, end_bytes)
     }
 
-    /// Get the B-tree depth for each table.
+    /// Returns the B-tree depth for each table.
     ///
     /// Returns a list of `(table_name, depth)` pairs for all tables with
     /// non-empty roots. Empty tables (root == 0) are skipped.
@@ -1080,7 +1080,7 @@ impl<B: StorageBackend> Drop for ReadTransaction<'_, B> {
 /// Changes are buffered until commit. On commit, all changes are
 /// atomically written and synced to disk using Copy-on-Write semantics.
 ///
-/// Read transactions can run concurrently — they see a consistent snapshot
+/// Reads transactions can run concurrently — they see a consistent snapshot
 /// and are unaffected by COW modifications.
 ///
 /// # Invariants
@@ -1123,7 +1123,7 @@ pub struct WriteTransaction<'db, B: StorageBackend> {
 }
 
 impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
-    /// Insert or update a key-value pair.
+    /// Inserts or update a key-value pair.
     ///
     /// # Errors
     ///
@@ -1163,7 +1163,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         Ok(())
     }
 
-    /// Delete a key from a table.
+    /// Deletes a key from a table.
     ///
     /// # Errors
     ///
@@ -1196,7 +1196,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         Ok(deleted.is_some())
     }
 
-    /// Get a value (within the transaction's view).
+    /// Returns a value (within the transaction's view).
     ///
     /// # Errors
     ///
@@ -1219,7 +1219,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         btree.get(&key_bytes)
     }
 
-    /// Get the first (smallest key) entry in a table.
+    /// Returns the first (smallest key) entry in a table.
     ///
     /// # Errors
     ///
@@ -1235,7 +1235,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         btree.first()
     }
 
-    /// Get the last (largest key) entry in a table.
+    /// Returns the last (largest key) entry in a table.
     ///
     /// # Errors
     ///
@@ -1251,7 +1251,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         btree.last()
     }
 
-    /// Iterate over all entries in a table.
+    /// Iterates over all entries in a table.
     ///
     /// Returns an iterator that yields (key, value) pairs in key order.
     /// Note: This reads the transaction's current view including uncommitted changes.
@@ -1269,7 +1269,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         TableIterator::new(self.db, root, &self.page_cache)
     }
 
-    /// Commit the transaction.
+    /// Commits the transaction.
     ///
     /// Uses Copy-on-Write + Dual-Slot commit for crash safety:
     /// 1. Write dirty pages to backend
@@ -1330,7 +1330,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         Ok(())
     }
 
-    /// Compact a table's B+ tree by merging underfull leaf nodes.
+    /// Compacts a table's B+ tree by merging underfull leaf nodes.
     ///
     /// This reclaims space from pages left sparse by deletions. Leaves
     /// with a fill factor below `min_fill_factor` are merged with their
@@ -1359,7 +1359,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         Ok(stats)
     }
 
-    /// Compact all tables in the database.
+    /// Compacts all tables in the database.
     ///
     /// Runs compaction on every non-empty table. Returns total statistics.
     ///
@@ -1392,7 +1392,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         Ok(total)
     }
 
-    /// Abort the transaction (discard all changes).
+    /// Aborts the transaction (discard all changes).
     pub fn abort(mut self) {
         // Simply drop the dirty_pages buffer - changes were never visible to others
         // Note: allocated page IDs are "leaked" to the freelist, but this is a
@@ -1694,7 +1694,7 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
         Ok(())
     }
 
-    /// Get the next entry, returning an explicit `Result`.
+    /// Returns the next entry, returning an explicit `Result`.
     ///
     /// Prefer this over the `Iterator` trait when error handling is needed,
     /// as `Iterator::next` silently converts B-tree errors into `None`.
@@ -1722,7 +1722,7 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
         }
     }
 
-    /// Collect all remaining entries into a `Vec`.
+    /// Collects all remaining entries into a `Vec`.
     pub fn collect_entries(mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut result = Vec::new();
         while let Ok(Some(entry)) = self.next_entry() {
@@ -1996,7 +1996,7 @@ mod tests {
         );
     }
 
-    /// Test that data persists across database close and reopen
+    /// Tests that data persists across database close and reopen
     #[test]
     fn test_file_persistence() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2045,7 +2045,7 @@ mod tests {
         }
     }
 
-    /// Test persistence with multiple tables
+    /// Tests persistence with multiple tables
     #[test]
     fn test_file_persistence_multiple_tables() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2091,7 +2091,7 @@ mod tests {
     // Crash Simulation Tests
     // ========================================================================
 
-    /// Test that recovery flag triggers free list rebuild.
+    /// Tests that recovery flag triggers free list rebuild.
     ///
     /// Simulates a crash by manually setting the recovery flag in the header,
     /// then verifies that reopening the database works correctly.
@@ -2144,7 +2144,7 @@ mod tests {
         }
     }
 
-    /// Test that corrupt primary slot falls back to secondary.
+    /// Tests that corrupt primary slot falls back to secondary.
     ///
     /// Simulates a crash during header write by corrupting the primary slot's
     /// checksum, then verifies that recovery uses the secondary slot.
@@ -2215,7 +2215,7 @@ mod tests {
         }
     }
 
-    /// Test that dual-slot commit survives simulated power loss.
+    /// Tests that dual-slot commit survives simulated power loss.
     ///
     /// This test creates a database, performs a write, then simulates
     /// a crash at various points in the commit sequence to verify
@@ -2254,7 +2254,7 @@ mod tests {
         }
     }
 
-    /// Test that free list persists across database close and reopen.
+    /// Tests that free list persists across database close and reopen.
     ///
     /// This test uses a multi-table write pattern that generates free pages
     /// when tables are cleared, then verifies the persisted free list is
@@ -2328,7 +2328,7 @@ mod tests {
     // Iteration Tests (after multi-transaction writes)
     // ========================================================================
 
-    /// Test that iteration returns all entries written across separate transactions.
+    /// Tests that iteration returns all entries written across separate transactions.
     ///
     /// This is a minimal reproduction case for a bug where iteration was returning
     /// incomplete results even though direct `get()` operations worked correctly.
@@ -2433,7 +2433,7 @@ mod tests {
         );
     }
 
-    /// Test iteration with file-backed database across reopen.
+    /// Tests iteration with file-backed database across reopen.
     ///
     /// Ensures that iteration works correctly after database close and reopen.
     #[test]
@@ -2476,7 +2476,7 @@ mod tests {
     // Streaming TableIterator tests
     // ========================================================================
 
-    /// Verify that buffer refill produces the same results as unbuffered iteration.
+    /// Verifies that buffer refill produces the same results as unbuffered iteration.
     /// Uses a buffer_size of 3 against 10 entries so multiple refills occur.
     #[test]
     fn test_streaming_iter_buffer_refill() {
@@ -2523,7 +2523,7 @@ mod tests {
         }
     }
 
-    /// Verify that streaming works correctly with range bounds and small buffer.
+    /// Verifies that streaming works correctly with range bounds and small buffer.
     #[test]
     fn test_streaming_iter_with_range_bounds() {
         let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
@@ -2566,7 +2566,7 @@ mod tests {
         assert_eq!(last_key, 14);
     }
 
-    /// Verify that an empty table returns no entries without error.
+    /// Verifies that an empty table returns no entries without error.
     #[test]
     fn test_streaming_iter_empty_table() {
         let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
@@ -2576,7 +2576,7 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    /// Verify that a single entry works correctly.
+    /// Verifies that a single entry works correctly.
     #[test]
     fn test_streaming_iter_single_entry() {
         let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
@@ -2597,7 +2597,7 @@ mod tests {
         assert!(second.is_none());
     }
 
-    /// Verify that the Iterator trait correctly yields all entries.
+    /// Verifies that the Iterator trait correctly yields all entries.
     #[test]
     fn test_streaming_iter_trait_integration() {
         let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
@@ -2618,7 +2618,7 @@ mod tests {
         assert_eq!(collected.len(), count);
     }
 
-    /// Verify correct behavior with entry count exactly equal to buffer size.
+    /// Verifies correct behavior with entry count exactly equal to buffer size.
     ///
     /// Inserts entries across separate transactions (the production pattern)
     /// to match the B-tree structure that leaf traversal expects.
@@ -2671,7 +2671,7 @@ mod tests {
         assert_eq!(count, num_keys, "Expected {} entries, got {}", num_keys, count);
     }
 
-    /// Test bulk single-transaction insert with iteration (exercises the
+    /// Tests bulk single-transaction insert with iteration (exercises the
     /// B-tree find_next_leaf path for dense intra-leaf key ranges).
     #[test]
     fn test_streaming_iter_bulk_single_transaction() {
@@ -2692,7 +2692,7 @@ mod tests {
         assert_eq!(entries.len(), num_keys);
     }
 
-    /// Verify write transaction iteration still works (sees uncommitted changes).
+    /// Verifies write transaction iteration still works (sees uncommitted changes).
     #[test]
     fn test_streaming_iter_write_transaction() {
         let db = Database::<InMemoryBackend>::open_in_memory().unwrap();

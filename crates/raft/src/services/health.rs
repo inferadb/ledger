@@ -48,7 +48,7 @@ pub struct HealthServiceImpl {
 }
 
 impl HealthServiceImpl {
-    /// Create a new health service.
+    /// Creates a new health service.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<StateLayer<FileBackend>>,

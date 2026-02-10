@@ -21,7 +21,7 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Create a namespace and return its ID.
+/// Creates a namespace and return its ID.
 async fn create_namespace(
     addr: std::net::SocketAddr,
     name: &str,
@@ -41,7 +41,7 @@ async fn create_namespace(
     Ok(namespace_id)
 }
 
-/// Create a vault in a namespace and return its ID.
+/// Creates a vault in a namespace and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -61,7 +61,7 @@ async fn create_vault(
     Ok(vault_id)
 }
 
-/// Write an entity to _system namespace.
+/// Writes an entity to _system namespace.
 async fn write_system_entity(
     addr: std::net::SocketAddr,
     key: &str,
@@ -99,7 +99,7 @@ async fn write_system_entity(
     }
 }
 
-/// Read an entity from a namespace.
+/// Reads an entity from a namespace.
 async fn read_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -123,7 +123,7 @@ async fn read_entity(
 // Saga Orchestrator Tests
 // ============================================================================
 
-/// Test that saga orchestrator runs without errors on a single-node cluster.
+/// Tests that saga orchestrator runs without errors on a single-node cluster.
 #[serial]
 #[tokio::test]
 async fn test_saga_orchestrator_starts() {
@@ -144,7 +144,7 @@ async fn test_saga_orchestrator_starts() {
     assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
 }
 
-/// Test that saga orchestrator only runs on leader.
+/// Tests that saga orchestrator only runs on leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_saga_orchestrator_leader_only() {
     let cluster = TestCluster::new(3).await;
@@ -162,7 +162,7 @@ async fn test_saga_orchestrator_leader_only() {
     assert_eq!(leader_id, new_leader_id, "leader should not have changed");
 }
 
-/// Test that a CreateOrg saga stored in _system will be picked up and executed.
+/// Tests that a CreateOrg saga stored in _system will be picked up and executed.
 ///
 /// This tests the full saga lifecycle: pending -> user_created -> namespace_created -> completed
 #[serial]
@@ -216,7 +216,7 @@ async fn test_create_org_saga_execution() {
     }
 }
 
-/// Test that a DeleteUser saga progresses through its states.
+/// Tests that a DeleteUser saga progresses through its states.
 #[serial]
 #[tokio::test]
 async fn test_delete_user_saga_state_transitions() {
@@ -282,7 +282,7 @@ async fn test_delete_user_saga_state_transitions() {
     }
 }
 
-/// Test that terminal sagas are not re-executed.
+/// Tests that terminal sagas are not re-executed.
 #[serial]
 #[tokio::test]
 async fn test_completed_saga_not_reexecuted() {
@@ -337,7 +337,7 @@ async fn test_completed_saga_not_reexecuted() {
     }
 }
 
-/// Test saga serialization round-trip through storage.
+/// Tests saga serialization round-trip through storage.
 #[serial]
 #[tokio::test]
 async fn test_saga_serialization_roundtrip() {

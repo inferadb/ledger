@@ -16,7 +16,7 @@ use inferadb_ledger_types::{Operation, VaultId};
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
-/// Create a test state layer pre-populated with data.
+/// Creates a test state layer pre-populated with data.
 fn create_populated_state_layer(
     temp_dir: &TempDir,
     vault_id: VaultId,

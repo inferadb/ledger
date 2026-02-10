@@ -13,9 +13,11 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum EngineError {
+    /// Engine failed to open the storage backend.
     #[snafu(display("Failed to open database at {path}: {source}"))]
     Open { path: String, source: inferadb_ledger_store::Error },
 
+    /// Underlying storage operation failed.
     #[snafu(display("Storage operation failed: {source}"))]
     Storage { source: inferadb_ledger_store::Error },
 }
@@ -29,7 +31,11 @@ pub struct StorageEngine {
 
 #[allow(clippy::result_large_err)]
 impl StorageEngine {
-    /// Open or create a database at the given path.
+    /// Opens or create a database at the given path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Open` if the database cannot be opened or created at the given path.
     pub fn open(path: impl AsRef<Path>) -> std::result::Result<Self, EngineError> {
         let path = path.as_ref();
         let db = if path.exists() { Database::open(path) } else { Database::create(path) }
@@ -38,7 +44,7 @@ impl StorageEngine {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Get a clone of the database handle.
+    /// Returns a clone of the database handle.
     pub fn db(&self) -> Arc<Database<FileBackend>> {
         Arc::clone(&self.db)
     }
@@ -59,7 +65,11 @@ pub struct InMemoryStorageEngine {
 
 #[allow(clippy::result_large_err)]
 impl InMemoryStorageEngine {
-    /// Create a new in-memory database.
+    /// Creates a new in-memory database.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Open` if the in-memory database cannot be created.
     pub fn open() -> std::result::Result<Self, EngineError> {
         let db = Database::open_in_memory()
             .map_err(|e| EngineError::Open { path: ":memory:".to_string(), source: e })?;
@@ -67,7 +77,7 @@ impl InMemoryStorageEngine {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Get a clone of the database handle.
+    /// Returns a clone of the database handle.
     pub fn db(&self) -> Arc<Database<InMemoryBackend>> {
         Arc::clone(&self.db)
     }

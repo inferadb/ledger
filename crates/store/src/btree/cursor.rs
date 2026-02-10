@@ -38,22 +38,22 @@ pub struct CursorPosition {
 }
 
 impl CursorPosition {
-    /// Create a new empty cursor position.
+    /// Creates a new empty cursor position.
     pub fn new() -> Self {
         Self { stack: Vec::new(), leaf_page_id: None, leaf_index: 0, valid: false }
     }
 
-    /// Create a cursor positioned at the start of the tree.
+    /// Creates a cursor positioned at the start of the tree.
     pub fn at_start() -> Self {
         Self { stack: Vec::new(), leaf_page_id: None, leaf_index: 0, valid: true }
     }
 
-    /// Check if cursor is valid (positioned on an entry).
+    /// Checks if cursor is valid (positioned on an entry).
     pub fn is_valid(&self) -> bool {
         self.valid && self.leaf_page_id.is_some()
     }
 
-    /// Invalidate the cursor.
+    /// Invalidates the cursor.
     pub fn invalidate(&mut self) {
         self.valid = false;
         self.leaf_page_id = None;
@@ -87,22 +87,22 @@ pub struct Range<'a> {
 }
 
 impl<'a> Range<'a> {
-    /// Create a range covering all keys.
+    /// Creates a range covering all keys.
     pub fn all() -> Self {
         Self { start: Bound::Unbounded, end: Bound::Unbounded }
     }
 
-    /// Create a range from start (inclusive) to end (exclusive).
+    /// Creates a range from start (inclusive) to end (exclusive).
     pub fn new(start: &'a [u8], end: &'a [u8]) -> Self {
         Self { start: Bound::Included(start), end: Bound::Excluded(end) }
     }
 
-    /// Create a range starting from a key (inclusive).
+    /// Creates a range starting from a key (inclusive).
     pub fn from(start: &'a [u8]) -> Self {
         Self { start: Bound::Included(start), end: Bound::Unbounded }
     }
 
-    /// Create a range with a prefix (all keys starting with prefix).
+    /// Creates a range with a prefix (all keys starting with prefix).
     pub fn prefix(prefix: &'a [u8]) -> Self {
         // Calculate the end key by incrementing the last byte
         // This is a simplified version; actual implementation may need
@@ -113,7 +113,7 @@ impl<'a> Range<'a> {
         }
     }
 
-    /// Check if a key is within this range.
+    /// Checks if a key is within this range.
     pub fn contains(&self, key: &[u8]) -> bool {
         let after_start = match &self.start {
             Bound::Unbounded => true,
@@ -130,7 +130,7 @@ impl<'a> Range<'a> {
         after_start && before_end
     }
 
-    /// Check if iteration should continue based on current key.
+    /// Checks if iteration should continue based on current key.
     pub fn should_continue(&self, key: &[u8]) -> bool {
         match &self.end {
             Bound::Unbounded => true,
@@ -151,17 +151,17 @@ pub struct RangeIterState<'a> {
 }
 
 impl<'a> RangeIterState<'a> {
-    /// Create a new range iterator state.
+    /// Creates a new range iterator state.
     pub fn new(range: Range<'a>) -> Self {
         Self { range, position: CursorPosition::new(), started: false }
     }
 
-    /// Create an iterator over all entries.
+    /// Creates an iterator over all entries.
     pub fn all() -> Self {
         Self::new(Range::all())
     }
 
-    /// Create an iterator starting from a specific key.
+    /// Creates an iterator starting from a specific key.
     pub fn from_key(key: &'a [u8]) -> Self {
         Self::new(Range::from(key))
     }
@@ -186,7 +186,7 @@ pub enum SeekResult {
 pub mod cursor_ops {
     use super::{super::node::LeafNodeRef, *};
 
-    /// Move to the first entry in a leaf node.
+    /// Moves to the first entry in a leaf node.
     ///
     /// # Errors
     ///
@@ -205,7 +205,7 @@ pub mod cursor_ops {
         Ok(true)
     }
 
-    /// Move to the last entry in a leaf node.
+    /// Moves to the last entry in a leaf node.
     ///
     /// # Errors
     ///
@@ -225,7 +225,7 @@ pub mod cursor_ops {
         Ok(true)
     }
 
-    /// Seek to a key within a leaf node.
+    /// Seeks to a key within a leaf node.
     ///
     /// # Errors
     ///
@@ -264,7 +264,7 @@ pub mod cursor_ops {
         }
     }
 
-    /// Advance to next entry within current leaf.
+    /// Advances to next entry within current leaf.
     ///
     /// Returns true if there's a next entry in this leaf.
     ///
@@ -287,7 +287,7 @@ pub mod cursor_ops {
         }
     }
 
-    /// Get key at current cursor position (returns owned copy).
+    /// Returns key at current cursor position (returns owned copy).
     ///
     /// # Errors
     ///
@@ -306,7 +306,7 @@ pub mod cursor_ops {
         }
     }
 
-    /// Get value at current cursor position (returns owned copy).
+    /// Returns value at current cursor position (returns owned copy).
     ///
     /// # Errors
     ///

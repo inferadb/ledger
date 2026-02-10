@@ -28,7 +28,7 @@ pub type Result<T> = std::result::Result<T, RelationshipError>;
 pub struct RelationshipStore;
 
 impl RelationshipStore {
-    /// Get a relationship by its components.
+    /// Returns a relationship by its components.
     ///
     /// # Errors
     ///
@@ -54,7 +54,7 @@ impl RelationshipStore {
         }
     }
 
-    /// Check if a relationship exists.
+    /// Checks if a relationship exists.
     ///
     /// # Errors
     ///
@@ -73,7 +73,7 @@ impl RelationshipStore {
         Ok(txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some())
     }
 
-    /// Create a relationship.
+    /// Creates a relationship.
     ///
     /// Returns true if created, false if already existed.
     ///
@@ -104,7 +104,7 @@ impl RelationshipStore {
         Ok(true)
     }
 
-    /// Delete a relationship.
+    /// Deletes a relationship.
     ///
     /// Returns true if deleted, false if not found.
     ///
@@ -126,7 +126,7 @@ impl RelationshipStore {
         Ok(existed)
     }
 
-    /// List all relationships in a vault.
+    /// Lists all relationships in a vault.
     ///
     /// # Errors
     ///
@@ -167,7 +167,7 @@ impl RelationshipStore {
         Ok(relationships)
     }
 
-    /// Count relationships in a vault.
+    /// Counts relationships in a vault.
     ///
     /// # Errors
     ///
@@ -195,7 +195,7 @@ impl RelationshipStore {
         Ok(count)
     }
 
-    /// List relationships for a specific resource.
+    /// Lists relationships for a specific resource.
     ///
     /// # Errors
     ///

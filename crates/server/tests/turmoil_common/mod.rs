@@ -130,7 +130,7 @@ impl Service<Uri> for TurmoilConnector {
     }
 }
 
-/// Create a tonic channel that uses turmoil's simulated network.
+/// Creates a tonic channel that uses turmoil's simulated network.
 pub async fn create_turmoil_channel(
     host: &str,
     port: u16,
@@ -139,7 +139,7 @@ pub async fn create_turmoil_channel(
     Endpoint::new(uri)?.connect_with_connector(TurmoilConnector).await
 }
 
-/// Create a turmoil-compatible TCP listener stream for tonic servers.
+/// Creates a turmoil-compatible TCP listener stream for tonic servers.
 pub fn incoming_stream(
     addr: SocketAddr,
 ) -> impl futures::Stream<Item = Result<ServerStream, io::Error>> {

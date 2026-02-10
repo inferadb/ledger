@@ -17,7 +17,7 @@ use std::time::Duration;
 use common::TestCluster;
 use serial_test::serial;
 
-/// Test single-node cluster bootstrap and leader election.
+/// Tests single-node cluster bootstrap and leader election.
 #[serial]
 #[tokio::test]
 async fn test_single_node_bootstrap() {
@@ -35,7 +35,7 @@ async fn test_single_node_bootstrap() {
     assert!(leader.is_leader(), "node should report itself as leader");
 }
 
-/// Test single-node write and read cycle.
+/// Tests single-node write and read cycle.
 #[serial]
 #[tokio::test]
 async fn test_single_node_write_read() {
@@ -84,7 +84,7 @@ async fn test_single_node_write_read() {
     }
 }
 
-/// Test write idempotency - same client_id + idempotency_key should return cached result.
+/// Tests write idempotency - same client_id + idempotency_key should return cached result.
 #[serial]
 #[tokio::test]
 async fn test_write_idempotency() {
@@ -137,7 +137,7 @@ async fn test_write_idempotency() {
     }
 }
 
-/// Test two-node cluster formation.
+/// Tests two-node cluster formation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_two_node_cluster_formation() {
     let cluster = TestCluster::new(2).await;
@@ -163,7 +163,7 @@ async fn test_two_node_cluster_formation() {
     assert_eq!(followers.len(), 1, "should have one follower");
 }
 
-/// Test three-node cluster formation and leader election.
+/// Tests three-node cluster formation and leader election.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_cluster_formation() {
     let cluster = TestCluster::new(3).await;
@@ -189,7 +189,7 @@ async fn test_three_node_cluster_formation() {
     assert_eq!(followers.len(), 2, "should have two followers");
 }
 
-/// Test that writes create blocks that can be retrieved via GetBlock.
+/// Tests that writes create blocks that can be retrieved via GetBlock.
 ///
 /// DESIGN.md §3.2.1: State root is computed after applying transactions.
 /// DESIGN.md §7.1: GetBlock returns stored block with header and transactions.
@@ -270,7 +270,7 @@ async fn test_write_creates_retrievable_block() {
     assert_eq!(tx.operations.len(), 1, "transaction should have 1 operation");
 }
 
-/// Test write to leader replicates to followers.
+/// Tests write to leader replicates to followers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_write_replication() {
     let cluster = TestCluster::new(3).await;

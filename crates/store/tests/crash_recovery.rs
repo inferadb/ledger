@@ -470,7 +470,7 @@ fn test_recovery_preserves_multiple_tables() {
 // Dual-Slot Protocol Correctness Tests
 // ============================================================================
 
-/// Verify that each commit alternates which slot is primary.
+/// Verifies that each commit alternates which slot is primary.
 ///
 /// The dual-slot protocol flips the god byte on each commit, alternating
 /// between slot 0 and slot 1 as the primary.
@@ -523,7 +523,7 @@ fn test_commits_alternate_primary_slot() {
     );
 }
 
-/// Verify that both commit slots have valid checksums after a successful commit.
+/// Verifies that both commit slots have valid checksums after a successful commit.
 ///
 /// After two commits, both slots should have data with valid checksums.
 /// This is the foundation of crash safety — either slot can be used for recovery.
@@ -538,7 +538,7 @@ fn test_both_slots_valid_after_two_commits() {
     assert!(header.slot1.verify_checksum(), "Slot 1 should have valid checksum after two commits");
 }
 
-/// Verify that recovery flag is set during commit.
+/// Verifies that recovery flag is set during commit.
 ///
 /// The recovery flag is set at the start of persist_state_to_disk and
 /// should remain set if the process crashes before clean shutdown.
@@ -566,7 +566,7 @@ fn test_recovery_flag_set_during_commit() {
     );
 }
 
-/// Verify that free list rebuild produces correct results after crash.
+/// Verifies that free list rebuild produces correct results after crash.
 ///
 /// After recovery with the recovery flag set, the free list is rebuilt
 /// by walking all B-tree roots. Writes after recovery should succeed,

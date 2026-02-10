@@ -46,7 +46,7 @@ impl Default for PeerTrackerConfig {
 /// Tracks when peers were last seen for health monitoring and staleness detection.
 #[derive(Debug)]
 pub struct PeerTracker {
-    /// Map of node ID string to last seen instant.
+    /// Maps of node ID string to last seen instant.
     last_seen: HashMap<String, Instant>,
     /// Configuration for staleness thresholds.
     config: PeerTrackerConfig,
@@ -59,22 +59,22 @@ impl Default for PeerTracker {
 }
 
 impl PeerTracker {
-    /// Create a new peer tracker with default configuration.
+    /// Creates a new peer tracker with default configuration.
     pub fn new() -> Self {
         Self::with_config(PeerTrackerConfig::default())
     }
 
-    /// Create a new peer tracker with custom configuration.
+    /// Creates a new peer tracker with custom configuration.
     pub fn with_config(config: PeerTrackerConfig) -> Self {
         Self { last_seen: HashMap::new(), config }
     }
 
-    /// Record that a peer was seen now.
+    /// Records that a peer was seen now.
     pub fn record_seen(&mut self, node_id: &str) {
         self.last_seen.insert(node_id.to_string(), Instant::now());
     }
 
-    /// Get the last seen timestamp for a peer as a proto Timestamp.
+    /// Returns the last seen timestamp for a peer as a proto Timestamp.
     ///
     /// Returns None if the peer has never been seen.
     pub fn get_last_seen(&self, node_id: &str) -> Option<Timestamp> {
@@ -95,7 +95,7 @@ impl PeerTracker {
         })
     }
 
-    /// Check if a peer is considered stale (not seen within threshold).
+    /// Checks if a peer is considered stale (not seen within threshold).
     pub fn is_stale(&self, node_id: &str) -> bool {
         match self.last_seen.get(node_id) {
             Some(instant) => instant.elapsed() > self.config.staleness_threshold,
@@ -103,7 +103,7 @@ impl PeerTracker {
         }
     }
 
-    /// Get the time since a peer was last seen.
+    /// Returns the time since a peer was last seen.
     ///
     /// Returns None if the peer has never been seen.
     pub fn time_since_seen(&self, node_id: &str) -> Option<Duration> {
@@ -143,22 +143,22 @@ impl PeerTracker {
         before_count - self.last_seen.len()
     }
 
-    /// Get the number of tracked peers.
+    /// Returns the number of tracked peers.
     pub fn peer_count(&self) -> usize {
         self.last_seen.len()
     }
 
-    /// Get all tracked peer IDs.
+    /// Returns all tracked peer IDs.
     pub fn peer_ids(&self) -> impl Iterator<Item = &str> {
         self.last_seen.keys().map(|s| s.as_str())
     }
 
-    /// Get the staleness threshold from config.
+    /// Returns the staleness threshold from config.
     pub fn staleness_threshold(&self) -> Duration {
         self.config.staleness_threshold
     }
 
-    /// Get the maintenance interval from config.
+    /// Returns the maintenance interval from config.
     pub fn maintenance_interval(&self) -> Duration {
         self.config.maintenance_interval
     }

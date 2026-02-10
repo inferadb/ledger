@@ -49,7 +49,7 @@ openraft::declare_raft_types!(
 /// Each request targets a specific namespace and vault.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerRequest {
-    /// Write transactions to a vault.
+    /// Writes transactions to a vault.
     Write {
         /// Target namespace.
         namespace_id: NamespaceId,
@@ -59,7 +59,7 @@ pub enum LedgerRequest {
         transactions: Vec<Transaction>,
     },
 
-    /// Create a new namespace (applied to `_system`).
+    /// Creates a new namespace (applied to `_system`).
     CreateNamespace {
         /// Requested namespace name.
         name: String,
@@ -70,7 +70,7 @@ pub enum LedgerRequest {
         quota: Option<inferadb_ledger_types::config::NamespaceQuota>,
     },
 
-    /// Create a new vault within a namespace.
+    /// Creates a new vault within a namespace.
     CreateVault {
         /// Namespace to create the vault in.
         namespace_id: NamespaceId,
@@ -81,13 +81,13 @@ pub enum LedgerRequest {
         retention_policy: Option<BlockRetentionPolicy>,
     },
 
-    /// Delete a namespace.
+    /// Deletes a namespace.
     DeleteNamespace {
         /// Namespace ID to delete.
         namespace_id: NamespaceId,
     },
 
-    /// Delete a vault.
+    /// Deletes a vault.
     DeleteVault {
         /// Namespace containing the vault.
         namespace_id: NamespaceId,
@@ -110,7 +110,7 @@ pub enum LedgerRequest {
         namespace_id: NamespaceId,
     },
 
-    /// Start namespace migration to a new shard.
+    /// Starts namespace migration to a new shard.
     /// Sets status to Migrating, blocking writes until CompleteMigration.
     StartMigration {
         /// Namespace to migrate.
@@ -126,7 +126,7 @@ pub enum LedgerRequest {
         namespace_id: NamespaceId,
     },
 
-    /// Update vault health status (used during recovery).
+    /// Updates vault health status (used during recovery).
     UpdateVaultHealth {
         /// Namespace containing the vault.
         namespace_id: NamespaceId,
@@ -149,7 +149,7 @@ pub enum LedgerRequest {
     /// System operation (user management, node membership, etc.).
     System(SystemRequest),
 
-    /// Batch of requests to apply atomically in a single Raft entry.
+    /// Batches of requests to apply atomically in a single Raft entry.
     ///
     /// Per DESIGN.md §6.3: Application-level batching coalesces multiple
     /// write requests into a single Raft proposal to reduce consensus
@@ -166,7 +166,7 @@ pub enum LedgerRequest {
 /// System-level requests that modify `_system` namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemRequest {
-    /// Create a new user.
+    /// Creates a new user.
     CreateUser {
         /// User's display name.
         name: String,
@@ -174,7 +174,7 @@ pub enum SystemRequest {
         email: String,
     },
 
-    /// Add a node to the cluster.
+    /// Adds a node to the cluster.
     AddNode {
         /// Numeric node ID.
         node_id: LedgerNodeId,
@@ -182,13 +182,13 @@ pub enum SystemRequest {
         address: String,
     },
 
-    /// Remove a node from the cluster.
+    /// Removes a node from the cluster.
     RemoveNode {
         /// Node ID to remove.
         node_id: LedgerNodeId,
     },
 
-    /// Update namespace-to-shard mapping.
+    /// Updates namespace-to-shard mapping.
     UpdateNamespaceRouting {
         /// Namespace to update.
         namespace_id: NamespaceId,
@@ -206,7 +206,7 @@ pub enum LedgerResponse {
     #[default]
     Empty,
 
-    /// Write operation completed.
+    /// Writes operation completed.
     Write {
         /// Block height where the write was committed.
         block_height: u64,
@@ -326,7 +326,7 @@ pub enum LedgerResponse {
         failed_condition: Option<SetCondition>,
     },
 
-    /// Batch of responses from a BatchWrite request.
+    /// Batches of responses from a BatchWrite request.
     ///
     /// Responses are in the same order as the requests in the corresponding
     /// `LedgerRequest::BatchWrite`.
@@ -486,7 +486,7 @@ mod tests {
             index: u64,
         }
 
-        /// Generate a valid Raft log sequence with monotonic indices and
+        /// Generates a valid Raft log sequence with monotonic indices and
         /// non-decreasing terms. Optionally includes term changes (leader elections).
         fn arb_valid_log(max_entries: usize) -> impl Strategy<Value = Vec<LogEntry>> {
             proptest::collection::vec(
@@ -510,7 +510,7 @@ mod tests {
         }
 
         proptest! {
-            /// Log indices must be strictly monotonic (sequential, no gaps).
+            /// Logs indices must be strictly monotonic (sequential, no gaps).
             #[test]
             fn prop_log_indices_strictly_monotonic(log in arb_valid_log(200)) {
                 for window in log.windows(2) {
@@ -524,7 +524,7 @@ mod tests {
                 }
             }
 
-            /// Log terms must be non-decreasing (can stay same or increase, never decrease).
+            /// Logs terms must be non-decreasing (can stay same or increase, never decrease).
             #[test]
             fn prop_log_terms_nondecreasing(log in arb_valid_log(200)) {
                 for window in log.windows(2) {

@@ -49,12 +49,12 @@ pub struct IntegrityScrubber<'a, B: StorageBackend> {
 }
 
 impl<'a, B: StorageBackend> IntegrityScrubber<'a, B> {
-    /// Create a scrubber for the given database.
+    /// Creates a scrubber for the given database.
     pub fn new(db: &'a Database<B>) -> Self {
         Self { db }
     }
 
-    /// Verify checksums for the specified page IDs.
+    /// Verifies checksums for the specified page IDs.
     ///
     /// Reads each page raw (bypassing cache) and verifies its stored checksum
     /// against a freshly computed one. Pages that are on the free list or
@@ -110,7 +110,7 @@ impl<'a, B: StorageBackend> IntegrityScrubber<'a, B> {
         result
     }
 
-    /// Verify B-tree structural invariants for all non-empty tables.
+    /// Verifies B-tree structural invariants for all non-empty tables.
     ///
     /// Checks:
     /// - Leaf key ordering (keys must be strictly ascending)
@@ -179,7 +179,7 @@ impl<'a, B: StorageBackend> IntegrityScrubber<'a, B> {
         }
     }
 
-    /// Verify that keys in a leaf node are strictly ascending.
+    /// Verifies that keys in a leaf node are strictly ascending.
     fn verify_leaf_ordering(
         &self,
         page: &Page,
@@ -221,7 +221,7 @@ impl<'a, B: StorageBackend> IntegrityScrubber<'a, B> {
         }
     }
 
-    /// Verify branch node key ordering and recurse into children.
+    /// Verifies branch node key ordering and recurse into children.
     fn verify_branch_ordering(
         &self,
         page: &Page,

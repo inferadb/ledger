@@ -1,7 +1,7 @@
 //! Snowflake-style node ID generation and persistence.
 //!
-//! This module provides globally unique, roughly time-ordered 64-bit node IDs.
-//! Nodes started earlier receive lower IDs, enabling deterministic leader election
+//! Generates globally unique, roughly time-ordered 64-bit node IDs. Nodes
+//! started earlier receive lower IDs, enabling deterministic leader election
 //! during bootstrap coordination.
 //!
 //! # ID Structure
@@ -116,7 +116,7 @@ pub enum NodeIdError {
     SystemClock,
 }
 
-/// Generate a new Snowflake ID.
+/// Generates a new Snowflake ID.
 ///
 /// The ID combines a timestamp (milliseconds since 2024-01-01) with a sequence counter
 /// to produce a globally unique, time-ordered identifier. The sequence counter guarantees
@@ -179,7 +179,7 @@ pub fn generate_snowflake_id() -> Result<u64, NodeIdError> {
     Ok((state.last_timestamp << SEQUENCE_BITS) | sequence)
 }
 
-/// Extract the timestamp portion from a Snowflake ID.
+/// Extracts the timestamp portion from a Snowflake ID.
 ///
 /// Returns milliseconds since the custom epoch (2024-01-01 00:00:00 UTC).
 #[must_use]
@@ -188,14 +188,14 @@ pub fn extract_timestamp(id: u64) -> u64 {
     id >> SEQUENCE_BITS
 }
 
-/// Extract the sequence portion from a Snowflake ID.
+/// Extracts the sequence portion from a Snowflake ID.
 #[must_use]
 #[cfg(test)]
 pub fn extract_sequence(id: u64) -> u64 {
     id & SEQUENCE_MASK
 }
 
-/// Load existing node ID or generate and persist a new one.
+/// Loads existing node ID or generate and persist a new one.
 ///
 /// On first startup, generates a new Snowflake ID and persists it to
 /// `{data_dir}/node_id`. On subsequent startups, loads the existing ID
@@ -236,7 +236,7 @@ pub fn load_or_generate_node_id(data_dir: &Path) -> Result<u64, NodeIdError> {
     }
 }
 
-/// Write a specific node ID to the data directory.
+/// Writes a specific node ID to the data directory.
 ///
 /// This is primarily useful for tests that need deterministic node IDs.
 /// Creates parent directories if they don't exist.

@@ -22,17 +22,17 @@ use crate::{error::PageId, tables::TableId};
 pub struct SnapshotId(pub u64);
 
 impl SnapshotId {
-    /// Create a new snapshot ID with the given value.
+    /// Creates a new snapshot ID with the given value.
     pub fn new(id: u64) -> Self {
         Self(id)
     }
 
-    /// Get the raw u64 value.
+    /// Returns the raw u64 value.
     pub fn raw(&self) -> u64 {
         self.0
     }
 
-    /// Increment and return the next snapshot ID.
+    /// Increments and return the next snapshot ID.
     pub fn next(&self) -> Self {
         Self(self.0 + 1)
     }
@@ -112,7 +112,7 @@ struct TrackerState {
 }
 
 impl TransactionTracker {
-    /// Create a new transaction tracker.
+    /// Creates a new transaction tracker.
     pub fn new(initial_snapshot_id: SnapshotId) -> Self {
         Self {
             state: Mutex::new(TrackerState {
@@ -123,7 +123,7 @@ impl TransactionTracker {
         }
     }
 
-    /// Register a new read transaction at the given snapshot.
+    /// Registers a new read transaction at the given snapshot.
     ///
     /// Increments the reference count for that snapshot.
     pub fn register_read_transaction(&self, snapshot_id: SnapshotId) {
@@ -135,7 +135,7 @@ impl TransactionTracker {
             .or_insert(1);
     }
 
-    /// Unregister a read transaction.
+    /// Unregisters a read transaction.
     ///
     /// Decrements the reference count. If it reaches zero, removes the entry.
     pub fn unregister_read_transaction(&self, snapshot_id: SnapshotId) {
@@ -148,7 +148,7 @@ impl TransactionTracker {
         }
     }
 
-    /// Start a write transaction and return its snapshot ID.
+    /// Starts a write transaction and return its snapshot ID.
     ///
     /// There can only be one write transaction at a time.
     /// This is enforced by the Database's write_lock mutex.
@@ -174,7 +174,7 @@ impl TransactionTracker {
         state.live_write_transaction = None;
     }
 
-    /// Get the oldest snapshot ID that still has active readers.
+    /// Returns the oldest snapshot ID that still has active readers.
     ///
     /// Pages freed by snapshots OLDER than this can be safely deallocated.
     /// Returns `None` if there are no active readers.
@@ -183,18 +183,18 @@ impl TransactionTracker {
         state.live_read_transactions.keys().next().copied()
     }
 
-    /// Get the current snapshot ID (without incrementing).
+    /// Returns the current snapshot ID (without incrementing).
     pub fn current_snapshot_id(&self) -> SnapshotId {
         SnapshotId(self.next_snapshot_id.load(Ordering::SeqCst))
     }
 
-    /// Check if there are any active read transactions.
+    /// Checks if there are any active read transactions.
     pub fn has_active_readers(&self) -> bool {
         let state = self.state.lock();
         !state.live_read_transactions.is_empty()
     }
 
-    /// Get the count of active read transactions.
+    /// Returns the count of active read transactions.
     #[cfg(test)]
     pub fn active_reader_count(&self) -> usize {
         let state = self.state.lock();
@@ -220,19 +220,19 @@ pub struct PendingFrees {
 }
 
 impl PendingFrees {
-    /// Create a new empty pending frees tracker.
+    /// Creates a new empty pending frees tracker.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record pages to be freed from a commit.
+    /// Records pages to be freed from a commit.
     pub fn record_freed_pages(&mut self, snapshot_id: SnapshotId, pages: Vec<PageId>) {
         if !pages.is_empty() {
             self.freed_by_snapshot.insert(snapshot_id, pages);
         }
     }
 
-    /// Get pages that can be safely freed.
+    /// Returns pages that can be safely freed.
     ///
     /// Returns pages from snapshots older than `oldest_reader`.
     /// If `oldest_reader` is `None`, all pending pages can be freed.
@@ -251,12 +251,12 @@ impl PendingFrees {
         pages
     }
 
-    /// Check if there are any pending frees.
+    /// Checks if there are any pending frees.
     pub fn is_empty(&self) -> bool {
         self.freed_by_snapshot.is_empty()
     }
 
-    /// Get total count of pages pending free.
+    /// Returns total count of pages pending free.
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
         self.freed_by_snapshot.values().map(|v| v.len()).sum()

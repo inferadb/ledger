@@ -260,7 +260,7 @@ pub struct ChainCommitment {
     /// Enables O(log n) proofs that a specific state_root was in the range.
     pub state_root_accumulator: Hash,
 
-    /// Start height of this commitment (inclusive).
+    /// Starts height of this commitment (inclusive).
     /// 0 for genesis, or previous_snapshot_height + 1.
     pub from_height: u64,
 
@@ -270,9 +270,9 @@ pub struct ChainCommitment {
 }
 
 impl ShardBlock {
-    /// Convert this ShardBlock to a shard-level BlockHeader for chain commitment computation.
+    /// Converts this ShardBlock to a shard-level BlockHeader for chain commitment computation.
     ///
-    /// Create a shard-level BlockHeader for ChainCommitment computation.
+    /// Creates a shard-level BlockHeader for ChainCommitment computation.
     ///
     /// The shard-level BlockHeader uses:
     /// - `height` = shard_height
@@ -309,7 +309,7 @@ impl ShardBlock {
         }
     }
 
-    /// Extract a standalone VaultBlock for client verification.
+    /// Extracts a standalone VaultBlock for client verification.
     ///
     /// Clients verify per-vault chains and never see ShardBlock directly.
     /// Per DESIGN.md lines 1749-1753: requires both namespace_id and vault_id
@@ -428,7 +428,7 @@ impl Transaction {
 /// Operation types per DESIGN.md lines 204-214.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operation {
-    /// Create a relationship tuple.
+    /// Creates a relationship tuple.
     CreateRelationship {
         /// Resource identifier (e.g., "document:123").
         resource: String,
@@ -437,7 +437,7 @@ pub enum Operation {
         /// Subject identifier (e.g., "user:456").
         subject: String,
     },
-    /// Delete a relationship tuple.
+    /// Deletes a relationship tuple.
     DeleteRelationship {
         /// Resource identifier.
         resource: String,
@@ -446,7 +446,7 @@ pub enum Operation {
         /// Subject identifier.
         subject: String,
     },
-    /// Set an entity value with optional condition and expiration.
+    /// Sets an entity value with optional condition and expiration.
     SetEntity {
         /// Entity key.
         key: String,
@@ -457,7 +457,7 @@ pub enum Operation {
         /// Unix timestamp for expiration (0 = never expires).
         expires_at: Option<u64>,
     },
-    /// Delete an entity.
+    /// Deletes an entity.
     DeleteEntity {
         /// Entity key to delete.
         key: String,
@@ -485,7 +485,7 @@ pub enum SetCondition {
 }
 
 impl SetCondition {
-    /// Condition type byte for encoding.
+    /// Returns the condition type byte for encoding.
     pub fn type_byte(&self) -> u8 {
         match self {
             SetCondition::MustNotExist => 0x01,
@@ -525,7 +525,7 @@ pub struct Relationship {
 }
 
 impl Relationship {
-    /// Create a new relationship.
+    /// Creates a new relationship.
     pub fn new(
         resource: impl Into<String>,
         relation: impl Into<String>,
@@ -534,7 +534,7 @@ impl Relationship {
         Self { resource: resource.into(), relation: relation.into(), subject: subject.into() }
     }
 
-    /// Encode relationship as a canonical string key.
+    /// Encodes relationship as a canonical string key.
     pub fn to_key(&self) -> String {
         format!("rel:{}#{}@{}", self.resource, self.relation, self.subject)
     }

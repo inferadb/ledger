@@ -17,7 +17,7 @@ use std::time::Duration;
 use common::TestCluster;
 use serial_test::serial;
 
-/// Test that multiple writes replicate in order.
+/// Tests that multiple writes replicate in order.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ordered_replication() {
@@ -74,7 +74,7 @@ async fn test_ordered_replication() {
     }
 }
 
-/// Test that followers have consistent state after writes.
+/// Tests that followers have consistent state after writes.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_follower_state_consistency() {
@@ -130,7 +130,7 @@ async fn test_follower_state_consistency() {
     }
 }
 
-/// Test replication continues after a brief network delay.
+/// Tests replication continues after a brief network delay.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_replication_after_delay() {

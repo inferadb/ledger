@@ -24,22 +24,22 @@ use inferadb_ledger_types::types::{
 };
 use proptest::prelude::*;
 
-/// Generate an arbitrary entity key of 1-32 characters matching `[a-z][a-z0-9]*`.
+/// Generates an arbitrary entity key of 1-32 characters matching `[a-z][a-z0-9]*`.
 pub fn arb_key() -> impl Strategy<Value = String> {
     "[a-z][a-z0-9]{0,31}"
 }
 
-/// Generate an arbitrary entity value of 0-256 random bytes.
+/// Generates an arbitrary entity value of 0-256 random bytes.
 pub fn arb_value() -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(any::<u8>(), 0..256)
 }
 
-/// Generate a small entity value of 0-32 random bytes for compact tests.
+/// Generates a small entity value of 0-32 random bytes for compact tests.
 pub fn arb_small_value() -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(any::<u8>(), 0..32)
 }
 
-/// Generate an arbitrary resource identifier in `{type}:{key}` format.
+/// Generates an arbitrary resource identifier in `{type}:{key}` format.
 ///
 /// Type is one of: `doc`, `folder`, `project`, `org`, `team`.
 /// Key is 1-32 characters matching `[a-z][a-z0-9]*`.
@@ -48,7 +48,7 @@ pub fn arb_resource() -> impl Strategy<Value = String> {
         .prop_map(|(typ, id)| format!("{typ}:{id}"))
 }
 
-/// Generate an arbitrary relation name from: `viewer`, `editor`, `owner`, `member`, `admin`.
+/// Generates an arbitrary relation name from: `viewer`, `editor`, `owner`, `member`, `admin`.
 pub fn arb_relation() -> impl Strategy<Value = String> {
     prop::sample::select(vec![
         "viewer".to_string(),
@@ -59,7 +59,7 @@ pub fn arb_relation() -> impl Strategy<Value = String> {
     ])
 }
 
-/// Generate an arbitrary subject identifier in `{type}:{key}` format.
+/// Generates an arbitrary subject identifier in `{type}:{key}` format.
 ///
 /// Type is one of: `user`, `group`, `team`, `service`.
 /// Key is 1-32 characters matching `[a-z][a-z0-9]*`.
@@ -68,7 +68,7 @@ pub fn arb_subject() -> impl Strategy<Value = String> {
         .prop_map(|(typ, id)| format!("{typ}:{id}"))
 }
 
-/// Generate an arbitrary [`SetCondition`]: `MustNotExist`, `MustExist`, `VersionEquals(0..1M)`, or
+/// Generates an arbitrary [`SetCondition`]: `MustNotExist`, `MustExist`, `VersionEquals(0..1M)`, or
 /// `ValueEquals(0-32 bytes)`.
 pub fn arb_set_condition() -> impl Strategy<Value = SetCondition> {
     prop_oneof![
@@ -79,7 +79,7 @@ pub fn arb_set_condition() -> impl Strategy<Value = SetCondition> {
     ]
 }
 
-/// Generate an arbitrary [`Operation`] covering all five variants with random payloads.
+/// Generates an arbitrary [`Operation`] covering all five variants with random payloads.
 pub fn arb_operation() -> impl Strategy<Value = Operation> {
     prop_oneof![
         // SetEntity with optional condition and expiration
@@ -112,34 +112,34 @@ pub fn arb_operation() -> impl Strategy<Value = Operation> {
     ]
 }
 
-/// Generate a vector of 1-20 arbitrary operations.
+/// Generates a vector of 1-20 arbitrary operations.
 pub fn arb_operation_sequence() -> impl Strategy<Value = Vec<Operation>> {
     proptest::collection::vec(arb_operation(), 1..20)
 }
 
-/// Generate an arbitrary [`Entity`] with random key (0-32 bytes), value, version, and expiry.
+/// Generates an arbitrary [`Entity`] with random key (0-32 bytes), value, version, and expiry.
 pub fn arb_entity() -> impl Strategy<Value = Entity> {
     (arb_small_value(), arb_small_value(), any::<u64>(), any::<u64>())
         .prop_map(|(key, value, expires_at, version)| Entity { key, value, expires_at, version })
 }
 
-/// Generate an arbitrary [`Relationship`] with random resource, relation, and subject.
+/// Generates an arbitrary [`Relationship`] with random resource, relation, and subject.
 pub fn arb_relationship() -> impl Strategy<Value = Relationship> {
     (arb_resource(), arb_relation(), arb_subject())
         .prop_map(|(resource, relation, subject)| Relationship { resource, relation, subject })
 }
 
-/// Generate an arbitrary 32-byte hash (uniform random bytes).
+/// Generates an arbitrary 32-byte hash (uniform random bytes).
 pub fn arb_hash() -> impl Strategy<Value = [u8; 32]> {
     proptest::array::uniform32(any::<u8>())
 }
 
-/// Generate an arbitrary 16-byte transaction ID (uniform random bytes).
+/// Generates an arbitrary 16-byte transaction ID (uniform random bytes).
 pub fn arb_tx_id() -> impl Strategy<Value = [u8; 16]> {
     proptest::array::uniform16(any::<u8>())
 }
 
-/// Generate an arbitrary [`DateTime<Utc>`] between 2020-01-01 and 2030-01-01.
+/// Generates an arbitrary [`DateTime<Utc>`] between 2020-01-01 and 2030-01-01.
 pub fn arb_timestamp() -> impl Strategy<Value = DateTime<Utc>> {
     (1_577_836_800i64..1_893_456_000i64).prop_map(|secs| {
         Utc.timestamp_opt(secs, 0)
@@ -148,22 +148,22 @@ pub fn arb_timestamp() -> impl Strategy<Value = DateTime<Utc>> {
     })
 }
 
-/// Generate an arbitrary [`NamespaceId`] in the range 1-9,999.
+/// Generates an arbitrary [`NamespaceId`] in the range 1-9,999.
 pub fn arb_namespace_id() -> impl Strategy<Value = NamespaceId> {
     (1i64..10_000).prop_map(NamespaceId::new)
 }
 
-/// Generate an arbitrary [`VaultId`] in the range 1-9,999.
+/// Generates an arbitrary [`VaultId`] in the range 1-9,999.
 pub fn arb_vault_id() -> impl Strategy<Value = VaultId> {
     (1i64..10_000).prop_map(VaultId::new)
 }
 
-/// Generate an arbitrary [`ShardId`] in the range 1-999.
+/// Generates an arbitrary [`ShardId`] in the range 1-999.
 pub fn arb_shard_id() -> impl Strategy<Value = ShardId> {
     (1u32..1_000).prop_map(ShardId::new)
 }
 
-/// Generate an arbitrary [`Transaction`] with 1-20 operations, random client ID, and actor.
+/// Generates an arbitrary [`Transaction`] with 1-20 operations, random client ID, and actor.
 pub fn arb_transaction() -> impl Strategy<Value = Transaction> {
     (
         arb_tx_id(),
@@ -183,7 +183,7 @@ pub fn arb_transaction() -> impl Strategy<Value = Transaction> {
         })
 }
 
-/// Generate an arbitrary [`BlockHeader`] with height 0-999,999 and random hashes.
+/// Generates an arbitrary [`BlockHeader`] with height 0-999,999 and random hashes.
 pub fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
     (
         0u64..1_000_000, // height
@@ -223,13 +223,13 @@ pub fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
         )
 }
 
-/// Generate an arbitrary [`VaultBlock`] with a random header and 0-4 transactions.
+/// Generates an arbitrary [`VaultBlock`] with a random header and 0-4 transactions.
 pub fn arb_vault_block() -> impl Strategy<Value = VaultBlock> {
     (arb_block_header(), proptest::collection::vec(arb_transaction(), 0..5))
         .prop_map(|(header, transactions)| VaultBlock { header, transactions })
 }
 
-/// Generate an arbitrary [`VaultEntry`] with height 0-999,999 and 0-2 transactions.
+/// Generates an arbitrary [`VaultEntry`] with height 0-999,999 and 0-2 transactions.
 pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
     (
         arb_namespace_id(),
@@ -263,7 +263,7 @@ pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
         )
 }
 
-/// Generate an arbitrary [`ShardBlock`] with height 0-999,999 and 0-2 vault entries.
+/// Generates an arbitrary [`ShardBlock`] with height 0-999,999 and 0-2 vault entries.
 pub fn arb_shard_block() -> impl Strategy<Value = ShardBlock> {
     (
         arb_shard_id(),
@@ -300,7 +300,7 @@ pub fn arb_shard_block() -> impl Strategy<Value = ShardBlock> {
         )
 }
 
-/// Generate an arbitrary [`ChainCommitment`] with `from_height <= to_height` (both 0-499,999).
+/// Generates an arbitrary [`ChainCommitment`] with `from_height <= to_height` (both 0-499,999).
 pub fn arb_chain_commitment() -> impl Strategy<Value = ChainCommitment> {
     (arb_hash(), arb_hash(), 0u64..500_000, 0u64..500_000).prop_map(
         |(accumulated_header_hash, state_root_accumulator, from, to)| {

@@ -53,7 +53,7 @@ pub struct BTreeCompactor<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> BTreeCompactor<B> {
-    /// Create a compactor from a configuration struct.
+    /// Creates a compactor from a configuration struct.
     pub fn from_config(
         raft: Arc<Raft<LedgerTypeConfig>>,
         node_id: LedgerNodeId,
@@ -69,13 +69,13 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
         }
     }
 
-    /// Check if this node is the current leader.
+    /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Run a single compaction cycle.
+    /// Runs a single compaction cycle.
     ///
     /// Compacts all B+ tree tables, merging underfull leaf nodes.
     fn run_cycle(&self) {
@@ -127,7 +127,7 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
         }
     }
 
-    /// Start the B+ tree compactor background task.
+    /// Starts the B+ tree compactor background task.
     ///
     /// Returns a handle that can be used to abort the task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {

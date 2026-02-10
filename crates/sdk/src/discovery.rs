@@ -140,10 +140,10 @@ pub struct DiscoveryService {
     /// Whether background refresh is running.
     running: Arc<AtomicBool>,
 
-    /// Notify channel to trigger immediate refresh.
+    /// Notifies channel to trigger immediate refresh.
     refresh_notify: Arc<Notify>,
 
-    /// Notify channel to signal shutdown.
+    /// Notifies channel to signal shutdown.
     shutdown_notify: Arc<Notify>,
 }
 

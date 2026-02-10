@@ -1,6 +1,6 @@
 //! InferaDB Ledger server binary.
 //!
-//! This is the main entry point for running a ledger node.
+//! Launches a ledger node with gRPC services, Raft consensus, and background jobs.
 //!
 //! # Usage
 //!
@@ -171,7 +171,7 @@ async fn main() -> Result<(), ServerError> {
     Ok(())
 }
 
-/// Initialize the logging system based on configuration.
+/// Initializes the logging system based on configuration.
 ///
 /// Supports three formats:
 /// - `Text`: Human-readable format (development)
@@ -198,7 +198,7 @@ fn init_logging(config: &Config) {
     }
 }
 
-/// Initialize OpenTelemetry/OTLP export if configured.
+/// Initializes OpenTelemetry/OTLP export if configured.
 ///
 /// Creates a tracer provider with batch span processor for exporting traces
 /// to observability backends like Jaeger, Tempo, or Honeycomb.
@@ -227,7 +227,7 @@ fn init_otel(config: &Config) -> Result<(), ServerError> {
     })
 }
 
-/// Initialize the Prometheus metrics exporter.
+/// Initializes the Prometheus metrics exporter.
 ///
 /// Starts an HTTP server that exposes metrics at `/metrics`.
 /// Configures histogram buckets aligned with SLI targets for latency tracking.

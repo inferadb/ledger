@@ -19,7 +19,7 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Create a namespace and return its ID.
+/// Creates a namespace and return its ID.
 async fn create_namespace(
     addr: std::net::SocketAddr,
     name: &str,
@@ -39,7 +39,7 @@ async fn create_namespace(
     Ok(namespace_id)
 }
 
-/// Create a vault in a namespace and return its ID.
+/// Creates a vault in a namespace and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -59,7 +59,7 @@ async fn create_vault(
     Ok(vault_id)
 }
 
-/// Write an entity with optional TTL.
+/// Writes an entity with optional TTL.
 async fn write_entity_with_ttl(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -102,7 +102,7 @@ async fn write_entity_with_ttl(
     }
 }
 
-/// Read an entity from a vault.
+/// Reads an entity from a vault.
 async fn read_entity(
     addr: std::net::SocketAddr,
     namespace_id: i64,
@@ -148,7 +148,7 @@ async fn force_gc(
 // TTL GC Tests
 // ============================================================================
 
-/// Test that ForceGc removes expired entities.
+/// Tests that ForceGc removes expired entities.
 ///
 /// DESIGN.md §6.4: Expired entities remain in state until garbage collection.
 #[serial]
@@ -241,7 +241,7 @@ async fn test_force_gc_removes_expired_entities() {
     assert!(future_after.is_some(), "future entity should still exist after GC");
 }
 
-/// Test that GC on empty vault succeeds.
+/// Tests that GC on empty vault succeeds.
 #[serial]
 #[tokio::test]
 async fn test_force_gc_empty_vault() {
@@ -261,7 +261,7 @@ async fn test_force_gc_empty_vault() {
     assert_eq!(vaults_scanned, 1, "should have scanned 1 vault");
 }
 
-/// Test that GC runs on all vaults when no filter specified.
+/// Tests that GC runs on all vaults when no filter specified.
 #[serial]
 #[tokio::test]
 async fn test_force_gc_all_vaults() {
@@ -311,7 +311,7 @@ async fn test_force_gc_all_vaults() {
     assert!(vaults_scanned >= 2, "should have scanned at least 2 vaults");
 }
 
-/// Test that multiple entities with different TTLs are handled correctly.
+/// Tests that multiple entities with different TTLs are handled correctly.
 ///
 /// Only entities whose TTL has passed should be collected; entities with
 /// future TTLs should remain in storage.
@@ -363,7 +363,7 @@ async fn test_force_gc_multiple_ttl_timings() {
     assert!(future_1d_val.is_some(), "future-1d entity should still exist");
 }
 
-/// Test that GC is idempotent — running twice produces zero expirations the second time.
+/// Tests that GC is idempotent — running twice produces zero expirations the second time.
 ///
 /// After all expired entities are collected, subsequent GC runs should find
 /// nothing to expire.
@@ -404,7 +404,7 @@ async fn test_force_gc_idempotent() {
     assert_eq!(scanned2, 1, "should still scan the vault");
 }
 
-/// Test that expired entities are filtered from read responses.
+/// Tests that expired entities are filtered from read responses.
 ///
 /// DESIGN.md: Expired entities remain in state until GC runs, but reads
 /// should filter them out based on current time vs expires_at.
@@ -441,7 +441,7 @@ async fn test_expired_entity_not_returned_by_read() {
     assert!(result.is_none(), "expired entity should not be returned by read (lazy TTL filtering)");
 }
 
-/// Test that GC fails on follower node.
+/// Tests that GC fails on follower node.
 ///
 /// Only the leader can run garbage collection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

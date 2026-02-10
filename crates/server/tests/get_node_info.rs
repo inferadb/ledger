@@ -14,7 +14,7 @@ use inferadb_ledger_proto::proto::GetNodeInfoRequest;
 use inferadb_ledger_server::discovery::discover_node_info;
 use serial_test::serial;
 
-/// Test GetNodeInfo returns correct node ID before bootstrap.
+/// Tests GetNodeInfo returns correct node ID before bootstrap.
 ///
 /// This test verifies that GetNodeInfo is available and returns the node's
 /// Snowflake ID even before the cluster is fully bootstrapped.
@@ -37,7 +37,7 @@ async fn test_get_node_info_returns_node_id() {
     assert_eq!(info.address, leader.addr.to_string(), "address should match listen_addr");
 }
 
-/// Test GetNodeInfo shows is_cluster_member=true after bootstrap.
+/// Tests GetNodeInfo shows is_cluster_member=true after bootstrap.
 ///
 /// After a node has bootstrapped and become a cluster member, the
 /// is_cluster_member flag should be true.
@@ -60,7 +60,7 @@ async fn test_get_node_info_shows_cluster_member_after_bootstrap() {
     assert!(info.term > 0, "term should be > 0 after bootstrap");
 }
 
-/// Test GetNodeInfo returns correct info in a 3-node cluster.
+/// Tests GetNodeInfo returns correct info in a 3-node cluster.
 ///
 /// Verifies that each node returns its own ID and all nodes report
 /// consistent cluster membership after joining.
@@ -104,7 +104,7 @@ async fn test_get_node_info_three_node_cluster() {
     }
 }
 
-/// Test GetNodeInfo term matches Raft metrics.
+/// Tests GetNodeInfo term matches Raft metrics.
 ///
 /// The term returned by GetNodeInfo should match the current Raft term
 /// from the node's metrics.
@@ -125,7 +125,7 @@ async fn test_get_node_info_term_matches_raft_metrics() {
     assert_eq!(info.term, raft_term, "term should match Raft metrics");
 }
 
-/// Test discover_node_info function against a running node.
+/// Tests discover_node_info function against a running node.
 ///
 /// Verifies that the discovery helper function correctly queries a node
 /// via the GetNodeInfo RPC and returns a DiscoveredNode.
@@ -150,7 +150,7 @@ async fn test_discover_node_info_against_running_node() {
     assert!(node.term > 0, "term should be > 0 after bootstrap");
 }
 
-/// Test discover_node_info returns None for unreachable peers.
+/// Tests discover_node_info returns None for unreachable peers.
 ///
 /// When a peer is not reachable, discover_node_info should return None
 /// rather than failing with an error.
