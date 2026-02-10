@@ -1,10 +1,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::observability::{HotKeyConfig, MetricsCardinalityConfig};
-use super::resilience::{RateLimitConfig, ValidationConfig};
-use super::storage::{BTreeCompactionConfig, IntegrityConfig};
-use super::ConfigError;
+use super::{
+    ConfigError,
+    observability::{HotKeyConfig, MetricsCardinalityConfig},
+    resilience::{RateLimitConfig, ValidationConfig},
+    storage::{BTreeCompactionConfig, IntegrityConfig},
+};
 
 /// Default maximum storage bytes per namespace (10 GiB).
 const fn default_max_storage_bytes() -> u64 {

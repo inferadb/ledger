@@ -1,16 +1,18 @@
-use inferadb_ledger_state::system::{
-    NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys,
+use inferadb_ledger_state::{
+    StateError,
+    system::{NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys},
 };
-use inferadb_ledger_state::StateError;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     Hash, NamespaceId, Operation, VaultEntry, VaultId, compute_tx_merkle_root, encode,
 };
 
-use super::store::RaftLogStore;
-use super::types::{
-    AppliedState, NamespaceMeta, VaultHealthStatus, VaultMeta, estimate_write_storage_delta,
-    select_least_loaded_shard,
+use super::{
+    store::RaftLogStore,
+    types::{
+        AppliedState, NamespaceMeta, VaultHealthStatus, VaultMeta, estimate_write_storage_delta,
+        select_least_loaded_shard,
+    },
 };
 use crate::types::{LedgerRequest, LedgerResponse, SystemRequest};
 
@@ -669,7 +671,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 let old_shard_id = ns.shard_id;
                                 // Safe cast: we already validated shard_id >= 0 above
                                 #[allow(clippy::cast_sign_loss)]
-                                let new_shard_id = inferadb_ledger_types::ShardId::new(*shard_id as u32);
+                                let new_shard_id =
+                                    inferadb_ledger_types::ShardId::new(*shard_id as u32);
                                 ns.shard_id = new_shard_id;
                                 LedgerResponse::NamespaceMigrated {
                                     namespace_id: *namespace_id,

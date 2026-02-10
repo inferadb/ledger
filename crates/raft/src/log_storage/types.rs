@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
-use inferadb_ledger_types::{
-    Hash, NamespaceId, Operation, ShardId, Transaction, VaultId,
-};
 use inferadb_ledger_state::system::NamespaceStatus;
+use inferadb_ledger_types::{Hash, NamespaceId, Operation, ShardId, Transaction, VaultId};
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
 

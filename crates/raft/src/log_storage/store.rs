@@ -8,10 +8,12 @@ use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 
-use super::accessor::AppliedStateAccessor;
-use super::raft_impl::{to_serde_error, to_storage_error};
-use super::types::{AppliedState, SequenceCounters};
-use super::{KEY_APPLIED_STATE, KEY_LAST_PURGED, KEY_VOTE, ShardChainState};
+use super::{
+    KEY_APPLIED_STATE, KEY_LAST_PURGED, KEY_VOTE, ShardChainState,
+    accessor::AppliedStateAccessor,
+    raft_impl::{to_serde_error, to_storage_error},
+    types::{AppliedState, SequenceCounters},
+};
 use crate::types::{LedgerNodeId, LedgerTypeConfig};
 
 /// Combined Raft storage.

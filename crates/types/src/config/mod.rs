@@ -23,9 +23,8 @@ pub use observability::*;
 pub use raft::*;
 pub use resilience::*;
 pub use runtime::*;
-pub use storage::*;
-
 use snafu::Snafu;
+pub use storage::*;
 
 /// Configuration validation error.
 ///
@@ -66,9 +65,7 @@ mod humantime_serde {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::path::PathBuf;
-    use std::time::Duration;
+    use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
     use super::*;
 

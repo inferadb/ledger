@@ -3,8 +3,10 @@ use std::{net::SocketAddr, path::PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::raft::{BatchConfig, RaftConfig};
-use super::storage::StorageConfig;
+use super::{
+    raft::{BatchConfig, RaftConfig},
+    storage::StorageConfig,
+};
 
 /// Main configuration for a ledger node.
 #[derive(Debug, Clone, bon::Builder, Serialize, Deserialize, JsonSchema)]

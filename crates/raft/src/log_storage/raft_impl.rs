@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Debug, io::Cursor, ops::RangeBounds, sync::Arc};
 
-use inferadb_ledger_store::{FileBackend, tables};
+use inferadb_ledger_store::tables;
 use inferadb_ledger_types::{decode, encode};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
@@ -9,11 +9,15 @@ use openraft::{
 };
 use parking_lot::RwLock;
 
-use super::ShardChainState;
-use super::store::RaftLogStore;
-use super::types::{AppliedState, CombinedSnapshot};
-use crate::metrics;
-use crate::types::{LedgerNodeId, LedgerTypeConfig};
+use super::{
+    ShardChainState,
+    store::RaftLogStore,
+    types::{AppliedState, CombinedSnapshot},
+};
+use crate::{
+    metrics,
+    types::{LedgerNodeId, LedgerTypeConfig},
+};
 
 // ============================================================================
 // RaftLogReader Implementation
