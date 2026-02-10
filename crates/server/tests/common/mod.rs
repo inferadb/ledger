@@ -708,3 +708,166 @@ impl MultiShardTestCluster {
         false
     }
 }
+
+// ============================================================================
+// External Cluster Infrastructure (for integration tests against running cluster)
+// ============================================================================
+
+/// An external cluster started by a shell script.
+///
+/// Reads endpoints from the `LEDGER_ENDPOINTS` environment variable.
+/// Returns `None` from `from_env()` if the variable is unset, allowing
+/// tests to gracefully skip when no cluster is available.
+pub struct ExternalCluster {
+    endpoints: Vec<String>,
+}
+
+impl ExternalCluster {
+    /// Read `LEDGER_ENDPOINTS` env var (comma-separated `http://host:port`).
+    ///
+    /// Returns `None` if the variable is unset, allowing tests to skip.
+    pub fn from_env() -> Option<Self> {
+        let raw = std::env::var("LEDGER_ENDPOINTS").ok()?;
+        let endpoints: Vec<String> =
+            raw.split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();
+
+        if endpoints.is_empty() {
+            return None;
+        }
+
+        Some(Self { endpoints })
+    }
+
+    /// Get all cluster endpoints.
+    pub fn endpoints(&self) -> &[String] {
+        &self.endpoints
+    }
+
+    /// Get the first endpoint (convenience for single-endpoint operations).
+    pub fn any_endpoint(&self) -> &str {
+        &self.endpoints[0]
+    }
+
+    /// Poll `GetClusterInfo` until a leader exists, with timeout.
+    ///
+    /// Returns the leader's endpoint URL.
+    pub async fn wait_for_leader(&self, timeout_duration: Duration) -> String {
+        let start = tokio::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            for endpoint in &self.endpoints {
+                if let Ok(info) = Self::get_cluster_info(endpoint).await
+                    && info.leader_id > 0
+                    && let Some(leader_ep) = Self::leader_endpoint_from_info(&info, &self.endpoints)
+                {
+                    return leader_ep;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        panic!("No leader elected within {:?}", timeout_duration);
+    }
+
+    /// Call `GetClusterInfo` on the given endpoint.
+    pub async fn get_cluster_info(
+        endpoint: &str,
+    ) -> Result<
+        inferadb_ledger_raft::proto::GetClusterInfoResponse,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let mut client =
+            inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(
+                endpoint.to_string(),
+            )
+            .await?;
+
+        let response =
+            client.get_cluster_info(inferadb_ledger_raft::proto::GetClusterInfoRequest {}).await?;
+
+        Ok(response.into_inner())
+    }
+
+    /// Find the leader's endpoint URL by matching leader address from
+    /// `GetClusterInfoResponse` against known endpoints.
+    pub fn leader_endpoint_from_info(
+        info: &inferadb_ledger_raft::proto::GetClusterInfoResponse,
+        endpoints: &[String],
+    ) -> Option<String> {
+        let leader_member = info.members.iter().find(|m| m.is_leader)?;
+        let leader_addr = &leader_member.address;
+
+        // Match against endpoints: endpoint is "http://host:port", address is "host:port"
+        endpoints.iter().find(|ep| ep.ends_with(leader_addr) || ep.contains(leader_addr)).cloned()
+    }
+
+    /// Find non-leader endpoint URLs.
+    pub fn non_leader_endpoints(
+        info: &inferadb_ledger_raft::proto::GetClusterInfoResponse,
+        endpoints: &[String],
+    ) -> Vec<String> {
+        let leader_member = info.members.iter().find(|m| m.is_leader);
+        let leader_addr = leader_member.map(|m| m.address.as_str()).unwrap_or("");
+
+        endpoints
+            .iter()
+            .filter(|ep| !ep.ends_with(leader_addr) && !ep.contains(leader_addr))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Generic polling helper for eventually-consistent checks.
+///
+/// Calls `f` repeatedly until it returns `Some(T)`, with the given interval
+/// between attempts. Returns `None` if the timeout expires.
+pub async fn poll_until<F, Fut, T>(
+    timeout_duration: Duration,
+    interval: Duration,
+    f: F,
+) -> Option<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let start = tokio::time::Instant::now();
+
+    while start.elapsed() < timeout_duration {
+        if let Some(result) = f().await {
+            return Some(result);
+        }
+        tokio::time::sleep(interval).await;
+    }
+
+    None
+}
+
+/// Helper to create an admin client from a URL string.
+pub async fn create_admin_client_from_url(
+    endpoint: &str,
+) -> Result<
+    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    inferadb_ledger_raft::proto::admin_service_client::AdminServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+}
+
+/// Helper to create a health client from a URL string.
+pub async fn create_health_client_from_url(
+    endpoint: &str,
+) -> Result<
+    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    inferadb_ledger_raft::proto::health_service_client::HealthServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+}

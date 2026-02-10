@@ -1,10 +1,16 @@
-//! Integration tests for background jobs: auto-recovery and learner refresh.
+//! Integration tests for background jobs and cluster health.
 //!
-//! Tests that:
-//! - Auto-recovery job correctly scans for diverged vaults
-//! - Recovery metrics are recorded
-//! - Learner refresh job syncs state from voters
-//! - Learner refresh metrics are recorded
+//! These tests run against an external Ledger cluster started by
+//! `scripts/run-server-integration-tests.sh`. The cluster endpoints are
+//! provided via the `LEDGER_ENDPOINTS` environment variable.
+//!
+//! When `LEDGER_ENDPOINTS` is not set, all tests skip gracefully — this
+//! allows `cargo test --workspace` to pass without a running cluster.
+//!
+//! Tests verify via gRPC APIs:
+//! - `HealthService::Check` for node/cluster health
+//! - `AdminService::GetClusterInfo` for membership and leadership
+//! - `AdminService` mutations for namespace/vault creation
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -12,147 +18,219 @@ mod common;
 
 use std::time::Duration;
 
-use common::{TestCluster, create_admin_client};
-use serial_test::serial;
+use common::{ExternalCluster, create_admin_client_from_url, create_health_client_from_url};
+use inferadb_ledger_raft::proto;
+
+/// Skip macro: returns early if no external cluster is available.
+macro_rules! require_cluster {
+    () => {
+        match ExternalCluster::from_env() {
+            Some(c) => c,
+            None => {
+                eprintln!(
+                    "LEDGER_ENDPOINTS not set — skipping integration test. \
+                     Run via scripts/run-server-integration-tests.sh"
+                );
+                return;
+            },
+        }
+    };
+}
 
 // ============================================================================
 // Auto-Recovery Tests
 // ============================================================================
 
-/// Test that auto-recovery job starts and runs without errors.
+/// Test that the cluster is healthy (auto-recovery job hasn't crashed anything).
 #[tokio::test]
-#[serial]
 async fn test_auto_recovery_job_starts() {
-    let cluster = TestCluster::new(1).await;
-    let leader = cluster.leader().expect("has leader");
+    let cluster = require_cluster!();
 
-    // The auto-recovery job should be running in the background.
-    // We can verify it's working by checking that the cluster is healthy.
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "leader should be elected");
+    // Health check on any node — verifies the node is running and healthy,
+    // which implies background jobs (including auto-recovery) haven't crashed it.
+    let mut health_client =
+        create_health_client_from_url(cluster.any_endpoint()).await.expect("connect to health");
 
-    // Give the recovery job time to run at least one scan cycle (30s default,
-    // but in tests we just verify it doesn't crash)
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let response = health_client
+        .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+        .await
+        .expect("health check");
 
-    // Cluster should still be healthy
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
+    let health = response.into_inner();
+    assert_eq!(
+        health.status,
+        proto::HealthStatus::Healthy as i32,
+        "node should be healthy: {}",
+        health.message
+    );
+
+    // Small delay then re-check — auto-recovery job runs periodically
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let response = health_client
+        .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+        .await
+        .expect("second health check");
+
+    let health = response.into_inner();
+    assert_eq!(
+        health.status,
+        proto::HealthStatus::Healthy as i32,
+        "node should remain healthy after recovery cycle"
+    );
 }
 
-/// Test that vault health status can be queried.
+/// Test vault creation and health tracking.
 #[tokio::test]
-#[serial]
 async fn test_vault_health_tracking() {
-    let cluster = TestCluster::new(1).await;
-    let leader = cluster.leader().expect("has leader");
+    let cluster = require_cluster!();
 
-    // Create a namespace and vault
-    let mut client = create_admin_client(leader.addr).await.unwrap();
+    let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
+    let mut admin_client =
+        create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
 
-    let ns_response = client
-        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
-            name: "test_health_ns".to_string(),
+    let ns_name = format!("test-health-{}", uuid::Uuid::new_v4());
+
+    // Create namespace
+    let ns_response = admin_client
+        .create_namespace(proto::CreateNamespaceRequest {
+            name: ns_name,
             shard_id: None,
             quota: None,
         })
         .await
-        .unwrap();
+        .expect("create namespace");
 
     let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
 
-    let vault_response = client
-        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+    // Create vault
+    let vault_response = admin_client
+        .create_vault(proto::CreateVaultRequest {
+            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
         })
         .await
-        .unwrap();
+        .expect("create vault");
 
     let vault_id = vault_response.into_inner().vault_id.map(|v| v.id).unwrap();
+    assert!(vault_id > 0, "vault should have valid ID");
 
-    // Vault should have been created successfully
-    // The auto-recovery job monitors vault health state
-    assert!(vault_id > 0, "vault should have valid ID after creation");
-
-    // Give auto-recovery job time to potentially scan
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for auto-recovery job to potentially scan the new vault
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Cluster should still be healthy (no recovery needed for fresh vault)
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "leader should still exist");
+    let mut health_client =
+        create_health_client_from_url(&leader_ep).await.expect("connect to health");
+
+    let response = health_client
+        .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+        .await
+        .expect("health check after vault creation");
+
+    let health = response.into_inner();
+    assert_eq!(
+        health.status,
+        proto::HealthStatus::Healthy as i32,
+        "cluster should remain healthy after vault creation"
+    );
 }
 
 // ============================================================================
 // Learner Refresh Tests
 // ============================================================================
 
-/// Test that learner refresh job starts without errors.
+/// Test that nodes are healthy (learner refresh job hasn't crashed anything).
 #[tokio::test]
-#[serial]
 async fn test_learner_refresh_job_starts() {
-    // Create a single-node cluster (which is a voter, not learner)
-    let cluster = TestCluster::new(1).await;
-    let node = cluster.leader().expect("has leader");
+    let cluster = require_cluster!();
 
-    // The learner refresh job should be running, but since this is a voter,
-    // it should skip refresh cycles
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Check health on each endpoint — learner refresh should be running
+    // on all nodes without causing issues
+    for endpoint in cluster.endpoints() {
+        let mut health_client =
+            create_health_client_from_url(endpoint).await.expect("connect to health");
 
-    // Node should still be healthy
-    let metrics = node.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "node should remain healthy");
-}
+        let response = health_client
+            .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+            .await
+            .expect("health check");
 
-/// Test that a 3-node cluster has properly distributed learner/voter roles.
-#[tokio::test]
-#[serial]
-async fn test_voter_detection() {
-    let cluster = TestCluster::new(3).await;
-
-    // Wait for cluster to stabilize
-    let _leader_id = cluster.wait_for_leader().await;
-
-    // All nodes should be voters in a 3-node cluster
-    for node in cluster.nodes() {
-        let metrics = node.raft.metrics().borrow().clone();
-        let membership = metrics.membership_config.membership();
-        let is_voter = membership.voter_ids().any(|id| id == node.id);
-
-        assert!(is_voter, "node {} should be a voter in 3-node cluster", node.id);
+        let health = response.into_inner();
+        assert_eq!(
+            health.status,
+            proto::HealthStatus::Healthy as i32,
+            "node at {} should be healthy",
+            endpoint
+        );
     }
 }
 
-/// Test learner cache state initialization.
+/// Test that all nodes in a 3-node cluster are voters.
 #[tokio::test]
-#[serial]
+async fn test_voter_detection() {
+    let cluster = require_cluster!();
+
+    // GetClusterInfo from any node — all 3 should be voters
+    let info =
+        ExternalCluster::get_cluster_info(cluster.any_endpoint()).await.expect("get cluster info");
+
+    assert!(!info.members.is_empty(), "cluster should have members");
+
+    for member in &info.members {
+        assert_eq!(
+            member.role,
+            proto::ClusterMemberRole::Voter as i32,
+            "node {} should be a voter, got role {}",
+            member.node_id,
+            member.role
+        );
+    }
+}
+
+/// Test that namespace data is replicated to all nodes (learner cache initialization).
+#[tokio::test]
 async fn test_learner_cache_initialization() {
-    // Create a 3-node cluster
-    let cluster = TestCluster::new(3).await;
-    let leader = cluster.leader().expect("has leader");
+    let cluster = require_cluster!();
 
-    // Create some state that would be cached
-    let mut client = create_admin_client(leader.addr).await.unwrap();
+    let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
-    let _ns_response = client
-        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
-            name: "test_cache_ns".to_string(),
+    // Create a namespace via the leader
+    let mut admin_client =
+        create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
+
+    let ns_name = format!("test-cache-{}", uuid::Uuid::new_v4());
+
+    let ns_response = admin_client
+        .create_namespace(proto::CreateNamespaceRequest {
+            name: ns_name.clone(),
             shard_id: None,
             quota: None,
         })
         .await
-        .unwrap();
+        .expect("create namespace");
+
+    let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
 
     // Wait for replication
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // All nodes should have the namespace replicated
-    for node in cluster.nodes() {
-        // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
-        // Access it directly to verify it's available (doesn't panic)
-        let _ = &*node.state;
+    // Verify namespace is readable from every endpoint
+    for endpoint in cluster.endpoints() {
+        let mut client = create_admin_client_from_url(endpoint).await.expect("connect to admin");
+
+        let response = client
+            .get_namespace(proto::GetNamespaceRequest {
+                lookup: Some(proto::get_namespace_request::Lookup::NamespaceId(
+                    proto::NamespaceId { id: namespace_id },
+                )),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("get_namespace from {} failed: {}", endpoint, e));
+
+        let ns = response.into_inner();
+        assert_eq!(ns.name, ns_name, "namespace name should match on {}", endpoint);
     }
 }
 
@@ -160,74 +238,86 @@ async fn test_learner_cache_initialization() {
 // Combined Background Job Tests
 // ============================================================================
 
-/// Test that all background jobs can run concurrently without interference.
+/// Test that all background jobs run concurrently without interfering with
+/// cluster stability. All nodes should agree on the same leader.
 #[tokio::test]
-#[serial]
 async fn test_concurrent_background_jobs() {
-    let cluster = TestCluster::new(3).await;
-    let leader = cluster.leader().expect("has leader");
+    let cluster = require_cluster!();
 
-    // Create some activity to exercise all jobs
-    let mut client = create_admin_client(leader.addr).await.unwrap();
+    let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
-    // Create namespace
-    let ns_response = client
-        .create_namespace(inferadb_ledger_raft::proto::CreateNamespaceRequest {
-            name: "concurrent_test_ns".to_string(),
+    // Create some activity to exercise background jobs
+    let mut admin_client =
+        create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
+
+    let ns_name = format!("test-concurrent-{}", uuid::Uuid::new_v4());
+
+    let ns_response = admin_client
+        .create_namespace(proto::CreateNamespaceRequest {
+            name: ns_name,
             shard_id: None,
             quota: None,
         })
         .await
-        .unwrap();
+        .expect("create namespace");
 
     let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
 
-    // Create vault
-    let _vault_response = client
-        .create_vault(inferadb_ledger_raft::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_raft::proto::NamespaceId { id: namespace_id }),
+    let _vault_response = admin_client
+        .create_vault(proto::CreateVaultRequest {
+            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
         })
         .await
-        .unwrap();
+        .expect("create vault");
 
-    // Let background jobs run for a bit
-    // TTL GC, Block Compactor, Auto-Recovery, Learner Refresh all running
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Let background jobs run
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Verify cluster is still healthy
-    let leader_id = cluster.wait_for_leader().await;
-    assert!(leader_id > 0, "cluster should still have a leader");
+    // All nodes should report the same leader via GetClusterInfo
+    let mut leader_ids = Vec::new();
+    for endpoint in cluster.endpoints() {
+        let info = ExternalCluster::get_cluster_info(endpoint)
+            .await
+            .unwrap_or_else(|e| panic!("get_cluster_info from {} failed: {}", endpoint, e));
 
-    // All nodes should still be responsive
-    for node in cluster.nodes() {
-        let metrics = node.raft.metrics().borrow().clone();
-        assert!(metrics.current_leader.is_some(), "node {} should know the leader", node.id);
+        assert!(info.leader_id > 0, "node at {} should know the leader", endpoint);
+        leader_ids.push(info.leader_id);
     }
+
+    // All nodes should agree on who the leader is
+    let first = leader_ids[0];
+    assert!(
+        leader_ids.iter().all(|&id| id == first),
+        "all nodes should agree on leader, got {:?}",
+        leader_ids
+    );
 }
 
-/// Test that recovery job only runs on leader.
+/// Test that leadership is stable (auto-recovery doesn't trigger spurious elections).
 #[tokio::test]
-#[serial]
 async fn test_recovery_only_on_leader() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = require_cluster!();
 
-    // Get leader and followers
-    let leader_id = cluster.wait_for_leader().await;
-    let _leader = cluster.node(leader_id).expect("leader exists");
-    let followers = cluster.followers();
+    // Get initial leader
+    let info =
+        ExternalCluster::get_cluster_info(cluster.any_endpoint()).await.expect("get cluster info");
+    let initial_leader = info.leader_id;
+    assert!(initial_leader > 0, "should have initial leader");
 
-    assert_eq!(followers.len(), 2, "should have 2 followers");
+    // Wait for background jobs to run a few cycles
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // The auto-recovery job runs on all nodes but only scans on the leader.
-    // Followers skip the scan cycle (we can't directly verify this without
-    // exposing metrics, but we verify they don't interfere)
+    // Leader should not have changed
+    let info = ExternalCluster::get_cluster_info(cluster.any_endpoint())
+        .await
+        .expect("get cluster info after sleep");
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Cluster should remain stable
-    let new_leader_id = cluster.wait_for_leader().await;
-    assert_eq!(leader_id, new_leader_id, "leader should not have changed unexpectedly");
+    assert_eq!(
+        info.leader_id, initial_leader,
+        "leader should remain stable (was {}, now {})",
+        initial_leader, info.leader_id
+    );
 }

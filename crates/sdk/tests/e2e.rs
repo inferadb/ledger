@@ -1,343 +1,86 @@
 //! End-to-end tests for the Ledger SDK against a real server cluster.
 //!
-//! These tests verify SDK functionality against an actual Ledger server,
-//! including Raft consensus, replication, and leader failover scenarios.
+//! These tests run against an external Ledger cluster started by
+//! `scripts/run-sdk-integration-tests.sh`. The cluster endpoints are
+//! provided via the `LEDGER_ENDPOINTS` environment variable.
 //!
-//! ## Requirements
-//!
-//! - Tests use ephemeral ports (40000-45000 range)
-//! - Tests require `serial_test::serial` annotation for cluster isolation
-//! - Each test creates its own `TestCluster` for isolation
+//! When `LEDGER_ENDPOINTS` is not set, all tests skip gracefully — this
+//! allows `cargo test --workspace` to pass without a running cluster.
 //!
 //! ## Test Categories
 //!
 //! - **Write/Read Cycle**: Basic CRUD operations through consensus
-//! - **Idempotency**: Idempotent writes with UUID keys
-//! - **Streaming**: WatchBlocks continues after leader election
+//! - **Replication**: Write to leader, read from followers
+//! - **Streaming**: WatchBlocks stream setup
+//! - **Admin**: Namespace/vault lifecycle
+//! - **Health**: Health check endpoints
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::time::Duration;
 
-use inferadb_ledger_raft::{
-    LedgerTypeConfig,
-    proto::{JoinClusterRequest, admin_service_client::AdminServiceClient},
+use inferadb_ledger_raft::proto::{
+    GetClusterInfoRequest, admin_service_client::AdminServiceClient,
 };
 use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource};
-use inferadb_ledger_test_utils::TestDir;
-use openraft::Raft;
-use serial_test::serial;
-use tokio::time::timeout;
 
 // ============================================================================
-// Test Cluster Infrastructure
+// External Cluster Helpers
 // ============================================================================
 
-/// A test node in a cluster.
-struct TestNode {
-    /// The node ID.
-    id: u64,
-    /// The gRPC address.
-    addr: SocketAddr,
-    /// The Raft instance.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// Temporary directory for node data.
-    _temp_dir: TestDir,
-    /// Server task handle for cleanup.
-    _server_handle: tokio::task::JoinHandle<()>,
-}
+/// Read `LEDGER_ENDPOINTS` env var. Returns `None` if not set.
+fn require_external_cluster() -> Option<Vec<String>> {
+    let raw = std::env::var("LEDGER_ENDPOINTS").ok()?;
+    let endpoints: Vec<String> =
+        raw.split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();
 
-impl TestNode {
-    /// Check if this node is the current leader.
-    fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.id)
+    if endpoints.is_empty() {
+        return None;
     }
 
-    /// Get the current leader ID if known.
-    fn current_leader(&self) -> Option<u64> {
-        self.raft.metrics().borrow().current_leader
-    }
-
-    /// Get the last applied log index.
-    fn last_applied(&self) -> u64 {
-        self.raft.metrics().borrow().last_applied.map_or(0, |id| id.index)
-    }
+    Some(endpoints)
 }
 
-/// A test cluster of Raft nodes.
-struct TestCluster {
-    /// The nodes in the cluster.
-    nodes: Vec<TestNode>,
-}
-
-impl TestCluster {
-    /// Create a new test cluster with the given number of nodes.
-    ///
-    /// The first node bootstraps the cluster, and other nodes join via
-    /// the AdminService's join_cluster RPC.
-    async fn new(size: usize) -> Self {
-        assert!(size >= 1, "cluster must have at least 1 node");
-
-        // Use wide random range to minimize port conflicts
-        let base_port = 40000 + (rand::random::<u16>() % 5000);
-        let mut nodes = Vec::with_capacity(size);
-
-        // Step 1: Start the bootstrap node as a SINGLE-NODE cluster
-        let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
-        let temp_dir = TestDir::new();
-
-        // Bootstrap node: no discovery configured → no peers found → bootstraps.
-        // Uses auto-generated Snowflake ID for realistic testing.
-        let data_dir = temp_dir.path().to_path_buf();
-        let config = inferadb_ledger_server::config::Config {
-            listen_addr: addr,
-            metrics_addr: None,
-            data_dir: Some(data_dir.clone()),
-            single: true, // Single-node mode for immediate bootstrap
-            ..inferadb_ledger_server::config::Config::default()
-        };
-
-        let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
-            &config,
-            &data_dir,
-            inferadb_ledger_raft::HealthState::new(),
-            tokio::sync::watch::channel(false).1,
-        )
-        .await
-        .expect("bootstrap node");
-
-        // Get the auto-generated Snowflake ID from Raft metrics
-        let node_id = bootstrapped.raft.metrics().borrow().id;
-
-        let server = bootstrapped.server;
-        let server_handle = tokio::spawn(async move {
-            if let Err(e) = server.serve().await {
-                tracing::error!("server error: {}", e);
-            }
-        });
-
-        let leader_raft = bootstrapped.raft.clone();
-        let leader_addr = addr;
-        nodes.push(TestNode {
-            id: node_id,
-            addr,
-            raft: bootstrapped.raft,
-            _temp_dir: temp_dir,
-            _server_handle: server_handle,
-        });
-
-        // Wait for the bootstrap node to become leader
-        let start = tokio::time::Instant::now();
-        let timeout_duration = Duration::from_secs(5);
-        while start.elapsed() < timeout_duration {
-            let metrics = leader_raft.metrics().borrow().clone();
-            if metrics.current_leader == Some(node_id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+/// Skip macro: returns early if no external cluster is available.
+macro_rules! require_cluster {
+    () => {
+        match require_external_cluster() {
+            Some(eps) => eps,
+            None => {
+                eprintln!(
+                    "LEDGER_ENDPOINTS not set — skipping SDK e2e test. \
+                     Run via scripts/run-sdk-integration-tests.sh"
+                );
+                return;
+            },
         }
-
-        // Verify leader election succeeded
-        {
-            let metrics = leader_raft.metrics().borrow().clone();
-            if metrics.current_leader != Some(node_id) {
-                panic!("Bootstrap node failed to become leader within timeout");
-            }
-        }
-
-        // Step 2: Start remaining nodes and have them join dynamically
-        for i in 1..size {
-            let port = base_port + i as u16;
-            let temp_dir = TestDir::new();
-            let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-
-            // Joining node: use join mode for dynamic node addition.
-            // This bypasses bootstrap entirely - no Raft cluster initialized, waiting
-            // to be added via AdminService's JoinCluster RPC which we call below.
-            // Uses auto-generated Snowflake ID for realistic testing.
-            let data_dir = temp_dir.path().to_path_buf();
-            let config = inferadb_ledger_server::config::Config {
-                listen_addr: addr,
-                metrics_addr: None,
-                data_dir: Some(data_dir.clone()),
-                join: true, // Join mode: wait to be added to existing cluster
-                ..inferadb_ledger_server::config::Config::default()
-            };
-
-            let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
-                &config,
-                &data_dir,
-                inferadb_ledger_raft::HealthState::new(),
-                tokio::sync::watch::channel(false).1,
-            )
-            .await
-            .expect("bootstrap node");
-
-            // Get the auto-generated Snowflake ID from Raft metrics
-            let node_id = bootstrapped.raft.metrics().borrow().id;
-
-            let server = bootstrapped.server;
-            let server_handle = tokio::spawn(async move {
-                if let Err(e) = server.serve().await {
-                    tracing::error!("server error: {}", e);
-                }
-            });
-
-            // Give server time to start
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            // Join the cluster via AdminService RPC
-            let mut attempts = 0;
-            let max_attempts = 10;
-            let mut join_success = false;
-            let mut last_error = String::new();
-
-            while attempts < max_attempts {
-                let endpoint = format!("http://{}", leader_addr);
-                let connect_result = AdminServiceClient::connect(endpoint).await;
-
-                match connect_result {
-                    Ok(mut admin_client) => {
-                        let request = JoinClusterRequest { node_id, address: addr.to_string() };
-
-                        match admin_client.join_cluster(request).await {
-                            Ok(_) => {
-                                join_success = true;
-                                break;
-                            },
-                            Err(e) => {
-                                last_error = format!("join RPC failed: {}", e);
-                            },
-                        }
-                    },
-                    Err(e) => {
-                        last_error = format!("connect failed: {}", e);
-                    },
-                }
-
-                attempts += 1;
-                let backoff = Duration::from_millis(100 * (1 << attempts.min(5)));
-                tokio::time::sleep(backoff).await;
-            }
-
-            if !join_success {
-                panic!("Failed to join cluster after {} attempts: {}", max_attempts, last_error);
-            }
-
-            let new_raft = bootstrapped.raft.clone();
-
-            // Wait for the new node to see itself as a voter
-            let sync_start = tokio::time::Instant::now();
-            let sync_timeout = Duration::from_secs(30);
-            while sync_start.elapsed() < sync_timeout {
-                let metrics = new_raft.metrics().borrow().clone();
-                let membership = metrics.membership_config.membership();
-                let is_voter = membership.voter_ids().any(|id| id == node_id);
-
-                if is_voter && metrics.current_leader.is_some() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-
-            // Wait for leader's membership to exit joint consensus
-            let stabilize_start = tokio::time::Instant::now();
-            let stabilize_timeout = Duration::from_secs(10);
-            while stabilize_start.elapsed() < stabilize_timeout {
-                let leader_metrics = leader_raft.metrics().borrow().clone();
-                let leader_membership = leader_metrics.membership_config.membership();
-                let joint_config = leader_membership.get_joint_config();
-
-                if joint_config.len() == 1 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-
-            nodes.push(TestNode {
-                id: node_id,
-                addr,
-                raft: bootstrapped.raft,
-                _temp_dir: temp_dir,
-                _server_handle: server_handle,
-            });
-        }
-
-        // Wait for cluster to stabilize
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        Self { nodes }
-    }
-
-    /// Wait for a leader to be elected across all nodes.
-    async fn wait_for_leader(&self) -> u64 {
-        let timeout_duration = Duration::from_secs(10);
-        timeout(timeout_duration, async {
-            loop {
-                for node in &self.nodes {
-                    if let Some(leader_id) = node.current_leader()
-                        && self.nodes.iter().any(|n| n.id == leader_id && n.is_leader())
-                    {
-                        return leader_id;
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("leader election timeout")
-    }
-
-    /// Get the current leader node.
-    fn leader(&self) -> Option<&TestNode> {
-        self.nodes.iter().find(|n| n.is_leader())
-    }
-
-    /// Get all follower nodes.
-    fn followers(&self) -> Vec<&TestNode> {
-        self.nodes.iter().filter(|n| !n.is_leader()).collect()
-    }
-
-    /// Get a specific node by ID.
-    #[allow(dead_code)]
-    fn node(&self, id: u64) -> Option<&TestNode> {
-        self.nodes.iter().find(|n| n.id == id)
-    }
-
-    /// Wait for all nodes to synchronize to the same last_applied index.
-    async fn wait_for_sync(&self, timeout_duration: Duration) -> bool {
-        timeout(timeout_duration, async {
-            loop {
-                let leader = match self.leader() {
-                    Some(l) => l,
-                    None => {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    },
-                };
-                let leader_applied = leader.last_applied();
-
-                let all_synced = self.nodes.iter().all(|n| n.last_applied() >= leader_applied);
-                if all_synced && leader_applied > 0 {
-                    return true;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .unwrap_or(false)
-    }
+    };
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Create a LedgerClient connected to the given cluster node.
-async fn create_sdk_client(addr: SocketAddr, client_id: &str) -> LedgerClient {
+/// Create a `LedgerClient` connected to all cluster endpoints.
+async fn create_sdk_client(endpoints: &[String], client_id: &str) -> LedgerClient {
     let config = ClientConfig::builder()
-        .servers(ServerSource::from_static([format!("http://{}", addr)]))
+        .servers(ServerSource::from_static(endpoints.iter().cloned()))
+        .client_id(client_id)
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .retry_policy(
+            RetryPolicy::builder()
+                .max_attempts(3)
+                .initial_backoff(Duration::from_millis(100))
+                .max_backoff(Duration::from_secs(2))
+                .build(),
+        )
+        .build()
+        .expect("valid config");
+
+    LedgerClient::new(config).await.expect("client creation")
+}
+
+/// Create a `LedgerClient` connected to a single specific endpoint.
+async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> LedgerClient {
+    let config = ClientConfig::builder()
+        .servers(ServerSource::from_static([endpoint.to_string()]))
         .client_id(client_id)
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))
@@ -356,26 +99,68 @@ async fn create_sdk_client(addr: SocketAddr, client_id: &str) -> LedgerClient {
 
 /// Create a test namespace and vault, returning (namespace_id, vault_id).
 async fn setup_test_namespace_vault(client: &LedgerClient) -> (i64, i64) {
-    let ns_id = client.create_namespace("test-ns").await.expect("create namespace");
+    let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
+    let ns_id = client.create_namespace(&ns_name).await.expect("create namespace");
     let vault_info = client.create_vault(ns_id).await.expect("create vault");
     (ns_id, vault_info.vault_id)
+}
+
+/// Find the leader endpoint via `GetClusterInfo`.
+async fn find_leader_endpoint(endpoints: &[String]) -> String {
+    for endpoint in endpoints {
+        let mut client =
+            AdminServiceClient::connect(endpoint.clone()).await.expect("connect to admin");
+
+        let response =
+            client.get_cluster_info(GetClusterInfoRequest {}).await.expect("get cluster info");
+
+        let info = response.into_inner();
+        if info.leader_id > 0
+            && let Some(leader) = info.members.iter().find(|m| m.is_leader)
+            && let Some(ep) = endpoints
+                .iter()
+                .find(|ep| ep.ends_with(&leader.address) || ep.contains(&leader.address))
+        {
+            return ep.clone();
+        }
+    }
+    panic!("no leader found in cluster");
+}
+
+/// Find non-leader endpoints via `GetClusterInfo`.
+async fn find_non_leader_endpoints(endpoints: &[String]) -> Vec<String> {
+    for endpoint in endpoints {
+        if let Ok(mut client) = AdminServiceClient::connect(endpoint.clone()).await
+            && let Ok(response) = client.get_cluster_info(GetClusterInfoRequest {}).await
+        {
+            let info = response.into_inner();
+            let leader_addr = info
+                .members
+                .iter()
+                .find(|m| m.is_leader)
+                .map(|m| m.address.clone())
+                .unwrap_or_default();
+
+            return endpoints
+                .iter()
+                .filter(|ep| !ep.ends_with(&leader_addr) && !ep.contains(&leader_addr))
+                .cloned()
+                .collect();
+        }
+    }
+    vec![]
 }
 
 // ============================================================================
 // E2E Tests: Write/Read Cycle
 // ============================================================================
 
-/// Test write → read cycle against TestCluster.
-#[serial]
+/// Test write → read cycle.
 #[tokio::test]
-async fn test_write_read_cycle_against_real_cluster() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+async fn test_write_read_cycle() {
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
-    let client = create_sdk_client(leader.addr, "e2e-client-1").await;
-
-    // Create namespace and vault first
+    let client = create_sdk_client(&endpoints, "e2e-write-read").await;
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
     // Write an entity
@@ -394,19 +179,14 @@ async fn test_write_read_cycle_against_real_cluster() {
 }
 
 /// Test multiple writes and reads.
-#[serial]
 #[tokio::test]
 async fn test_multiple_writes_reads() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
-    let client = create_sdk_client(leader.addr, "e2e-client-2").await;
-
-    // Create namespace and vault first
+    let client = create_sdk_client(&endpoints, "e2e-multi-rw").await;
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
-    // Write multiple entities in separate transactions
+    // Write multiple entities
     for i in 0..5 {
         let key = format!("item:{}", i);
         let value = format!("value-{}", i).into_bytes();
@@ -424,16 +204,11 @@ async fn test_multiple_writes_reads() {
 }
 
 /// Test batch read functionality.
-#[serial]
 #[tokio::test]
-async fn test_batch_read_against_real_cluster() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+async fn test_batch_read() {
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
-    let client = create_sdk_client(leader.addr, "e2e-client-3").await;
-
-    // Create namespace and vault first
+    let client = create_sdk_client(&endpoints, "e2e-batch-read").await;
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
     // Write several entities
@@ -462,75 +237,115 @@ async fn test_batch_read_against_real_cluster() {
 }
 
 // ============================================================================
-// E2E Tests: Idempotency
+// E2E Tests: Replication
 // ============================================================================
 
-/// Test idempotency survives leader failover.
-#[serial]
+/// Test that writes to the leader replicate to followers.
+///
+/// Writes via a leader-connected client, then reads from each non-leader
+/// endpoint to verify Raft replication is working.
 #[tokio::test]
-async fn test_idempotency_survives_leader_failover() {
-    let cluster = TestCluster::new(3).await;
-    let _original_leader_id = cluster.wait_for_leader().await;
+async fn test_write_replication_to_followers() {
+    let endpoints = require_cluster!();
 
-    let original_leader = cluster.leader().expect("original leader");
-    let client = create_sdk_client(original_leader.addr, "failover-client").await;
+    if endpoints.len() < 3 {
+        eprintln!("Skipping replication test: need >= 3 nodes, got {}", endpoints.len());
+        return;
+    }
 
-    // Create namespace and vault first
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
+    let leader_ep = find_leader_endpoint(&endpoints).await;
+    let leader_client = create_single_endpoint_client(&leader_ep, "repl-leader").await;
 
-    // Perform a write
-    let ops = vec![Operation::set_entity("failover:key", b"original-data".to_vec())];
-    let first_result = client.write(ns_id, Some(vault_id), ops.clone()).await.expect("first write");
+    let (ns_id, vault_id) = setup_test_namespace_vault(&leader_client).await;
+
+    // Write through the leader
+    let ops = vec![Operation::set_entity("repl:key", b"replicated-data".to_vec())];
+    let result =
+        leader_client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+    assert!(result.block_height > 0);
 
     // Wait for replication
-    cluster.wait_for_sync(Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Find a follower
-    let followers = cluster.followers();
-    assert!(!followers.is_empty(), "should have followers");
+    // Read from each non-leader endpoint
+    let non_leaders = find_non_leader_endpoints(&endpoints).await;
+    assert!(!non_leaders.is_empty(), "should have non-leader endpoints");
 
-    let follower = followers[0];
-    let follower_client = create_sdk_client(follower.addr, "follower-reader").await;
+    for (i, ep) in non_leaders.iter().enumerate() {
+        let follower_client =
+            create_single_endpoint_client(ep, &format!("repl-follower-{}", i)).await;
 
-    // Read from follower - data should be replicated
-    let result = follower_client
-        .read(ns_id, Some(vault_id), "failover:key")
-        .await
-        .expect("read from follower");
+        let read_result = follower_client
+            .read(ns_id, Some(vault_id), "repl:key")
+            .await
+            .expect("read from follower should succeed");
 
-    assert_eq!(result, Some(b"original-data".to_vec()), "data should be replicated to follower");
-
-    // Verify block height consistency across cluster
-    assert!(first_result.block_height > 0);
+        assert_eq!(
+            read_result,
+            Some(b"replicated-data".to_vec()),
+            "data should be replicated to follower at {}",
+            ep
+        );
+    }
 }
 
-/// Test that multiple writes with sequential client IDs work correctly.
-///
-/// This test verifies that each client session with a unique ID can perform
-/// independent writes without interference. This is the recommended pattern
-/// for applications that need multiple independent sessions.
-#[serial]
+/// Test write replicates to all nodes.
 #[tokio::test]
-async fn test_multiple_client_sessions_independent() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+async fn test_three_node_write_replication() {
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
+    if endpoints.len() < 3 {
+        eprintln!("Skipping 3-node test: need >= 3 nodes, got {}", endpoints.len());
+        return;
+    }
 
-    // Create first client session
-    let client1 = create_sdk_client(leader.addr, "session-1").await;
+    let leader_ep = find_leader_endpoint(&endpoints).await;
+    let client = create_single_endpoint_client(&leader_ep, "repl-3node").await;
 
-    // Create namespace and vault first
+    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
+
+    // Write through the leader
+    let ops = vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec())];
+    client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+
+    // Wait for replication
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Read from every endpoint (including leader)
+    for (i, ep) in endpoints.iter().enumerate() {
+        let reader = create_single_endpoint_client(ep, &format!("repl-reader-{}", i)).await;
+
+        let result =
+            reader.read(ns_id, Some(vault_id), "replicated:key").await.expect("read from node");
+
+        assert_eq!(
+            result,
+            Some(b"replicated-data".to_vec()),
+            "data should be replicated to node at {}",
+            ep
+        );
+    }
+}
+
+// ============================================================================
+// E2E Tests: Multiple Sessions
+// ============================================================================
+
+/// Test multiple client sessions with independent IDs.
+#[tokio::test]
+async fn test_multiple_client_sessions() {
+    let endpoints = require_cluster!();
+
+    let client1 = create_sdk_client(&endpoints, "session-1").await;
     let (ns_id, vault_id) = setup_test_namespace_vault(&client1).await;
 
     // First session writes
     let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec())];
     let first_result = client1.write(ns_id, Some(vault_id), ops1).await.expect("first write");
 
-    // Create second independent client session with different ID
-    let client2 = create_sdk_client(leader.addr, "session-2").await;
+    // Second independent session
+    let client2 = create_sdk_client(&endpoints, "session-2").await;
 
-    // Second session writes different data
     let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec())];
     let second_result = client2.write(ns_id, Some(vault_id), ops2).await.expect("second write");
 
@@ -551,53 +366,36 @@ async fn test_multiple_client_sessions_independent() {
 // E2E Tests: Streaming
 // ============================================================================
 
-/// Test streaming continues after leader election.
-/// Note: Full streaming test requires block production, which may not happen
-/// in a test cluster without writes. This test verifies stream setup works.
-#[serial]
+/// Test watch_blocks stream setup.
 #[tokio::test]
 async fn test_watch_blocks_stream_setup() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
-    let client = create_sdk_client(leader.addr, "stream-client").await;
-
-    // Create namespace and vault first
+    let client = create_sdk_client(&endpoints, "stream-client").await;
     let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
 
     // Start watching blocks from height 1 (genesis)
-    // Note: start_height must be >= 1 per server requirements
     let stream_result = client.watch_blocks(ns_id, vault_id, 1).await;
 
-    // Stream setup should succeed
     assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", stream_result.err());
 }
 
 // ============================================================================
-// E2E Tests: Sequence Recovery
+// E2E Tests: Persistence
 // ============================================================================
 
 /// Test that data persists across client sessions.
-///
-/// This test verifies that data written by one client session is readable
-/// by a different client session, demonstrating server-side persistence.
-/// Each session uses a unique client ID to avoid sequence conflicts.
-#[serial]
 #[tokio::test]
 async fn test_data_persistence_across_sessions() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
-
-    // Setup client first creates namespace/vault
-    let setup_client = create_sdk_client(leader.addr, "setup-client").await;
+    // Setup: create namespace/vault
+    let setup_client = create_sdk_client(&endpoints, "setup-client").await;
     let (ns_id, vault_id) = setup_test_namespace_vault(&setup_client).await;
 
-    // First client session - perform several writes
+    // First client session — write data
     {
-        let client = create_sdk_client(leader.addr, "writer-session-1").await;
+        let client = create_sdk_client(&endpoints, "writer-session-1").await;
 
         for i in 0..5 {
             let key = format!("persist:{}", i);
@@ -605,14 +403,12 @@ async fn test_data_persistence_across_sessions() {
             let ops = vec![Operation::set_entity(&key, value)];
             client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
         }
-    } // Client dropped, simulating shutdown
+    } // Client dropped
 
-    // Second client session with different ID - reads previously written data
-    // and writes additional data
+    // Second client session — read previously written data
     {
-        let client = create_sdk_client(leader.addr, "reader-session-2").await;
+        let client = create_sdk_client(&endpoints, "reader-session-2").await;
 
-        // Verify all previously written data is accessible
         for i in 0..5 {
             let key = format!("persist:{}", i);
             let expected = format!("data-{}", i).into_bytes();
@@ -628,51 +424,8 @@ async fn test_data_persistence_across_sessions() {
             client.write(ns_id, Some(vault_id), ops).await.expect("write from new session");
         assert!(!result.tx_id.is_empty(), "should have tx_id");
 
-        // Verify the new write is readable
         let read_result = client.read(ns_id, Some(vault_id), key).await.expect("read new write");
         assert_eq!(read_result, Some(value));
-    }
-}
-
-// ============================================================================
-// E2E Tests: Multi-Node Replication
-// ============================================================================
-
-/// Test write replicates to all nodes in cluster.
-#[serial]
-#[tokio::test]
-async fn test_three_node_write_replication() {
-    let cluster = TestCluster::new(3).await;
-    let _leader_id = cluster.wait_for_leader().await;
-
-    let leader = cluster.leader().expect("should have leader");
-    let client = create_sdk_client(leader.addr, "replication-client").await;
-
-    // Create namespace and vault first
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
-
-    // Write through the leader
-    let ops = vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec())];
-    client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
-
-    // Wait for replication to all nodes
-    let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
-    assert!(synced, "cluster should sync");
-
-    // Read from each follower
-    for follower in cluster.followers() {
-        let follower_client = create_sdk_client(follower.addr, "follower-client").await;
-        let result = follower_client
-            .read(ns_id, Some(vault_id), "replicated:key")
-            .await
-            .expect("read from follower");
-
-        assert_eq!(
-            result,
-            Some(b"replicated-data".to_vec()),
-            "data should be replicated to node {}",
-            follower.id
-        );
     }
 }
 
@@ -680,26 +433,23 @@ async fn test_three_node_write_replication() {
 // E2E Tests: Admin Operations
 // ============================================================================
 
-/// Test admin operations against real cluster.
-#[serial]
+/// Test admin operations (namespace/vault lifecycle).
 #[tokio::test]
-async fn test_admin_operations_real_cluster() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+async fn test_admin_operations() {
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
-    let client = create_sdk_client(leader.addr, "admin-client").await;
+    let client = create_sdk_client(&endpoints, "admin-client").await;
 
     // Create a namespace
-    let ns_id = client.create_namespace("test-namespace").await.expect("create namespace");
-
+    let ns_name = format!("test-admin-{}", uuid::Uuid::new_v4());
+    let ns_id = client.create_namespace(&ns_name).await.expect("create namespace");
     assert!(ns_id > 0, "should get valid namespace ID");
 
     // Get the namespace
     let ns_info = client.get_namespace(ns_id).await.expect("get namespace");
-    assert_eq!(ns_info.name, "test-namespace");
+    assert_eq!(ns_info.name, ns_name);
 
-    // Create a vault in the namespace
+    // Create a vault
     let vault_info = client.create_vault(ns_id).await.expect("create vault");
     assert!(vault_info.vault_id > 0, "should get valid vault ID");
 
@@ -715,15 +465,12 @@ async fn test_admin_operations_real_cluster() {
 // E2E Tests: Health Check
 // ============================================================================
 
-/// Test health check against real cluster.
-#[serial]
+/// Test health check endpoints.
 #[tokio::test]
-async fn test_health_check_real_cluster() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
+async fn test_health_check() {
+    let endpoints = require_cluster!();
 
-    let leader = cluster.leader().expect("should have leader");
-    let client = create_sdk_client(leader.addr, "health-client").await;
+    let client = create_sdk_client(&endpoints, "health-client").await;
 
     // Simple health check
     let is_healthy = client.health_check().await.expect("health check");
