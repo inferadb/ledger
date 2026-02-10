@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1770707089634,
+  "lastUpdate": 1770745984186,
   "repoUrl": "https://github.com/inferadb/ledger",
   "entries": {
     "InferaDB Ledger Benchmarks": [
@@ -2374,6 +2374,270 @@ window.BENCHMARK_DATA = {
           {
             "name": "wide_events/operation_types/count/20",
             "value": 761,
+            "range": "± 3",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "hello@evansims.com",
+            "name": "Evan Sims",
+            "username": "evansims"
+          },
+          "committer": {
+            "email": "hello@evansims.com",
+            "name": "Evan Sims",
+            "username": "evansims"
+          },
+          "distinct": true,
+          "id": "c577abff7ac4af340b26226671a19a4c6ed9c277",
+          "message": "imp: public api documentation",
+          "timestamp": "2026-02-10T11:39:21-06:00",
+          "tree_id": "6c18589fbc73695f05ea383b28313ea55cbb27ec",
+          "url": "https://github.com/inferadb/ledger/commit/c577abff7ac4af340b26226671a19a4c6ed9c277"
+        },
+        "date": 1770745983609,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "btree/point_lookup/sequential/1k",
+            "value": 1409,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/point_lookup/sequential/10k",
+            "value": 1186,
+            "range": "± 58",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/point_lookup/sequential/100k",
+            "value": 1418,
+            "range": "± 157",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/missing_key/10k_entries",
+            "value": 1866,
+            "range": "± 27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/batch_insert/size/10",
+            "value": 388287,
+            "range": "± 36100",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/batch_insert/size/100",
+            "value": 804463,
+            "range": "± 74490",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/batch_insert/size/1000",
+            "value": 2465724,
+            "range": "± 181505",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/insert_memory/batch_100",
+            "value": 169046,
+            "range": "± 17089",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/iteration/full_scan/1k",
+            "value": 161777,
+            "range": "± 1500",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/iteration/full_scan/10k",
+            "value": 1583212,
+            "range": "± 7131",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/range_scan/10pct_of_10k",
+            "value": 170591,
+            "range": "± 1775",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/mixed_workload/90r_10w",
+            "value": 556731,
+            "range": "± 44088",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_reads/entities/1000",
+            "value": 2521,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_reads/entities/10000",
+            "value": 1661,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_reads/entities/100000",
+            "value": 1931,
+            "range": "± 227",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sequential_reads/100_keys",
+            "value": 162837,
+            "range": "± 742",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "random_reads/100_random_keys",
+            "value": 163745,
+            "range": "± 664",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "multi_vault_reads/10_vaults",
+            "value": 16385,
+            "range": "± 411",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "missing_key_reads/missing_key",
+            "value": 1422,
+            "range": "± 42",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_writes/vault/1",
+            "value": 327447,
+            "range": "± 49673",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_writes/vault/10",
+            "value": 323613,
+            "range": "± 36055",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_writes/vault/100",
+            "value": 325932,
+            "range": "± 35498",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_writes/batch_size/10",
+            "value": 747233,
+            "range": "± 76005",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_writes/batch_size/100",
+            "value": 3307157,
+            "range": "± 308453",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_writes/batch_size/1000",
+            "value": 8466686,
+            "range": "± 250176",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "state_root/entities/100",
+            "value": 5795,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "state_root/entities/1000",
+            "value": 5805,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "state_root/entities/10000",
+            "value": 5805,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrent_vault_writes/10_vaults",
+            "value": 3651323,
+            "range": "± 505503",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/context_creation/new",
+            "value": 755,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/field_population/minimal_fields",
+            "value": 888,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/field_population/all_fields",
+            "value": 1146,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/sampling/should_sample_success",
+            "value": 22,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/sampling/should_sample_error",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/end_to_end/write_request",
+            "value": 1063,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/end_to_end/read_request",
+            "value": 1029,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/operation_types/count/1",
+            "value": 754,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/operation_types/count/5",
+            "value": 758,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/operation_types/count/10",
+            "value": 760,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "wide_events/operation_types/count/20",
+            "value": 768,
             "range": "± 3",
             "unit": "ns/iter"
           }
