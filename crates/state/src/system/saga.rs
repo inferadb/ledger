@@ -152,7 +152,7 @@ impl CreateOrgSaga {
         std::cmp::min(backoff, MAX_BACKOFF)
     }
 
-    /// Increments retry count and set next retry time.
+    /// Increments the retry count and sets the next retry time.
     pub fn schedule_retry(&mut self) {
         self.retries = self.retries.saturating_add(1);
         let backoff = self.next_backoff();
@@ -161,7 +161,7 @@ impl CreateOrgSaga {
         self.updated_at = Utc::now();
     }
 
-    /// Transition to a new state.
+    /// Transitions to a new state.
     pub fn transition(&mut self, new_state: CreateOrgSagaState) {
         self.state = new_state;
         self.updated_at = Utc::now();
@@ -273,7 +273,7 @@ impl DeleteUserSaga {
         )
     }
 
-    /// Checks if ready for retry.
+    /// Checks if the saga is ready for retry.
     pub fn is_ready_for_retry(&self) -> bool {
         if self.is_terminal() {
             return false;
@@ -284,14 +284,14 @@ impl DeleteUserSaga {
         }
     }
 
-    /// Calculates next backoff.
+    /// Calculates the next backoff duration using exponential backoff.
     pub fn next_backoff(&self) -> Duration {
         let base = Duration::from_secs(1);
         let backoff = base * 2u32.saturating_pow(self.retries as u32);
         std::cmp::min(backoff, MAX_BACKOFF)
     }
 
-    /// Schedules retry.
+    /// Schedules the next retry with exponential backoff.
     pub fn schedule_retry(&mut self) {
         self.retries = self.retries.saturating_add(1);
         let backoff = self.next_backoff();
@@ -300,7 +300,7 @@ impl DeleteUserSaga {
         self.updated_at = Utc::now();
     }
 
-    /// Transition to new state.
+    /// Transitions to a new state.
     pub fn transition(&mut self, new_state: DeleteUserSagaState) {
         self.state = new_state;
         self.updated_at = Utc::now();
@@ -379,7 +379,7 @@ impl Saga {
         }
     }
 
-    /// Returns created_at timestamp.
+    /// Returns the creation timestamp.
     pub fn created_at(&self) -> DateTime<Utc> {
         match self {
             Saga::CreateOrg(s) => s.created_at,
@@ -387,7 +387,7 @@ impl Saga {
         }
     }
 
-    /// Returns updated_at timestamp.
+    /// Returns the last-updated timestamp.
     pub fn updated_at(&self) -> DateTime<Utc> {
         match self {
             Saga::CreateOrg(s) => s.updated_at,
@@ -395,7 +395,7 @@ impl Saga {
         }
     }
 
-    /// Returns retry count.
+    /// Returns the retry count.
     pub fn retries(&self) -> u8 {
         match self {
             Saga::CreateOrg(s) => s.retries,

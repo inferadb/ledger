@@ -5,7 +5,7 @@
 //! - Operation application
 //! - State root computation via dirty bucket tracking
 //!
-//! Per DESIGN.md: State layer separates commitment (merkleized) from storage (fast K/V).
+//! Per DESIGN.md: State layer separates commitment (Merkleized) from storage (fast K/V).
 
 use std::{collections::HashMap, sync::Arc};
 

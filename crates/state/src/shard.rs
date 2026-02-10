@@ -372,7 +372,7 @@ impl<B: StorageBackend> ShardManager<B> {
         })
     }
 
-    /// Returns or compute the genesis hash for this shard.
+    /// Returns or computes the genesis hash for this shard.
     ///
     /// The genesis hash is the block hash of the first block (height 1).
     /// It's cached after first computation for efficiency.

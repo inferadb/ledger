@@ -570,7 +570,7 @@ impl VerifyOpts {
         self
     }
 
-    /// Include chain proof from a trusted height.
+    /// Includes a chain proof from a trusted height.
     pub fn with_chain_proof(mut self, trusted_height: u64) -> Self {
         self.include_chain_proof = true;
         self.trusted_height = Some(trusted_height);
@@ -704,7 +704,7 @@ impl ListEntitiesOpts {
         self
     }
 
-    /// Include expired entities in results.
+    /// Includes expired entities in results.
     pub fn include_expired(mut self) -> Self {
         self.include_expired = true;
         self
@@ -716,7 +716,7 @@ impl ListEntitiesOpts {
         self
     }
 
-    /// Continue from a previous page.
+    /// Continues from a previous page.
     pub fn page_token(mut self, token: impl Into<String>) -> Self {
         self.page_token = Some(token.into());
         self
@@ -728,13 +728,13 @@ impl ListEntitiesOpts {
         self
     }
 
-    /// Use linearizable (strong) consistency.
+    /// Uses linearizable (strong) consistency.
     pub fn linearizable(mut self) -> Self {
         self.consistency = ReadConsistency::Linearizable;
         self
     }
 
-    /// Scope to a specific vault (for vault-level entities).
+    /// Scopes to a specific vault (for vault-level entities).
     pub fn vault(mut self, vault_id: i64) -> Self {
         self.vault_id = Some(vault_id);
         self
@@ -775,19 +775,19 @@ impl ListRelationshipsOpts {
         Self::default()
     }
 
-    /// Filter by resource.
+    /// Filters by resource.
     pub fn resource(mut self, resource: impl Into<String>) -> Self {
         self.resource = Some(resource.into());
         self
     }
 
-    /// Filter by relation.
+    /// Filters by relation.
     pub fn relation(mut self, relation: impl Into<String>) -> Self {
         self.relation = Some(relation.into());
         self
     }
 
-    /// Filter by subject.
+    /// Filters by subject.
     pub fn subject(mut self, subject: impl Into<String>) -> Self {
         self.subject = Some(subject.into());
         self
@@ -805,7 +805,7 @@ impl ListRelationshipsOpts {
         self
     }
 
-    /// Continue from a previous page.
+    /// Continues from a previous page.
     pub fn page_token(mut self, token: impl Into<String>) -> Self {
         self.page_token = Some(token.into());
         self
@@ -817,7 +817,7 @@ impl ListRelationshipsOpts {
         self
     }
 
-    /// Use linearizable (strong) consistency.
+    /// Uses linearizable (strong) consistency.
     pub fn linearizable(mut self) -> Self {
         self.consistency = ReadConsistency::Linearizable;
         self
@@ -863,7 +863,7 @@ impl ListResourcesOpts {
         self
     }
 
-    /// Continue from a previous page.
+    /// Continues from a previous page.
     pub fn page_token(mut self, token: impl Into<String>) -> Self {
         self.page_token = Some(token.into());
         self
@@ -875,7 +875,7 @@ impl ListResourcesOpts {
         self
     }
 
-    /// Use linearizable (strong) consistency.
+    /// Uses linearizable (strong) consistency.
     pub fn linearizable(mut self) -> Self {
         self.consistency = ReadConsistency::Linearizable;
         self

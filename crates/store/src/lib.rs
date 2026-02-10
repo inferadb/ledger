@@ -75,16 +75,26 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::implicit_saturating_sub)]
 
+/// Storage backend abstraction (file-based and in-memory implementations).
 pub mod backend;
 pub(crate) mod bloom;
+/// B+ tree index structure with get, insert, delete, range, and compaction operations.
 pub mod btree;
+/// Database API: open, read, write, commit, and iteration.
 pub mod db;
+/// Bitmap for tracking modified pages within a transaction.
 pub mod dirty_bitmap;
+/// Error types and result aliases for the store crate.
 pub mod error;
+/// Integrity scrubbing for detecting page-level corruption.
 pub mod integrity;
+/// Page management: allocation, caching, checksums, and copy-on-write.
 pub mod page;
+/// Compile-time table definitions mapping logical tables to B+ tree instances.
 pub mod tables;
+/// Transaction tracking and snapshot management for copy-on-write semantics.
 pub mod transaction;
+/// Key and value type definitions used across the storage engine.
 pub mod types;
 
 // Re-export commonly used types

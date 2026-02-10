@@ -279,8 +279,8 @@ impl ShardBlock {
     /// - `namespace_id` = 0 (shard-level aggregate)
     /// - `vault_id` = shard_id (for identification)
     /// - `previous_hash` = previous_shard_hash
-    /// - `tx_merkle_root` = merkle root of all vault entry tx_merkle_roots
-    /// - `state_root` = merkle root of all vault entry state_roots
+    /// - `tx_merkle_root` = Merkle root of all vault entry tx_merkle_roots
+    /// - `state_root` = Merkle root of all vault entry state_roots
     /// - `timestamp` = block timestamp
     /// - `term`, `committed_index` = Raft consensus state
     ///
@@ -390,7 +390,7 @@ pub struct Transaction {
     pub client_id: ClientId,
     /// Monotonic sequence number per client.
     pub sequence: u64,
-    /// Actor identifier for audit logging (provided by upstream Engine/Control).
+    /// Actor identifier for audit logging (typically a user or service principal).
     pub actor: String,
     /// Operations to apply atomically.
     pub operations: Vec<Operation>,

@@ -166,7 +166,7 @@ pub fn generate_write_proof(
 // Low-Level Proof Utilities
 // ============================================================================
 
-/// Generates a merkle proof for a transaction at the given index.
+/// Generates a Merkle proof for a transaction at the given index.
 ///
 /// Returns `None` if the index is out of bounds or the transaction list is empty.
 pub fn generate_tx_proof(
@@ -187,7 +187,7 @@ pub fn generate_tx_proof(
     Some((&internal_proof).into())
 }
 
-/// Generates a merkle proof for a transaction by its ID.
+/// Generates a Merkle proof for a transaction by its ID.
 ///
 /// Searches the transaction list for a matching ID and generates a proof.
 /// Returns `None` if the transaction is not found.

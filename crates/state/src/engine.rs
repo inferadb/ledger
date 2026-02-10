@@ -31,7 +31,7 @@ pub struct StorageEngine {
 
 #[allow(clippy::result_large_err)]
 impl StorageEngine {
-    /// Opens or create a database at the given path.
+    /// Opens or creates a database at the given path.
     ///
     /// # Errors
     ///

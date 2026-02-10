@@ -78,7 +78,7 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // Sequence Counters
     // =========================================================================
 
-    /// Returns the next value from a sequence counter and increment it.
+    /// Returns the next value from a sequence counter and increments it.
     ///
     /// If the counter doesn't exist, initializes it to `start_value`.
     pub fn next_sequence(&self, key: &str, start_value: i64) -> Result<i64> {

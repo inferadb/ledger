@@ -12,8 +12,11 @@
 //! - `cursor.rs`: Iterator and range query support
 //! - `split.rs`: Node splitting logic for insertions
 
+/// Cursor and range query support for B+ tree iteration.
 pub mod cursor;
+/// Low-level leaf and branch node operations on pages.
 pub mod node;
+/// Node splitting logic for leaf and branch pages during insertions.
 pub mod split;
 
 use cursor::{Range, RangeIterState, SeekResult, cursor_ops};

@@ -4,7 +4,7 @@
 //! - Object index: "Who can access doc:123 as viewer?" → list of subjects
 //! - Subject index: "What can user:alice access?" → list of (resource, relation) pairs
 //!
-//! Per DESIGN.md: Indexes are NOT merkleized (no per-write amplification).
+//! Per DESIGN.md: Indexes are NOT Merkleized (no per-write amplification).
 
 use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use inferadb_ledger_types::{VaultId, decode, encode};

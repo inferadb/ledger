@@ -15,7 +15,7 @@
 //!
 //! This allows verification via:
 //! - Chain integrity (header hash links)
-//! - Transaction inclusion (if client provides tx body + merkle proof)
+//! - Transaction inclusion (if client provides tx body + Merkle proof)
 //! - Snapshot-based state reconstruction
 
 use std::{

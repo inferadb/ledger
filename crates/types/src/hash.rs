@@ -270,7 +270,7 @@ impl BucketHasher {
         self.hasher.update(entity.version.to_be_bytes());
     }
 
-    /// Finalizes and return the bucket root hash.
+    /// Finalizes and returns the bucket root hash.
     ///
     /// Returns EMPTY_HASH for empty buckets per DESIGN.md line 660.
     pub fn finalize(self) -> Hash {
@@ -294,10 +294,10 @@ pub fn bucket_id(key: &[u8]) -> u8 {
 
 /// Computes the Merkle root of a list of transactions.
 ///
-/// Per DESIGN.md: binary merkle tree where each leaf is SHA-256(tx).
+/// Per DESIGN.md: binary Merkle tree where each leaf is SHA-256(tx).
 /// Returns EMPTY_HASH for an empty transaction list.
 ///
-/// Uses the same rs_merkle implementation as other merkle operations
+/// Uses the same rs_merkle implementation as other Merkle operations
 /// for consistency across the codebase.
 pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
     if transactions.is_empty() {

@@ -1,6 +1,6 @@
 //! Merkle tree implementation for InferaDB Ledger.
 //!
-//! Uses rs_merkle with SHA-256 for transaction merkle roots and proofs.
+//! Uses rs_merkle with SHA-256 for transaction Merkle roots and proofs.
 
 use rs_merkle::{MerkleTree as RsMerkleTree, algorithms::Sha256 as RsSha256};
 
@@ -13,7 +13,7 @@ pub struct MerkleTree {
 }
 
 impl MerkleTree {
-    /// Builds a merkle tree from leaf hashes.
+    /// Builds a Merkle tree from leaf hashes.
     ///
     /// For empty input, the root is EMPTY_HASH.
     pub fn from_leaves(leaves: &[Hash]) -> Self {
@@ -21,7 +21,7 @@ impl MerkleTree {
         Self { tree, leaves: leaves.to_vec() }
     }
 
-    /// Returns the merkle root.
+    /// Returns the Merkle root.
     ///
     /// Returns EMPTY_HASH for empty trees.
     pub fn root(&self) -> Hash {
@@ -107,7 +107,7 @@ impl MerkleProof {
     }
 }
 
-/// Computes merkle root from leaf hashes.
+/// Computes the Merkle root from leaf hashes.
 ///
 /// Convenience function when you don't need the full tree or proofs.
 pub fn merkle_root(leaves: &[Hash]) -> Hash {
