@@ -54,7 +54,7 @@ zstd = "0.13"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "0.9"
 postcard = { version = "1", features = ["alloc"] }
 schemars = "1"
 
@@ -100,12 +100,12 @@ fs2 = "0.4"
 
 # Testing
 tempfile = "3"
-rand = "0.9"
+rand = "0.10"
 futures = "0.3"
 proptest = "1"
 
 # Benchmarking
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 # DNS resolver for A record discovery
 hickory-resolver = "0.25"
