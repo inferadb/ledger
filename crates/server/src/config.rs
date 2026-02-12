@@ -95,7 +95,7 @@ impl WideEventsSamplingConfig {
         }
     }
 
-    /// Creates a test configuration with default values.
+    /// Creates a configuration with test-suitable values (all rates set to 100%).
     pub fn for_test() -> Self {
         Self {
             error_rate: 1.0,
@@ -247,7 +247,7 @@ impl Default for OtelConfig {
 }
 
 impl OtelConfig {
-    /// Creates a test configuration with default values.
+    /// Creates a configuration with test-suitable values (OTEL disabled).
     pub fn for_test() -> Self {
         Self::default()
     }
@@ -363,7 +363,7 @@ impl Default for VipConfig {
 }
 
 impl VipConfig {
-    /// Creates a test configuration with default values.
+    /// Creates a configuration with test-suitable values (discovery disabled).
     pub fn for_test() -> Self {
         Self { discovery_enabled: false, cache_ttl_secs: 60, tag_name: "vip".to_string() }
     }
@@ -460,7 +460,7 @@ impl Default for WideEventsConfig {
 }
 
 impl WideEventsConfig {
-    /// Creates a test configuration with default values.
+    /// Creates a configuration with test-suitable values (all sampling enabled).
     pub fn for_test() -> Self {
         Self {
             enabled: true,
@@ -790,7 +790,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Creates a test configuration with default values.
+    /// Creates a configuration with test-suitable values (single-node, deterministic ID).
     ///
     /// Writes the given `node_id` to the data directory for deterministic
     /// node IDs in tests. Uses single-node mode.
@@ -981,7 +981,7 @@ pub enum ConfigError {
     },
 }
 
-/// InferaDB Ledger - Distributed consensus ledger.
+/// Command-line arguments for the ledger server.
 #[derive(Debug, Parser)]
 #[command(name = "inferadb-ledger")]
 #[command(version)]
@@ -990,7 +990,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<CliCommand>,
 
-    /// Server configuration (flattened for backward compatibility).
+    /// Server configuration (flattened so flags appear at top level).
     #[command(flatten)]
     pub config: Config,
 }

@@ -93,8 +93,8 @@ impl BloomFilter {
 
     /// Computes a double-hash pair from a key using FNV-1a-inspired mixing.
     ///
-    /// Uses two independent hash values derived from the key bytes.
-    /// The approach splits a 128-bit hash into two 64-bit halves.
+    /// Runs two independent hash passes over the key bytes, each seeded with
+    /// a different FNV offset basis, producing two 64-bit hash values.
     fn hash_pair(key: &[u8]) -> (u64, u64) {
         // FNV-1a inspired mixing with two independent seeds.
         // Seed 1 (h1): standard FNV offset basis

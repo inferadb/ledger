@@ -595,7 +595,8 @@ impl<B: StorageBackend> Database<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if reading the snapshot state fails.
+    /// This method is infallible in practice; the `Result` return preserves
+    /// API consistency with other transaction entry points.
     pub fn read(&self) -> Result<ReadTransaction<'_, B>> {
         // Load current committed state (atomic, lock-free)
         // Use load_full() to get Arc directly - avoids Guard which blocks writers

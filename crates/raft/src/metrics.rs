@@ -1,7 +1,4 @@
-//! Metrics for InferaDB Ledger.
-//!
-//! This module defines metrics for observability using the `metrics` crate.
-//! Metrics are exposed via Prometheus when the metrics exporter is initialized.
+//! Observability metrics exposed via Prometheus using the `metrics` crate.
 //!
 //! ## Metric Naming Conventions
 //!
@@ -116,7 +113,7 @@ pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
     histogram!(BATCH_SIZE).record(batch_size as f64);
 }
 
-/// Records a rate limit exceeded event (legacy, namespace-only).
+/// Records a rate limit exceeded event for a single namespace.
 #[inline]
 pub fn record_rate_limit_exceeded(namespace_id: i64) {
     counter!(RATE_LIMIT_EXCEEDED, "namespace_id" => namespace_id.to_string()).increment(1);

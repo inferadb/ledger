@@ -6,11 +6,14 @@
 //!
 //! ## Usage
 //!
-//! ```text
+//! ```no_run
+//! # use inferadb_ledger_raft::peer_maintenance::PeerMaintenance;
+//! # fn example(discovery_service: std::sync::Arc<inferadb_ledger_raft::services::DiscoveryServiceImpl>) {
 //! let maintenance = PeerMaintenance::builder().discovery(discovery_service).build();
 //! let handle = maintenance.start();
 //! // ... later ...
 //! handle.abort(); // to stop maintenance
+//! # }
 //! ```
 
 use std::{sync::Arc, time::Duration};

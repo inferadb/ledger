@@ -162,7 +162,7 @@ pub async fn coordinate_bootstrap(
     }
 }
 
-/// Queries multiple peers for their node info concurrently.
+/// Queries multiple peers for their node info sequentially.
 async fn query_peers(peer_addrs: &[SocketAddr], timeout: Duration) -> Vec<DiscoveredNode> {
     let mut discovered = Vec::new();
     for &addr in peer_addrs {

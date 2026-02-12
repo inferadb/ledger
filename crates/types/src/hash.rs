@@ -14,9 +14,10 @@ use crate::types::{BlockHeader, Entity, Transaction};
 /// SHA-256 hash output (32 bytes).
 pub type Hash = [u8; 32];
 
-/// Hash of empty input: SHA-256("").
-/// Used for empty buckets per DESIGN.md line 660.
-/// NOT zero bytes - this is critical for cross-node consistency.
+/// Hash of empty input: `SHA-256("")`.
+///
+/// Used for empty buckets per DESIGN.md line 660. This is distinct from
+/// [`ZERO_HASH`] — using zero bytes here would break cross-node consistency.
 pub const EMPTY_HASH: Hash = [
     0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
     0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
@@ -239,7 +240,7 @@ pub struct BucketHasher {
 }
 
 impl BucketHasher {
-    /// Creates a new bucket hasher.
+    /// Initializes an empty hasher for streaming bucket root computation.
     pub fn new() -> Self {
         Self { hasher: Sha256::new(), has_entries: false }
     }
@@ -294,11 +295,8 @@ pub fn bucket_id(key: &[u8]) -> u8 {
 
 /// Computes the Merkle root of a list of transactions.
 ///
-/// Per DESIGN.md: binary Merkle tree where each leaf is SHA-256(tx).
-/// Returns EMPTY_HASH for an empty transaction list.
-///
-/// Uses the same rs_merkle implementation as other Merkle operations
-/// for consistency across the codebase.
+/// Per DESIGN.md: builds a binary Merkle tree where each leaf is the
+/// hash of a transaction. Returns [`EMPTY_HASH`] for an empty list.
 pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
     if transactions.is_empty() {
         return EMPTY_HASH;

@@ -46,7 +46,7 @@ impl Default for PeerTrackerConfig {
 /// Tracks when peers were last seen for health monitoring and staleness detection.
 #[derive(Debug)]
 pub struct PeerTracker {
-    /// Maps of node ID string to last seen instant.
+    /// Map from node ID string to last seen instant.
     last_seen: HashMap<String, Instant>,
     /// Configuration for staleness thresholds.
     config: PeerTrackerConfig,

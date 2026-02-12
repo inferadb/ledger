@@ -10,10 +10,10 @@ use parking_lot::RwLock;
 
 use super::types::{AppliedState, NamespaceMeta, VaultHealthStatus, VaultMeta};
 
-/// Shared accessor for applied state.
+/// Provides shared read access to the Raft state machine's applied state.
 ///
-/// This allows services to read vault heights and health status
-/// without needing direct access to the Raft storage.
+/// Services use this to query vault heights and health status
+/// without holding a direct reference to the Raft log store.
 #[derive(Clone)]
 pub struct AppliedStateAccessor {
     pub(super) state: Arc<RwLock<AppliedState>>,

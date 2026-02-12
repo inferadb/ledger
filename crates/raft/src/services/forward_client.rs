@@ -6,7 +6,9 @@
 //!
 //! ## Usage
 //!
-//! ```text
+//! ```no_run
+//! # use inferadb_ledger_raft::services::ForwardClient;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = ForwardClient::new(connection).await?;
 //!
 //! // Forward a read request
@@ -14,6 +16,8 @@
 //!
 //! // Forward a write request
 //! let response = client.forward_write(request).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::time::Duration;

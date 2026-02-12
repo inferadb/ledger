@@ -34,9 +34,7 @@ use crate::{
 
 // Note: SetCondition conversion is internal to convert_set_condition
 
-/// Routes write requests to the correct shard via Raft consensus.
-///
-/// Routes write requests to the correct shard based on namespace_id.
+/// Routes write requests to the correct shard via Raft consensus based on namespace ID.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct MultiShardWriteService {

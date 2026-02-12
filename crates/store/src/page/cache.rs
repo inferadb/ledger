@@ -54,9 +54,7 @@ impl PageCache {
         }
     }
 
-    /// Returns a page from the cache.
-    ///
-    /// Returns a clone of the page if found, None otherwise.
+    /// Returns a clone of the cached page, or `None` if not present.
     pub fn get(&self, page_id: PageId) -> Option<Page> {
         let mut pages = self.pages.write();
         if let Some(entry) = pages.get_mut(&page_id) {

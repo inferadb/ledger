@@ -88,7 +88,14 @@ impl PositionTracker for HeightTracker {
 ///
 /// # Example
 ///
-/// ```text
+/// ```no_run
+/// # use inferadb_ledger_sdk::streaming::{ReconnectingStream, HeightTracker};
+/// # use inferadb_ledger_sdk::config::RetryPolicy;
+/// # async fn example(
+/// #     initial_stream: tonic::Streaming<inferadb_ledger_proto::proto::BlockAnnouncement>,
+/// #     start_height: u64,
+/// #     retry_policy: RetryPolicy,
+/// # ) {
 /// let stream = ReconnectingStream::new(
 ///     initial_stream,
 ///     HeightTracker::new(start_height),
@@ -98,6 +105,8 @@ impl PositionTracker for HeightTracker {
 ///         create_stream(last_height + 1).await
 ///     },
 /// );
+/// # }
+/// # fn create_stream(_h: u64) -> futures::future::Ready<inferadb_ledger_sdk::Result<tonic::Streaming<inferadb_ledger_proto::proto::BlockAnnouncement>>> { todo!() }
 /// ```
 pub struct ReconnectingStream<T, P, F, Fut>
 where

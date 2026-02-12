@@ -469,7 +469,7 @@ impl<P: PageProvider> BTree<P> {
         }
     }
 
-    /// Inserts into leaf and split if necessary.
+    /// Inserts into a leaf and splits if necessary.
     ///
     /// This uses a key-aware split strategy: we find a split point that ensures
     /// the new key can fit in the correct side (based on ordering).
@@ -513,7 +513,7 @@ impl<P: PageProvider> BTree<P> {
         Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
 
-    /// Inserts into branch and split if necessary.
+    /// Inserts into a branch and splits if necessary.
     ///
     /// # Arguments
     /// * `page` - The branch page to split
@@ -1096,7 +1096,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         }
     }
 
-    /// Moves to next entry and return it.
+    /// Moves to the next entry and returns it.
     ///
     /// # Errors
     ///

@@ -325,7 +325,10 @@ impl<'a> LeafNode<'a> {
         self.page.dirty = true;
     }
 
-    /// Updates the value at a given index (in place if same size, or rewrite).
+    /// Updates the value at the given cell index in place.
+    ///
+    /// Returns `true` if the update succeeded (same size or smaller value).
+    /// Returns `false` if the new value is larger and cannot fit in place.
     pub fn update(&mut self, index: usize, value: &[u8]) -> bool {
         let cell_offset = self.cell_ptr(index);
         let key_len =

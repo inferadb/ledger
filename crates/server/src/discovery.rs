@@ -1,15 +1,17 @@
-//! Peer discovery via DNS.
+//! Peer discovery via DNS and file-based peer lists.
 //!
 //! Discovery enables nodes to find each other during cluster bootstrap.
-//! Nodes query DNS A records at the configured domain to discover peer IPs.
+//! The `--peers` value is auto-detected based on format:
+//! - **DNS domain**: Queries A records to discover peer IPs (optimized for
+//!   Kubernetes headless Services)
+//! - **File path**: Loads a JSON peer list from the local filesystem
 //!
-//! Optimized for Kubernetes headless Services, which create A records for each
-//! pod IP. Example: querying `ledger.default.svc.cluster.local` returns the IPs
+//! Example DNS: querying `ledger.default.svc.cluster.local` returns the IPs
 //! of all ledger pods.
 //!
 //! Discovery order:
-//! 1. Cached peers (from previous successful connections)
-//! 2. DNS A record lookup (if discovery_domain is configured)
+//! 1. File-based peers (if `--peers` is a file path)
+//! 2. DNS A record lookup (if `--peers` is a domain)
 //!
 //! # Security
 //!

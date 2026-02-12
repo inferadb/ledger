@@ -355,10 +355,10 @@ pub fn branch_needs_split(page: &Page, key: &[u8]) -> Result<bool> {
     Ok(!node.can_insert(key))
 }
 
-/// Merges two leaf nodes (for deletion, when underfull).
+/// Merges two leaf nodes by moving all entries from `right` into `left`.
 ///
-/// All entries from `right` are moved into `left`.
-/// Returns the key that was separating them in the parent.
+/// Rebuilds `left` from scratch to reclaim dead space left by prior deletes.
+/// After this call, `right` is empty and should be freed by the caller.
 ///
 /// # Errors
 ///

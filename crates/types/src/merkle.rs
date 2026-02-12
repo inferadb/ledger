@@ -76,7 +76,14 @@ impl MerkleProof {
     /// Verifies the proof against an expected root.
     ///
     /// Walks up the tree using the proof hashes and leaf index to recompute
-    /// the root. Only produces correct results for power-of-2 leaf counts.
+    /// the root.
+    ///
+    /// # Limitations
+    ///
+    /// This method only produces correct results when the tree has a
+    /// power-of-2 leaf count (1, 2, 4, 8, ...). For non-power-of-2 trees,
+    /// use [`MerkleTree::proof`] combined with `rs_merkle`'s built-in
+    /// verification instead.
     pub fn verify(&self, expected_root: &Hash) -> bool {
         if self.proof_hashes.is_empty() {
             // Single-element tree: leaf hash equals root

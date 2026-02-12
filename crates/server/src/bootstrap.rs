@@ -1,7 +1,8 @@
 //! Cluster bootstrap and initialization.
 //!
 //! Provides functions to:
-//! - Bootstrap a new cluster with this node as the initial leader
+//! - Resume from persisted Raft state (existing node restart)
+//! - Bootstrap a new cluster (single-node or coordinated multi-node)
 //! - Join an existing cluster by contacting the leader
 
 use std::{
@@ -107,7 +108,7 @@ pub struct BootstrappedNode {
     pub runtime_config: RuntimeConfigHandle,
 }
 
-/// Bootstrap a new cluster, join an existing one, or resume from saved state.
+/// Bootstraps a new cluster, joins an existing one, or resumes from saved state.
 ///
 /// Behavior is determined automatically via coordinated bootstrap:
 ///
@@ -415,7 +416,7 @@ pub async fn bootstrap_node(
     })
 }
 
-/// Bootstrap a new single-node cluster with this node as the initial member.
+/// Bootstraps a new single-node cluster with this node as the initial member.
 ///
 /// Additional nodes join dynamically via `join_cluster()` using discovery.
 async fn bootstrap_cluster(
@@ -435,7 +436,7 @@ async fn bootstrap_cluster(
     Ok(())
 }
 
-/// Bootstrap a new cluster with multiple initial members.
+/// Bootstraps a new cluster with multiple initial members.
 ///
 /// This is used during coordinated bootstrap when multiple nodes start simultaneously.
 /// The node with the lowest Snowflake ID calls this with all discovered members.
@@ -599,7 +600,7 @@ async fn try_join_via_peer(
     Err(format!("Join request rejected: {}", resp.message))
 }
 
-/// Follow a redirect to join via the leader.
+/// Follows a redirect to join via the leader.
 async fn try_join_via_leader(
     node_id: u64,
     my_address: &str,

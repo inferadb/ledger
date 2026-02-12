@@ -24,17 +24,17 @@ use inferadb_ledger_types::types::{
 };
 use proptest::prelude::*;
 
-/// Generates an arbitrary entity key of 1-32 characters matching `[a-z][a-z0-9]*`.
+/// Generates an arbitrary entity key of 1-32 characters matching `[a-z][a-z0-9]{0,31}`.
 pub fn arb_key() -> impl Strategy<Value = String> {
     "[a-z][a-z0-9]{0,31}"
 }
 
-/// Generates an arbitrary entity value of 0-256 random bytes.
+/// Generates an arbitrary entity value of 0-255 random bytes.
 pub fn arb_value() -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(any::<u8>(), 0..256)
 }
 
-/// Generates a small entity value of 0-32 random bytes for compact tests.
+/// Generates a small entity value of 0-31 random bytes for compact tests.
 pub fn arb_small_value() -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(any::<u8>(), 0..32)
 }
@@ -42,7 +42,7 @@ pub fn arb_small_value() -> impl Strategy<Value = Vec<u8>> {
 /// Generates an arbitrary resource identifier in `{type}:{key}` format.
 ///
 /// Type is one of: `doc`, `folder`, `project`, `org`, `team`.
-/// Key is 1-32 characters matching `[a-z][a-z0-9]*`.
+/// Key is 1-32 characters matching `[a-z][a-z0-9]{0,31}`.
 pub fn arb_resource() -> impl Strategy<Value = String> {
     (prop::sample::select(vec!["doc", "folder", "project", "org", "team"]), arb_key())
         .prop_map(|(typ, id)| format!("{typ}:{id}"))
@@ -62,7 +62,7 @@ pub fn arb_relation() -> impl Strategy<Value = String> {
 /// Generates an arbitrary subject identifier in `{type}:{key}` format.
 ///
 /// Type is one of: `user`, `group`, `team`, `service`.
-/// Key is 1-32 characters matching `[a-z][a-z0-9]*`.
+/// Key is 1-32 characters matching `[a-z][a-z0-9]{0,31}`.
 pub fn arb_subject() -> impl Strategy<Value = String> {
     (prop::sample::select(vec!["user", "group", "team", "service"]), arb_key())
         .prop_map(|(typ, id)| format!("{typ}:{id}"))

@@ -98,7 +98,9 @@ pub struct Page {
 }
 
 impl Page {
-    /// Creates a new empty page.
+    /// Creates a new empty page with the given type and transaction ID.
+    ///
+    /// The page is marked dirty on creation since it has never been persisted.
     pub fn new(id: PageId, page_size: usize, page_type: PageType, txn_id: u64) -> Self {
         let mut data = vec![0u8; page_size];
         let header = PageHeader::new(page_type, txn_id);

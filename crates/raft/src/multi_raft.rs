@@ -28,7 +28,9 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
+//! # use inferadb_ledger_raft::multi_raft::MultiRaftManager;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let manager = MultiRaftManager::new(config);
 //!
 //! // Start the _system shard (always required)
@@ -40,6 +42,8 @@
 //! // Route requests
 //! let shard = manager.get_shard(shard_id)?;
 //! shard.raft().client_write(request).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{

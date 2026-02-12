@@ -1,6 +1,6 @@
 //! Transaction tracking and snapshot management for Copy-on-Write semantics.
 //!
-//! This module provides the infrastructure for MVCC-style snapshot isolation:
+//! This module provides the infrastructure for COW-based snapshot isolation:
 //! - `SnapshotId`: Unique identifier for a committed database state
 //! - `CommittedState`: The visible state (table roots) at a snapshot
 //! - `TransactionTracker`: Reference counting for safe page deallocation

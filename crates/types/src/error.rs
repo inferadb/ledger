@@ -298,6 +298,7 @@ impl fmt::Display for ErrorCode {
 /// | `Io`                 | Maybe     | Check filesystem permissions and disk health               |
 /// | `InvalidArgument`    | No        | Fix the request parameters                                 |
 /// | `Internal`           | No        | Unexpected state; report as issue with context             |
+/// | `QuotaExceeded`      | Yes       | Reduce usage or request a namespace quota increase         |
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum LedgerError {
@@ -655,7 +656,10 @@ impl From<StorageError> for LedgerError {
     }
 }
 
-/// Consensus-specific errors.
+/// Consensus-specific errors from the Raft layer.
+///
+/// These errors originate in the `raft` crate and are wrapped into
+/// [`LedgerError::Consensus`] when propagated to higher layers.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ConsensusError {

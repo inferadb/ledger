@@ -6,8 +6,7 @@ use tokio::signal;
 
 /// Waits for a shutdown signal (Ctrl-C or SIGTERM).
 ///
-/// This function suspends until a shutdown signal is received.
-/// On Unix systems, it also handles SIGTERM for container environments.
+/// On Unix systems, also handles SIGTERM for container environments.
 #[allow(clippy::expect_used)]
 pub async fn shutdown_signal() {
     let ctrl_c = async {
@@ -39,8 +38,6 @@ pub async fn shutdown_signal() {
 }
 
 /// Coordinates graceful shutdown by distributing a signal via broadcast channel.
-///
-/// Broadcasts the shutdown signal to all subscribers.
 ///
 /// The actual graceful shutdown logic (draining connections, flushing Raft
 /// state) is handled by [`inferadb_ledger_raft::GracefulShutdown`].

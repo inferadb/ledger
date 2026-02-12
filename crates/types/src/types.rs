@@ -84,8 +84,8 @@ macro_rules! define_id {
 define_id!(
     /// Unique identifier for a namespace (organization-level isolation).
     ///
-    /// Wraps an `i64` with compile-time type safety to prevent mixing with
-    /// other identifier types.
+    /// Wraps an `i64` with compile-time type safety to prevent mixing
+    /// with [`VaultId`], [`UserId`], or [`ShardId`].
     ///
     /// # Display
     ///
@@ -96,8 +96,8 @@ define_id!(
 define_id!(
     /// Unique identifier for a vault within a namespace.
     ///
-    /// Wraps an `i64` with compile-time type safety to prevent mixing with
-    /// other identifier types.
+    /// Wraps an `i64` with compile-time type safety to prevent mixing
+    /// with [`NamespaceId`], [`UserId`], or [`ShardId`].
     ///
     /// # Display
     ///
@@ -108,8 +108,8 @@ define_id!(
 define_id!(
     /// Unique identifier for a user in the `_system` namespace.
     ///
-    /// Wraps an `i64` with compile-time type safety to prevent mixing with
-    /// other identifier types.
+    /// Wraps an `i64` with compile-time type safety to prevent mixing
+    /// with [`NamespaceId`], [`VaultId`], or [`ShardId`].
     ///
     /// # Display
     ///
@@ -120,8 +120,8 @@ define_id!(
 define_id!(
     /// Unique identifier for a Raft shard group.
     ///
-    /// Wraps a `u32` with compile-time type safety to prevent mixing with
-    /// other identifier types.
+    /// Wraps a `u32` with compile-time type safety to prevent mixing
+    /// with [`NamespaceId`], [`VaultId`], or [`UserId`].
     ///
     /// # Display
     ///
@@ -270,19 +270,10 @@ pub struct ChainCommitment {
 }
 
 impl ShardBlock {
-    /// Converts this ShardBlock to a shard-level BlockHeader for chain commitment computation.
+    /// Converts this [`ShardBlock`] to a shard-level [`BlockHeader`] for chain commitment computation.
     ///
-    /// The shard-level BlockHeader uses:
-    /// - `height` = shard_height
-    /// - `namespace_id` = 0 (shard-level aggregate)
-    /// - `vault_id` = shard_id (for identification)
-    /// - `previous_hash` = previous_shard_hash
-    /// - `tx_merkle_root` = Merkle root of all vault entry tx_merkle_roots
-    /// - `state_root` = Merkle root of all vault entry state_roots
-    /// - `timestamp` = block timestamp
-    /// - `term`, `committed_index` = Raft consensus state
-    ///
-    /// This enables computing ChainCommitment over the shard chain for snapshot verification.
+    /// Aggregates vault entry Merkle roots into a single header, enabling
+    /// [`ChainCommitment`] computation over the shard chain for snapshot verification.
     pub fn to_shard_header(&self) -> BlockHeader {
         use crate::merkle::merkle_root;
 
@@ -454,7 +445,7 @@ pub enum Operation {
         value: Vec<u8>,
         /// Optional write condition.
         condition: Option<SetCondition>,
-        /// Unix timestamp for expiration (0 = never expires).
+        /// Unix timestamp for expiration. A value of 0 means the entry never expires.
         expires_at: Option<u64>,
     },
     /// Deletes an entity.
@@ -512,7 +503,7 @@ pub struct Entity {
     pub key: Vec<u8>,
     /// Opaque value bytes. Interpretation is application-defined.
     pub value: Vec<u8>,
-    /// Unix timestamp for expiration (0 = never).
+    /// Unix timestamp for expiration. A value of 0 means the entry never expires.
     pub expires_at: u64,
     /// Block height when this entity was last modified.
     pub version: u64,
@@ -663,15 +654,15 @@ impl Default for BlockRetentionPolicy {
 
 /// Snapshot of per-namespace resource consumption.
 ///
-/// Used by `QuotaChecker` for enforcement and by operators for
+/// Used by the quota checker for enforcement and by operators for
 /// capacity planning. All values are point-in-time snapshots from
 /// Raft-replicated state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamespaceUsage {
     /// Cumulative estimated storage bytes for this namespace.
     ///
-    /// Updated on every committed write via `estimate_write_storage_delta`.
-    /// Approximate — does not track exact on-disk overhead.
+    /// Updated on every committed write. Approximate — does not track
+    /// exact on-disk overhead.
     pub storage_bytes: u64,
     /// Number of active (non-deleted) vaults in this namespace.
     pub vault_count: u32,

@@ -134,7 +134,7 @@ impl NamespaceQuota {
 /// Runtime-reconfigurable configuration subset.
 ///
 /// Contains only parameters that can be safely changed without a server restart.
-/// Stored behind `Arc<ArcSwap<RuntimeConfig>>` for lock-free reads on every RPC.
+/// Designed for lock-free reads on every RPC.
 ///
 /// # Reconfigurable vs Non-Reconfigurable
 ///
@@ -205,7 +205,7 @@ impl std::fmt::Display for ConfigChange {
     }
 }
 
-/// Recursively compare two JSON values and collect leaf-level differences.
+/// Collects leaf-level differences between two JSON values recursively.
 fn collect_json_diffs(
     prefix: &str,
     old: &serde_json::Value,
