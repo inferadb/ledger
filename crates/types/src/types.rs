@@ -270,7 +270,8 @@ pub struct ChainCommitment {
 }
 
 impl ShardBlock {
-    /// Converts this [`ShardBlock`] to a shard-level [`BlockHeader`] for chain commitment computation.
+    /// Converts this [`ShardBlock`] to a shard-level [`BlockHeader`] for chain commitment
+    /// computation.
     ///
     /// Aggregates vault entry Merkle roots into a single header, enabling
     /// [`ChainCommitment`] computation over the shard chain for snapshot verification.

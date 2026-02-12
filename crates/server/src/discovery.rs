@@ -2,8 +2,8 @@
 //!
 //! Discovery enables nodes to find each other during cluster bootstrap.
 //! The `--peers` value is auto-detected based on format:
-//! - **DNS domain**: Queries A records to discover peer IPs (optimized for
-//!   Kubernetes headless Services)
+//! - **DNS domain**: Queries A records to discover peer IPs (optimized for Kubernetes headless
+//!   Services)
 //! - **File path**: Loads a JSON peer list from the local filesystem
 //!
 //! Example DNS: querying `ledger.default.svc.cluster.local` returns the IPs
