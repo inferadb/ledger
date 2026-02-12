@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use inferadb_ledger_sdk::{ClientConfig, ServerSource};
 //! use inferadb_ledger_sdk::connection::ConnectionPool;
 //!

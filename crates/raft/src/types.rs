@@ -95,7 +95,7 @@ pub enum LedgerRequest {
         vault_id: VaultId,
     },
 
-    /// Suspend a namespace (billing hold or policy violation).
+    /// Suspends a namespace (billing hold or policy violation).
     /// Suspended namespaces reject writes but allow reads.
     SuspendNamespace {
         /// Namespace to suspend.
@@ -104,7 +104,7 @@ pub enum LedgerRequest {
         reason: Option<String>,
     },
 
-    /// Resume a suspended namespace.
+    /// Resumes a suspended namespace.
     ResumeNamespace {
         /// Namespace to resume.
         namespace_id: NamespaceId,
@@ -119,7 +119,7 @@ pub enum LedgerRequest {
         target_shard_id: ShardId,
     },
 
-    /// Complete a pending namespace migration.
+    /// Completes a pending namespace migration.
     /// Updates shard_id and returns status to Active.
     CompleteMigration {
         /// Namespace being migrated.

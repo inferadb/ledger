@@ -52,7 +52,7 @@ impl GrpcRaftNetwork {
         Self { clients: Arc::new(RwLock::new(HashMap::new())) }
     }
 
-    /// Returns or create a client connection to a peer node.
+    /// Returns or creates a client connection to a peer node.
     async fn get_client(
         &self,
         target: LedgerNodeId,

@@ -49,7 +49,7 @@
 //! │                   Idempotency Layer                         │
 //! │   UUID generation │ Retry key preservation │ Dedup         │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │                   Resilience Layer (backon)                 │
+//! │                   Resilience Layer (retry + cancellation)    │
 //! │   Retry middleware │ Exponential backoff │ Timeout         │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │                   Connection Pool                           │

@@ -12,7 +12,7 @@ use snafu::{ResultExt, Snafu};
 
 use crate::keys::{encode_obj_index_key, encode_storage_key, encode_subj_index_key};
 
-/// Index manager error types.
+/// Errors returned by [`IndexManager`] operations.
 #[derive(Debug, Snafu)]
 pub enum IndexError {
     /// Underlying storage operation failed.

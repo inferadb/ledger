@@ -410,7 +410,7 @@ impl From<InternalMerkleProof> for proto::MerkleProof {
 
 /// Converts a VaultEntry from storage to a proto Block.
 ///
-/// This is a method rather than a `From` impl because it requires additional
+/// This is a free function rather than a `From` impl because it requires additional
 /// context (the ShardBlock) to populate the block header timestamp and leader info.
 pub fn vault_entry_to_proto_block(
     entry: &inferadb_ledger_types::VaultEntry,

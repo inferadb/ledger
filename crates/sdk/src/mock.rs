@@ -22,7 +22,7 @@
 //!     let server = MockLedgerServer::start().await.unwrap();
 //!
 //!     // Set up test data
-//!     server.set_entity("user:123", b"test-value");
+//!     server.set_entity(1, 0, "user:123", b"test-value");
 //!
 //!     // Create client connected to mock server
 //!     let config = ClientConfig::builder()
@@ -175,7 +175,7 @@ impl MockState {
         }
     }
 
-    /// Applies configured delay and check for injected errors.
+    /// Applies configured delay and checks for injected errors.
     ///
     /// Combines `maybe_delay()` and `should_inject_unavailable()` into a single call.
     async fn check_injection(&self) -> Result<(), Status> {
@@ -282,7 +282,7 @@ impl MockLedgerServer {
         self.set_entity_with_options(namespace_id, vault_id, key, value, 1, None);
     }
 
-    /// Sets an entity value with full options.
+    /// Sets an entity value with version and optional expiration.
     pub fn set_entity_with_options(
         &self,
         namespace_id: i64,
@@ -424,7 +424,7 @@ impl MockLedgerServer {
         self.state.block_height.store(1, Ordering::SeqCst);
     }
 
-    /// Shutdown the server gracefully.
+    /// Shuts down the server gracefully.
     pub fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());

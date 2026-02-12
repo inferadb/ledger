@@ -1,3 +1,8 @@
+//! Core types for the Raft state machine.
+//!
+//! Defines [`AppliedState`], [`NamespaceMeta`], [`VaultMeta`],
+//! [`SequenceCounters`], and snapshot types used by the log store.
+
 use std::collections::HashMap;
 
 use inferadb_ledger_state::system::NamespaceStatus;
@@ -143,35 +148,35 @@ impl SequenceCounters {
         }
     }
 
-    /// Returns and increment the next namespace ID.
+    /// Returns and increments the next namespace ID.
     pub fn next_namespace(&mut self) -> NamespaceId {
         let id = self.namespace;
         self.namespace = NamespaceId::new(id.value() + 1);
         id
     }
 
-    /// Returns and increment the next vault ID.
+    /// Returns and increments the next vault ID.
     pub fn next_vault(&mut self) -> VaultId {
         let id = self.vault;
         self.vault = VaultId::new(id.value() + 1);
         id
     }
 
-    /// Returns and increment the next user ID.
+    /// Returns and increments the next user ID.
     pub fn next_user(&mut self) -> i64 {
         let id = self.user;
         self.user += 1;
         id
     }
 
-    /// Returns and increment the next user email ID.
+    /// Returns and increments the next user email ID.
     pub fn next_user_email(&mut self) -> i64 {
         let id = self.user_email;
         self.user_email += 1;
         id
     }
 
-    /// Returns and increment the next email verification token ID.
+    /// Returns and increments the next email verification token ID.
     pub fn next_email_verify(&mut self) -> i64 {
         let id = self.email_verify;
         self.email_verify += 1;

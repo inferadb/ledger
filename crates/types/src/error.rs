@@ -659,18 +659,18 @@ impl From<StorageError> for LedgerError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ConsensusError {
-    /// Not the leader.
+    /// Current node is not the Raft leader and cannot process the request.
     #[snafu(display("Not the leader, current leader: {leader:?}"))]
     NotLeader {
         /// Current leader node ID, if known.
         leader: Option<String>,
     },
 
-    /// Leader unknown.
+    /// Raft cluster leader is unknown, likely during an election.
     #[snafu(display("Leader unknown, cluster may be electing"))]
     LeaderUnknown,
 
-    /// Proposal failed.
+    /// Raft proposal was rejected by the cluster.
     #[snafu(display("Proposal failed: {message}"))]
     ProposalFailed {
         /// Error description.
@@ -681,21 +681,21 @@ pub enum ConsensusError {
         rejecting_node_id: Option<String>,
     },
 
-    /// Log storage error.
+    /// Raft log storage operation failed.
     #[snafu(display("Log storage error: {message}"))]
     LogStorage {
         /// Error description.
         message: String,
     },
 
-    /// State machine error.
+    /// Error applying a committed log entry to the state machine.
     #[snafu(display("State machine error: {message}"))]
     StateMachine {
         /// Error description.
         message: String,
     },
 
-    /// Network error.
+    /// Network communication failure with a Raft peer.
     #[snafu(display("Network error communicating with {node}: {message}"))]
     Network {
         /// Target node.

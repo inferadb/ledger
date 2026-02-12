@@ -34,7 +34,7 @@ use crate::{
 
 // Note: SetCondition conversion is internal to convert_set_condition
 
-/// Multi-shard write service implementation.
+/// Routes write requests to the correct shard via Raft consensus.
 ///
 /// Routes write requests to the correct shard based on namespace_id.
 #[derive(bon::Builder)]
@@ -96,7 +96,7 @@ impl MultiShardWriteService {
         super::helpers::hash_operations(operations)
     }
 
-    /// Generates inclusion proof for a write.
+    /// Generates block header and transaction proof for a committed write.
     fn generate_write_proof(
         &self,
         namespace_id: inferadb_ledger_types::NamespaceId,

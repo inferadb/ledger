@@ -9,7 +9,7 @@ use snafu::{ResultExt, Snafu};
 
 use crate::keys::{bucket_prefix, encode_storage_key, vault_prefix};
 
-/// Entity store error types.
+/// Errors returned by [`EntityStore`] operations.
 #[derive(Debug, Snafu)]
 pub enum EntityError {
     /// Underlying storage operation failed.

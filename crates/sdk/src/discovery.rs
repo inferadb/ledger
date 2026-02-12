@@ -17,7 +17,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use inferadb_ledger_sdk::{DiscoveryConfig, ClientConfig, ServerSource};
 //! use inferadb_ledger_sdk::discovery::DiscoveryService;
 //! use inferadb_ledger_sdk::connection::ConnectionPool;
@@ -75,7 +75,7 @@ pub struct PeerInfo {
     /// These are private/WireGuard IPs, not public addresses.
     pub addresses: Vec<String>,
 
-    /// gRPC port (same for all addresses), typically 5000.
+    /// gRPC port (same for all addresses), typically 50051.
     pub grpc_port: u32,
 
     /// When this peer was last seen by the cluster.

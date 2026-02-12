@@ -39,7 +39,7 @@ use crate::{
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use inferadb_ledger_sdk::{with_retry, RetryPolicy, SdkError};
 ///
 /// let policy = RetryPolicy::default();
@@ -142,7 +142,7 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use inferadb_ledger_sdk::{with_retry_cancellable, RetryPolicy, SdkError};
 /// use tokio_util::sync::CancellationToken;
 ///

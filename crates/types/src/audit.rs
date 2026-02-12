@@ -60,7 +60,7 @@ pub enum AuditAction {
     DeleteNamespace,
     /// Suspends a namespace.
     SuspendNamespace,
-    /// Resume a suspended namespace.
+    /// Resumes a suspended namespace.
     ResumeNamespace,
 
     // --- Vault Lifecycle ---
@@ -88,7 +88,7 @@ pub enum AuditAction {
     // --- Migration ---
     /// Starts namespace migration.
     StartMigration,
-    /// Complete namespace migration.
+    /// Completes namespace migration.
     CompleteMigration,
 
     // --- Configuration ---

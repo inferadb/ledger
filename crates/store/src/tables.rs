@@ -5,7 +5,8 @@
 
 use crate::types::KeyType;
 
-/// Table identifier - compile-time known, no dynamic creation.
+/// Compile-time table identifier. All tables are statically defined; dynamic creation is not
+/// supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum TableId {
@@ -257,7 +258,7 @@ impl Table for RaftState {
     type ValueType = Vec<u8>;
 }
 
-/// Vault metadata table.
+/// Vault metadata table mapping vault IDs to serialized vault configuration.
 pub struct VaultMeta;
 impl Table for VaultMeta {
     const ID: TableId = TableId::VaultMeta;
@@ -265,7 +266,7 @@ impl Table for VaultMeta {
     type ValueType = Vec<u8>;
 }
 
-/// Namespace metadata table.
+/// Namespace metadata table mapping namespace IDs to serialized namespace configuration.
 pub struct NamespaceMeta;
 impl Table for NamespaceMeta {
     const ID: TableId = TableId::NamespaceMeta;
@@ -289,7 +290,7 @@ impl Table for ClientSequences {
     type ValueType = Vec<u8>;
 }
 
-/// Compaction metadata table.
+/// Compaction metadata table storing block compaction watermarks per vault.
 pub struct CompactionMeta;
 impl Table for CompactionMeta {
     const ID: TableId = TableId::CompactionMeta;

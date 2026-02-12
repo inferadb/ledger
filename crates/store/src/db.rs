@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use inferadb_ledger_store::{Database, tables};
 //!
 //! // Open or create a database
@@ -77,6 +77,9 @@ impl Default for DatabaseConfig {
 }
 
 /// The main database handle.
+///
+/// Generic over [`StorageBackend`] — use [`Database<FileBackend>`] for production
+/// and [`Database<InMemoryBackend>`] for testing.
 ///
 /// Thread-safe with interior mutability. Supports concurrent reads
 /// and exclusive writes (single-writer model).
@@ -902,7 +905,7 @@ pub struct DatabaseStats {
     pub cached_pages: usize,
     /// Dirty pages pending write.
     pub dirty_pages: usize,
-    /// Frees pages available for reuse.
+    /// Free pages available for reuse.
     pub free_pages: usize,
     /// Total page cache hits since creation.
     pub cache_hits: u64,
@@ -1080,7 +1083,7 @@ impl<B: StorageBackend> Drop for ReadTransaction<'_, B> {
 /// Changes are buffered until commit. On commit, all changes are
 /// atomically written and synced to disk using Copy-on-Write semantics.
 ///
-/// Reads transactions can run concurrently — they see a consistent snapshot
+/// Read transactions can run concurrently — they see a consistent snapshot
 /// and are unaffected by COW modifications.
 ///
 /// # Invariants
@@ -1123,7 +1126,7 @@ pub struct WriteTransaction<'db, B: StorageBackend> {
 }
 
 impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
-    /// Inserts or update a key-value pair.
+    /// Inserts or updates a key-value pair.
     ///
     /// # Errors
     ///

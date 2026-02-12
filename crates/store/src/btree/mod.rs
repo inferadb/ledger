@@ -142,14 +142,14 @@ impl<P: PageProvider> BTree<P> {
         self.root_page = page_id;
     }
 
-    /// Allocates and initialize a new leaf page.
+    /// Allocates and initializes a new leaf page.
     fn new_leaf_page(&mut self) -> Page {
         let mut page = self.provider.allocate_page(PageType::BTreeLeaf);
         LeafNode::init(&mut page);
         page
     }
 
-    /// Allocates and initialize a new branch page.
+    /// Allocates and initializes a new branch page.
     fn new_branch_page(&mut self, rightmost_child: PageId) -> Page {
         let mut page = self.provider.allocate_page(PageType::BTreeBranch);
         BranchNode::init(&mut page, rightmost_child);

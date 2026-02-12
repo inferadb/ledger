@@ -6,7 +6,7 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
 //! let client = ForwardClient::new(connection).await?;
 //!
 //! // Forward a read request

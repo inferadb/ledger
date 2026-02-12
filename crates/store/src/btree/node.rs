@@ -93,7 +93,7 @@ impl SearchResult {
     }
 }
 
-/// Read/write operations on a B-tree leaf node.
+/// Mutable accessor for a B-tree leaf node backed by a [`Page`].
 pub struct LeafNode<'a> {
     page: &'a mut Page,
 }
@@ -391,7 +391,7 @@ impl<'a> LeafNode<'a> {
     }
 }
 
-/// Read/write operations on a B-tree branch (internal) node.
+/// Mutable accessor for a B-tree branch (internal) node backed by a [`Page`].
 pub struct BranchNode<'a> {
     page: &'a mut Page,
 }
@@ -734,7 +734,7 @@ impl<'a> LeafNodeRef<'a> {
     }
 }
 
-/// Read-only accessor for branch node data.
+/// Read-only accessor for branch node data backed by a [`Page`].
 pub struct BranchNodeRef<'a> {
     data: &'a [u8],
 }

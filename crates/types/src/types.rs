@@ -184,19 +184,19 @@ pub struct VaultBlock {
 }
 
 impl VaultBlock {
-    /// Returns `header.namespace_id`.
+    /// Returns the namespace that owns this vault block.
     #[inline]
     pub fn namespace_id(&self) -> NamespaceId {
         self.header.namespace_id
     }
 
-    /// Returns `header.vault_id`.
+    /// Returns the vault identifier for this block.
     #[inline]
     pub fn vault_id(&self) -> VaultId {
         self.header.vault_id
     }
 
-    /// Returns `header.height`.
+    /// Returns the block height in the vault chain.
     #[inline]
     pub fn height(&self) -> u64 {
         self.header.height
@@ -260,7 +260,7 @@ pub struct ChainCommitment {
     /// Enables O(log n) proofs that a specific state_root was in the range.
     pub state_root_accumulator: Hash,
 
-    /// Starts height of this commitment (inclusive).
+    /// Start height of this commitment (inclusive).
     /// 0 for genesis, or previous_snapshot_height + 1.
     pub from_height: u64,
 
@@ -271,8 +271,6 @@ pub struct ChainCommitment {
 
 impl ShardBlock {
     /// Converts this ShardBlock to a shard-level BlockHeader for chain commitment computation.
-    ///
-    /// Creates a shard-level BlockHeader for ChainCommitment computation.
     ///
     /// The shard-level BlockHeader uses:
     /// - `height` = shard_height
@@ -425,7 +423,9 @@ impl Transaction {
     }
 }
 
-/// Operation types per DESIGN.md lines 204-214.
+/// Mutation operations that can be applied to vault state.
+///
+/// Per DESIGN.md lines 204-214.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operation {
     /// Creates a relationship tuple.
@@ -462,7 +462,7 @@ pub enum Operation {
         /// Entity key to delete.
         key: String,
     },
-    /// Expire an entity (GC-initiated, distinct from DeleteEntity for audit).
+    /// Expires an entity (GC-initiated, distinct from DeleteEntity for audit).
     ExpireEntity {
         /// Entity key that expired.
         key: String,
@@ -471,7 +471,9 @@ pub enum Operation {
     },
 }
 
-/// Conditional write conditions per DESIGN.md lines 768-774.
+/// Conditional write predicates for compare-and-swap operations.
+///
+/// Per DESIGN.md lines 768-774.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SetCondition {
     /// Key must not exist (0x01).
@@ -500,12 +502,15 @@ impl SetCondition {
 // Entity Structures
 // ============================================================================
 
-/// Entity stored in the state layer.
+/// Key-value record stored per-vault in the B-tree.
+///
+/// Each entity has a unique key within its vault, an opaque value,
+/// optional TTL expiration, and a monotonic version for optimistic concurrency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entity {
-    /// Entity key.
+    /// Unique key within the vault, conforming to the validation character whitelist.
     pub key: Vec<u8>,
-    /// Entity value.
+    /// Opaque value bytes. Interpretation is application-defined.
     pub value: Vec<u8>,
     /// Unix timestamp for expiration (0 = never).
     pub expires_at: u64,
@@ -525,7 +530,7 @@ pub struct Relationship {
 }
 
 impl Relationship {
-    /// Creates a new relationship.
+    /// Creates a new authorization tuple linking a resource, relation, and subject.
     pub fn new(
         resource: impl Into<String>,
         relation: impl Into<String>,
@@ -564,7 +569,7 @@ pub enum VaultHealth {
 // Write Result
 // ============================================================================
 
-/// Result of a write operation.
+/// Outcome status of a single operation within a write request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteStatus {
     /// Entity/relationship was created.
@@ -589,7 +594,7 @@ pub enum WriteStatus {
     },
 }
 
-/// Result of processing a write request.
+/// Aggregate result of a committed write request, including per-operation statuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteResult {
     /// Block height where the write was committed.

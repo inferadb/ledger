@@ -25,7 +25,7 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use std::sync::atomic::{AtomicBool, Ordering};
 /// use std::sync::Arc;
 /// use std::time::Duration;

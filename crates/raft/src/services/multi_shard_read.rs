@@ -40,7 +40,7 @@ use crate::{
     trace_context,
 };
 
-/// Multi-shard read service implementation.
+/// Routes read requests to the correct shard, supporting local processing and remote forwarding.
 ///
 /// Routes read requests to the correct shard based on namespace_id.
 /// Supports both local processing and remote forwarding for transparent

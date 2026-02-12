@@ -1,3 +1,8 @@
+//! OpenRaft trait implementations for [`RaftLogStore`].
+//!
+//! Implements [`RaftLogReader`], [`RaftStorage`], and [`RaftSnapshotBuilder`]
+//! using the B-tree-backed storage engine.
+
 use std::{collections::HashMap, fmt::Debug, io::Cursor, ops::RangeBounds, sync::Arc};
 
 use inferadb_ledger_store::tables;
@@ -154,7 +159,7 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
 // RaftSnapshotBuilder Implementation
 // ============================================================================
 
-/// Snapshot builder for the ledger storage.
+/// Builds Raft snapshots by serializing the current applied state and entity data.
 pub struct LedgerSnapshotBuilder {
     /// State to snapshot.
     state: AppliedState,

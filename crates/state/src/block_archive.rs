@@ -37,7 +37,7 @@ const COMPACTION_WATERMARK_KEY: &str = "compacted_before";
 /// Blocks per segment file.
 const SEGMENT_SIZE: u64 = 10_000;
 
-/// Block archive error types.
+/// Errors returned by [`BlockArchive`] operations.
 #[derive(Debug, Snafu)]
 pub enum BlockArchiveError {
     /// IO error during file operations.
@@ -157,7 +157,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         })
     }
 
-    /// Append a block to the archive.
+    /// Appends a block to the archive.
     ///
     /// # Errors
     ///

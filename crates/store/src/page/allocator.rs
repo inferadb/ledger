@@ -14,7 +14,7 @@ use crate::error::PageId;
 /// Pages are allocated from a free list. When the free list is empty,
 /// new pages are allocated by extending the file.
 pub struct PageAllocator {
-    /// Frees pages available for reuse.
+    /// Free pages available for reuse.
     free_pages: Mutex<Vec<PageId>>,
     /// Next page ID to allocate if free list is empty.
     next_page: Mutex<PageId>,
@@ -77,7 +77,7 @@ impl PageAllocator {
         self.free_pages.lock().len()
     }
 
-    /// Returns the total number of pages (allocated + free).
+    /// Returns the total number of page slots (the next page ID that would be allocated).
     pub fn total_pages(&self) -> PageId {
         self.next_page_id()
     }

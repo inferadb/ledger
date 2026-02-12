@@ -32,7 +32,7 @@ impl SnapshotId {
         self.0
     }
 
-    /// Increments and return the next snapshot ID.
+    /// Increments and returns the next snapshot ID.
     pub fn next(&self) -> Self {
         Self(self.0 + 1)
     }
@@ -148,7 +148,7 @@ impl TransactionTracker {
         }
     }
 
-    /// Starts a write transaction and return its snapshot ID.
+    /// Starts a write transaction and returns its snapshot ID.
     ///
     /// There can only be one write transaction at a time.
     /// This is enforced by the Database's write_lock mutex.
@@ -163,7 +163,7 @@ impl TransactionTracker {
         snapshot_id
     }
 
-    /// End the current write transaction.
+    /// Ends the current write transaction.
     pub fn end_write_transaction(&self, snapshot_id: SnapshotId) {
         let mut state = self.state.lock();
         debug_assert_eq!(

@@ -284,13 +284,13 @@ pub fn record_idempotency_evictions(count: usize) {
 // Connection Metrics
 // =============================================================================
 
-/// Increment active connections.
+/// Increments the active connection gauge.
 #[inline]
 pub fn increment_connections() {
     gauge!(ACTIVE_CONNECTIONS).increment(1.0);
 }
 
-/// Decrement active connections.
+/// Decrements the active connection gauge.
 #[inline]
 pub fn decrement_connections() {
     gauge!(ACTIVE_CONNECTIONS).decrement(1.0);
@@ -753,7 +753,7 @@ impl Timer {
         self.start.elapsed().as_secs_f64()
     }
 
-    /// Stops the timer and return elapsed time without recording.
+    /// Stops the timer and returns elapsed time without recording.
     pub fn stop(mut self) -> f64 {
         self.record_fn = None;
         self.elapsed_secs()

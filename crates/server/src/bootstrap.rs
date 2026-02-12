@@ -32,7 +32,7 @@ use crate::{
     discovery::resolve_bootstrap_peers,
 };
 
-/// Error type for bootstrap operations.
+/// Errors during cluster bootstrap, including database, Raft, and coordination failures.
 #[derive(Debug)]
 pub enum BootstrapError {
     /// Failed to open database.
@@ -71,19 +71,19 @@ impl std::fmt::Display for BootstrapError {
 
 impl std::error::Error for BootstrapError {}
 
-/// Bootstrapped node components.
+/// Holds ownership of all node resources after a successful bootstrap.
 ///
 /// Some fields are not directly accessed but are retained for ownership semantics:
 /// - `raft` and `state`: Maintain Arc reference counts for shared state
 /// - Handle fields: Keep background tasks alive and allow graceful shutdown
 pub struct BootstrappedNode {
-    /// The Raft instance.
+    /// Raft consensus instance (retained for reference counting).
     #[allow(dead_code)] // retained to maintain Arc reference count for shared Raft state
     pub raft: Arc<Raft<LedgerTypeConfig>>,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     #[allow(dead_code)] // retained to maintain Arc reference count for shared state layer
     pub state: Arc<StateLayer<FileBackend>>,
-    /// The configured Ledger server.
+    /// gRPC server ready to accept connections.
     pub server: LedgerServer,
     /// TTL garbage collector background task handle.
     #[allow(dead_code)] // retained to keep background task alive

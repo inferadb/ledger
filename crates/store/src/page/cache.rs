@@ -1,7 +1,7 @@
-//! LRU page cache for the store engine.
+//! Page cache for the store engine.
 //!
 //! The cache stores recently accessed pages to reduce I/O.
-//! It uses a simple LRU eviction policy.
+//! Uses clock eviction (approximate LRU) for low overhead.
 
 use std::{
     collections::HashMap,
@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use super::Page;
 use crate::error::PageId;
 
-/// LRU page cache.
+/// Page cache with clock eviction.
 ///
 /// Caches recently accessed pages to reduce disk I/O.
 /// Uses clock algorithm (approximation of LRU) for eviction.

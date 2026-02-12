@@ -88,7 +88,7 @@ impl BloomFilter {
         self.bits.iter().all(|&b| b == 0)
     }
 
-    /// Computes double-hash pair from a key using SipHash-derived hashing.
+    /// Computes a double-hash pair from a key using FNV-1a-inspired mixing.
     ///
     /// Uses two independent hash values derived from the key bytes.
     /// The approach splits a 128-bit hash into two 64-bit halves.

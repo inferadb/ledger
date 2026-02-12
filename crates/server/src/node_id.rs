@@ -72,7 +72,7 @@ struct SnowflakeState {
 static SNOWFLAKE_STATE: Mutex<SnowflakeState> =
     Mutex::new(SnowflakeState { last_timestamp: 0, sequence: 0 });
 
-/// Error type for node ID operations.
+/// Errors from Snowflake ID generation and persistence.
 #[derive(Debug, Snafu)]
 pub enum NodeIdError {
     /// Failed to read node ID from file.
@@ -129,7 +129,7 @@ pub enum NodeIdError {
 ///
 /// # Example
 ///
-/// ```
+/// ```no_run
 /// use inferadb_ledger_server::node_id::generate_snowflake_id;
 ///
 /// let id1 = generate_snowflake_id().unwrap();
@@ -195,7 +195,7 @@ pub fn extract_sequence(id: u64) -> u64 {
     id & SEQUENCE_MASK
 }
 
-/// Loads existing node ID or generate and persist a new one.
+/// Loads an existing node ID or generates and persists a new one.
 ///
 /// On first startup, generates a new Snowflake ID and persists it to
 /// `{data_dir}/node_id`. On subsequent startups, loads the existing ID

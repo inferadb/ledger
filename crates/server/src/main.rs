@@ -34,7 +34,7 @@ use inferadb_ledger_raft::otel::{self, OtelConfig};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Server error type.
+/// Top-level error type for the server binary, wrapping bootstrap and runtime failures.
 #[derive(Debug)]
 enum ServerError {
     Bootstrap(bootstrap::BootstrapError),

@@ -5,7 +5,7 @@
 //!
 //! - **Fixed schema**: 15 tables known at compile time
 //! - **Single writer**: Leverages Raft's serialization (no write-write MVCC needed)
-//! - **Append-optimized**: Raft log access patterns
+//! - **Raft-friendly**: Optimized for append-heavy Raft log access patterns
 //! - **Checksummed pages**: Crash safety with XXH3-64 verification
 //! - **Dual-slot commit**: Atomic commits via shadow paging (no WAL)
 //!
@@ -82,7 +82,7 @@ pub(crate) mod bloom;
 pub mod btree;
 /// Database API: open, read, write, commit, and iteration.
 pub mod db;
-/// Bitmap for tracking modified pages within a transaction.
+/// Bitmap for tracking pages modified since the last backup checkpoint.
 pub mod dirty_bitmap;
 /// Error types and result aliases for the store crate.
 pub mod error;
@@ -113,5 +113,5 @@ pub use page::{PAGE_HEADER_SIZE, Page, PageAllocator, PageCache};
 pub use tables::{Table, TableEntry, TableId};
 pub use types::{Key, KeyType, Value};
 
-/// Stores format version.
+/// Format version for the store on-disk layout.
 pub const VERSION: u16 = 1;

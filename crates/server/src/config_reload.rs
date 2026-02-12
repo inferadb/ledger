@@ -62,7 +62,7 @@ pub fn spawn_sighup_handler(
     });
 }
 
-/// Reads and apply a runtime config file.
+/// Reads and applies a runtime config file.
 ///
 /// Returns the list of changed field paths, or an error if the file
 /// cannot be read, parsed, or validated.

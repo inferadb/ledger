@@ -88,7 +88,7 @@ impl PositionTracker for HeightTracker {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use inferadb_ledger_sdk::streaming::{ReconnectingStream, HeightTracker};
 /// use inferadb_ledger_sdk::RetryPolicy;
 ///

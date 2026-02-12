@@ -124,7 +124,7 @@ impl CrashInjector {
         self.crashed.load(Ordering::SeqCst)
     }
 
-    /// Records a sync operation and check if a crash should occur.
+    /// Records a sync operation and checks if a crash should occur.
     ///
     /// Returns `true` if the crash should be triggered at this point.
     pub fn on_sync(&self) -> bool {
@@ -154,7 +154,7 @@ impl CrashInjector {
         should_crash
     }
 
-    /// Records a header write operation and check if a crash should occur.
+    /// Records a header write operation and checks if a crash should occur.
     ///
     /// Returns `true` if the crash should be triggered at this point.
     pub fn on_header_write(&self) -> bool {
@@ -178,7 +178,7 @@ impl CrashInjector {
         should_crash
     }
 
-    /// Records a page write operation and check if a crash should occur.
+    /// Records a page write operation and checks if a crash should occur.
     ///
     /// Returns `true` if the crash should be triggered at this point.
     /// The `page_threshold` parameter controls after how many page writes to crash.

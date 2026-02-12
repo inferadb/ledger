@@ -80,7 +80,7 @@ impl FileBackend {
         Ok(Self { file: RwLock::new(file_guard), page_size, path: path_str })
     }
 
-    /// Returns the file for direct operations.
+    /// Executes a closure with exclusive (write) access to the underlying file.
     fn with_file<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut File) -> Result<T>,
@@ -89,7 +89,7 @@ impl FileBackend {
         f(&mut file)
     }
 
-    /// Returns the file for read operations.
+    /// Executes a closure with shared (read) access to the underlying file.
     fn with_file_read<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&File) -> Result<T>,

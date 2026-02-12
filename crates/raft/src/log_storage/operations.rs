@@ -1,3 +1,7 @@
+//! State machine apply logic for Raft log entries.
+//!
+//! Transforms committed log entries into state mutations via the storage engine.
+
 use inferadb_ledger_state::{
     StateError,
     system::{NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys},
@@ -18,7 +22,7 @@ use crate::types::{LedgerRequest, LedgerResponse, SystemRequest};
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
-    /// Applies a single request and return the response plus optional vault entry.
+    /// Applies a single request and returns the response plus optional vault entry.
     ///
     /// For Write requests, this also returns a VaultEntry that should be included
     /// in the ShardBlock. The caller is responsible for collecting these entries

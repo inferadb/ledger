@@ -18,7 +18,7 @@ use tonic::{Request, Response, Status};
 
 use crate::types::{LedgerNodeId, LedgerTypeConfig};
 
-/// Raft service implementation for handling inter-node Raft RPCs.
+/// Handles incoming vote, append-entries, and install-snapshot RPCs from peer Raft nodes.
 pub struct RaftServiceImpl {
     /// The Raft instance to forward requests to.
     raft: Arc<Raft<LedgerTypeConfig>>,

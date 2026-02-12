@@ -317,10 +317,10 @@ const fn default_max_cardinality() -> u32 {
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MetricsCardinalityConfig {
-    /// Emit a WARN log when estimated distinct label combinations reach this count.
+    /// Emits a WARN log when estimated distinct label combinations reach this count.
     #[serde(default = "default_warn_cardinality")]
     pub warn_cardinality: u32,
-    /// Drop metric observations when estimated cardinality exceeds this count.
+    /// Drops metric observations when estimated cardinality exceeds this count.
     #[serde(default = "default_max_cardinality")]
     pub max_cardinality: u32,
 }

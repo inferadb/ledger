@@ -1,4 +1,3 @@
-//! Wide events logging system for comprehensive request observability.
 //! Canonical log lines (wide events) for structured request-level observability.
 //!
 //! This module implements the canonical log line pattern where each request emits

@@ -122,7 +122,7 @@ impl CommitSlot {
     /// Size of a commit slot on disk (64 bytes).
     pub const SIZE: usize = 64;
 
-    /// Size of checksum-protected region (48 bytes = 6 × 8-byte fields before checksum).
+    /// Size of checksum-protected region (40 bytes = 5 × 8-byte fields before checksum).
     const CHECKSUMMED_SIZE: usize = 40;
 
     /// Serializes the slot to bytes.
@@ -357,7 +357,7 @@ impl DatabaseHeader {
         Ok(Self { magic, version, page_size_power, reserved, god_byte, slot0, slot1 })
     }
 
-    /// Validates the header and determine which slot to use.
+    /// Validates the header and determines which slot to use.
     ///
     /// Returns the index of the valid primary slot, or an error if both are corrupt.
     /// If the indicated primary slot has an invalid checksum, tries the secondary.

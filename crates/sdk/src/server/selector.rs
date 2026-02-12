@@ -81,7 +81,7 @@ impl LatencyStats {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// let selector = ServerSelector::new();
 ///
 /// // Record latencies as requests complete

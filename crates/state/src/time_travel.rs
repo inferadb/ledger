@@ -25,7 +25,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 
-/// Error types for time-travel index operations.
+/// Errors returned by [`TimeTravelIndex`] operations.
 #[derive(Debug, Snafu)]
 pub enum TimeTravelError {
     /// Underlying storage operation failed.

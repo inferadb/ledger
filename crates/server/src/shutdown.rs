@@ -38,14 +38,14 @@ pub async fn shutdown_signal() {
     }
 }
 
-/// Shutdown coordinator for graceful termination.
+/// Coordinates graceful shutdown by distributing a signal via broadcast channel.
 ///
-/// Manages the shutdown sequence to ensure:
-/// - In-flight requests complete
-/// - Raft state is flushed
-/// - Connections are closed cleanly
+/// Broadcasts the shutdown signal to all subscribers.
+///
+/// The actual graceful shutdown logic (draining connections, flushing Raft
+/// state) is handled by [`inferadb_ledger_raft::GracefulShutdown`].
 pub struct ShutdownCoordinator {
-    /// Notifies channel for shutdown signal.
+    /// Broadcast sender for shutdown notifications.
     notify: tokio::sync::broadcast::Sender<()>,
 }
 
@@ -62,12 +62,12 @@ impl ShutdownCoordinator {
         self.notify.subscribe()
     }
 
-    /// Triggers shutdown.
+    /// Sends the shutdown signal to all active subscribers.
     pub fn shutdown(&self) {
         let _ = self.notify.send(());
     }
 
-    /// Waits for shutdown signal and trigger coordinator.
+    /// Blocks until Ctrl-C or SIGTERM is received, then broadcasts shutdown.
     #[allow(dead_code)] // utility for graceful shutdown coordination
     pub async fn wait_for_signal(&self) {
         shutdown_signal().await;

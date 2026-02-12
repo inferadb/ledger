@@ -23,7 +23,7 @@ use crate::{
     types::LedgerTypeConfig,
 };
 
-/// Health service implementation.
+/// Health check service with three-probe Kubernetes support and dependency validation.
 ///
 /// Provides three-probe health checking for Kubernetes orchestration:
 /// - **Startup**: passes once initialization is complete and data directory is valid

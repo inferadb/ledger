@@ -12,7 +12,7 @@ use inferadb_ledger_proto::proto;
 use prost::Message;
 use tonic::{Response, Status};
 
-/// Inject `x-request-id` and `x-trace-id` correlation metadata into a gRPC response.
+/// Injects `x-request-id` and `x-trace-id` correlation metadata into a gRPC response.
 ///
 /// Called on every successful response to propagate server-generated correlation IDs
 /// back to the SDK, where they are extracted and attached to `SdkError` variants.
@@ -31,7 +31,7 @@ pub(crate) fn response_with_correlation<T>(
     response
 }
 
-/// Inject correlation metadata and structured error details into a gRPC error `Status`.
+/// Injects correlation metadata and structured error details into a gRPC error `Status`.
 ///
 /// Ensures that even error responses carry:
 /// 1. Correlation IDs (`x-request-id`, `x-trace-id`) for SDK error enrichment.
@@ -66,7 +66,7 @@ pub(crate) fn status_with_correlation(
     status
 }
 
-/// Synthesize a generic `ErrorDetails` from a gRPC status code.
+/// Synthesizes a generic `ErrorDetails` from a gRPC status code.
 ///
 /// Maps each gRPC code to the most appropriate `ErrorCode`, retryability flag,
 /// and recovery guidance. Used as a fallback when specialized error builders

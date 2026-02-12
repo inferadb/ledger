@@ -25,7 +25,7 @@ use crate::{
     state::StateLayer,
 };
 
-/// Shard manager error types.
+/// Errors returned by [`ShardManager`] operations.
 #[derive(Debug, Snafu)]
 pub enum ShardError {
     /// State layer operation failed.
@@ -157,12 +157,12 @@ impl<B: StorageBackend> ShardManager<B> {
         self.vault_meta.read().get(&vault_id).map(|m| m.health.clone())
     }
 
-    /// Access the state layer.
+    /// Returns a reference to the state layer.
     pub fn state(&self) -> &StateLayer<B> {
         &self.state
     }
 
-    /// Access the block archive.
+    /// Returns a reference to the block archive.
     pub fn blocks(&self) -> &BlockArchive<B> {
         &self.blocks
     }

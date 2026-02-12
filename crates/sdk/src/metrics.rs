@@ -17,7 +17,7 @@
 //! | `ledger_sdk_requests_total` | Counter | `method`, `status` | Total requests by method and outcome |
 //! | `ledger_sdk_request_duration_seconds` | Histogram | `method` | Request latency distribution |
 //! | `ledger_sdk_retries_total` | Counter | `method`, `attempt`, `error_type` | Retry attempts by method |
-//! | `ledger_sdk_circuit_state` | Gauge | `endpoint`, `state` | Circuit breaker state (1=active) |
+//! | `ledger_sdk_circuit_transitions_total` | Counter | `endpoint`, `state` | Circuit breaker state transitions |
 //! | `ledger_sdk_connections_total` | Counter | `endpoint`, `event` | Connection lifecycle events |
 //!
 //! # Example

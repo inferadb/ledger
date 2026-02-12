@@ -1,3 +1,8 @@
+//! Shared read handle for Raft applied state.
+//!
+//! Provides concurrent read access to the state machine's applied state
+//! without holding the write lock.
+
 use std::{collections::HashMap, sync::Arc};
 
 use inferadb_ledger_types::{NamespaceId, NamespaceUsage, VaultId};

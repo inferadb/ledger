@@ -160,7 +160,7 @@ pub fn tx_hash(tx: &Transaction) -> Hash {
     hasher.finalize().into()
 }
 
-/// Hash a single operation into the hasher.
+/// Hashes a single operation into the hasher.
 fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
     use crate::types::Operation;
 
@@ -215,14 +215,14 @@ fn hash_operation(hasher: &mut Sha256, op: &crate::types::Operation) {
     }
 }
 
-/// Hash a length-prefixed string.
+/// Hashes a length-prefixed string.
 #[inline]
 fn hash_length_prefixed_str(hasher: &mut Sha256, s: &str) {
     hasher.update((s.len() as u32).to_le_bytes());
     hasher.update(s.as_bytes());
 }
 
-/// Hash length-prefixed bytes.
+/// Hashes length-prefixed bytes.
 #[inline]
 fn hash_length_prefixed_bytes(hasher: &mut Sha256, data: &[u8]) {
     hasher.update((data.len() as u32).to_le_bytes());
@@ -323,7 +323,7 @@ pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
 pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
     let mut hasher = Sha256::new();
 
-    // namespace_id: i32 as LE
+    // namespace_id: i64 as LE
     hasher.update(entry.namespace_id.value().to_le_bytes());
 
     // vault_id: i64 as LE

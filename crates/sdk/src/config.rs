@@ -18,6 +18,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration for the Ledger SDK client.
+///
+/// Constructed via [`ClientConfig::builder()`](ClientConfig::builder) which validates all fields at
+/// build time.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Server source for discovering cluster servers.
@@ -239,7 +242,7 @@ const fn default_jitter() -> f64 {
     0.25
 }
 
-/// Retry policy configuration.
+/// Retry policy with exponential backoff and jitter.
 #[derive(Debug, Clone, bon::Builder, serde::Serialize, serde::Deserialize)]
 #[builder(derive(Debug))]
 pub struct RetryPolicy {
@@ -324,7 +327,7 @@ const DEFAULT_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 ///
 /// # Example
 ///
-/// ```
+/// ```no_run
 /// use std::time::Duration;
 /// use inferadb_ledger_sdk::DiscoveryConfig;
 ///

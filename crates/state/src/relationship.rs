@@ -9,7 +9,7 @@ use snafu::{ResultExt, Snafu};
 
 use crate::keys::{encode_storage_key, vault_prefix};
 
-/// Relationship store error types.
+/// Errors returned by [`RelationshipStore`] operations.
 #[derive(Debug, Snafu)]
 pub enum RelationshipError {
     /// Underlying storage operation failed.

@@ -5,7 +5,7 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
 //! let lock = DataDirLock::acquire("/path/to/data")?;
 //! // Lock is held until `lock` is dropped
 //! ```
@@ -88,7 +88,7 @@ impl DataDirLock {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// let lock = DataDirLock::acquire("/var/lib/ledger/data")?;
     /// // Data directory is now exclusively locked
     /// // Lock is released when `lock` goes out of scope

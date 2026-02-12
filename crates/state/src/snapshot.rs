@@ -26,7 +26,7 @@ const SNAPSHOT_MAGIC: [u8; 4] = *b"LSNP";
 /// v2: Added chain verification linkage (genesis_hash, previous_snapshot, chain_commitment)
 const SNAPSHOT_VERSION: u32 = 2;
 
-/// Snapshot error types.
+/// Errors returned by snapshot creation, reading, and management operations.
 #[derive(Debug, Snafu)]
 pub enum SnapshotError {
     /// IO error during snapshot read or write.

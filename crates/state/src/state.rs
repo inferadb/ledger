@@ -22,7 +22,7 @@ use crate::{
     keys::{bucket_prefix, encode_storage_key},
 };
 
-/// State layer error types.
+/// Errors returned by [`StateLayer`] operations.
 #[derive(Debug, Snafu)]
 pub enum StateError {
     /// Underlying storage operation failed.
@@ -115,7 +115,7 @@ impl<B: StorageBackend> StateLayer<B> {
         self.db.stats()
     }
 
-    /// Access the underlying database for integrity scrubbing and diagnostics.
+    /// Returns a reference to the underlying database for integrity scrubbing and diagnostics.
     pub fn database(&self) -> &Arc<Database<B>> {
         &self.db
     }

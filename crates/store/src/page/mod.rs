@@ -3,7 +3,7 @@
 //! This module handles:
 //! - Page layout and structure
 //! - Page allocation (free list)
-//! - Page caching (LRU)
+//! - Page caching (clock eviction)
 //! - Checksum computation and verification
 
 mod allocator;
@@ -25,7 +25,7 @@ pub const PAGE_HEADER_SIZE: usize = 16;
 /// 0       1      Page type (PageType enum)
 /// 1       1      Flags (reserved)
 /// 2       2      Item count (for B-tree pages)
-/// 4       4      Checksum (XXH32 of page content after header)
+/// 4       4      Checksum (XXH3-64 truncated to 32 bits, of page content after header)
 /// 8       8      Transaction ID that last modified this page
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -144,13 +144,13 @@ impl Page {
         &self.data[PAGE_HEADER_SIZE..]
     }
 
-    /// Returns mutable content portion.
+    /// Returns a mutable reference to the content portion of the page (after header).
     pub fn content_mut(&mut self) -> &mut [u8] {
         self.dirty = true;
         &mut self.data[PAGE_HEADER_SIZE..]
     }
 
-    /// Computes and update the checksum using XXH3-64 (truncated to 32 bits).
+    /// Computes and updates the checksum using XXH3-64 (truncated to 32 bits).
     ///
     /// Uses XXH3-64 for better hash quality and performance on modern CPUs,
     /// truncated to 32 bits to maintain format compatibility with existing pages.

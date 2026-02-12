@@ -33,7 +33,7 @@ pub enum StorageTier {
     Cold,
 }
 
-/// Error types for tiered storage operations.
+/// Errors returned by tiered snapshot storage operations.
 #[derive(Debug, Snafu)]
 pub enum TieredStorageError {
     /// Error from underlying snapshot operations.
@@ -606,7 +606,7 @@ impl Default for TieredConfig {
 /// Tiered snapshot manager.
 ///
 /// Manages snapshots across multiple storage tiers with automatic
-/// promotion/demotion based on age and access patterns.
+/// promotion/demotion based on age.
 pub struct TieredSnapshotManager {
     /// Hot tier (local SSD).
     hot: Box<dyn StorageBackend>,

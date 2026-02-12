@@ -6,7 +6,10 @@ use rs_merkle::{MerkleTree as RsMerkleTree, algorithms::Sha256 as RsSha256};
 
 use crate::hash::{EMPTY_HASH, Hash};
 
-/// Merkle tree using SHA-256.
+/// Binary Merkle tree using SHA-256 for transaction inclusion proofs.
+///
+/// Leaf nodes are transaction hashes; internal nodes are `H(left || right)`.
+/// Supports proof generation for individual leaf indices.
 pub struct MerkleTree {
     tree: RsMerkleTree<RsSha256>,
     leaves: Vec<Hash>,
@@ -50,13 +53,13 @@ impl MerkleTree {
         self.leaves.len()
     }
 
-    /// Whether the tree is empty.
+    /// Returns true if the tree has no leaves.
     pub fn is_empty(&self) -> bool {
         self.leaves.is_empty()
     }
 }
 
-/// Merkle proof for a single leaf.
+/// Inclusion proof for a single leaf in a [`MerkleTree`], verifiable against a root hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleProof {
     /// Index of the leaf in the tree.

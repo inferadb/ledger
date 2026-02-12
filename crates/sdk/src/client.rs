@@ -18,7 +18,7 @@ use crate::{
     tracing::TraceContextInterceptor,
 };
 
-/// Reads consistency level for read operations.
+/// Consistency level for read operations.
 ///
 /// Controls whether reads are served from any replica (eventual) or must
 /// go through the leader (linearizable).
@@ -685,7 +685,7 @@ pub struct ListEntitiesOpts {
     /// Pagination token from previous response.
     #[builder(into)]
     pub page_token: Option<String>,
-    /// Reads consistency level.
+    /// Read consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
     /// Vault ID for vault-scoped entities (None = namespace-level, uses vault_id=0).
@@ -764,7 +764,7 @@ pub struct ListRelationshipsOpts {
     /// Pagination token from previous response.
     #[builder(into)]
     pub page_token: Option<String>,
-    /// Reads consistency level.
+    /// Read consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
 }
@@ -840,7 +840,7 @@ pub struct ListResourcesOpts {
     /// Pagination token from previous response.
     #[builder(into)]
     pub page_token: Option<String>,
-    /// Reads consistency level.
+    /// Read consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
 }
@@ -1021,7 +1021,7 @@ pub enum SetCondition {
 }
 
 impl Operation {
-    /// Creates a set entity operation.
+    /// Creates an operation that sets an entity's key-value pair.
     ///
     /// # Example
     ///
@@ -1065,12 +1065,12 @@ impl Operation {
         }
     }
 
-    /// Creates a delete entity operation.
+    /// Creates an operation that deletes an entity by key.
     pub fn delete_entity(key: impl Into<String>) -> Self {
         Operation::DeleteEntity { key: key.into() }
     }
 
-    /// Creates a relationship.
+    /// Creates an operation that establishes a relationship between a resource and subject.
     ///
     /// # Arguments
     ///
@@ -1089,7 +1089,7 @@ impl Operation {
         }
     }
 
-    /// Deletes a relationship.
+    /// Creates an operation that removes a relationship between a resource and subject.
     pub fn delete_relationship(
         resource: impl Into<String>,
         relation: impl Into<String>,
@@ -1436,7 +1436,7 @@ impl LedgerClient {
 
     /// Creates a fluent batch read builder for the given namespace and optional vault.
     ///
-    /// Adds keys and then call `.execute()`:
+    /// Add keys, then call `.execute()`:
     ///
     /// ```no_run
     /// # use inferadb_ledger_sdk::LedgerClient;
@@ -1462,7 +1462,7 @@ impl LedgerClient {
 
     /// Creates a fluent relationship query builder for the given namespace and vault.
     ///
-    /// Adds filters and then call `.execute()`:
+    /// Add filters, then call `.execute()`:
     ///
     /// ```no_run
     /// # use inferadb_ledger_sdk::LedgerClient;
@@ -2167,7 +2167,7 @@ impl LedgerClient {
         self.execute_write(namespace_id, vault_id, &operations, idempotency_key, None).await
     }
 
-    /// Execute a single write attempt with retry for transient errors.
+    /// Executes a single write attempt with retry for transient errors.
     ///
     /// The idempotency key is preserved across retry attempts to ensure
     /// at-most-once semantics even with network failures.
@@ -2247,7 +2247,7 @@ impl LedgerClient {
         .await
     }
 
-    /// Process WriteResponse and convert to Result<WriteSuccess>.
+    /// Processes a WriteResponse and converts to Result<WriteSuccess>.
     fn process_write_response(response: proto::WriteResponse) -> Result<WriteSuccess> {
         match response.result {
             Some(proto::write_response::Result::Success(success)) => Ok(WriteSuccess {
@@ -2414,7 +2414,7 @@ impl LedgerClient {
         self.execute_batch_write(namespace_id, vault_id, &batches, idempotency_key, None).await
     }
 
-    /// Execute a single batch write attempt with retry for transient errors.
+    /// Executes a single batch write attempt with retry for transient errors.
     ///
     /// The idempotency key is preserved across retry attempts to ensure
     /// at-most-once semantics even with network failures.
@@ -2498,7 +2498,7 @@ impl LedgerClient {
         .await
     }
 
-    /// Process BatchWriteResponse and convert to Result<WriteSuccess>.
+    /// Processes a BatchWriteResponse and converts to Result<WriteSuccess>.
     fn process_batch_write_response(response: proto::BatchWriteResponse) -> Result<WriteSuccess> {
         match response.result {
             Some(proto::batch_write_response::Result::Success(success)) => Ok(WriteSuccess {

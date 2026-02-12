@@ -6,7 +6,7 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
 //! let maintenance = PeerMaintenance::builder().discovery(discovery_service).build();
 //! let handle = maintenance.start();
 //! // ... later ...

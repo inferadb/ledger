@@ -45,7 +45,8 @@ use crate::{
     wide_events::{OperationType, RequestContext, Sampler},
 };
 
-/// Reads service implementation.
+/// Handles read operations including verified reads, entity/relationship listing, and block
+/// streaming.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct ReadServiceImpl {
@@ -219,7 +220,7 @@ impl ReadServiceImpl {
         )
     }
 
-    /// Finds and load the nearest snapshot for historical read optimization.
+    /// Finds and loads the nearest snapshot for historical read optimization.
     ///
     /// Returns (start_height, snapshot_loaded):
     /// - If a suitable snapshot is found and loaded, returns (snapshot_vault_height + 1, true)

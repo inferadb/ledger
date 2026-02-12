@@ -51,7 +51,8 @@ fn classify_batch_error(err: &BatchError) -> Status {
     }
 }
 
-/// Writes service implementation.
+/// Handles transaction submission through Raft consensus with batching, idempotency, and rate
+/// limiting.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct WriteServiceImpl {
@@ -197,7 +198,7 @@ impl WriteServiceImpl {
         self
     }
 
-    /// Adds applied state accessor for sequence gap detection.
+    /// Attaches applied state accessor for client sequence tracking.
     #[must_use]
     pub fn with_applied_state(mut self, applied_state: AppliedStateAccessor) -> Self {
         self.applied_state = Some(applied_state);
@@ -250,7 +251,7 @@ impl WriteServiceImpl {
         super::helpers::validate_operations(operations, &self.validation_config)
     }
 
-    /// Emits an audit event and record the corresponding Prometheus metric.
+    /// Emits an audit event and records the corresponding Prometheus metric.
     fn emit_audit_event(&self, event: &AuditEvent) {
         super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
     }

@@ -160,7 +160,7 @@ fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
 /// Default learner cache TTL (5 seconds).
 const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Discovery service implementation.
+/// Provides peer discovery and system state for cluster coordination.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct DiscoveryServiceImpl {

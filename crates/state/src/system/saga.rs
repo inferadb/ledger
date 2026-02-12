@@ -90,7 +90,7 @@ pub struct CreateOrgInput {
     pub existing_user_id: Option<UserId>,
 }
 
-/// Creates Organization saga record.
+/// Record for the Create Organization saga, tracking state and retry progress.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrgSaga {
     /// Unique saga identifier.
@@ -231,7 +231,7 @@ pub struct DeleteUserInput {
     pub namespace_ids: Vec<NamespaceId>,
 }
 
-/// Deletes User saga record.
+/// Record for the Delete User saga, tracking state and retry progress.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteUserSaga {
     /// Unique saga identifier.
@@ -331,18 +331,18 @@ impl DeleteUserSaga {
 /// Type of saga.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SagaType {
-    /// Creates organization saga.
+    /// Create Organization saga type.
     CreateOrg,
-    /// Deletes user saga.
+    /// Delete User saga type.
     DeleteUser,
 }
 
 /// Generic saga record that wraps specific saga types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Saga {
-    /// Creates organization saga.
+    /// Create Organization saga.
     CreateOrg(CreateOrgSaga),
-    /// Deletes user saga.
+    /// Delete User saga.
     DeleteUser(DeleteUserSaga),
 }
 

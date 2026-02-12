@@ -158,7 +158,7 @@ impl WideEventsSamplingConfig {
     }
 }
 
-/// OTLP transport protocol.
+/// Transport protocol for OTLP trace export.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OtelTransport {
@@ -429,7 +429,7 @@ pub struct WideEventsConfig {
     #[builder(default)]
     pub sampling: WideEventsSamplingConfig,
 
-    /// Lists of VIP namespace IDs with elevated sampling rates.
+    /// List of VIP namespace IDs with elevated sampling rates.
     /// These are static overrides that always receive VIP treatment.
     #[serde(default)]
     #[builder(default)]
@@ -529,7 +529,7 @@ pub enum LogFormat {
 /// Default listen address for the gRPC server (localhost only for security).
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 
-/// Server configuration.
+/// Configuration for the InferaDB Ledger server.
 ///
 /// Configuration can be provided via command-line arguments or environment variables.
 /// CLI arguments take precedence over environment variables.
@@ -582,7 +582,7 @@ pub struct Config {
     /// Address to listen on for gRPC.
     ///
     /// Defaults to 127.0.0.1:50051 (localhost only) for security.
-    /// Sets to 0.0.0.0:50051 or a specific IP to accept remote connections.
+    /// Set to 0.0.0.0:50051 or a specific IP to accept remote connections.
     #[arg(long = "listen", env = "INFERADB__LEDGER__LISTEN", default_value = DEFAULT_LISTEN_ADDR)]
     #[builder(default = default_listen_addr())]
     pub listen_addr: SocketAddr,
@@ -971,7 +971,7 @@ impl Config {
     }
 }
 
-/// Configuration error.
+/// Errors from configuration validation.
 #[derive(Debug, Snafu)]
 pub enum ConfigError {
     /// Configuration validation failed.

@@ -61,7 +61,7 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
-    /// Opens or create a new log store at the given path.
+    /// Opens or creates a new log store at the given path.
     ///
     /// This creates a basic log store without StateLayer or BlockArchive integration.
     /// Use `with_state_layer` and `with_block_archive` to add those capabilities.
@@ -72,7 +72,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Max supported: 64KB. Minimum: 512 bytes (must be power of 2).
     pub const RAFT_PAGE_SIZE: usize = 16 * 1024; // 16KB
 
-    /// Opens or create a Raft log storage database.
+    /// Opens or creates a Raft log storage database.
     ///
     /// New databases are created with 16KB pages to support larger batch sizes.
     /// Existing databases retain their original page size for backwards compatibility.

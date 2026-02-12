@@ -166,7 +166,7 @@ impl BucketRootBuilder {
         self.hasher.add_entity(entity);
     }
 
-    /// Finalizes and return the bucket root hash.
+    /// Finalizes and returns the computed bucket root hash.
     pub fn finalize(self) -> Hash {
         self.hasher.finalize()
     }

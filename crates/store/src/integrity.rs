@@ -221,7 +221,7 @@ impl<'a, B: StorageBackend> IntegrityScrubber<'a, B> {
         }
     }
 
-    /// Verifies branch node key ordering and recurse into children.
+    /// Verifies branch node key ordering and recurses into children.
     fn verify_branch_ordering(
         &self,
         page: &Page,

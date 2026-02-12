@@ -545,7 +545,7 @@ impl Default for ValidationConfig {
 
 #[bon::bon]
 impl ValidationConfig {
-    /// Creates a new validation configuration with validation.
+    /// Creates a new validation configuration, verifying all limits are positive.
     ///
     /// # Errors
     ///

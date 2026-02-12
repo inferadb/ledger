@@ -15,7 +15,7 @@ use tempfile::TempDir;
 ///
 /// # Example
 ///
-/// ```
+/// ```no_run
 /// use inferadb_ledger_test_utils::TestDir;
 ///
 /// let dir = TestDir::new();

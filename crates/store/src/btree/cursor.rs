@@ -102,15 +102,10 @@ impl<'a> Range<'a> {
         Self { start: Bound::Included(start), end: Bound::Unbounded }
     }
 
-    /// Creates a range with a prefix (all keys starting with prefix).
+    /// Creates a range starting from `prefix` (inclusive) with unbounded end.
+    /// Note: includes all keys >= prefix, not just those sharing the prefix.
     pub fn prefix(prefix: &'a [u8]) -> Self {
-        // Calculate the end key by incrementing the last byte
-        // This is a simplified version; actual implementation may need
-        // to handle overflow cases
-        Self {
-            start: Bound::Included(prefix),
-            end: Bound::Unbounded, // Would need special prefix handling
-        }
+        Self { start: Bound::Included(prefix), end: Bound::Unbounded }
     }
 
     /// Checks if a key is within this range.

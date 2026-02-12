@@ -2,8 +2,8 @@
 //!
 //! The store supports three key types:
 //! - `u64` / `i64`: 8-byte fixed-width integers (big-endian for lexicographic ordering)
-//! - `&str`: UTF-8 strings with length prefix
-//! - `&[u8]`: Arbitrary byte slices with length prefix
+//! - `&str`: UTF-8 strings (stored inline without length prefix)
+//! - `&[u8]`: Arbitrary byte slices (stored inline without length prefix)
 //!
 //! Values are always `&[u8]` (arbitrary bytes).
 
@@ -18,9 +18,9 @@ pub enum KeyType {
     U64,
     /// Signed 64-bit integer (transformed for lexicographic ordering).
     I64,
-    /// UTF-8 string (length-prefixed).
+    /// UTF-8 string (stored inline without length prefix).
     Str,
-    /// Arbitrary bytes (length-prefixed).
+    /// Arbitrary bytes (stored inline without length prefix).
     Bytes,
 }
 
@@ -35,7 +35,7 @@ pub trait Key: Sized {
     /// Decodes a key from a byte slice.
     fn decode(buf: &[u8]) -> Option<Self>;
 
-    /// Compare two encoded keys lexicographically.
+    /// Compares two encoded keys lexicographically.
     fn compare_encoded(a: &[u8], b: &[u8]) -> Ordering;
 
     /// Returns the encoded size of this key.

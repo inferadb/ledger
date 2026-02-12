@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{metrics, rate_limit::RateLimiter};
 
-/// Emits an audit event and record the corresponding Prometheus metric.
+/// Emits an audit event and records the corresponding Prometheus metric.
 ///
 /// If the audit logger is not configured, this is a no-op (only metrics recorded).
 /// If the audit log write fails, logs a warning but does not propagate the error —
@@ -223,8 +223,7 @@ pub(crate) fn check_storage_quota(
 
 /// Estimates the total byte size of operations for storage quota checking.
 ///
-/// Sums key + value sizes across all operations. This is an estimate —
-/// exact storage accounting is deferred to Task 6 (Namespace Resource Accounting).
+/// Sums key + value sizes across all operations as an approximate storage estimate.
 pub(crate) fn estimate_operations_bytes(
     operations: &[inferadb_ledger_proto::proto::Operation],
 ) -> u64 {

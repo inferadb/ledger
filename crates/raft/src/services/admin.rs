@@ -43,7 +43,8 @@ use crate::{
     wide_events::{OperationType, RequestContext, Sampler},
 };
 
-/// Admin service implementation.
+/// Handles namespace and vault lifecycle, cluster membership, snapshots, and runtime configuration
+/// via Raft consensus.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct AdminServiceImpl {
@@ -170,7 +171,7 @@ impl AdminServiceImpl {
         )
     }
 
-    /// Emits an audit event and record the corresponding Prometheus metric.
+    /// Emits an audit event and records the corresponding Prometheus metric.
     fn emit_audit_event(&self, event: &AuditEvent) {
         super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
     }

@@ -217,7 +217,7 @@ impl BatchWriterHandle {
     }
 }
 
-/// Batches writer that coalesces writes.
+/// Batch writer that coalesces individual write proposals into batches for Raft consensus.
 pub struct BatchWriter<F>
 where
     F: Fn(

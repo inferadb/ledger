@@ -9,7 +9,7 @@ use std::{path::Path, sync::Arc};
 use inferadb_ledger_store::{Database, FileBackend, InMemoryBackend};
 use snafu::Snafu;
 
-/// Error context for storage operations.
+/// Errors returned when opening or operating on a [`StorageEngine`].
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum EngineError {

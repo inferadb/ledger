@@ -247,7 +247,7 @@ pub enum SdkError {
         original_tx_id: Option<String>,
     },
 
-    /// Writes was already committed (idempotent retry detected).
+    /// Write was already committed (idempotent retry detected).
     ///
     /// This is not an error - the original write succeeded. The SDK returns
     /// success with the original transaction details when this is detected.
@@ -304,7 +304,7 @@ pub enum SdkError {
     InvalidUrl {
         /// The invalid URL.
         url: String,
-        /// Parses error description.
+        /// Error description from URL parsing.
         message: String,
     },
 
