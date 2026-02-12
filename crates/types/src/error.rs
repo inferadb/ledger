@@ -390,7 +390,7 @@ pub enum LedgerError {
     /// Entity not found at the given key.
     ///
     /// **Recovery**: Not retryable. This is expected for first reads.
-    /// Creates the entity with a `SetEntity` operation first.
+    /// Create the entity with a `SetEntity` operation first.
     #[snafu(display("Entity not found: {key}"))]
     EntityNotFound {
         /// Entity key.

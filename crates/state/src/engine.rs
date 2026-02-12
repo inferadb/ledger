@@ -1,8 +1,8 @@
-//! inferadb-ledger-store storage engine wrapper.
+//! Storage engine wrapper around [`inferadb-ledger-store`].
 //!
-//! Provides a thin wrapper around inferadb-ledger-store with:
-//! - Database lifecycle management
-//! - Convenient constructors
+//! Provides lifecycle management for the underlying B+ tree database:
+//! - File-based ([`StorageEngine`]) and in-memory ([`InMemoryStorageEngine`]) backends
+//! - Shared ownership via [`Arc`] for concurrent access across state layer components
 
 use std::{path::Path, sync::Arc};
 
@@ -22,9 +22,11 @@ pub enum EngineError {
     Storage { source: inferadb_ledger_store::Error },
 }
 
-/// Storage engine backed by inferadb-ledger-store (file-based).
+/// File-backed storage engine wrapping [`Database<FileBackend>`].
 ///
-/// Wraps an inferadb-ledger-store Database with a FileBackend for persistent storage.
+/// Use [`open`](Self::open) to create or open a database at a filesystem path.
+/// The database handle is reference-counted; cloning this struct shares the
+/// same underlying database.
 pub struct StorageEngine {
     db: Arc<Database<FileBackend>>,
 }
@@ -56,9 +58,11 @@ impl Clone for StorageEngine {
     }
 }
 
-/// In-memory storage engine for testing.
+/// In-memory storage engine wrapping [`Database<InMemoryBackend>`].
 ///
-/// Wraps an inferadb-ledger-store Database with an InMemoryBackend.
+/// Intended for testing. Data is not persisted across process restarts.
+/// The database handle is reference-counted; cloning this struct shares
+/// the same underlying database.
 pub struct InMemoryStorageEngine {
     db: Arc<Database<InMemoryBackend>>,
 }

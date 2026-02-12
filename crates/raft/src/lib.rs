@@ -15,10 +15,7 @@
 //!
 //! All other modules and re-exports are server-internal infrastructure
 //! hidden from documentation. They may change without notice.
-
-#![deny(unsafe_code)]
-#![warn(missing_docs)]
-
+//!
 //! ## Architecture Note
 //!
 //! OpenRaft 0.9 has sealed traits for `RaftLogStorage` and `RaftStateMachine` (v2 API).
@@ -30,6 +27,8 @@
 //! Ledger runs behind WireGuard VPN. Authentication and authorization are handled
 //! by Engine/Control services upstream. Ledger trusts all incoming requests.
 
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
 // gRPC services return tonic::Status (176 bytes) - this is standard practice for gRPC error
 // handling
 #![allow(clippy::result_large_err)]
@@ -178,4 +177,5 @@ pub use server::LedgerServer;
 pub use ttl_gc::TtlGarbageCollector;
 #[doc(hidden)]
 pub use types::LedgerNodeId;
+/// OpenRaft type configuration for the ledger's Raft consensus layer.
 pub use types::LedgerTypeConfig;

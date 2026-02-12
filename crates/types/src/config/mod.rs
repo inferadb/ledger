@@ -3,7 +3,7 @@
 //! Configuration is loaded from TOML files and environment variables.
 //! All config structs validate their values at construction time via
 //! fallible builders. Post-deserialization validation is available via
-//! the [`validate`](StorageConfig::validate) method on each struct.
+//! the `validate()` method on each struct.
 
 // The schemars `JsonSchema` derive macro internally uses `.unwrap()` in its
 // `json_schema!` and `json_internal!` expansions. Allow `disallowed_methods`

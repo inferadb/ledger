@@ -24,6 +24,11 @@ mod relationship;
 mod shard;
 mod snapshot;
 mod state;
+/// System namespace (`_system`) for global cluster data.
+///
+/// Contains types for user accounts, namespace routing, cluster membership,
+/// and cross-namespace sagas. See [`system::SystemNamespaceService`] for the
+/// primary service interface.
 pub mod system;
 mod tiered_storage;
 mod time_travel;

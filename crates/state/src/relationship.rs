@@ -24,11 +24,15 @@ pub enum RelationshipError {
 /// Result type for relationship operations.
 pub type Result<T> = std::result::Result<T, RelationshipError>;
 
-/// Relationship storage operations.
+/// Low-level relationship storage operations on raw transactions.
+///
+/// Provides direct relationship CRUD without the batch semantics, dual-index
+/// updates, or dirty-bucket tracking of [`StateLayer`](crate::StateLayer).
+/// Use this when operating within an existing transaction.
 pub struct RelationshipStore;
 
 impl RelationshipStore {
-    /// Returns a relationship by its components.
+    /// Returns a relationship by its components, or `None` if not found.
     ///
     /// # Errors
     ///
@@ -54,7 +58,7 @@ impl RelationshipStore {
         }
     }
 
-    /// Checks if a relationship exists.
+    /// Checks if a relationship exists in the vault.
     ///
     /// # Errors
     ///
@@ -73,9 +77,14 @@ impl RelationshipStore {
         Ok(txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some())
     }
 
-    /// Creates a relationship.
+    /// Creates a relationship if it does not already exist.
     ///
-    /// Returns true if created, false if already existed.
+    /// Returns `true` if the relationship was created, `false` if it already existed.
+    /// The caller must commit the transaction after this call.
+    ///
+    /// Note: This does not update the dual indexes ([`IndexManager`](crate::IndexManager)).
+    /// [`StateLayer::apply_operations`](crate::StateLayer::apply_operations) handles
+    /// index maintenance automatically.
     ///
     /// # Errors
     ///
@@ -104,9 +113,12 @@ impl RelationshipStore {
         Ok(true)
     }
 
-    /// Deletes a relationship.
+    /// Deletes a relationship by its components.
     ///
-    /// Returns true if deleted, false if not found.
+    /// Returns `true` if the relationship existed and was deleted, `false` if not found.
+    /// The caller must commit the transaction after this call.
+    ///
+    /// Note: This does not update the dual indexes. See [`create`](Self::create) for details.
     ///
     /// # Errors
     ///
@@ -126,7 +138,9 @@ impl RelationshipStore {
         Ok(existed)
     }
 
-    /// Lists all relationships in a vault.
+    /// Lists relationships in a vault with pagination.
+    ///
+    /// Returns up to `limit` relationships starting from `offset`.
     ///
     /// # Errors
     ///
@@ -167,7 +181,7 @@ impl RelationshipStore {
         Ok(relationships)
     }
 
-    /// Counts relationships in a vault.
+    /// Counts all relationships in a vault.
     ///
     /// # Errors
     ///
@@ -195,7 +209,11 @@ impl RelationshipStore {
         Ok(count)
     }
 
-    /// Lists relationships for a specific resource.
+    /// Lists relationships for a specific resource across all relations.
+    ///
+    /// Scans the vault for relationships whose key starts with `rel:{resource}#`,
+    /// returning up to `limit` matches. Because keys are distributed across buckets
+    /// by hash, a full vault scan is performed internally.
     ///
     /// # Errors
     ///

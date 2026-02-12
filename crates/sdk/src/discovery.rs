@@ -17,11 +17,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
-//! use inferadb_ledger_sdk::{DiscoveryConfig, ClientConfig, ServerSource};
-//! use inferadb_ledger_sdk::discovery::DiscoveryService;
-//! use inferadb_ledger_sdk::connection::ConnectionPool;
-//!
+//! ```text
 //! let config = ClientConfig::builder()
 //!     .servers(ServerSource::from_static(["http://localhost:50051"]))
 //!     .client_id("my-client")

@@ -45,7 +45,7 @@ pub struct BatchConfig {
     /// the incoming queue is empty rather than waiting for `batch_timeout`.
     /// This optimizes latency for interactive workloads.
     ///
-    /// Sets to false for batch import workloads where throughput is more
+    /// Set to `false` for batch import workloads where throughput is more
     /// important than latency.
     #[builder(default = true)]
     pub eager_commit: bool,
@@ -254,7 +254,9 @@ where
 
     /// Runs the batch writer loop.
     ///
-    /// This should be spawned as a background task.
+    /// This should be spawned as a background task. Runs an infinite loop
+    /// that processes batches on each tick until the task is cancelled or
+    /// the process exits.
     #[instrument(skip(self))]
     pub async fn run(self) {
         let mut ticker = interval(self.config.tick_interval);

@@ -95,7 +95,7 @@ impl WideEventsSamplingConfig {
         }
     }
 
-    /// Creates a config for testing (samples everything).
+    /// Creates a test configuration with default values.
     pub fn for_test() -> Self {
         Self {
             error_rate: 1.0,
@@ -247,7 +247,7 @@ impl Default for OtelConfig {
 }
 
 impl OtelConfig {
-    /// Creates a config for testing with OTEL disabled.
+    /// Creates a test configuration with default values.
     pub fn for_test() -> Self {
         Self::default()
     }
@@ -363,7 +363,7 @@ impl Default for VipConfig {
 }
 
 impl VipConfig {
-    /// Creates a config for testing with discovery disabled.
+    /// Creates a test configuration with default values.
     pub fn for_test() -> Self {
         Self { discovery_enabled: false, cache_ttl_secs: 60, tag_name: "vip".to_string() }
     }
@@ -460,7 +460,7 @@ impl Default for WideEventsConfig {
 }
 
 impl WideEventsConfig {
-    /// Creates a config for testing with all sampling enabled.
+    /// Creates a test configuration with default values.
     pub fn for_test() -> Self {
         Self {
             enabled: true,
@@ -790,11 +790,10 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Creates a configuration for testing.
+    /// Creates a test configuration with default values.
     ///
-    /// Uses single-node mode by default for simple test scenarios.
-    /// Writes the given node_id to the data directory for deterministic,
-    /// predictable node IDs in tests.
+    /// Writes the given `node_id` to the data directory for deterministic
+    /// node IDs in tests. Uses single-node mode.
     #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, dead_code)]
     pub fn for_test(node_id: u64, port: u16, data_dir: PathBuf) -> Self {
         // Write the node_id file for deterministic test behavior

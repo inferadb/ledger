@@ -82,6 +82,9 @@ impl LatencyStats {
 /// # Example
 ///
 /// ```no_run
+/// use std::time::Duration;
+/// use inferadb_ledger_sdk::{ResolvedServer, ServerSelector};
+///
 /// let selector = ServerSelector::new();
 ///
 /// // Record latencies as requests complete
@@ -89,6 +92,10 @@ impl LatencyStats {
 /// selector.record_latency("10.0.0.2:50051", Duration::from_millis(15));
 ///
 /// // Get servers ordered by latency
+/// let available_servers = vec![
+///     ResolvedServer::new("10.0.0.1:50051", false),
+///     ResolvedServer::new("10.0.0.2:50051", false),
+/// ];
 /// let servers = selector.select_best(&available_servers);
 /// // Returns: ["10.0.0.1:50051", "10.0.0.2:50051"]
 /// ```

@@ -13,7 +13,7 @@
 //!
 //! # Security
 //!
-//! The [`discover_node_info`] function currently uses plaintext HTTP for gRPC
+//! The `discover_node_info` function currently uses plaintext HTTP for gRPC
 //! connections during bootstrap coordination. This is acceptable for:
 //! - Private networks with network-level isolation
 //! - Development and testing environments

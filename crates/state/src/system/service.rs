@@ -58,6 +58,7 @@ pub enum SystemError {
     },
 }
 
+/// Result type for system namespace operations.
 pub type Result<T> = std::result::Result<T, SystemError>;
 
 /// Service for reading from and writing to the `_system` namespace.

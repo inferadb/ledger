@@ -1,11 +1,12 @@
 //! State layer for materialized state with bucket-based commitment.
 //!
 //! Provides:
-//! - Per-vault state management
-//! - Operation application
-//! - State root computation via dirty bucket tracking
+//! - Per-vault entity and relationship CRUD via [`StateLayer::apply_operations`]
+//! - Atomic batch writes with conditional (CAS) semantics
+//! - Incremental state root computation via 256-bucket dirty tracking
 //!
-//! Per DESIGN.md: State layer separates commitment (Merkleized) from storage (fast K/V).
+//! Per DESIGN.md: the state layer separates commitment (Merkleized hashing) from
+//! storage (fast K/V reads), so queries bypass the hash tree entirely.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -78,11 +79,12 @@ pub type Result<T> = std::result::Result<T, StateError>;
 
 /// State layer managing per-vault materialized state.
 ///
-/// Provides fast K/V queries and efficient state root computation
+/// Provides entity/relationship CRUD and incremental state root computation
 /// via bucket-based dirty tracking. Each vault's state is independently
-/// tracked with its own [`VaultCommitment`] for incremental hashing.
+/// tracked with its own [`VaultCommitment`] — only buckets modified since
+/// the last commit are rehashed.
 ///
-/// Generic over `StorageBackend` to support both file-based (production)
+/// Generic over [`StorageBackend`] to support both file-based (production)
 /// and in-memory (testing) storage.
 ///
 /// # Usage

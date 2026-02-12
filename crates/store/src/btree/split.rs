@@ -429,9 +429,10 @@ pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
     Ok(live_bytes as f64 / total_content as f64)
 }
 
-/// Checks whether two leaf nodes can be merged (combined entries fit in one page).
+/// Checks whether two leaf nodes can be merged into a single page.
 ///
-/// Returns `true` if all entries from `right` can fit into `left`'s free space.
+/// Returns `true` if the total live data from both leaves fits within one page's
+/// usable space, ignoring dead cells (since merging rebuilds the page from scratch).
 ///
 /// # Errors
 ///

@@ -13,7 +13,11 @@ use crate::error::{Error, PageId, Result};
 
 /// File-based storage backend.
 ///
-/// Uses standard file I/O (read/write/seek) for page access with explicit fsync for durability.
+/// Uses standard file I/O (read/write/seek) for page access. Durability
+/// requires the caller to invoke [`sync`](StorageBackend::sync) after
+/// writes; page data is not guaranteed on disk until `fsync` completes.
+/// Crash safety is provided by the dual-slot commit protocol in
+/// [`DatabaseHeader`], not by this backend alone.
 pub struct FileBackend {
     /// The underlying file.
     file: RwLock<File>,

@@ -298,9 +298,15 @@ pub fn decrement_connections() {
 
 /// Records a gRPC request.
 ///
-/// The `error_class` label classifies errors by cause for error-budget tracking:
-/// `"timeout"`, `"unavailable"`, `"permission_denied"`, `"validation"`, `"internal"`,
-/// or `"none"` for successful requests.
+/// # Arguments
+///
+/// * `service` - gRPC service name (e.g., `"WriteService"`, `"ReadService"`).
+/// * `method` - RPC method name (e.g., `"write"`, `"read"`).
+/// * `status` - gRPC status code as a string (e.g., `"OK"`, `"Internal"`).
+/// * `error_class` - Error classification for error-budget tracking: `"timeout"`, `"unavailable"`,
+///   `"permission_denied"`, `"validation"`, `"rate_limited"`, `"internal"`, or `"none"` for
+///   successful requests. See [`error_class_from_grpc_code`] for the mapping.
+/// * `latency_secs` - Request latency in seconds.
 #[inline]
 pub fn record_grpc_request(
     service: &str,
@@ -753,7 +759,10 @@ impl Timer {
         self.start.elapsed().as_secs_f64()
     }
 
-    /// Stops the timer and returns elapsed time without recording.
+    /// Cancels the on-drop recording and returns the elapsed time in seconds.
+    ///
+    /// Unlike dropping the timer (which records to the histogram), this
+    /// consumes the timer without emitting a metric.
     pub fn stop(mut self) -> f64 {
         self.record_fn = None;
         self.elapsed_secs()

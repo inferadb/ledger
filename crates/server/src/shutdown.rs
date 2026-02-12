@@ -6,7 +6,7 @@ use tokio::signal;
 
 /// Waits for a shutdown signal (Ctrl-C or SIGTERM).
 ///
-/// This function blocks until a shutdown signal is received.
+/// This function suspends until a shutdown signal is received.
 /// On Unix systems, it also handles SIGTERM for container environments.
 #[allow(clippy::expect_used)]
 pub async fn shutdown_signal() {
@@ -67,7 +67,7 @@ impl ShutdownCoordinator {
         let _ = self.notify.send(());
     }
 
-    /// Blocks until Ctrl-C or SIGTERM is received, then broadcasts shutdown.
+    /// Awaits Ctrl-C or SIGTERM, then broadcasts shutdown.
     #[allow(dead_code)] // utility for graceful shutdown coordination
     pub async fn wait_for_signal(&self) {
         shutdown_signal().await;

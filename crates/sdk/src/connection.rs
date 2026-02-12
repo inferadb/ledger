@@ -13,9 +13,10 @@
 //! # Example
 //!
 //! ```no_run
-//! use inferadb_ledger_sdk::{ClientConfig, ServerSource};
-//! use inferadb_ledger_sdk::connection::ConnectionPool;
+//! use inferadb_ledger_sdk::{ClientConfig, ConnectionPool, ServerSource};
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = ClientConfig::builder()
 //!     .servers(ServerSource::from_static(["http://localhost:50051"]))
 //!     .client_id("my-client")
@@ -23,6 +24,8 @@
 //!
 //! let pool = ConnectionPool::new(config);
 //! let channel = pool.get_channel().await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{sync::Arc, time::Duration};

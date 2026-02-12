@@ -141,7 +141,7 @@ impl FileAuditLogger {
         Ok(())
     }
 
-    /// Returns the current file size in bytes (for testing).
+    /// Returns the number of bytes written to the current log file.
     pub fn bytes_written(&self) -> u64 {
         self.inner.lock().bytes_written
     }

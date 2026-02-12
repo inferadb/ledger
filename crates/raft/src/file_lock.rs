@@ -6,8 +6,12 @@
 //! ## Usage
 //!
 //! ```no_run
+//! # use inferadb_ledger_raft::file_lock::DataDirLock;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let lock = DataDirLock::acquire("/path/to/data")?;
 //! // Lock is held until `lock` is dropped
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{
@@ -89,9 +93,13 @@ impl DataDirLock {
     /// # Example
     ///
     /// ```no_run
+    /// # use inferadb_ledger_raft::file_lock::DataDirLock;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let lock = DataDirLock::acquire("/var/lib/ledger/data")?;
     /// // Data directory is now exclusively locked
     /// // Lock is released when `lock` goes out of scope
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn acquire<P: AsRef<Path>>(data_dir: P) -> Result<Self, LockError> {
         let data_dir = data_dir.as_ref();

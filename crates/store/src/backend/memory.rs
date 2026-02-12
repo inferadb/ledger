@@ -9,8 +9,10 @@ use crate::error::{Error, PageId, Result};
 
 /// In-memory storage backend for testing.
 ///
-/// All data is stored in memory and lost when the backend is dropped.
-/// This is useful for unit tests and benchmarking.
+/// Stores all pages in a [`HashMap`] with no durability -- data is lost
+/// when the backend is dropped. [`sync`](StorageBackend::sync) is a
+/// no-op. Suitable for unit tests and benchmarks where crash safety is
+/// irrelevant.
 pub struct InMemoryBackend {
     /// The database header.
     header: RwLock<Vec<u8>>,

@@ -9,7 +9,7 @@ use snafu::{ResultExt, Snafu};
 /// Error type for codec operations.
 #[derive(Debug, Snafu)]
 pub enum CodecError {
-    /// Encoding failed.
+    /// Serialization to bytes failed.
     #[snafu(display("Encoding failed: {source}"))]
     Encode {
         /// The underlying postcard error.
@@ -19,7 +19,7 @@ pub enum CodecError {
         location: snafu::Location,
     },
 
-    /// Decoding failed.
+    /// Deserialization from bytes failed (malformed, truncated, or type mismatch).
     #[snafu(display("Decoding failed: {source}"))]
     Decode {
         /// The underlying postcard error.

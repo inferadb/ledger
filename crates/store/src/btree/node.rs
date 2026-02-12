@@ -115,7 +115,11 @@ impl<'a> LeafNode<'a> {
         Ok(Self { page })
     }
 
-    /// Initializes an empty leaf node.
+    /// Initializes a [`Page`] as an empty leaf node.
+    ///
+    /// Writes the node header (cell count, free space pointers) and zeros
+    /// the bloom filter region. The page must already have a valid page
+    /// header with type [`PageType::BTreeLeaf`].
     pub fn init(page: &'a mut Page) -> Self {
         let page_size = page.size();
 
@@ -171,7 +175,9 @@ impl<'a> LeafNode<'a> {
         )
     }
 
-    /// Returns the free space available for new cells.
+    /// Returns the contiguous free space between the cell pointer array and the cell content area.
+    ///
+    /// Does not account for reclaimable space from deleted cells.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
@@ -256,9 +262,15 @@ impl<'a> LeafNode<'a> {
         self.free_space() >= Self::cell_size(key, value)
     }
 
-    /// Inserts a key-value pair at the given index.
+    /// Inserts a key-value pair at the given index, shifting subsequent
+    /// cell pointers right.
     ///
-    /// Caller must ensure there's enough space (use `can_insert` first).
+    /// Also updates the embedded bloom filter incrementally.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > cell_count` or if there is insufficient free
+    /// space. Call [`can_insert`](Self::can_insert) first to check.
     pub fn insert(&mut self, index: usize, key: &[u8], value: &[u8]) {
         let count = self.cell_count() as usize;
         assert!(index <= count);
@@ -413,7 +425,11 @@ impl<'a> BranchNode<'a> {
         Ok(Self { page })
     }
 
-    /// Initializes an empty branch node.
+    /// Initializes a [`Page`] as an empty branch node with the given rightmost child.
+    ///
+    /// Writes the node header (cell count, free space pointers, rightmost
+    /// child pointer). The page must already have a valid page header with
+    /// type [`PageType::BTreeBranch`].
     pub fn init(page: &'a mut Page, rightmost_child: PageId) -> Self {
         let page_size = page.size();
 
@@ -455,7 +471,7 @@ impl<'a> BranchNode<'a> {
         self.page.dirty = true;
     }
 
-    /// Returns the free space available.
+    /// Returns the contiguous free space between the cell pointer array and the cell content area.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
@@ -502,11 +518,11 @@ impl<'a> BranchNode<'a> {
         self.page.dirty = true;
     }
 
-    /// Returns the child page for a given key (navigating to the appropriate subtree).
+    /// Returns the child page for a given key by scanning separator keys.
     pub fn child_for_key(&self, key: &[u8]) -> PageId {
         let count = self.cell_count() as usize;
 
-        // Binary search for the right child
+        // Linear scan through separator keys
         for i in 0..count {
             let sep_key = self.key(i);
             if key < sep_key {
@@ -714,7 +730,9 @@ impl<'a> LeafNodeRef<'a> {
         SearchResult::NotFound(lo)
     }
 
-    /// Returns the free space available for new cells.
+    /// Returns the contiguous free space between the cell pointer array and the cell content area.
+    ///
+    /// Does not account for reclaimable space from deleted cells.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
@@ -789,7 +807,7 @@ impl<'a> BranchNodeRef<'a> {
         u64::from_le_bytes(self.data[cell_offset + 2..cell_offset + 2 + 8].try_into().unwrap())
     }
 
-    /// Returns the child page for a given key.
+    /// Returns the child page for a given key by scanning separator keys.
     pub fn child_for_key(&self, key: &[u8]) -> PageId {
         let count = self.cell_count() as usize;
 
@@ -803,7 +821,7 @@ impl<'a> BranchNodeRef<'a> {
         self.rightmost_child()
     }
 
-    /// Returns the free space available.
+    /// Returns the contiguous free space between the cell pointer array and the cell content area.
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),

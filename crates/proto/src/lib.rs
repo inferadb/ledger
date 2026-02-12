@@ -27,4 +27,5 @@ pub mod proto {
     tonic::include_proto!("ledger.v1");
 }
 
+/// Bidirectional conversions between domain and protobuf types.
 pub mod convert;

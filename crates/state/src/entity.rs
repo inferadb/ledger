@@ -1,7 +1,9 @@
-//! Entity storage operations.
+//! Low-level entity storage operations on raw read/write transactions.
 //!
-//! Provides direct entity CRUD operations separate from the state layer.
-//! Used for lower-level access when the full state layer isn't needed.
+//! [`EntityStore`] provides direct entity CRUD without the batch semantics
+//! or dirty-bucket tracking of [`StateLayer`](crate::StateLayer). Use it when
+//! operating within an existing transaction (e.g., snapshot restoration,
+//! state root recomputation).
 
 use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use inferadb_ledger_types::{CodecError, Entity, VaultId, decode, encode};
@@ -32,11 +34,16 @@ pub enum EntityError {
 /// Result type for entity operations.
 pub type Result<T> = std::result::Result<T, EntityError>;
 
-/// Entity storage operations.
+/// Low-level entity storage operations on raw transactions.
+///
+/// Provides direct entity CRUD without the batch semantics, dirty-bucket
+/// tracking, or conditional writes of [`StateLayer`](crate::StateLayer).
+/// Use this when operating within an existing transaction (e.g., snapshot
+/// restoration).
 pub struct EntityStore;
 
 impl EntityStore {
-    /// Returns an entity by key.
+    /// Returns an entity by key, or `None` if not found.
     ///
     /// # Errors
     ///
@@ -58,7 +65,10 @@ impl EntityStore {
         }
     }
 
-    /// Sets an entity value.
+    /// Inserts or overwrites an entity.
+    ///
+    /// If an entity with the same key already exists in the vault, it is replaced.
+    /// The caller must commit the transaction after this call.
     ///
     /// # Errors
     ///
@@ -76,7 +86,10 @@ impl EntityStore {
         Ok(())
     }
 
-    /// Deletes an entity.
+    /// Deletes an entity by key.
+    ///
+    /// Returns `true` if the entity existed and was deleted, `false` if it
+    /// was not found. The caller must commit the transaction after this call.
     ///
     /// # Errors
     ///
@@ -91,7 +104,7 @@ impl EntityStore {
         Ok(existed)
     }
 
-    /// Checks if an entity exists.
+    /// Checks if an entity exists in the vault.
     ///
     /// # Errors
     ///
@@ -105,9 +118,10 @@ impl EntityStore {
         Ok(txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)?.is_some())
     }
 
-    /// Lists all entities in a vault with pagination.
+    /// Lists entities in a vault with pagination.
     ///
-    /// Returns entities sorted by key with their local keys.
+    /// Returns up to `limit` entities starting from `offset`, ordered by
+    /// storage key (vault prefix + bucket + local key).
     ///
     /// # Errors
     ///
@@ -149,9 +163,9 @@ impl EntityStore {
         Ok(entities)
     }
 
-    /// Lists all entities in a specific bucket within a vault.
+    /// Lists entities in a specific bucket within a vault.
     ///
-    /// Used for state root computation.
+    /// Used during state root recomputation to rehash a single dirty bucket.
     ///
     /// # Errors
     ///
@@ -194,7 +208,7 @@ impl EntityStore {
         Ok(entities)
     }
 
-    /// Counts entities in a vault.
+    /// Counts all entities in a vault.
     ///
     /// # Errors
     ///
@@ -221,7 +235,11 @@ impl EntityStore {
         Ok(count)
     }
 
-    /// Scans entities with a key prefix within a vault.
+    /// Scans entities matching a key prefix within a vault.
+    ///
+    /// Returns up to `limit` entities whose local key starts with `key_prefix`.
+    /// Because keys are distributed across buckets by hash, a full vault scan
+    /// is performed internally (prefix filtering cannot short-circuit by bucket).
     ///
     /// # Errors
     ///

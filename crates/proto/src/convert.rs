@@ -11,9 +11,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use inferadb_ledger_proto::convert;
-//!
+//! ```text
 //! // Domain to proto
 //! let proto_op: proto::Operation = domain_op.into();
 //!

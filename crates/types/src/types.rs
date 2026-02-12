@@ -171,9 +171,9 @@ pub struct BlockHeader {
     pub committed_index: u64,
 }
 
-/// Client-facing block structure (VaultBlock).
+/// Client-facing block containing a header and transactions for a single vault.
 ///
-/// This is what clients receive and verify. Each vault maintains its own
+/// Clients receive and verify these blocks. Each vault maintains its own
 /// independent chain for cryptographic isolation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultBlock {
@@ -203,10 +203,10 @@ impl VaultBlock {
     }
 }
 
-/// Internal shard block structure (ShardBlock).
+/// Internal shard block stored on disk, containing entries for multiple vaults.
 ///
-/// Multiple vaults share a single Raft group. This is the physical block
-/// stored on disk, containing entries for multiple vaults.
+/// Multiple vaults share a single Raft group. Shard blocks are the physical
+/// unit of Raft replication; clients never see them directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardBlock {
     /// Shard group identifier.
@@ -626,14 +626,16 @@ pub type LedgerNodeId = u64;
 /// whether transaction bodies are preserved after snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BlockRetentionMode {
-    /// Full retention: all transaction bodies preserved indefinitely.
-    /// Use case: Audit/compliance requirements.
+    /// All transaction bodies preserved indefinitely.
+    ///
+    /// Suitable for audit and compliance requirements where full history
+    /// must remain accessible.
     #[default]
     Full,
-    /// Compacted retention: after snapshot, transaction bodies are removed
-    /// for blocks older than retention_blocks from tip.
-    /// Headers (state_root, tx_merkle_root) are preserved for verification.
-    /// Use case: High-volume workloads prioritizing storage efficiency.
+    /// Transaction bodies removed for blocks older than `retention_blocks` from tip.
+    ///
+    /// Headers (`state_root`, `tx_merkle_root`) are preserved for verification.
+    /// Suitable for high-volume workloads prioritizing storage efficiency.
     Compacted,
 }
 

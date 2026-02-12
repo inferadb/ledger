@@ -80,7 +80,13 @@ impl PageHeader {
     }
 }
 
-/// A page of data with header and content.
+/// A fixed-size page containing a [`PageHeader`] followed by content bytes.
+///
+/// Pages are the unit of storage I/O. New pages are created via
+/// [`Page::new`] (dirty by default), or loaded from storage via
+/// [`Page::from_bytes`] (clean). Modifications set the `dirty` flag;
+/// the [`PageCache`] uses this flag to decide which pages need flushing
+/// and to prevent eviction of unflushed data.
 #[derive(Clone)]
 pub struct Page {
     /// Page ID (position in file).

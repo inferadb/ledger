@@ -32,7 +32,7 @@ impl SnapshotId {
         self.0
     }
 
-    /// Increments and returns the next snapshot ID.
+    /// Returns the next sequential snapshot ID without modifying `self`.
     pub fn next(&self) -> Self {
         Self(self.0 + 1)
     }

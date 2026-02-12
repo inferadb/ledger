@@ -48,6 +48,16 @@ struct ResourceRelationSet {
 }
 
 /// Dual index manager for relationship queries.
+///
+/// Maintains two non-Merkleized indexes per vault:
+/// - **Object index** (`obj_idx:{resource}#{relation}` -> subjects): answers "who can access this
+///   resource with this relation?"
+/// - **Subject index** (`subj_idx:{subject}` -> (resource, relation) pairs): answers "what
+///   resources can this subject access?"
+///
+/// These indexes are maintained by
+/// [`StateLayer::apply_operations`](crate::StateLayer::apply_operations) when creating or deleting
+/// relationships. They are not part of the state root hash.
 pub struct IndexManager;
 
 #[allow(clippy::result_large_err)]

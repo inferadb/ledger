@@ -26,6 +26,7 @@ pub use config::{TestRateLimitConfig, test_batch_config, test_rate_limit_config}
 mod crash_injector;
 pub use crash_injector::{CrashInjector, CrashPoint};
 
+/// Proptest strategies for generating domain types.
 pub mod strategies;
 
 #[cfg(test)]

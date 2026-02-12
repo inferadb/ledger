@@ -6,6 +6,7 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use inferadb_ledger_store::{Database, tables};
 //!
 //! // Open or create a database
@@ -23,6 +24,8 @@
 //!     let txn = db.read()?;
 //!     let value = txn.get::<tables::RaftLog>(&1u64)?;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{

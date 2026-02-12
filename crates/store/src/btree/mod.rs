@@ -156,7 +156,8 @@ impl<P: PageProvider> BTree<P> {
         page
     }
 
-    /// Returns a value by key.
+    /// Returns the value associated with `key`, or `None` if the key does
+    /// not exist in the tree.
     ///
     /// Uses the leaf page's embedded bloom filter for fast negative lookups:
     /// if the bloom filter says "definitely absent," the binary search is skipped.
@@ -582,9 +583,12 @@ impl<P: PageProvider> BTree<P> {
         Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
 
-    /// Deletes a key from the tree.
+    /// Deletes a key from the tree and returns its former value, or `None`
+    /// if the key was not present.
     ///
-    /// Returns the value that was deleted, or None if key didn't exist.
+    /// Uses non-rebalancing deletion: the leaf may become underfull after
+    /// removal, but the tree remains structurally valid. Run
+    /// [`compact`](Self::compact) to merge underfull leaves.
     ///
     /// # Errors
     ///

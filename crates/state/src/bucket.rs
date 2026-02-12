@@ -109,12 +109,14 @@ impl VaultCommitment {
         self.dirty_buckets.clear();
     }
 
-    /// Computes the vault's state root.
+    /// Computes the vault's state root from the current bucket roots.
     ///
-    /// state_root = SHA-256(bucket_root\[0\] || ... || bucket_root\[255\])
+    /// `state_root = SHA-256(bucket_root[0] || ... || bucket_root[255])`
     ///
-    /// Note: This does NOT recompute dirty bucket roots. Call `update_dirty_buckets`
-    /// first to recompute them, or use `compute_state_root_with_scan` which does both.
+    /// This does NOT recompute dirty bucket roots — call
+    /// [`set_bucket_root`](Self::set_bucket_root) for each dirty bucket first,
+    /// then [`clear_dirty`](Self::clear_dirty). See `StateLayer::compute_state_root`
+    /// for the higher-level API that handles recomputation automatically.
     pub fn compute_state_root(&self) -> Hash {
         sha256_concat(&self.bucket_roots)
     }

@@ -69,7 +69,7 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 - Fallible builders via `#[bon]` impl block when validation needed
 - Prefer compile-time required fields over runtime checks
 
-**Doc comments:** Use ` ```no_run ` — `cargo test` skips, `cargo doc` validates.
+**Doc comments:** Use ` ```no_run ` (never ignore or text) — `cargo test` skips, `cargo doc` validates. To avoid documentation compiling problems, instead use hidden setup lines.
 
 **Writing:** No filler (very, really, basically), no wordiness (in order to → to), active voice, specific language.
 

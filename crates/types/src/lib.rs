@@ -12,13 +12,21 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Audit logging types for compliance-ready event tracking.
 pub mod audit;
+/// Serialization and deserialization via postcard.
 pub mod codec;
+/// Configuration types with validated builders.
 pub mod config;
+/// Error types using snafu with structured error codes.
 pub mod error;
+/// Cryptographic hashing (SHA-256, seahash) and block/transaction hashing.
 pub mod hash;
+/// Merkle tree construction and verification.
 pub mod merkle;
+/// Core domain types: identifiers, blocks, transactions, operations.
 pub mod types;
+/// Input validation for gRPC request fields.
 pub mod validation;
 
 pub use audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource};

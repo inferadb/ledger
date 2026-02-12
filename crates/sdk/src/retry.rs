@@ -41,6 +41,8 @@ use crate::{
 /// # Example
 ///
 /// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
 /// use inferadb_ledger_sdk::{with_retry, RetryPolicy, SdkError};
 ///
 /// let policy = RetryPolicy::default();
@@ -48,6 +50,7 @@ use crate::{
 ///     // Some fallible async operation
 ///     Ok::<_, SdkError>("success")
 /// }).await;
+/// # }
 /// ```
 pub async fn with_retry<F, Fut, T>(policy: &RetryPolicy, operation: F) -> Result<T>
 where
@@ -144,6 +147,8 @@ where
 /// # Example
 ///
 /// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
 /// use inferadb_ledger_sdk::{with_retry_cancellable, RetryPolicy, SdkError};
 /// use tokio_util::sync::CancellationToken;
 ///
@@ -153,6 +158,7 @@ where
 /// let result = with_retry_cancellable(&policy, &token, None, "read", || async {
 ///     Ok::<_, SdkError>("success")
 /// }).await;
+/// # }
 /// ```
 pub async fn with_retry_cancellable<F, Fut, T>(
     policy: &RetryPolicy,
