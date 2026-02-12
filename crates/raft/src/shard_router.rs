@@ -207,7 +207,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
     }
 
-    /// Route a request to the appropriate shard.
+    /// Routes a request to the appropriate shard.
     ///
     /// Returns the shard connection for the namespace. The connection
     /// may be cached or freshly established.
@@ -261,7 +261,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         self.refresh_routing(namespace_id)
     }
 
-    /// Refresh routing information from `_system`.
+    /// Refreshes routing information from `_system`.
     fn refresh_routing(&self, namespace_id: NamespaceId) -> Result<CacheEntry> {
         let registry = self
             .system
@@ -369,7 +369,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         Err(last_error.unwrap_or(RoutingError::NoAvailableNodes { shard_id }))
     }
 
-    /// Connect to a specific node.
+    /// Connects to a specific node.
     async fn connect_to_node(&self, shard_id: ShardId, node_id: &str) -> Result<ShardConnection> {
         // Parse node address (format: "host:port" or just "host")
         let address = self.resolve_node_address(node_id)?;
@@ -424,7 +424,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
     /// Invalidate cached routing for a namespace.
     ///
-    /// Call this when a redirect indicates stale routing data.
+    /// Invalidates cached routing when a redirect indicates stale data.
     pub fn invalidate(&self, namespace_id: NamespaceId) {
         let mut cache = self.cache.write();
         if cache.remove(&namespace_id).is_some() {
@@ -434,7 +434,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
     /// Invalidate all cached connections to a shard.
     ///
-    /// Call this when a shard leader changes or becomes unavailable.
+    /// Invalidates all cached connections when a shard leader changes or becomes unavailable.
     pub fn invalidate_shard(&self, shard_id: ShardId) {
         let mut connections = self.connections.write();
         if connections.remove(&shard_id).is_some() {
@@ -444,7 +444,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
     /// Updates leader hint after successful request.
     ///
-    /// Call this when a response indicates the actual leader.
+    /// Updates the leader hint when a response indicates the actual leader.
     pub fn update_leader_hint(&self, namespace_id: NamespaceId, leader_node: &str) {
         let mut cache = self.cache.write();
         if let Some(entry) = cache.get_mut(&namespace_id)

@@ -2588,7 +2588,7 @@ mod tests {
         assert!(event.contains("\"trace_flags\":1"));
     }
 
-    // === Canonical Log Line Field Tests (Task 16) ===
+    // === Canonical Log Line Field Tests ===
 
     #[test]
     fn test_bytes_read_in_json_output() {

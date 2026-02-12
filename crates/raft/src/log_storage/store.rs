@@ -1,3 +1,5 @@
+//! Raft log storage combining durable log entries with state machine access.
+
 use std::{path::Path, sync::Arc};
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;

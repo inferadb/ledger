@@ -93,7 +93,7 @@ pub enum RecoveryResult {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
-    /// The Raft instance for proposing health updates.
+    /// Raft consensus handle for proposing vault health state changes.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,

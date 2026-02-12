@@ -46,9 +46,9 @@ use crate::{
 ///
 /// Contains all the resources needed to process a request on a specific shard.
 pub struct ShardContext {
-    /// The Raft instance for this shard.
+    /// Raft consensus handle for this shard's membership queries.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer for this shard.
+    /// State layer providing this shard's entity and relationship reads.
     pub state: Arc<StateLayer<FileBackend>>,
     /// The block archive for this shard.
     pub block_archive: Arc<BlockArchive<FileBackend>>,

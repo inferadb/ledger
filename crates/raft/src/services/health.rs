@@ -35,7 +35,7 @@ use crate::{
 pub struct HealthServiceImpl {
     /// Raft consensus handle for leadership and term queries.
     raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer.
+    /// State layer for vault health and height queries.
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,

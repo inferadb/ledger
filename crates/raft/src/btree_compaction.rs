@@ -38,7 +38,7 @@ const DEFAULT_MIN_FILL_FACTOR: f64 = 0.4;
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct BTreeCompactor<B: StorageBackend + 'static> {
-    /// The Raft instance (for leader check).
+    /// Raft consensus handle for verifying leadership before compacting.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,

@@ -671,7 +671,7 @@ impl BackupManager {
         Ok(chain)
     }
 
-    /// Restore from a page-level backup chain.
+    /// Restores from a page-level backup chain.
     ///
     /// Applies the full (base) backup first, then each incremental in order.
     /// The full backup is restored via Raft snapshot, then incrementals are
@@ -856,7 +856,7 @@ pub fn record_backup_failed() {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct BackupJob {
-    /// The Raft instance (for leader check and triggering snapshots).
+    /// Raft consensus handle for verifying leadership and triggering snapshots.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,

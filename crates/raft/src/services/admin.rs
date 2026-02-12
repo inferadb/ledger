@@ -50,7 +50,7 @@ use crate::{
 pub struct AdminServiceImpl {
     /// Raft consensus handle for proposing admin operations.
     raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer.
+    /// State layer for entity and relationship reads during admin operations.
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,

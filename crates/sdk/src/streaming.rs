@@ -564,5 +564,5 @@ mod tests {
 
     // Note: Integration tests for reconnection behavior will require
     // a mock tonic::Streaming, which is challenging to create directly.
-    // These tests will be added in Task 18 (Mock Server) or Task 19 (Integration Tests).
+    // These tests require a mock tonic::Streaming or integration test harness.
 }

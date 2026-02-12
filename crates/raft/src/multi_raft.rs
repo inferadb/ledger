@@ -227,7 +227,7 @@ impl ShardBackgroundJobs {
         }
     }
 
-    /// Abort all running background jobs.
+    /// Aborts all running background jobs.
     fn abort(&mut self) {
         if let Some(handle) = self.gc_handle.take() {
             handle.abort();
@@ -381,7 +381,7 @@ impl MultiRaftManager {
         self.router.read().clone()
     }
 
-    /// Route a namespace to its shard group.
+    /// Routes a namespace to its shard group.
     ///
     /// Uses the ShardRouter to look up the namespace's shard assignment,
     /// then returns the local ShardGroup if available.

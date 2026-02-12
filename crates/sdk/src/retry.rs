@@ -14,7 +14,7 @@ use crate::{
     error::{Result, SdkError},
 };
 
-/// Execute an async operation with retry using exponential backoff.
+/// Executes an async operation with retry using exponential backoff.
 ///
 /// The operation will be retried according to the provided [`RetryPolicy`] if
 /// it fails with a retryable error (as determined by [`SdkError::is_retryable`]).
@@ -111,7 +111,7 @@ where
         })
 }
 
-/// Execute an async operation with retry and cancellation support.
+/// Executes an async operation with retry and cancellation support.
 ///
 /// Behaves identically to [`with_retry`], but races each attempt against the
 /// provided `CancellationToken`. If the token is cancelled before the

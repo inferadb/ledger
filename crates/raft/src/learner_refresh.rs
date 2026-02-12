@@ -100,7 +100,7 @@ impl CachedSystemState {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct LearnerRefreshJob {
-    /// The Raft instance for membership info.
+    /// Raft consensus handle for querying cluster membership.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
@@ -145,7 +145,7 @@ impl LearnerRefreshJob {
             .collect()
     }
 
-    /// Refresh state from a voter.
+    /// Refreshes state from a voter.
     ///
     /// This fetches the latest system state from the specified voter
     /// and updates the local cache if the voter's state is newer.

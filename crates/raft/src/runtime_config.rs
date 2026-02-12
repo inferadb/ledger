@@ -135,7 +135,7 @@ impl RuntimeConfigHandle {
         Ok(changed)
     }
 
-    /// Replace the configuration without validation or side effects.
+    /// Replaces the configuration without validation or side effects.
     ///
     /// Used by the SIGHUP handler after external validation.
     pub fn store(&self, config: RuntimeConfig) {

@@ -110,7 +110,7 @@ impl PeerTracker {
         self.last_seen.get(node_id).map(|instant| instant.elapsed())
     }
 
-    /// Prune all stale peers that haven't been seen within the staleness threshold.
+    /// Prunes all stale peers that haven't been seen within the staleness threshold.
     ///
     /// Returns the number of peers pruned.
     pub fn prune_stale(&mut self) -> usize {
@@ -132,7 +132,7 @@ impl PeerTracker {
         pruned
     }
 
-    /// Prune peers not seen within a custom duration.
+    /// Prunes peers not seen within a custom duration.
     ///
     /// Useful for testing or one-off cleanup with different thresholds.
     pub fn prune_older_than(&mut self, max_age: Duration) -> usize {

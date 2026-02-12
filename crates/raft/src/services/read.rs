@@ -50,7 +50,7 @@ use crate::{
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct ReadServiceImpl {
-    /// The state layer for reading data.
+    /// State layer providing entity, vault, and namespace read access.
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,

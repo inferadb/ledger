@@ -46,7 +46,7 @@ const DEFAULT_PAGES_PER_CYCLE_PERCENT: f64 = 1.0;
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct IntegrityScrubberJob<B: StorageBackend + 'static> {
-    /// The Raft instance (for leader check).
+    /// Raft consensus handle for verifying leadership before scrubbing.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,

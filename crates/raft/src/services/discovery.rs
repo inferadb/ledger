@@ -164,9 +164,9 @@ const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct DiscoveryServiceImpl {
-    /// The Raft instance.
+    /// Raft consensus handle for membership and leader queries.
     raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer.
+    /// State layer for namespace registry access.
     #[allow(dead_code)] // retained to maintain Arc reference count
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (namespace registry).
