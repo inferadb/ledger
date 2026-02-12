@@ -723,7 +723,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         inferadb_ledger_types::vault_entry_hash(entry)
     }
 
-    /// Computes a simple block hash (used in tests).
+    /// Computes a block hash (used in tests).
     #[allow(dead_code)] // reserved for block hash computation in state machine
     pub(super) fn compute_block_hash(
         &self,

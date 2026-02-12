@@ -24,7 +24,7 @@ pub fn test_batch_config() -> BatchConfig {
 
 /// Rate limiting configuration for tests.
 ///
-/// This is a simple struct for test utilities since the production
+/// Lightweight struct for test utilities since the production
 /// `RateLimitConfig` is in the types crate.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct TestRateLimitConfig {

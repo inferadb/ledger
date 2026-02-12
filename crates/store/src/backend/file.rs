@@ -133,7 +133,7 @@ impl StorageBackend for FileBackend {
         self.with_file(|file| {
             let file_len = file.metadata()?.len();
             if offset + self.page_size as u64 > file_len {
-                // Page doesn't exist yet, return zeros
+                // Page is beyond current file size; return zeros
                 return Ok(vec![0u8; self.page_size]);
             }
 

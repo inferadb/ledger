@@ -365,7 +365,7 @@ fn validation_status(message: impl Into<String>) -> Status {
 
 /// Computes a hash of operations for idempotency payload comparison.
 ///
-/// Uses a simple concatenation of operation fields to create a deterministic
+/// Uses concatenation of operation fields to create a deterministic
 /// byte sequence that can be hashed with seahash.
 pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
     use proto::operation::Op;

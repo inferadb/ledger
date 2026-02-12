@@ -37,7 +37,10 @@ impl BloomFilter {
         Self { bits: [0u8; BLOOM_FILTER_SIZE] }
     }
 
-    /// Creates a bloom filter from a fixed-size byte array (infallible).
+    /// Creates a bloom filter from a fixed-size byte array.
+    ///
+    /// Unlike [`from_bytes`](Self::from_bytes), this cannot fail because the
+    /// array size is verified at compile time.
     pub fn from_array(data: &[u8; BLOOM_FILTER_SIZE]) -> Self {
         Self { bits: *data }
     }

@@ -127,7 +127,7 @@ impl PageCache {
         }
     }
 
-    /// Evicts one page using clock algorithm.
+    /// Evicts one page using the clock algorithm.
     ///
     /// IMPORTANT: Never evicts dirty pages to prevent data loss. If all pages
     /// are dirty, returns false and the caller must flush before retrying.

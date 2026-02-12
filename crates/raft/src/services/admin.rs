@@ -1652,7 +1652,7 @@ impl AdminService for AdminServiceImpl {
     /// - `is_cluster_member`: Cluster state observable via connection behavior
     /// - `term`: Raft term (not sensitive)
     ///
-    /// **Threat: Malicious Node ID**: An attacker could provide a very low Snowflake
+    /// **Threat: Malicious Node ID**: An attacker could provide an artificially low Snowflake
     /// ID to force leadership. Mitigations:
     /// - Snowflake IDs use 42-bit timestamp + 22-bit random, making prediction difficult
     /// - IDs are persisted on first startup, preventing replay

@@ -12,7 +12,7 @@
 //!
 //! Before running this example, you'll need:
 //!
-//! ## For simple TLS (server verification only):
+//! ## For one-way TLS (server verification only):
 //! - CA certificate that signed the server's certificate (`ca.pem`)
 //!
 //! ## For mutual TLS (mTLS):

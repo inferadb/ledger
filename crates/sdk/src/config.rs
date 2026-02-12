@@ -352,7 +352,7 @@ pub struct DiscoveryConfig {
 ///
 /// ```no_run
 /// # use inferadb_ledger_sdk::{TlsConfig, CertificateData};
-/// // Simple TLS with native root certificates
+/// // TLS with native root certificates
 /// let tls = TlsConfig::builder()
 ///     .use_native_roots(true)
 ///     .build()
@@ -428,7 +428,7 @@ impl CertificateData {
     }
 }
 
-/// Simple base64 encoding for DER to PEM conversion.
+/// Base64 encoding for DER to PEM conversion.
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

@@ -5,7 +5,7 @@
 //!
 //! ## Design Decisions
 //!
-//! OpenRaft's error types have complex generic bounds that don't work well with
+//! OpenRaft's error types have complex generic bounds incompatible with
 //! Snafu's derive macro. Instead of wrapping them directly, we capture the error
 //! message and preserve the semantic information in our error variants.
 

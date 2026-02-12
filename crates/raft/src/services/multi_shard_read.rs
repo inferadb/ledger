@@ -49,7 +49,7 @@ pub struct MultiShardReadService {
     /// Shard resolver for routing requests.
     resolver: Arc<dyn ShardResolver>,
     /// Multi-raft manager for creating forward clients when needed.
-    /// Optional to support simple single-shard deployments.
+    /// Optional to support standalone single-shard deployments.
     manager: Option<Arc<MultiRaftManager>>,
 }
 

@@ -149,7 +149,7 @@ pub trait ShardResolver: Send + Sync {
     }
 }
 
-/// Single-shard resolver for simple deployments.
+/// Single-shard resolver for standalone deployments.
 ///
 /// Always returns the same shard context, as all namespaces
 /// are handled by a single Raft group.

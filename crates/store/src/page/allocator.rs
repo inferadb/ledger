@@ -1,6 +1,6 @@
-//! Simple free-list page allocator.
+//! Free-list page allocator.
 //!
-//! The store uses a simple free list rather than a buddy allocator because:
+//! The store uses a free list rather than a buddy allocator because:
 //! - All pages are the same size (no variable allocation orders)
 //! - Single-writer model simplifies state management
 //! - Free list can be rebuilt from B-tree scan on recovery
@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 
 use crate::error::PageId;
 
-/// Simple free-list based page allocator.
+/// Free-list based page allocator.
 ///
 /// Pages are allocated from a free list. When the free list is empty,
 /// new pages are allocated by extending the file.

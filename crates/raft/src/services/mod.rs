@@ -5,8 +5,9 @@
 //!
 //! ## Multi-Shard Support
 //!
-//! For multi-shard deployments, use the `MultiShard*` service variants with a
-//! `ShardResolver` to route requests to the correct shard.
+//! For multi-shard deployments, use [`MultiShardReadService`] and
+//! [`MultiShardWriteService`] with a [`ShardResolver`] to route requests
+//! to the correct shard.
 //!
 //! ## Request Forwarding
 //!

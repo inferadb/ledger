@@ -35,7 +35,7 @@ pub trait PositionTracker: Clone + Send + 'static {
     fn position(&self) -> u64;
 }
 
-/// Simple height-based position tracker.
+/// Height-based position tracker.
 ///
 /// Tracks the last seen block height for stream resumption.
 #[derive(Debug, Clone, Default)]

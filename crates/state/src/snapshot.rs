@@ -227,7 +227,7 @@ impl Snapshot {
         Ok(Self { header, state })
     }
 
-    /// Creates a simple snapshot without chain verification (for testing).
+    /// Creates a snapshot without chain verification (for testing).
     ///
     /// In production, prefer `new()` with proper chain parameters.
     #[cfg(test)]

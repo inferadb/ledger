@@ -75,9 +75,10 @@ pub struct BranchSplitResult {
 /// The separator key (first key of new node) and page ID of new node.
 ///
 /// # Note
-/// If the original node is empty or has only 1 entry, this creates an
-/// empty left node and returns a synthetic separator key. This handles
-/// edge cases where large values don't fit even in an empty page.
+/// If the original node is empty, both pages are reinitialized and an
+/// empty separator key (`Vec::new()`) is returned. The caller places the
+/// new key into either page based on comparison. This handles edge cases
+/// where large values exhaust page space.
 ///
 /// # Errors
 ///
