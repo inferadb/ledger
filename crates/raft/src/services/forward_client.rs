@@ -7,15 +7,23 @@
 //! ## Usage
 //!
 //! ```no_run
+//! # use std::net::SocketAddr;
 //! # use inferadb_ledger_raft::services::ForwardClient;
+//! # use inferadb_ledger_raft::shard_router::ShardConnection;
+//! # use inferadb_ledger_types::ShardId;
+//! # use inferadb_ledger_proto::proto::ReadRequest;
+//! # use tonic::transport::Channel;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = ForwardClient::new(connection).await?;
+//! # let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
+//! # let addr: SocketAddr = "[::1]:50051".parse()?;
+//! # let connection = ShardConnection {
+//! #     shard_id: ShardId::new(1), channel, address: addr, is_leader: true,
+//! # };
+//! let mut client = ForwardClient::new(connection);
 //!
 //! // Forward a read request
-//! let response = client.forward_read(request).await?;
-//!
-//! // Forward a write request
-//! let response = client.forward_write(request).await?;
+//! let request = ReadRequest::default();
+//! let response = client.forward_read(request, None, None).await?;
 //! # Ok(())
 //! # }
 //! ```

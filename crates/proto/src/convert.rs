@@ -11,11 +11,16 @@
 //!
 //! # Usage
 //!
-//! ```text
+//! ```no_run
+//! # use inferadb_ledger_proto::{proto, convert};
+//! # use inferadb_ledger_types::LedgerNodeId;
+//! # use openraft::Vote;
 //! // Domain to proto
-//! let proto_op: proto::Operation = domain_op.into();
+//! let domain_vote = Vote::new(1u64, 42u64);
+//! let proto_vote: proto::RaftVote = domain_vote.into();
 //!
 //! // Proto to domain
+//! let proto_vote = proto::RaftVote { term: 1, node_id: 42, committed: false };
 //! let domain_vote: Vote<LedgerNodeId> = proto_vote.into();
 //! ```
 //!

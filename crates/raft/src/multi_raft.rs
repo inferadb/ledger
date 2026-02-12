@@ -29,19 +29,22 @@
 //! ## Usage
 //!
 //! ```no_run
-//! # use inferadb_ledger_raft::multi_raft::MultiRaftManager;
+//! # use std::path::PathBuf;
+//! # use inferadb_ledger_raft::multi_raft::{MultiRaftConfig, MultiRaftManager, ShardConfig};
+//! # use inferadb_ledger_types::ShardId;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = MultiRaftConfig::builder()
+//!     .data_dir(PathBuf::from("/data"))
+//!     .node_id(1u64)
+//!     .build();
 //! let manager = MultiRaftManager::new(config);
 //!
 //! // Start the _system shard (always required)
-//! manager.start_system_shard().await?;
+//! let system_config = ShardConfig::system(1u64, "127.0.0.1:50051".to_string());
+//! manager.start_system_shard(system_config).await?;
 //!
-//! // Start data shards as needed
-//! manager.start_shard(1, shard_config).await?;
-//!
-//! // Route requests
-//! let shard = manager.get_shard(shard_id)?;
-//! shard.raft().client_write(request).await?;
+//! // Route requests to a shard
+//! let shard = manager.get_shard(ShardId::new(0))?;
 //! # Ok(())
 //! # }
 //! ```
