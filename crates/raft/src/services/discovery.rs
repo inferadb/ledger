@@ -230,7 +230,7 @@ impl DiscoveryServiceImpl {
         metrics.current_leader.map(|id| id.to_string())
     }
 
-    /// Prune stale peers that haven't been seen within the staleness threshold.
+    /// Prunes stale peers that haven't been seen within the staleness threshold.
     ///
     /// Per DESIGN.md §3.6: Peers not seen in >1 hour should be pruned.
     /// This method should be called periodically (every 5 minutes).

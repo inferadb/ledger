@@ -91,7 +91,7 @@ impl std::fmt::Display for OtelInitError {
 
 impl std::error::Error for OtelInitError {}
 
-/// Initialize the OpenTelemetry tracer provider.
+/// Initializes the OpenTelemetry tracer provider.
 ///
 /// This function should be called once at server startup. It creates a
 /// `SdkTracerProvider` with `BatchSpanProcessor` for efficient span export.
@@ -178,7 +178,7 @@ pub fn init_otel(config: &OtelConfig) -> Result<(), OtelInitError> {
     Ok(())
 }
 
-/// Shutdown the OpenTelemetry tracer provider gracefully.
+/// Shuts down the OpenTelemetry tracer provider gracefully.
 ///
 /// This function flushes any pending spans and shuts down the provider.
 /// It should be called during server shutdown.

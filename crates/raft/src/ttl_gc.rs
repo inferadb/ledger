@@ -41,7 +41,7 @@ const GC_ACTOR: &str = "system:gc";
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
-    /// The Raft instance.
+    /// Raft consensus handle for proposing TTL expiration operations.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
@@ -67,7 +67,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Scan for expired entities in a vault.
+    /// Scans for expired entities in a vault.
     ///
     /// Returns a list of (key, expires_at) for entities that have expired.
     fn find_expired_entities(&self, vault_id: VaultId) -> Vec<(String, u64)> {

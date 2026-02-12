@@ -57,7 +57,7 @@ const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct SagaOrchestrator<B: StorageBackend + 'static> {
-    /// The Raft instance.
+    /// Raft consensus handle for proposing saga step operations.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,

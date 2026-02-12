@@ -48,7 +48,7 @@ use crate::{
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct AdminServiceImpl {
-    /// The Raft instance.
+    /// Raft consensus handle for proposing admin operations.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
     state: Arc<StateLayer<FileBackend>>,

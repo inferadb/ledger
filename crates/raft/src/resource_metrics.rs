@@ -57,7 +57,7 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
         self.collect_snapshot_metrics();
     }
 
-    /// Collect disk space metrics for the data directory's filesystem.
+    /// Collects disk space metrics for the data directory's filesystem.
     fn collect_disk_metrics(&self) {
         match disk_space(&self.data_dir) {
             Some((total, free)) => {
@@ -72,7 +72,7 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
         }
     }
 
-    /// Collect database-level metrics (page cache, splits, compaction lag, btree depth).
+    /// Collects database-level metrics (page cache, splits, compaction lag, btree depth).
     fn collect_database_metrics(&self) {
         let stats = self.state.database_stats();
 
@@ -92,7 +92,7 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
         }
     }
 
-    /// Collect snapshot directory disk usage.
+    /// Collects snapshot directory disk usage.
     fn collect_snapshot_metrics(&self) {
         match snapshot_disk_bytes(&self.snapshot_dir) {
             Some(bytes) => metrics::set_snapshot_disk_bytes(bytes),

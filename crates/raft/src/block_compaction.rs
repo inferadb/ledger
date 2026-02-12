@@ -40,7 +40,7 @@ const COMPACTION_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct BlockCompactor<B: StorageBackend + 'static> {
-    /// The Raft instance.
+    /// Raft consensus handle for leader checks.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,

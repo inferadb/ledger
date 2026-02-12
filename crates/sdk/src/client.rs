@@ -1494,7 +1494,7 @@ impl LedgerClient {
     ///
     /// # Per-Request Cancellation
     ///
-    /// Creates a child token and pass it to RPC methods that accept an
+    /// Create a child token and pass it to RPC methods that accept an
     /// optional cancellation token. Cancelling the child token cancels
     /// only that request, not the entire client.
     ///

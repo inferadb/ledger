@@ -33,7 +33,7 @@ use crate::{
 /// Dependency checks (disk, peer, Raft lag) are cached with a configurable TTL
 /// to prevent I/O storms from aggressive probe intervals.
 pub struct HealthServiceImpl {
-    /// The Raft instance.
+    /// Raft consensus handle for leadership and term queries.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// The state layer.
     state: Arc<StateLayer<FileBackend>>,

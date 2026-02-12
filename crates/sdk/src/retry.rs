@@ -1,7 +1,8 @@
 //! Retry logic with exponential backoff.
 //!
-//! Provides retry wrappers using the `backon` crate with
-//! configurable backoff policies.
+//! Provides retry wrappers with configurable backoff policies.
+//! Uses the `backon` crate for simple retries and a manual retry loop
+//! with cancellation support for production use.
 
 use std::{future::Future, time::Duration};
 

@@ -57,7 +57,7 @@ impl AppliedStateAccessor {
             .cloned()
     }
 
-    /// List all active namespaces.
+    /// Lists all active namespaces.
     pub fn list_namespaces(&self) -> Vec<NamespaceMeta> {
         use inferadb_ledger_state::system::NamespaceStatus;
         self.state
@@ -74,7 +74,7 @@ impl AppliedStateAccessor {
         self.state.read().vaults.get(&(namespace_id, vault_id)).filter(|v| !v.deleted).cloned()
     }
 
-    /// List all active vaults in a namespace.
+    /// Lists all active vaults in a namespace.
     pub fn list_vaults(&self, namespace_id: NamespaceId) -> Vec<VaultMeta> {
         self.state
             .read()

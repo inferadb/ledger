@@ -52,7 +52,7 @@ const SYSTEM_NAMESPACE_ID: NamespaceId = NamespaceId::new(0);
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
-    /// The Raft instance.
+    /// Raft consensus handle for proposing cleanup operations.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,

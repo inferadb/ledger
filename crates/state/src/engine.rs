@@ -44,7 +44,7 @@ impl StorageEngine {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Returns a clone of the database handle.
+    /// Returns a shared reference to the underlying database (via [`Arc::clone`]).
     pub fn db(&self) -> Arc<Database<FileBackend>> {
         Arc::clone(&self.db)
     }
@@ -77,7 +77,7 @@ impl InMemoryStorageEngine {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Returns a clone of the database handle.
+    /// Returns a shared reference to the underlying database (via [`Arc::clone`]).
     pub fn db(&self) -> Arc<Database<InMemoryBackend>> {
         Arc::clone(&self.db)
     }

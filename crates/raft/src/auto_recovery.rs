@@ -123,7 +123,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Calculate retry delay with exponential backoff.
+    /// Calculates retry delay with exponential backoff.
     fn retry_delay(&self, attempt: u8) -> Duration {
         let multiplier = 2u64.saturating_pow(attempt.saturating_sub(1) as u32);
         let delay = self.config.base_retry_delay.saturating_mul(multiplier as u32);
@@ -137,7 +137,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         elapsed >= self.retry_delay(attempt)
     }
 
-    /// Scan for vaults that need recovery action.
+    /// Scans for vaults that need recovery action.
     ///
     /// Returns vaults that are:
     /// - Diverged (need initial recovery)

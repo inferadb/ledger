@@ -34,7 +34,7 @@ pub enum RateLimitLevel {
 }
 
 impl RateLimitLevel {
-    /// Return a static string label for metrics.
+    /// Returns a static string label for metrics.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Client => "client",
@@ -54,7 +54,7 @@ pub enum RateLimitReason {
 }
 
 impl RateLimitReason {
-    /// Return a static string label for metrics.
+    /// Returns a static string label for metrics.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TokensExhausted => "tokens_exhausted",

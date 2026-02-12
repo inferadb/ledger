@@ -56,7 +56,7 @@ fn classify_batch_error(err: &BatchError) -> Status {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct WriteServiceImpl {
-    /// The Raft instance.
+    /// Raft consensus handle for proposing write transactions.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,

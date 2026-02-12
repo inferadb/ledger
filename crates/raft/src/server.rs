@@ -317,7 +317,7 @@ impl LedgerServer {
         self.block_archive.as_ref()
     }
 
-    /// Attach backup support (backup manager + snapshot manager).
+    /// Attaches backup support (backup manager + snapshot manager).
     ///
     /// Enables `CreateBackup`, `ListBackups`, and `RestoreBackup` RPCs on the
     /// admin service. Done post-construction because bon type-state builders

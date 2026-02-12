@@ -226,7 +226,7 @@ impl BackupManager {
         Ok(metadata)
     }
 
-    /// List available backups sorted by creation time (newest first).
+    /// Lists available backups sorted by creation time (newest first).
     ///
     /// # Errors
     ///
@@ -307,7 +307,7 @@ impl BackupManager {
             .map_err(|e| BackupError::Serialization { message: e.to_string() })
     }
 
-    /// Prune old backups, keeping only the most recent `retention_count`.
+    /// Prunes old backups, keeping only the most recent `retention_count`.
     fn prune(&self) -> Result<()> {
         let backups = self.list_backups(0)?;
 

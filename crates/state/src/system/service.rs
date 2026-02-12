@@ -81,6 +81,10 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     /// Returns the next value from a sequence counter and increments it.
     ///
     /// If the counter doesn't exist, initializes it to `start_value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the underlying read or write fails.
     pub fn next_sequence(&self, key: &str, start_value: i64) -> Result<i64> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         // Read current value
@@ -111,12 +115,20 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Returns the next namespace ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the sequence counter read or write fails.
     pub fn next_namespace_id(&self) -> Result<NamespaceId> {
         // Start at 1 because 0 is reserved for _system
         self.next_sequence(SystemKeys::NAMESPACE_SEQ_KEY, 1).map(NamespaceId::new)
     }
 
     /// Returns the next vault ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the sequence counter read or write fails.
     pub fn next_vault_id(&self) -> Result<VaultId> {
         self.next_sequence(SystemKeys::VAULT_SEQ_KEY, 1).map(VaultId::new)
     }
@@ -126,6 +138,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // =========================================================================
 
     /// Registers a node in the cluster.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] if serialization fails, or
+    /// [`SystemError::State`] if the write operation fails.
     pub fn register_node(&self, node: &NodeInfo) -> Result<()> {
         let key = SystemKeys::node_key(&node.node_id);
         let value = encode(node).context(CodecSnafu)?;
@@ -138,6 +155,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Returns a node by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the read fails, or
+    /// [`SystemError::Codec`] if deserialization fails.
     pub fn get_node(&self, node_id: &NodeId) -> Result<Option<NodeInfo>> {
         let key = SystemKeys::node_key(node_id);
 
@@ -153,6 +175,10 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Lists all registered nodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the underlying list operation fails.
     pub fn list_nodes(&self) -> Result<Vec<NodeInfo>> {
         let entities = self
             .state
@@ -170,6 +196,10 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Removes a node from the cluster.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the delete operation fails.
     pub fn remove_node(&self, node_id: &NodeId) -> Result<bool> {
         let key = SystemKeys::node_key(node_id);
         let ops = vec![Operation::DeleteEntity { key }];
@@ -184,6 +214,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // =========================================================================
 
     /// Registers a new namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] if serialization fails, or
+    /// [`SystemError::State`] if the write operation fails.
     pub fn register_namespace(&self, registry: &NamespaceRegistry) -> Result<()> {
         let key = SystemKeys::namespace_key(registry.namespace_id);
         let value = encode(registry).context(CodecSnafu)?;
@@ -208,6 +243,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Returns a namespace by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the read fails, or
+    /// [`SystemError::Codec`] if deserialization fails.
     pub fn get_namespace(&self, namespace_id: NamespaceId) -> Result<Option<NamespaceRegistry>> {
         let key = SystemKeys::namespace_key(namespace_id);
 
@@ -223,6 +263,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Returns a namespace by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the index or registry read fails, or
+    /// [`SystemError::Codec`] if deserialization fails.
     pub fn get_namespace_by_name(&self, name: &str) -> Result<Option<NamespaceRegistry>> {
         let index_key = SystemKeys::namespace_name_index_key(name);
 
@@ -244,6 +289,10 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Lists all namespaces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the underlying list operation fails.
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceRegistry>> {
         let entities = self
             .state
@@ -261,6 +310,11 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     /// Updates namespace status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::NotFound`] if the namespace does not exist, or
+    /// [`SystemError::Codec`] / [`SystemError::State`] if the update fails.
     pub fn update_namespace_status(
         &self,
         namespace_id: NamespaceId,
@@ -284,11 +338,21 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     // =========================================================================
 
     /// Returns the shard ID for a namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] or [`SystemError::Codec`] if the
+    /// namespace lookup fails.
     pub fn get_shard_for_namespace(&self, namespace_id: NamespaceId) -> Result<Option<ShardId>> {
         self.get_namespace(namespace_id).map(|opt| opt.map(|r| r.shard_id))
     }
 
     /// Assigns a namespace to a shard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::NotFound`] if the namespace does not exist, or
+    /// [`SystemError::Codec`] / [`SystemError::State`] if the update fails.
     pub fn assign_namespace_to_shard(
         &self,
         namespace_id: NamespaceId,

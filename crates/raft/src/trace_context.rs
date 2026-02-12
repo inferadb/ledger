@@ -247,7 +247,7 @@ pub fn inject_into_metadata(metadata: &mut MetadataMap, context: &TraceContext) 
     }
 }
 
-/// Extracts or generate trace context from gRPC metadata.
+/// Extracts or generates trace context from gRPC metadata.
 ///
 /// If valid trace context exists, returns it. If the header is missing or
 /// malformed, generates a new trace context. Logs a warning for malformed

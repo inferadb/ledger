@@ -366,7 +366,7 @@ impl MultiRaftManager {
         self.get_shard(ShardId::new(0))
     }
 
-    /// List all active shard IDs.
+    /// Lists all active shard IDs.
     pub fn list_shards(&self) -> Vec<ShardId> {
         self.shards.read().keys().copied().collect()
     }

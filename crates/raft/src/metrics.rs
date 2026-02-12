@@ -124,7 +124,7 @@ pub fn record_rate_limit_exceeded(namespace_id: i64) {
 
 /// Records a rate limit rejection with level and reason labels.
 ///
-/// Per PRD Task 4: `ledger_rate_limit_rejected_total{level, reason}`.
+/// `ledger_rate_limit_rejected_total{level, reason}`.
 #[inline]
 pub fn record_rate_limit_rejected(level: &str, reason: &str) {
     counter!(RATE_LIMIT_REJECTED, "level" => level.to_string(), "reason" => reason.to_string())
