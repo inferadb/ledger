@@ -97,7 +97,7 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
     /// Called whenever a circuit breaker changes state.
     ///
     /// - `endpoint`: The server endpoint URL.
-    /// - `state`: The new circuit state ("closed", "open", "half_open").
+    /// - `state`: The new circuit state ("closed", "open", "half-open").
     fn record_circuit_state(&self, endpoint: &str, state: &str) {
         let _ = (endpoint, state);
     }

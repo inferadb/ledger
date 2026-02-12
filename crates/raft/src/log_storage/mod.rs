@@ -7,7 +7,7 @@
 //! log storage and state machine into one implementation. The v2 traits
 //! (`RaftLogStorage`, `RaftStateMachine`) are sealed in OpenRaft 0.9.
 //!
-//! Per DESIGN.md, each shard group has its own storage located at:
+//! Each shard group has its own storage located at:
 //! `shards/{shard_id}/raft/log.db`
 //!
 //! # Lock Ordering Convention
@@ -733,8 +733,8 @@ mod tests {
     // ========================================================================
     //
     // These tests verify the namespace deletion behavior with blocking vaults.
-    // Per DESIGN.md: namespaces with active vaults cannot be deleted until
-    // all vaults are deleted first. The response includes blocking vault IDs.
+    // Namespaces with active vaults cannot be deleted until all vaults are
+    // deleted first. The response includes blocking vault IDs.
 
     #[tokio::test]
     async fn test_delete_namespace_blocked_by_active_vaults() {
@@ -2487,7 +2487,7 @@ mod tests {
     fn test_sequence_counters_initial_values() {
         let counters = SequenceCounters::new();
 
-        // Verify initial values per DESIGN.md:
+        // Verify initial values:
         // - namespace 0 is reserved for _system
         // - IDs start at 1
         assert_eq!(counters.namespace, NamespaceId::new(1), "Namespace counter should start at 1");
@@ -3311,7 +3311,7 @@ mod tests {
         }
 
         // Writes should still go through when in Recovering state
-        // (only Diverged blocks writes per DESIGN.md)
+        // (only Diverged blocks writes)
         // The circuit breaker is enforced by AutoRecoveryJob not attempting
         // recovery beyond MAX_RECOVERY_ATTEMPTS
     }

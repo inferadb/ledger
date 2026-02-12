@@ -1,6 +1,6 @@
 //! Background maintenance task for peer tracking.
 //!
-//! Per DESIGN.md §3.6, this module provides:
+//! This module provides:
 //! - Periodic pruning of stale peers (not seen in >1 hour)
 //! - Maintenance runs every 5 minutes by default
 //!

@@ -20,8 +20,8 @@
 //! # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 //! let result = client
 //!     .write_builder(1, Some(1))
-//!     .set("user:123", b"data".to_vec())
 //!     .if_not_exists()
+//!     .set("user:123", b"data".to_vec())
 //!     .delete("old-key")
 //!     .create_relationship("doc:1", "viewer", "user:123")
 //!     .execute()

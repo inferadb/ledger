@@ -2,9 +2,9 @@
 //!
 //! Handles transaction submission through Raft consensus.
 //!
-//! Per DESIGN.md §6.3: Uses application-level batching to coalesce multiple
-//! write requests into single Raft proposals, improving throughput by reducing
-//! consensus round-trips.
+//! Uses application-level batching to coalesce multiple write requests into
+//! single Raft proposals, improving throughput by reducing consensus
+//! round-trips.
 
 use std::{fmt::Write, sync::Arc, time::Duration};
 
@@ -71,8 +71,8 @@ pub struct WriteServiceImpl {
     applied_state: Option<AppliedStateAccessor>,
     /// Handles for submitting writes to the batch writer.
     ///
-    /// Per DESIGN.md §6.3: Writes are coalesced into batches and submitted
-    /// as single Raft proposals for improved throughput.
+    /// Writes are coalesced into batches and submitted as single Raft
+    /// proposals for improved throughput.
     #[builder(default)]
     batch_handle: Option<BatchWriterHandle>,
     /// Mutex to serialize Raft proposals (fallback when batching disabled).
@@ -110,8 +110,8 @@ pub struct WriteServiceImpl {
 impl WriteServiceImpl {
     /// Creates a write service with batching enabled.
     ///
-    /// Per DESIGN.md §6.3: Batching coalesces multiple writes into single
-    /// Raft proposals for improved throughput.
+    /// Batching coalesces multiple writes into single Raft proposals for
+    /// improved throughput.
     ///
     /// Returns the service and a task handle for the batch writer background loop.
     /// The caller must spawn or await the returned task.
@@ -293,7 +293,7 @@ impl WriteServiceImpl {
 
     /// Maps a failed SetCondition to the appropriate WriteErrorCode.
     ///
-    /// Per DESIGN.md §6.1 and proto WriteErrorCode:
+    /// Maps per proto WriteErrorCode:
     /// - MustNotExist failed → KEY_EXISTS (key already exists)
     /// - MustExist failed → KEY_NOT_FOUND (key doesn't exist)
     /// - VersionEquals failed with existing key → VERSION_MISMATCH
@@ -824,7 +824,7 @@ impl WriteService for WriteServiceImpl {
                 current_value,
                 failed_condition,
             } => {
-                // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
+                // Return current state for client-side conflict resolution
                 // Key exists if we have a current_version (which is the version when entity was
                 // last modified)
                 let key_exists = current_version.is_some();
@@ -1204,7 +1204,7 @@ impl WriteService for WriteServiceImpl {
                 current_value,
                 failed_condition,
             } => {
-                // Per DESIGN.md §6.1: Return current state for client-side conflict resolution
+                // Return current state for client-side conflict resolution
                 // Key exists if we have a current_version (which is the version when entity was
                 // last modified)
                 let key_exists = current_version.is_some();

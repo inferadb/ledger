@@ -1,7 +1,7 @@
 //! Transaction batching for improved write throughput.
 //!
-//! Per DESIGN.md §6.3: Transaction batching coalesces multiple writes into
-//! single Raft proposals to reduce consensus round-trips and improve throughput.
+//! Transaction batching coalesces multiple writes into single Raft proposals
+//! to reduce consensus round-trips and improve throughput.
 //!
 //! ## Architecture
 //!
@@ -41,9 +41,9 @@ pub struct BatchConfig {
     pub tick_interval: Duration,
     /// Commit immediately when queue drains to zero.
     ///
-    /// Per DESIGN.md §6.3: When true (default), flushes the batch as soon as
-    /// the incoming queue is empty rather than waiting for `batch_timeout`.
-    /// This optimizes latency for interactive workloads.
+    /// When true (default), flushes the batch as soon as the incoming queue
+    /// is empty rather than waiting for `batch_timeout`. This optimizes
+    /// latency for interactive workloads.
     ///
     /// Set to `false` for batch import workloads where throughput is more
     /// important than latency.

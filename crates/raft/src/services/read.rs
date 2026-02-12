@@ -5,7 +5,7 @@
 //!
 //! ## Consistency Levels
 //!
-//! Per DESIGN.md §10, reads support two consistency levels:
+//! Reads support two consistency levels:
 //! - **EVENTUAL** (default): Read from any replica. Fastest, may be slightly stale.
 //! - **LINEARIZABLE**: Read from leader only. Strong consistency, higher latency.
 //!
@@ -988,7 +988,7 @@ impl ReadService for ReadServiceImpl {
 
     /// Watch blocks with historical replay support.
     ///
-    /// Per DESIGN.md §3.3:
+    /// Behavior:
     /// - If start_height <= current tip: replays committed blocks first, then streams new
     /// - If start_height > current tip: waits for that block, then streams
     /// - start_height must be >= 1 (0 is rejected with INVALID_ARGUMENT)
@@ -1003,7 +1003,7 @@ impl ReadService for ReadServiceImpl {
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let start_height = req.start_height;
 
-        // Validate start_height >= 1 (per DESIGN.md)
+        // Validate start_height >= 1
         if start_height == 0 {
             return Err(Status::invalid_argument(
                 "start_height must be >= 1 (use 1 for full replay from genesis)",

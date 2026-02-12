@@ -340,7 +340,7 @@ pub async fn bootstrap_node(
     tracing::info!("Started block compactor");
 
     // Start auto-recovery job for detecting and recovering diverged vaults
-    // Per DESIGN.md §8.2: Circuit breaker with bounded retries
+    // Circuit breaker with bounded retries
     let recovery_handle = AutoRecoveryJob::builder()
         .raft(raft.clone())
         .node_id(node_id)
@@ -354,7 +354,7 @@ pub async fn bootstrap_node(
     tracing::info!("Started auto-recovery job with snapshot support");
 
     // Start learner refresh job for keeping learner state synchronized
-    // Per DESIGN.md §9.3: Background polling of voters for fresh state
+    // Background polling of voters for fresh state
     let learner_refresh_handle = LearnerRefreshJob::builder()
         .raft(raft.clone())
         .node_id(node_id)

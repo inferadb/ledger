@@ -1,7 +1,7 @@
 //! Production-grade Rust SDK for InferaDB Ledger service.
 //!
-//! This SDK provides a high-level, ergonomic API for Rust applications to interact
-//! with Ledger's blockchain database. It wraps the gRPC services with automatic
+//! Provides a high-level, ergonomic API for Rust applications to interact
+//! with Ledger's blockchain database. Wraps the gRPC services with automatic
 //! idempotency, resilient connectivity, and streaming support.
 //!
 //! # Features
@@ -11,7 +11,7 @@
 //! - **Resilient connectivity**: Exponential backoff retry and failover
 //! - **Streaming support**: WatchBlocks with automatic reconnection
 //! - **Cancellation support**: Per-request and client-level cancellation via `CancellationToken`
-//! - **Zero-cost abstractions**: Efficient serialization and connection pooling
+//! - **Minimal-overhead abstractions**: Efficient serialization and connection pooling
 //!
 //! # Quick Start
 //!

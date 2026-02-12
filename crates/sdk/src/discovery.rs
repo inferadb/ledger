@@ -17,7 +17,10 @@
 //!
 //! # Example
 //!
-//! ```text
+//! ```no_run
+//! # use inferadb_ledger_sdk::{ClientConfig, ConnectionPool, ServerSource};
+//! # use inferadb_ledger_sdk::{DiscoveryService, DiscoveryConfig};
+//! # async fn example() -> inferadb_ledger_sdk::Result<()> {
 //! let config = ClientConfig::builder()
 //!     .servers(ServerSource::from_static(["http://localhost:50051"]))
 //!     .client_id("my-client")
@@ -32,6 +35,8 @@
 //! // Or manually refresh
 //! let peers = discovery.get_peers().await?;
 //! discovery.refresh_peers().await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{

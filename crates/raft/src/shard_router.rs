@@ -1,7 +1,7 @@
 //! Shard router for multi-shard request routing.
 //!
-//! Per DESIGN.md §4.6: Routes requests to the correct shard based on namespace.
-//! Maintains a local cache of namespace → shard mappings with TTL-based invalidation.
+//! Routes requests to the correct shard based on namespace. Maintains a local
+//! cache of namespace to shard mappings with TTL-based invalidation.
 //!
 //! ## Architecture
 //!

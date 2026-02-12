@@ -1,6 +1,6 @@
 //! TTL garbage collection for expired entities.
 //!
-//! Per DESIGN.md, expired entities remain in state until garbage collection
+//! Expired entities remain in state until garbage collection
 //! removes them via committed `ExpireEntity` operations. This preserves the
 //! `state_root = f(block N)` invariant while allowing lazy expiration.
 //!

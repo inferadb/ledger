@@ -1,8 +1,8 @@
 //! Multi-shard read service implementation.
 //!
 //! Routes read requests to the appropriate shard based on namespace.
-//! Per DESIGN.md §4.6: Each namespace is assigned to a shard, and requests
-//! are routed to the state layer for that shard.
+//! Each namespace is assigned to a shard, and requests are routed to the
+//! state layer for that shard.
 //!
 //! ## Request Forwarding
 //!
@@ -233,7 +233,7 @@ impl MultiShardReadService {
     > {
         let start_height = req.start_height;
 
-        // Validate start_height >= 1 (per DESIGN.md)
+        // Validate start_height >= 1
         if start_height == 0 {
             return Err(Status::invalid_argument(
                 "start_height must be >= 1 (use 1 for full replay from genesis)",

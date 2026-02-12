@@ -323,7 +323,6 @@ impl<P: PageProvider> BTree<P> {
     /// - A page read or write fails through the `PageProvider`
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {
         if self.root_page == 0 {
-            // Create first leaf as root
             let mut page = self.new_leaf_page();
             {
                 let mut leaf = LeafNode::from_page(&mut page)?;
@@ -368,7 +367,6 @@ impl<P: PageProvider> BTree<P> {
 
                 match leaf.search(key) {
                     SearchResult::Found(idx) => {
-                        // Update existing key
                         old_value = Some(leaf.value(idx).to_vec());
                         if !leaf.update(idx, value) {
                             // Value grew - need to delete and reinsert
@@ -867,7 +865,6 @@ impl<P: PageProvider> BTree<P> {
                 }
             }
 
-            // Free the right (now empty) page
             self.provider.free_page(right_id);
             stats.pages_merged += 1;
             stats.pages_freed += 1;

@@ -1,8 +1,8 @@
 //! Time-travel index for fast historical queries.
 //!
-//! Per DESIGN.md §3.5: Optional index that stores historical versions of
-//! entity values for high-frequency audit targets. Enables O(1) historical
-//! reads without snapshot replay.
+//! Optional index that stores historical versions of entity values for
+//! high-frequency audit targets. Enables O(1) historical reads without
+//! snapshot replay.
 //!
 //! ## Usage
 //!

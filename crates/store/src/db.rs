@@ -1164,7 +1164,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             self.db.page_splits.fetch_add(splits, Ordering::Relaxed);
         }
 
-        // Update root if it changed
         self.table_roots[T::ID as usize] = btree.root_page();
 
         Ok(())
@@ -1197,7 +1196,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         let mut btree = BTree::new(root, provider);
         let deleted = btree.delete(&key_bytes)?;
 
-        // Update root if it changed
         self.table_roots[T::ID as usize] = btree.root_page();
 
         Ok(deleted.is_some())
@@ -1307,7 +1305,6 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
             self.db.cache.insert(page);
         }
 
-        // Flush all dirty pages to disk (data pages)
         self.db.flush_pages()?;
 
         // Persist table directory and header using dual-slot commit protocol

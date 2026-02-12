@@ -1,6 +1,6 @@
 //! Auto-recovery for diverged vaults.
 //!
-//! Per DESIGN.md §8.2: Diverged vaults recover automatically with bounded retries.
+//! Diverged vaults recover automatically with bounded retries.
 //! When a vault's computed state_root doesn't match the expected value, it enters
 //! `Diverged` status. This module provides automatic recovery:
 //!

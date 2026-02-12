@@ -151,9 +151,9 @@ pub enum LedgerRequest {
 
     /// Batches of requests to apply atomically in a single Raft entry.
     ///
-    /// Per DESIGN.md §6.3: Application-level batching coalesces multiple
-    /// write requests into a single Raft proposal to reduce consensus
-    /// round-trips and improve throughput.
+    /// Application-level batching coalesces multiple write requests into a
+    /// single Raft proposal to reduce consensus round-trips and improve
+    /// throughput.
     ///
     /// Each inner request is processed sequentially, and responses are
     /// returned in the same order via `LedgerResponse::BatchWrite`.
@@ -314,7 +314,7 @@ pub enum LedgerResponse {
     },
 
     /// Precondition failed for conditional write.
-    /// Per DESIGN.md §6.1: Returns current state for client-side conflict resolution.
+    /// Returns current state for client-side conflict resolution.
     PreconditionFailed {
         /// Key that failed the condition.
         key: String,

@@ -16,8 +16,8 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 ///
 /// # Arguments
 ///
-/// * `timeout` - Maximum time to wait for the condition
-/// * `condition` - A closure that returns true when the expected state is reached
+/// * `timeout` - Maximum wait duration
+/// * `condition` - Closure returning `true` when the expected state holds
 ///
 /// # Returns
 ///

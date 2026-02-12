@@ -346,7 +346,6 @@ impl DatabaseHeader {
             return Err(Error::UnsupportedVersion { version });
         }
 
-        // Parse slots
         let slot0 = CommitSlot::from_bytes(&buf[16..16 + CommitSlot::SIZE]).ok_or_else(|| {
             Error::Corrupted { reason: "Failed to parse commit slot 0".to_string() }
         })?;

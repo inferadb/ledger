@@ -1,6 +1,5 @@
 //! Snapshot management for point-in-time state capture.
 //!
-//! Per DESIGN.md:
 //! - Snapshots serialize state for fast recovery
 //! - Uses zstd compression (3-5x ratio typical)
 //! - Format: header + compressed state data
@@ -119,8 +118,8 @@ impl VaultSnapshotMeta {
 
 /// Snapshot header.
 ///
-/// Per DESIGN.md §4.4: Snapshots include chain verification linkage to enable
-/// verification after block compaction.
+/// Snapshots include chain verification linkage to enable verification after
+/// block compaction.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotHeader {
     /// Magic bytes for validation.
@@ -136,7 +135,7 @@ pub struct SnapshotHeader {
     /// SHA-256 checksum of compressed state data.
     pub checksum: Hash,
 
-    // Chain verification linkage (per DESIGN.md §4.4)
+    // Chain verification linkage
     /// Hash of the genesis block for this shard.
     /// Links the snapshot back to the shard's origin.
     pub genesis_hash: Hash,
@@ -194,8 +193,8 @@ impl Default for SnapshotChainParams {
 impl Snapshot {
     /// Creates a new snapshot with chain verification linkage.
     ///
-    /// Per DESIGN.md §4.4, snapshots should include chain verification data
-    /// to enable verification after block compaction.
+    /// Snapshots include chain verification data to enable verification after
+    /// block compaction.
     ///
     /// # Errors
     ///

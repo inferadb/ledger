@@ -1,6 +1,6 @@
 //! Block compaction for COMPACTED retention mode.
 //!
-//! Per DESIGN.md §4.4, vaults can be configured with COMPACTED retention mode
+//! Vaults can be configured with COMPACTED retention mode
 //! where transaction bodies are removed from old blocks while preserving headers
 //! (state_root, tx_merkle_root) for verification.
 //!

@@ -1,6 +1,6 @@
 //! Saga orchestrator for cross-namespace operations.
 //!
-//! Per DESIGN.md §4.6: Sagas coordinate operations spanning multiple namespaces
+//! Sagas coordinate operations spanning multiple namespaces
 //! using eventual consistency. The orchestrator polls for pending sagas and
 //! drives state transitions.
 //!

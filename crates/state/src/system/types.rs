@@ -1,6 +1,4 @@
 //! Data model types for the `_system` namespace.
-//!
-//! Per DESIGN.md §4.6–§4.7.
 
 use std::net::SocketAddr;
 
@@ -12,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // User Types
 // ============================================================================
 
-/// Global user account per DESIGN.md §4.6.
+/// Global user account.
 ///
 /// Users exist globally in `_system`, independent of organizations.
 /// Organizations reference users by their global `UserId`.
@@ -53,7 +51,7 @@ pub enum UserStatus {
 // Email Types
 // ============================================================================
 
-/// User email address per DESIGN.md §4.6.
+/// User email address.
 ///
 /// Users can have multiple email addresses. One is marked as primary.
 /// Global email uniqueness is enforced via the `_idx:email:{email}` index.
@@ -75,7 +73,7 @@ pub struct UserEmail {
     pub verified_at: Option<DateTime<Utc>>,
 }
 
-/// Email verification token per DESIGN.md §4.6.
+/// Email verification token.
 ///
 /// Tokens are stored with their hash, not plaintext, for security.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +94,7 @@ pub struct EmailVerificationToken {
 // Namespace Routing
 // ============================================================================
 
-/// Namespace routing table entry per DESIGN.md §4.7.
+/// Namespace routing table entry.
 ///
 /// Maps a namespace to its shard group for request routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,7 +136,7 @@ pub enum NamespaceStatus {
 // Cluster Membership
 // ============================================================================
 
-/// Cluster node information per DESIGN.md §4.7.
+/// Cluster node information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInfo {
     /// Unique node identifier.
@@ -155,7 +153,7 @@ pub struct NodeInfo {
     pub joined_at: DateTime<Utc>,
 }
 
-/// Node role in the cluster per DESIGN.md §4.7.
+/// Node role in the cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRole {

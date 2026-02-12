@@ -1,6 +1,5 @@
 //! Tiered snapshot storage.
 //!
-//! Per DESIGN.md §4.4:
 //! - Hot: Last N snapshots on local SSD (fast access)
 //! - Warm: Older snapshots on object storage (S3/GCS/Azure)
 //! - Cold: Archive snapshots (Glacier, optional)

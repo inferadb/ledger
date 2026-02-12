@@ -124,7 +124,7 @@ impl VaultCommitment {
     /// Computes a bucket's root hash from a list of entities.
     ///
     /// Entities must be sorted by key in lexicographic order.
-    /// Uses streaming hash with length-prefixed encoding per DESIGN.md.
+    /// Uses streaming hash with length-prefixed encoding.
     pub fn compute_bucket_root_from_entities(entities: &[Entity]) -> Hash {
         let mut hasher = BucketHasher::new();
         for entity in entities {

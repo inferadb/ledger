@@ -1,6 +1,5 @@
 //! Block archive for permanent block storage.
 //!
-//! Per DESIGN.md:
 //! - Segment-based storage (10,000 blocks per segment)
 //! - Append-only within segments
 //! - Index files for fast block lookup
@@ -391,7 +390,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Compacts all blocks before the given height.
     ///
-    /// Per DESIGN.md §4.4: After compaction, transaction bodies are removed but:
+    /// After compaction, transaction bodies are removed but:
     /// - Block headers are preserved (state_root, tx_merkle_root, previous_hash)
     /// - Vault metadata is preserved (namespace_id, vault_id, vault_height)
     /// - Chain verification remains possible via ChainCommitment

@@ -1,6 +1,6 @@
 //! Multi-Raft Manager for coordinating multiple independent shard groups.
 //!
-//! Per DESIGN.md §4.6: InferaDB uses a shard-per-Raft-group architecture where
+//! InferaDB uses a shard-per-Raft-group architecture where
 //! each shard is an independent Raft consensus group. The `_system` shard handles
 //! global coordination, while data shards handle namespace workloads.
 //!

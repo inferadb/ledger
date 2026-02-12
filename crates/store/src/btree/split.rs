@@ -106,7 +106,6 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
         return Ok(LeafSplitResult { new_page_id: new_page.id, separator_key: Vec::new() });
     }
 
-    // Calculate split point (middle)
     let split_at = entries.len() / 2;
     // When there's only 1 entry, split_at=0, so we need at least index 0 to exist
     let separator_key = entries[split_at].0.clone();
@@ -273,7 +272,7 @@ pub fn split_leaf_for_key(
     }
 
     // If we couldn't find a valid split point, return an error
-    // This can happen with very large values that don't fit even in an empty page
+    // This can happen with large values that don't fit even in an empty page
     Err(Error::PageFull)
 }
 

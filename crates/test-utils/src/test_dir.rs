@@ -12,6 +12,7 @@ use tempfile::TempDir;
 /// A managed temporary directory for tests.
 ///
 /// The directory is automatically cleaned up when this struct is dropped.
+/// `Default` delegates to [`TestDir::new`].
 ///
 /// # Example
 ///

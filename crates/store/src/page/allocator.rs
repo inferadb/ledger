@@ -41,7 +41,6 @@ impl PageAllocator {
             return page_id;
         }
 
-        // Allocate a new page by incrementing the counter
         let mut next = self.next_page.lock();
         let page_id = *next;
         *next += 1;

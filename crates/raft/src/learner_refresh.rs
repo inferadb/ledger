@@ -1,6 +1,6 @@
 //! Learner state refresh from voters.
 //!
-//! Per DESIGN.md §9.3: Learner nodes maintain a cache of system state (namespace
+//! Learner nodes maintain a cache of system state (namespace
 //! registry, routing info) that they periodically refresh from voters. This ensures
 //! learners can serve read requests with reasonably fresh data without participating
 //! in consensus.

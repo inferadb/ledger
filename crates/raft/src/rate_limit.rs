@@ -10,8 +10,8 @@
 //! an average rate. Each bucket has a capacity (max burst) and a refill rate (sustained
 //! throughput). Tokens are consumed on each request and refilled over time.
 //!
-//! Per DESIGN.md §3.7: Mitigates noisy neighbor problems in multi-tenant shards
-//! by applying rate limits per namespace_id at the shard leader.
+//! Mitigates noisy neighbor problems in multi-tenant shards by applying rate
+//! limits per namespace_id at the shard leader.
 
 use std::{
     collections::HashMap,

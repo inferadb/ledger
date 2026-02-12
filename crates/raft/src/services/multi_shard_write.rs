@@ -1,8 +1,8 @@
 //! Multi-shard write service implementation.
 //!
 //! Routes write requests to the appropriate shard based on namespace.
-//! Per DESIGN.md §4.6: Each namespace is assigned to a shard, and requests
-//! are routed to the Raft instance for that shard.
+//! Each namespace is assigned to a shard, and requests are routed to the
+//! Raft instance for that shard.
 
 use std::{
     sync::Arc,

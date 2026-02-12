@@ -1,10 +1,8 @@
 //! Cluster membership and Voter/Learner scaling model.
 //!
-//! Per DESIGN.md lines 1966-1996.
-//!
 //! ## Learner Staleness Handling
 //!
-//! Per DESIGN.md §3.5, learners receive replication but may lag during network issues.
+//! Learners receive replication but may lag during network issues.
 //! The design specifies:
 //! - `learner_cache_ttl`: Maximum age before learner considers cache stale (default: 5s)
 //! - `learner_refresh_interval`: Interval for polling voter freshness (default: 1s)
@@ -32,7 +30,7 @@ use super::types::{NodeInfo, NodeRole};
 
 /// Configuration for learner cache staleness handling.
 ///
-/// Per DESIGN.md §3.5. Currently not actively used - included for future implementation.
+/// Currently not actively used - included for future implementation.
 #[derive(Debug, Clone)]
 pub struct LearnerCacheConfig {
     /// Maximum age before learner considers its cache stale and falls back to voter query.

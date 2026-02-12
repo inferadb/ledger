@@ -1,6 +1,6 @@
 //! Secure pagination token implementation.
 //!
-//! Per DESIGN.md §7.4: Page tokens are opaque to clients and include:
+//! Page tokens are opaque to clients and include:
 //! - HMAC validation to prevent tampering
 //! - Context validation (namespace_id, vault_id) to prevent cross-context reuse
 //! - Query hash to detect filter changes mid-pagination

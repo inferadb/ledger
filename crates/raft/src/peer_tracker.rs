@@ -1,6 +1,6 @@
 //! Peer tracking with staleness detection and pruning.
 //!
-//! Per DESIGN.md §3.6, this module tracks when peers were last seen and provides:
+//! This module tracks when peers were last seen and provides:
 //! - Recording peer announcements with timestamps
 //! - Querying last-seen time for health monitoring
 //! - Pruning stale peers not seen within a configurable threshold (default: 1 hour)

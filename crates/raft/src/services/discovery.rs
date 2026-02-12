@@ -2,8 +2,8 @@
 //!
 //! Provides peer discovery and system state information for cluster coordination.
 //!
-//! Per DESIGN.md, peer addresses must be private/WireGuard IPs. Public IPs are
-//! rejected to ensure cluster traffic stays within the private network.
+//! Peer addresses must be private/WireGuard IPs. Public IPs are rejected to
+//! ensure cluster traffic stays within the private network.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -232,8 +232,8 @@ impl DiscoveryServiceImpl {
 
     /// Prunes stale peers that haven't been seen within the staleness threshold.
     ///
-    /// Per DESIGN.md §3.6: Peers not seen in >1 hour should be pruned.
-    /// This method should be called periodically (every 5 minutes).
+    /// Peers not seen in >1 hour are pruned. This method should be called
+    /// periodically (every 5 minutes).
     ///
     /// Returns the number of peers pruned.
     pub fn prune_stale_peers(&self) -> usize {
@@ -305,7 +305,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             )));
         }
 
-        // Validate addresses are private/WireGuard IPs (per DESIGN.md)
+        // Validate addresses are private/WireGuard IPs
         validate_peer_addresses(&peer.addresses)?;
 
         // Record that we've seen this peer
@@ -330,7 +330,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
     ) -> Result<Response<GetSystemStateResponse>, Status> {
         let req = request.into_inner();
 
-        // Check learner staleness (per DESIGN.md §3.5).
+        // Check learner staleness.
         // If this is a learner with stale cache, return error with leader hint.
         if self.is_cache_stale() {
             let leader_hint = self.get_leader_hint();

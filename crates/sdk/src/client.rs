@@ -1,7 +1,7 @@
 //! Main `LedgerClient` implementation.
 //!
 //! Provides the high-level API for interacting with the Ledger service,
-//! orchestrating connection pool, sequence tracker, and retry logic.
+//! orchestrating connection pool, idempotency keys, and retry logic.
 
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ pub enum ReadConsistency {
 }
 
 impl ReadConsistency {
-    /// Converts to proto enum value.
+    /// Converts to protobuf enum value.
     fn to_proto(self) -> proto::ReadConsistency {
         match self {
             ReadConsistency::Eventual => proto::ReadConsistency::Eventual,
@@ -112,7 +112,7 @@ pub struct BlockAnnouncement {
 }
 
 impl BlockAnnouncement {
-    /// Creates a BlockAnnouncement from the proto type.
+    /// Creates a BlockAnnouncement from the protobuf type.
     fn from_proto(proto: proto::BlockAnnouncement) -> Self {
         let timestamp = proto.timestamp.map(|ts| {
             std::time::UNIX_EPOCH + std::time::Duration::new(ts.seconds as u64, ts.nanos as u32)
@@ -146,7 +146,7 @@ pub enum NamespaceStatus {
 }
 
 impl NamespaceStatus {
-    /// Creates from proto enum value.
+    /// Creates from protobuf enum value.
     fn from_proto(value: i32) -> Self {
         match proto::NamespaceStatus::try_from(value) {
             Ok(proto::NamespaceStatus::Active) => NamespaceStatus::Active,
@@ -171,7 +171,7 @@ pub enum VaultStatus {
 }
 
 impl VaultStatus {
-    /// Creates from proto enum value.
+    /// Creates from protobuf enum value.
     fn from_proto(value: i32) -> Self {
         match proto::VaultStatus::try_from(value) {
             Ok(proto::VaultStatus::Active) => VaultStatus::Active,
@@ -203,7 +203,7 @@ pub struct NamespaceInfo {
 }
 
 impl NamespaceInfo {
-    /// Creates from proto response.
+    /// Creates from protobuf response.
     fn from_proto(proto: proto::GetNamespaceResponse) -> Self {
         Self {
             namespace_id: proto.namespace_id.map_or(0, |n| n.id),
@@ -239,7 +239,7 @@ pub struct VaultInfo {
 }
 
 impl VaultInfo {
-    /// Creates from proto response.
+    /// Creates from protobuf response.
     fn from_proto(proto: proto::GetVaultResponse) -> Self {
         Self {
             namespace_id: proto.namespace_id.map_or(0, |n| n.id),
@@ -255,7 +255,7 @@ impl VaultInfo {
 
 /// Health status of a node or vault.
 ///
-/// Maps to the proto `HealthStatus` enum.
+/// Maps to the protobuf `HealthStatus` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HealthStatus {
     /// Status is unknown or unspecified.
@@ -270,7 +270,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
-    /// Creates from proto enum value.
+    /// Creates from protobuf enum value.
     fn from_proto(value: i32) -> Self {
         match proto::HealthStatus::try_from(value) {
             Ok(proto::HealthStatus::Healthy) => HealthStatus::Healthy,
@@ -295,7 +295,7 @@ pub struct HealthCheckResult {
 }
 
 impl HealthCheckResult {
-    /// Creates from proto response.
+    /// Creates from protobuf response.
     fn from_proto(proto: proto::HealthCheckResponse) -> Self {
         Self {
             status: HealthStatus::from_proto(proto.status),
@@ -337,7 +337,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// Creates from proto enum value.
+    /// Creates from protobuf enum value.
     fn from_proto(value: i32) -> Self {
         match proto::Direction::try_from(value) {
             Ok(proto::Direction::Left) => Direction::Left,
@@ -359,7 +359,7 @@ pub struct MerkleSibling {
 }
 
 impl MerkleSibling {
-    /// Creates from proto type.
+    /// Creates from protobuf type.
     fn from_proto(proto: proto::MerkleSibling) -> Self {
         Self {
             hash: proto.hash.map(|h| h.value).unwrap_or_default(),
@@ -381,7 +381,7 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Creates from proto type.
+    /// Creates from protobuf type.
     fn from_proto(proto: proto::MerkleProof) -> Self {
         Self {
             leaf_hash: proto.leaf_hash.map(|h| h.value).unwrap_or_default(),
@@ -461,7 +461,7 @@ pub struct BlockHeader {
 }
 
 impl BlockHeader {
-    /// Creates from proto type.
+    /// Creates from protobuf type.
     fn from_proto(proto: proto::BlockHeader) -> Self {
         let timestamp = proto.timestamp.map(|ts| {
             std::time::UNIX_EPOCH + std::time::Duration::new(ts.seconds as u64, ts.nanos as u32)
@@ -493,7 +493,7 @@ pub struct ChainProof {
 }
 
 impl ChainProof {
-    /// Creates from proto type.
+    /// Creates from protobuf type.
     fn from_proto(proto: proto::ChainProof) -> Self {
         Self { headers: proto.headers.into_iter().map(BlockHeader::from_proto).collect() }
     }
@@ -620,7 +620,7 @@ pub struct Entity {
 }
 
 impl Entity {
-    /// Converts from proto Entity.
+    /// Converts from protobuf Entity.
     pub fn from_proto(proto: proto::Entity) -> Self {
         Self {
             key: proto.key,
@@ -660,7 +660,7 @@ impl Relationship {
         Self { resource: resource.into(), relation: relation.into(), subject: subject.into() }
     }
 
-    /// Converts from proto Relationship.
+    /// Converts from protobuf Relationship.
     pub fn from_proto(proto: proto::Relationship) -> Self {
         Self { resource: proto.resource, relation: proto.relation, subject: proto.subject }
     }
@@ -921,7 +921,7 @@ pub struct VerifiedValue {
 }
 
 impl VerifiedValue {
-    /// Creates from proto response.
+    /// Creates from protobuf response.
     fn from_proto(proto: proto::VerifiedReadResponse) -> Option<Self> {
         // Block header is required for verification
         let block_header = proto.block_header.map(BlockHeader::from_proto)?;
@@ -1151,7 +1151,7 @@ impl Operation {
         }
     }
 
-    /// Converts to proto operation.
+    /// Converts to protobuf operation.
     fn to_proto(&self) -> proto::Operation {
         let op = match self {
             Operation::SetEntity { key, value, expires_at, condition } => {
@@ -1185,7 +1185,7 @@ impl Operation {
 }
 
 impl SetCondition {
-    /// Converts to proto set condition.
+    /// Converts to protobuf set condition.
     fn to_proto(&self) -> proto::SetCondition {
         let condition = match self {
             SetCondition::NotExists => proto::set_condition::Condition::NotExists(true),

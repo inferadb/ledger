@@ -106,8 +106,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     // Apply operations (StateLayer is internally thread-safe via
                     // inferadb-ledger-store MVCC)
                     if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
-                        // Per DESIGN.md §6.1: On CAS failure, return current state for conflict
-                        // resolution
+                        // On CAS failure, return current state for conflict resolution
                         return match e {
                             StateError::PreconditionFailed {
                                 key,

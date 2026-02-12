@@ -1,6 +1,5 @@
 //! Shard management for multi-vault state coordination.
 //!
-//! Per DESIGN.md:
 //! - Multiple namespaces share a single Raft group (shard)
 //! - Each vault maintains independent cryptographic chain
 //! - State root divergence in one vault doesn't cascade to others

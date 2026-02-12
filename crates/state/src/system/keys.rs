@@ -1,6 +1,4 @@
 //! Key patterns for the `_system` namespace.
-//!
-//! Per DESIGN.md lines 1933-1949.
 
 use inferadb_ledger_types::{NamespaceId, NodeId, UserId};
 

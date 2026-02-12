@@ -40,7 +40,6 @@ impl FileBackend {
         let path_str = path.as_ref().display().to_string();
         let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
 
-        // Read header to get page size
         let mut file_guard = file;
         let mut header_buf = vec![0u8; HEADER_SIZE];
         file_guard.read_exact(&mut header_buf)?;
@@ -72,7 +71,6 @@ impl FileBackend {
             .truncate(true)
             .open(path.as_ref())?;
 
-        // Write initial header
         let page_size_power = page_size.trailing_zeros() as u8;
         let header = DatabaseHeader::new(page_size_power);
         let header_bytes = header.to_bytes();

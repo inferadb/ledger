@@ -149,9 +149,9 @@ impl LedgerServer {
             .raft(Some(self.raft.clone()))
             .build();
         // Create write service with batching enabled for high throughput.
-        // Per DESIGN.md §6.3: Server-level batching coalesces individual Write RPCs
-        // into single Raft proposals. This improves throughput when clients can't
-        // or don't use BatchWrite RPC.
+        // Server-level batching coalesces individual Write RPCs into single Raft
+        // proposals. This improves throughput when clients can't or don't use
+        // BatchWrite RPC.
         let batch_config = BatchConfig::default();
         let write_service = if let Some(archive) = &self.block_archive {
             let (service, task) = WriteServiceImpl::with_block_archive_and_batching(

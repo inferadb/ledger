@@ -117,9 +117,9 @@ impl Outcome {
 /// Different operation types have different default sampling rates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationType {
-    /// Reads operations (lowest default sampling rate).
+    /// Read operations (lowest default sampling rate).
     Read,
-    /// Writes operations (medium default sampling rate).
+    /// Write operations (medium default sampling rate).
     Write,
     /// Admin operations (always 100% sampled).
     Admin,

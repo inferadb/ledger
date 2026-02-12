@@ -6,8 +6,6 @@
 //! - Namespace routing table
 //! - Cluster node membership
 //! - Cross-namespace sagas
-//!
-//! Per DESIGN.md lines 1858-1996 and §4.6.
 
 mod cluster;
 mod keys;

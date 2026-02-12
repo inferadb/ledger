@@ -42,24 +42,20 @@ impl RaftService for RaftServiceImpl {
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
 
-        // Convert proto to OpenRaft types (using From impl in proto_convert)
         let raft_vote: Vote<LedgerNodeId> = vote.into();
-        // Use the vote's node_id for the CommittedLeaderId - this identifies who committed the log
-        // entry
+        // Use the vote's node_id for the CommittedLeaderId — identifies who committed the log entry
         let last_log_id = req.last_log_id.map(|id| {
             openraft::LogId::new(openraft::CommittedLeaderId::new(id.term, vote.node_id), id.index)
         });
 
         let vote_request = openraft::raft::VoteRequest { vote: raft_vote, last_log_id };
 
-        // Forward to the Raft instance
         let response = self
             .raft
             .vote(vote_request)
             .await
             .map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
 
-        // Convert response back to proto
         Ok(Response::new(RaftVoteResponse {
             vote: Some((&response.vote).into()),
             vote_granted: response.vote_granted,
@@ -78,10 +74,8 @@ impl RaftService for RaftServiceImpl {
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
 
-        // Deserialize log entries
         let entries: Vec<_> = req.entries.iter().filter_map(|bytes| decode(bytes).ok()).collect();
 
-        // Convert proto to OpenRaft types (using From impl in proto_convert)
         let raft_vote: Vote<LedgerNodeId> = vote.into();
         // Use the vote's node_id (the leader) for the CommittedLeaderId
         let leader_node_id = vote.node_id;
@@ -101,14 +95,12 @@ impl RaftService for RaftServiceImpl {
         let append_request: AppendEntriesRequest<LedgerTypeConfig> =
             AppendEntriesRequest { vote: raft_vote, prev_log_id, entries, leader_commit };
 
-        // Forward to the Raft instance
         let response = self
             .raft
             .append_entries(append_request)
             .await
             .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
 
-        // Convert response to proto
         use openraft::raft::AppendEntriesResponse::*;
         let (success, conflict, higher_vote) = match response {
             Success => (true, false, None),
@@ -132,7 +124,7 @@ impl RaftService for RaftServiceImpl {
         let meta =
             req.meta.as_ref().ok_or_else(|| Status::invalid_argument("Missing meta field"))?;
 
-        // Build snapshot metadata - use leader's node_id from vote
+        // Use leader's node_id from vote for the CommittedLeaderId
         let leader_node_id = vote.node_id;
         let last_log_id = meta.last_log_id.as_ref().map(|id| {
             openraft::LogId::new(
@@ -141,7 +133,7 @@ impl RaftService for RaftServiceImpl {
             )
         });
 
-        // Build membership from proto (simplified - just extract node addresses)
+        // Simplified membership conversion — only extracts node addresses
         let membership_proto = meta
             .last_membership
             .as_ref()
@@ -159,7 +151,6 @@ impl RaftService for RaftServiceImpl {
             }
         }
 
-        // Create membership with voter set and node info
         let voter_ids: std::collections::BTreeSet<u64> = all_nodes.keys().copied().collect();
         let membership = openraft::Membership::new(vec![voter_ids], all_nodes);
 
@@ -180,7 +171,6 @@ impl RaftService for RaftServiceImpl {
             done: req.done,
         };
 
-        // Forward to the Raft instance
         let response = self
             .raft
             .install_snapshot(install_request)
@@ -231,13 +221,11 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftVoteResponse>, Status> {
         let req = request.into_inner();
 
-        // Resolve shard from request
         let raft = self.resolve_shard(req.shard_id)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
 
-        // Convert proto to OpenRaft types
         let raft_vote: Vote<LedgerNodeId> = vote.into();
         let last_log_id = req.last_log_id.map(|id| {
             openraft::LogId::new(openraft::CommittedLeaderId::new(id.term, vote.node_id), id.index)
@@ -245,7 +233,6 @@ impl RaftService for MultiShardRaftService {
 
         let vote_request = openraft::raft::VoteRequest { vote: raft_vote, last_log_id };
 
-        // Forward to the shard's Raft instance
         let response = raft
             .vote(vote_request)
             .await
@@ -266,16 +253,13 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
         let req = request.into_inner();
 
-        // Resolve shard from request
         let raft = self.resolve_shard(req.shard_id)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
 
-        // Deserialize log entries
         let entries: Vec<_> = req.entries.iter().filter_map(|bytes| decode(bytes).ok()).collect();
 
-        // Convert proto to OpenRaft types
         let raft_vote: Vote<LedgerNodeId> = vote.into();
         let leader_node_id = vote.node_id;
         let prev_log_id = req.prev_log_id.map(|id| {
@@ -294,13 +278,11 @@ impl RaftService for MultiShardRaftService {
         let append_request: AppendEntriesRequest<LedgerTypeConfig> =
             AppendEntriesRequest { vote: raft_vote, prev_log_id, entries, leader_commit };
 
-        // Forward to the shard's Raft instance
         let response = raft
             .append_entries(append_request)
             .await
             .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
 
-        // Convert response to proto
         use openraft::raft::AppendEntriesResponse::*;
         let (success, conflict, higher_vote) = match response {
             Success => (true, false, None),
@@ -318,7 +300,6 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
         let req = request.into_inner();
 
-        // Resolve shard from request
         let raft = self.resolve_shard(req.shard_id)?;
 
         let vote =
@@ -327,7 +308,6 @@ impl RaftService for MultiShardRaftService {
         let meta =
             req.meta.as_ref().ok_or_else(|| Status::invalid_argument("Missing meta field"))?;
 
-        // Build snapshot metadata
         let leader_node_id = vote.node_id;
         let last_log_id = meta.last_log_id.as_ref().map(|id| {
             openraft::LogId::new(
@@ -336,7 +316,6 @@ impl RaftService for MultiShardRaftService {
             )
         });
 
-        // Convert membership
         let membership_proto = meta
             .last_membership
             .as_ref()
@@ -371,7 +350,6 @@ impl RaftService for MultiShardRaftService {
             done: req.done,
         };
 
-        // Forward to the shard's Raft instance
         let response = raft
             .install_snapshot(install_request)
             .await

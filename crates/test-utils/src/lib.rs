@@ -39,10 +39,6 @@ mod tests {
 
     use super::*;
 
-    // ============================================
-    // TestDir tests
-    // ============================================
-
     #[test]
     fn test_dir_creates_temp_directory() {
         let dir = TestDir::new();
@@ -77,10 +73,6 @@ mod tests {
         };
         assert!(!path.exists(), "temp directory should be cleaned up on drop");
     }
-
-    // ============================================
-    // assert_eventually tests
-    // ============================================
 
     #[tokio::test]
     async fn test_assert_eventually_immediate_success() {
@@ -124,10 +116,6 @@ mod tests {
             assert_eventually(Duration::from_millis(200), || *state.lock().unwrap() == 42).await;
         assert!(result, "should detect state change");
     }
-
-    // ============================================
-    // Config helper tests
-    // ============================================
 
     #[test]
     fn test_batch_config_returns_valid_config() {

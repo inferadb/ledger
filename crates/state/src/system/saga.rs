@@ -1,7 +1,7 @@
 //! Cross-namespace saga support.
 //!
-//! Per DESIGN.md §4.6: Sagas coordinate operations spanning multiple namespaces
-//! using eventual consistency. Each saga step is idempotent for crash recovery.
+//! Sagas coordinate operations spanning multiple namespaces using eventual
+//! consistency. Each saga step is idempotent for crash recovery.
 //!
 //! ## Saga Patterns
 //!

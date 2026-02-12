@@ -1,6 +1,6 @@
 //! Cross-namespace orphan cleanup job.
 //!
-//! Per DESIGN.md: When users are deleted from `_system`, membership records
+//! When users are deleted from `_system`, membership records
 //! in org namespaces become orphaned. This background job periodically scans
 //! for and removes these orphaned records.
 //!

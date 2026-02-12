@@ -79,7 +79,7 @@ pub fn arb_set_condition() -> impl Strategy<Value = SetCondition> {
     ]
 }
 
-/// Generates an arbitrary [`Operation`] covering all five variants with random payloads.
+/// Generates an arbitrary [`Operation`] covering every variant with random payloads.
 pub fn arb_operation() -> impl Strategy<Value = Operation> {
     prop_oneof![
         // SetEntity with optional condition and expiration

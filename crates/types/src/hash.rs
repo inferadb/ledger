@@ -1,6 +1,6 @@
 //! Cryptographic hashing functions for InferaDB Ledger.
 //!
-//! All hashing uses SHA-256 per DESIGN.md. This module provides:
+//! All hashing uses SHA-256. This module provides:
 //! - Basic SHA-256 hashing
 //! - Block header hashing (fixed 148-byte encoding)
 //! - Transaction hashing (canonical binary encoding)
@@ -16,7 +16,7 @@ pub type Hash = [u8; 32];
 
 /// Hash of empty input: `SHA-256("")`.
 ///
-/// Used for empty buckets per DESIGN.md line 660. This is distinct from
+/// Used for empty buckets. This is distinct from
 /// [`ZERO_HASH`] — using zero bytes here would break cross-node consistency.
 pub const EMPTY_HASH: Hash = [
     0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
@@ -24,7 +24,7 @@ pub const EMPTY_HASH: Hash = [
 ];
 
 /// Zero hash: 32 zero bytes.
-/// Used ONLY for genesis block previous_hash per DESIGN.md line 710.
+/// Used only for genesis block `previous_hash`.
 pub const ZERO_HASH: Hash = [0u8; 32];
 
 /// Computes SHA-256 hash of arbitrary data.
@@ -55,9 +55,9 @@ pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
     a.ct_eq(b).into()
 }
 
-/// Computes block header hash per DESIGN.md fixed 148-byte encoding.
+/// Computes block header hash using a fixed 148-byte encoding.
 ///
-/// Encoding layout (DESIGN.md lines 695-708):
+/// Encoding layout:
 /// - height: 8 bytes (u64 BE)
 /// - namespace_id: 8 bytes (i64 BE)
 /// - vault_id: 8 bytes (i64 BE)
@@ -120,7 +120,7 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
     sha256(&buf)
 }
 
-/// Computes transaction hash per DESIGN.md canonical binary encoding.
+/// Computes transaction hash using canonical binary encoding.
 ///
 /// Encoding includes:
 /// - id: 16 bytes
@@ -232,8 +232,8 @@ fn hash_length_prefixed_bytes(hasher: &mut Sha256, data: &[u8]) {
 
 /// Streaming hasher for bucket root computation.
 ///
-/// Per DESIGN.md lines 821-832: uses streaming hash with length-prefixed
-/// key-value encoding including expires_at and version fields.
+/// Uses streaming hash with length-prefixed key-value encoding including
+/// expires_at and version fields.
 pub struct BucketHasher {
     hasher: Sha256,
     has_entries: bool,
@@ -247,7 +247,7 @@ impl BucketHasher {
 
     /// Adds an entity to the bucket hash.
     ///
-    /// Per DESIGN.md lines 803-815:
+    /// Encoding:
     /// - key_len: u32 LE
     /// - key: variable
     /// - value_len: u32 LE
@@ -273,7 +273,7 @@ impl BucketHasher {
 
     /// Finalizes and returns the bucket root hash.
     ///
-    /// Returns EMPTY_HASH for empty buckets per DESIGN.md line 660.
+    /// Returns [`EMPTY_HASH`] for empty buckets.
     pub fn finalize(self) -> Hash {
         if self.has_entries { self.hasher.finalize().into() } else { EMPTY_HASH }
     }
@@ -287,7 +287,7 @@ impl Default for BucketHasher {
 
 /// Assigns a key to a bucket using seahash.
 ///
-/// Per DESIGN.md: bucket_id = seahash(key) % 256
+/// Computes `seahash(key) % 256`.
 #[inline]
 pub fn bucket_id(key: &[u8]) -> u8 {
     (seahash::hash(key) % 256) as u8
@@ -295,8 +295,8 @@ pub fn bucket_id(key: &[u8]) -> u8 {
 
 /// Computes the Merkle root of a list of transactions.
 ///
-/// Per DESIGN.md: builds a binary Merkle tree where each leaf is the
-/// hash of a transaction. Returns [`EMPTY_HASH`] for an empty list.
+/// Builds a binary Merkle tree where each leaf is the hash of a transaction.
+/// Returns [`EMPTY_HASH`] for an empty list.
 pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
     if transactions.is_empty() {
         return EMPTY_HASH;
@@ -344,7 +344,7 @@ pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
 
 /// Computes a ChainCommitment for a range of blocks.
 ///
-/// Per DESIGN.md §4.4: Proves snapshot's lineage without requiring full block replay.
+/// Proves snapshot lineage without requiring full block replay.
 /// - `accumulated_header_hash`: Sequential hash chain of all block headers
 /// - `state_root_accumulator`: Merkle root of all state roots in range
 ///
@@ -701,7 +701,7 @@ mod tests {
     }
 }
 
-/// Helper for hex encoding (dev dependency not needed for tests).
+/// Hex encoding helper for test assertions. Avoids adding a dev-dependency on the `hex` crate.
 #[cfg(test)]
 mod hex {
     use std::fmt::Write;

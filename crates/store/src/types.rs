@@ -54,10 +54,6 @@ pub trait Value: Sized {
     fn encoded_size(&self) -> usize;
 }
 
-// ============================================================================
-// u64 Key Implementation
-// ============================================================================
-
 impl Key for u64 {
     const KEY_TYPE: KeyType = KeyType::U64;
 
@@ -78,10 +74,6 @@ impl Key for u64 {
         8
     }
 }
-
-// ============================================================================
-// i64 Key Implementation
-// ============================================================================
 
 impl Key for i64 {
     const KEY_TYPE: KeyType = KeyType::I64;
@@ -114,10 +106,6 @@ impl Key for i64 {
         8
     }
 }
-
-// ============================================================================
-// String Key Implementation
-// ============================================================================
 
 impl Key for String {
     const KEY_TYPE: KeyType = KeyType::Str;
@@ -161,10 +149,6 @@ impl Key for &str {
     }
 }
 
-// ============================================================================
-// Bytes Key Implementation
-// ============================================================================
-
 impl Key for Vec<u8> {
     const KEY_TYPE: KeyType = KeyType::Bytes;
 
@@ -205,10 +189,6 @@ impl Key for &[u8] {
         self.len()
     }
 }
-
-// ============================================================================
-// Value Implementations
-// ============================================================================
 
 impl Value for Vec<u8> {
     fn encode(&self, buf: &mut Vec<u8>) {
@@ -251,10 +231,6 @@ impl Value for u64 {
         8
     }
 }
-
-// ============================================================================
-// Encoding Utilities
-// ============================================================================
 
 /// Encodes a length-prefixed byte slice (used for variable-length fields).
 pub fn encode_length_prefixed(data: &[u8], buf: &mut Vec<u8>) {

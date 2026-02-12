@@ -76,7 +76,6 @@ impl PageCache {
         let page_id = page.id;
         let mut pages = self.pages.write();
 
-        // Check if already in cache
         if let Some(entry) = pages.get_mut(&page_id) {
             entry.page = page;
             entry.accessed = true;
@@ -105,7 +104,6 @@ impl PageCache {
             }
         }
 
-        // Insert new entry
         let mut page_order = self.page_order.write();
         page_order.push(page_id);
 
@@ -370,8 +368,6 @@ mod tests {
         let clean_remaining = [1, 2].iter().filter(|&&id| cache.contains(id)).count();
         assert_eq!(clean_remaining, 1);
     }
-
-    // ── Concurrency Stress Tests ────────────────────────────────────────
 
     /// Stress test: concurrent page cache access with eviction under contention.
     ///

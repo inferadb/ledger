@@ -365,8 +365,8 @@ pub fn record_batch_flush(latency_secs: f64) {
 
 /// Records an eager commit (batch flushed due to queue draining).
 ///
-/// Per DESIGN.md §6.3: Eager commits occur when the incoming queue drains
-/// and the batch is flushed immediately rather than waiting for timeout.
+/// Eager commits occur when the incoming queue drains and the batch is
+/// flushed immediately rather than waiting for timeout.
 #[inline]
 pub fn record_eager_commit() {
     counter!(BATCH_EAGER_COMMITS_TOTAL).increment(1);
@@ -504,8 +504,7 @@ pub fn record_proto_decode(latency_secs: f64, operation: &str) {
 /// Records postcard encoding latency (internal types → Raft log).
 ///
 /// This measures serialization time when appending entries to the Raft log.
-/// Per DESIGN.md architecture: internal types are postcard-serialized for
-/// efficient storage.
+/// Internal types are postcard-serialized for efficient storage.
 #[inline]
 pub fn record_postcard_encode(latency_secs: f64, entry_type: &str) {
     histogram!(SERIALIZATION_POSTCARD_ENCODE, "entry_type" => entry_type.to_string())

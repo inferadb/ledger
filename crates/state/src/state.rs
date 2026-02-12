@@ -5,8 +5,8 @@
 //! - Atomic batch writes with conditional (CAS) semantics
 //! - Incremental state root computation via 256-bucket dirty tracking
 //!
-//! Per DESIGN.md: the state layer separates commitment (Merkleized hashing) from
-//! storage (fast K/V reads), so queries bypass the hash tree entirely.
+//! The state layer separates commitment (Merkleized hashing) from storage
+//! (fast K/V reads), so queries bypass the hash tree entirely.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -58,9 +58,9 @@ pub enum StateError {
 
     /// Conditional write precondition failed.
     ///
-    /// Per DESIGN.md §6.1: Returns current state for client-side conflict resolution.
-    /// When a CAS (compare-and-swap) condition fails, this error provides the current
-    /// entity state so clients can implement retry or conflict resolution logic.
+    /// Returns current state for client-side conflict resolution. When a CAS
+    /// (compare-and-swap) condition fails, this error provides the current entity
+    /// state so clients can implement retry or conflict resolution logic.
     #[snafu(display("Precondition failed for key '{key}'"))]
     PreconditionFailed {
         /// The key that failed the condition check.
@@ -216,8 +216,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     };
 
                     if !condition_met {
-                        // Per DESIGN.md §5.9: All-or-nothing - if ANY condition fails, entire batch
-                        // fails
+                        // All-or-nothing: if ANY condition fails, entire batch fails
                         return Err(StateError::PreconditionFailed {
                             key: key.clone(),
                             current_version: entity_data.as_ref().map(|e| e.version),
@@ -818,7 +817,7 @@ mod tests {
         let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        // Second set should fail with error (per DESIGN.md §5.9: batch atomicity)
+        // Second set should fail with error (batch atomicity)
         let ops = vec![Operation::SetEntity {
             key: "key".to_string(),
             value: b"value2".to_vec(),

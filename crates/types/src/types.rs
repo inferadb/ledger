@@ -1,9 +1,7 @@
 //! Core type definitions for InferaDB Ledger.
 //!
-//! These types align with DESIGN.md specifications for:
-//! - Identifier types (NamespaceId, VaultId, etc.)
-//! - Block and transaction structures
-//! - Operations and conditions
+//! Defines identifier types (NamespaceId, VaultId, etc.), block and transaction
+//! structures, operations, and conditions.
 
 use std::fmt;
 
@@ -144,7 +142,7 @@ pub type ClientId = String;
 
 /// Block header containing cryptographic chain metadata.
 ///
-/// Per DESIGN.md lines 695-708, block headers are hashed with a fixed 148-byte encoding:
+/// Block headers are hashed with a fixed 148-byte encoding:
 /// height (8) + namespace_id (8) + vault_id (8) + previous_hash (32) + tx_merkle_root (32)
 /// + state_root (32) + timestamp_secs (8) + timestamp_nanos (4) + term (8) + committed_index (8)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
@@ -223,7 +221,7 @@ pub struct ShardBlock {
     pub leader_id: NodeId,
     /// Raft term when committed.
     pub term: u64,
-    /// Raft committed log index (required per DESIGN.md line 1698).
+    /// Raft committed log index.
     pub committed_index: u64,
 }
 
@@ -248,7 +246,7 @@ pub struct VaultEntry {
 
 /// Accumulated cryptographic commitment for a range of blocks.
 ///
-/// Per DESIGN.md §4.4: Proves snapshot's lineage without requiring full block replay.
+/// Proves snapshot lineage without requiring full block replay.
 /// Enables verification continuity even after transaction body compaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ChainCommitment {
@@ -302,8 +300,8 @@ impl ShardBlock {
     /// Extracts a standalone VaultBlock for client verification.
     ///
     /// Clients verify per-vault chains and never see ShardBlock directly.
-    /// Per DESIGN.md lines 1749-1753: requires both namespace_id and vault_id
-    /// since multiple namespaces can share a shard.
+    /// Requires both namespace_id and vault_id since multiple namespaces can
+    /// share a shard.
     pub fn extract_vault_block(
         &self,
         namespace_id: NamespaceId,
@@ -351,8 +349,6 @@ pub enum TransactionValidationError {
 }
 
 /// Transaction containing one or more operations.
-///
-/// Per DESIGN.md lines 196-202.
 ///
 /// Use the builder pattern to construct transactions with validation:
 /// ```no_run
@@ -416,8 +412,6 @@ impl Transaction {
 }
 
 /// Mutation operations that can be applied to vault state.
-///
-/// Per DESIGN.md lines 204-214.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operation {
     /// Creates a relationship tuple.
@@ -464,8 +458,6 @@ pub enum Operation {
 }
 
 /// Conditional write predicates for compare-and-swap operations.
-///
-/// Per DESIGN.md lines 768-774.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SetCondition {
     /// Key must not exist (0x01).
@@ -614,8 +606,8 @@ pub type LedgerNodeId = u64;
 
 /// Block retention mode for storage/compliance trade-off.
 ///
-/// Per DESIGN.md §4.4: Configurable retention policy determines
-/// whether transaction bodies are preserved after snapshots.
+/// Configurable retention policy determines whether transaction bodies
+/// are preserved after snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BlockRetentionMode {
     /// All transaction bodies preserved indefinitely.
