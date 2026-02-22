@@ -40,7 +40,7 @@ When a follower applies a block, it:
 If they don't match:
 
 ```
-CRITICAL: state_root_divergence{vault_id=123, shard_id=1, height=45678}
+CRITICAL: state_root_divergence{vault_id=123, shard_id=1, height=45678}  # internal vault_id in metrics
   expected: 0x7a3f...
   computed: 0x8b2e...
 ```
@@ -78,7 +78,7 @@ The recovery process:
 After 3 failed attempts:
 
 ```
-CRITICAL: vault_recovery_exhausted{vault_id=123}
+CRITICAL: vault_recovery_exhausted{vault_id=123}  # internal vault_id in metrics
 ```
 
 Manual intervention is required.
@@ -95,7 +95,7 @@ Manual intervention is required.
 
 ```bash
 # Check vault health status via HealthService
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault_id": {"id": 123}}' \
+grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.HealthService/Check
 
 # View recent divergence events in logs
@@ -120,11 +120,11 @@ Once you've identified and addressed the root cause:
 
 ```bash
 # Force recovery for a specific vault via AdminService
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault_id": {"id": 123}}' \
+grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.AdminService/RecoverVault
 
 # Monitor recovery progress via health checks
-watch -n 5 'grpcurl -plaintext -d "{\"organization_slug\": {\"id\": 1}, \"vault_id\": {\"id\": 123}}" \
+watch -n 5 'grpcurl -plaintext -d "{\"organization_slug\": {\"id\": 1}, \"vault\": {\"slug\": \"7180591718400\"}}" \
   localhost:50051 ledger.v1.HealthService/Check'
 ```
 
@@ -138,11 +138,11 @@ The `RecoverVault` RPC:
 
 ```bash
 # Check vault is healthy
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault_id": {"id": 123}}' \
+grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.HealthService/Check
 
 # Test read operations
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault_id": {"id": 123}, "key": "test"}' \
+grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}, "key": "test"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 
@@ -191,7 +191,7 @@ cp -r /var/lib/ledger/state.db /var/lib/ledger/state.db.corrupt.$(date +%Y%m%d)
 systemctl start ledger
 
 # 4. Monitor recovery via HealthService
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault_id": {"id": 123}}' \
+grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.HealthService/Check
 
 # 5. Check logs for recovery progress

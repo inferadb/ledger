@@ -29,10 +29,11 @@ message OrganizationSlug {
   uint64 slug = 1;
 }
 
-// Unique vault identifier (relationship store within an organization)
-// Sequential int64 assigned by Ledger leader from "_meta:seq:vault"
-message VaultId {
-  int64 id = 1;
+// External Snowflake identifier for a vault.
+// This is the only vault identifier exposed to API consumers.
+// Internal sequential VaultId(i64) is used for storage but never appears in the API.
+message VaultSlug {
+  uint64 slug = 1;
 }
 
 // Unique shard identifier (Raft group hosting multiple organizations)
@@ -128,7 +129,7 @@ message TxId {
 message BlockHeader {
   uint64 height = 1;
   OrganizationSlug organization = 2; // Owning organization
-  VaultId vault_id = 3; // Vault within organization
+  VaultSlug vault = 3; // Vault within organization
   Hash previous_hash = 4;
   Hash tx_merkle_root = 5;
   Hash state_root = 6;
@@ -150,7 +151,7 @@ message Block {
 // Lightweight block notification for streaming (excludes transaction bodies)
 message BlockAnnouncement {
   OrganizationSlug organization = 1; // Owning organization
-  VaultId vault_id = 2; // Vault within organization
+  VaultSlug vault = 2; // Vault within organization
   uint64 height = 3;
   Hash block_hash = 4;
   Hash state_root = 5;
@@ -348,7 +349,7 @@ service ReadService {
 
 message ReadRequest {
   OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2; // Omit for organization-level entity reads
+  optional VaultSlug vault = 2; // Omit for organization-level reads
   string key = 3;
   ReadConsistency consistency = 4; // Default: EVENTUAL (any replica)
 }
@@ -362,7 +363,7 @@ message ReadResponse {
 // All reads share the same organization, vault, and consistency level.
 message BatchReadRequest {
   OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2;
+  optional VaultSlug vault = 2;
   repeated string keys = 3;           // Keys to read (max 1000)
   ReadConsistency consistency = 4;    // Applied to all reads
 }
@@ -388,7 +389,7 @@ message BatchReadResult {
 // with include_proof=false to avoid proof generation overhead.
 message VerifiedReadRequest {
   OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2; // Omit for organization-level entity reads
+  optional VaultSlug vault = 2; // Omit for organization-level reads
   string key = 3;
   optional uint64 at_height = 4; // Read at specific height (0 or omit = current)
   bool include_chain_proof = 5; // Also include chain proof to trusted_height
@@ -412,7 +413,7 @@ message VerifiedReadResponse {
 // archival queries where proof generation would add unnecessary overhead.
 message HistoricalReadRequest {
   OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2; // Omit for organization-level entity reads
+  optional VaultSlug vault = 2; // Omit for organization-level reads
   string key = 3;
   uint64 at_height = 4; // Required: block height to read from
   bool include_proof = 5; // Include block_header + merkle_proof (default: false)
@@ -431,7 +432,7 @@ message HistoricalReadResponse {
 
 message WatchBlocksRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   // First block height to stream. Must be >= 1 (0 is rejected with INVALID_ARGUMENT).
   //
   // Streaming behavior:
@@ -455,7 +456,7 @@ message WatchBlocksRequest {
 
 message GetBlockRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   uint64 height = 3;
 }
 
@@ -467,7 +468,7 @@ message GetBlockResponse {
 // Use case: Client reconnecting after downtime needs to catch up.
 message GetBlockRangeRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   uint64 start_height = 3; // First block to return (inclusive)
   uint64 end_height = 4; // Last block to return (inclusive), max range: 1000 blocks
 }
@@ -479,7 +480,7 @@ message GetBlockRangeResponse {
 
 message GetTipRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
 }
 
 message GetTipResponse {
@@ -490,7 +491,7 @@ message GetTipResponse {
 
 message GetClientStateRequest {
   OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2; // Omit for organization-level entity writes
+  optional VaultSlug vault = 2; // Omit for organization-level writes
   ClientId client_id = 3;
 }
 
@@ -500,7 +501,7 @@ message GetClientStateResponse {
 
 message ListRelationshipsRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   optional string resource = 3; // Filter by resource (exact match)
   optional string relation = 4; // Filter by relation (exact match)
   optional string subject = 5; // Filter by subject (exact match)
@@ -520,7 +521,7 @@ message ListRelationshipsResponse {
 
 message ListResourcesRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   string resource_type = 3; // Type prefix (e.g., "document" matches "document:*")
   optional uint64 at_height = 4; // Read at specific height (0 or omit = current)
   uint32 limit = 5; // Max results (0 = default limit)
@@ -544,7 +545,7 @@ message ListEntitiesRequest {
   // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
   string page_token = 6;
   ReadConsistency consistency = 7; // Default: EVENTUAL (any replica)
-  optional VaultId vault_id = 8; // Omit for organization-level entities (vault_id=0)
+  optional VaultSlug vault = 8; // Omit for organization-level entities
 }
 
 message ListEntitiesResponse {
@@ -569,7 +570,7 @@ service WriteService {
 // from authenticated context (session token, API key, or system identity).
 message WriteRequest {
   OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2; // Required for relationships; omit for organization-level entities
+  optional VaultSlug vault = 2; // Required for relationships; omit for organization-level entities
   ClientId client_id = 3;
   bytes idempotency_key = 4; // 16-byte UUID for idempotent retries (server rejects reuse with different payload)
   repeated Operation operations = 5;
@@ -674,7 +675,7 @@ message ErrorDetails {
 // - Ordered operations where later writes depend on earlier writes' effects
 message BatchWriteRequest {
   OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2; // All writes must target same scope
+  optional VaultSlug vault = 2; // All writes target same vault scope
   ClientId client_id = 3; // Batch-level idempotency (per-write client_id ignored)
   bytes idempotency_key = 4; // 16-byte UUID for idempotent retries (server rejects reuse with different payload)
   repeated BatchWriteOperation operations = 5; // Operations in this batch
@@ -684,7 +685,7 @@ message BatchWriteRequest {
 // Logical grouping of operations within a BatchWriteRequest.
 // Purpose: Allows expressing ordered operation groups within an atomic batch.
 // Processing: Groups are processed in array order (operations[0], then operations[1], etc.)
-//             All groups share the batch's organization, vault_id, client_id, and idempotency_key.
+//             All groups share the batch's organization, vault, client_id, and idempotency_key.
 // Atomicity: The ENTIRE batch is atomic—if any operation fails, no changes are applied.
 message BatchWriteOperation {
   repeated Operation operations = 1; // Operations in this group
@@ -895,8 +896,8 @@ message ListOrganizationsResponse {
 // Vault Messages
 // -----------------------------------------------------------------------------
 
-// Create a new vault. VaultId is leader-assigned from _meta:seq:vault
-// and returned in CreateVaultResponse.
+// Create a new vault. A VaultSlug (Snowflake ID) is generated
+// and returned. Internal sequential VaultId is never exposed.
 message CreateVaultRequest {
   OrganizationSlug organization = 1;
   uint32 replication_factor = 2;
@@ -924,13 +925,13 @@ message BlockRetentionPolicy {
 }
 
 message CreateVaultResponse {
-  VaultId vault_id = 1;
+  VaultSlug vault = 1;
   BlockHeader genesis = 2;
 }
 
 message DeleteVaultRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
 }
 
 message DeleteVaultResponse {
@@ -939,12 +940,12 @@ message DeleteVaultResponse {
 
 message GetVaultRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
 }
 
 message GetVaultResponse {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   uint64 height = 3;
   Hash state_root = 4;
   repeated NodeId nodes = 5;
@@ -970,7 +971,7 @@ message ListVaultsResponse {
 
 message CreateSnapshotRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
 }
 
 message CreateSnapshotResponse {
@@ -981,7 +982,7 @@ message CreateSnapshotResponse {
 
 message CheckIntegrityRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   bool full_check = 3; // Replay from genesis vs quick check
 }
 
@@ -999,7 +1000,7 @@ message IntegrityIssue {
 // Recover a diverged vault by replaying blocks from archive.
 message RecoverVaultRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   // Force recovery even if vault is healthy (for testing/maintenance).
   // Required for manual intervention after automatic recovery exhausted.
   bool force = 3;
@@ -1020,7 +1021,7 @@ message RecoverVaultResponse {
 // This forces a vault into the Diverged state without actual corruption.
 message SimulateDivergenceRequest {
   OrganizationSlug organization = 1;
-  VaultId vault_id = 2;
+  VaultSlug vault = 2;
   // Expected state root (fake value for simulation).
   Hash expected_state_root = 3;
   // Computed state root (fake value for simulation).
@@ -1037,11 +1038,11 @@ message SimulateDivergenceResponse {
 }
 
 // Force a garbage collection cycle for expired entities.
-// If organization and vault_id are specified, only that vault is scanned.
+// If organization and vault are specified, only that vault is scanned.
 // If omitted, all vaults are scanned (cluster-wide GC).
 message ForceGcRequest {
   optional OrganizationSlug organization = 1;
-  optional VaultId vault_id = 2;
+  optional VaultSlug vault = 2;
 }
 
 message ForceGcResponse {
@@ -1263,7 +1264,7 @@ service HealthService {
 
 message HealthCheckRequest {
   optional OrganizationSlug organization = 1; // Organization for vault health check
-  optional VaultId vault_id = 2; // If empty, check node health
+  optional VaultSlug vault = 2; // Omit to check node health
 }
 
 message HealthCheckResponse {

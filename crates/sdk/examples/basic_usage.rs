@@ -48,8 +48,8 @@ async fn main() -> Result<()> {
     println!("Created organization with slug: {organization}");
 
     let vault_info = client.create_vault(organization).await?;
-    let vault_id = vault_info.vault_id;
-    println!("Created vault: {vault_id}");
+    let vault_slug = vault_info.vault_slug;
+    println!("Created vault: {vault_slug}");
 
     // -------------------------------------------------------------------------
     // 3. Write a single entity
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     let write_result = client
         .write(
             organization,
-            Some(vault_id),
+            Some(vault_slug),
             vec![Operation::set_entity(
                 user_key,
                 serde_json::to_vec(&user_data).expect("serialize"),
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 4. Read the value back with eventual consistency (fast)
     // -------------------------------------------------------------------------
-    let value = client.read(organization, Some(vault_id), user_key).await?;
+    let value = client.read(organization, Some(vault_slug), user_key).await?;
 
     match value {
         Some(bytes) => {
@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 5. Read with linearizable consistency (strong, reads from leader)
     // -------------------------------------------------------------------------
-    let value = client.read_consistent(organization, Some(vault_id), user_key).await?;
+    let value = client.read_consistent(organization, Some(vault_slug), user_key).await?;
 
     match value {
         Some(bytes) => {
@@ -113,14 +113,14 @@ async fn main() -> Result<()> {
         Operation::create_relationship("doc:readme", "editor", "user:bob"),
     ];
 
-    let result = client.write(organization, Some(vault_id), operations).await?;
+    let result = client.write(organization, Some(vault_slug), operations).await?;
     println!("Multi-entity write at block {}, tx: {}", result.block_height, result.tx_id);
 
     // -------------------------------------------------------------------------
     // 7. Batch read multiple keys
     // -------------------------------------------------------------------------
     let keys = vec!["user:alice", "user:bob", "user:charlie", "user:nonexistent"];
-    let results = client.batch_read(organization, Some(vault_id), keys).await?;
+    let results = client.batch_read(organization, Some(vault_slug), keys).await?;
 
     println!("Batch read results:");
     for (key, value) in results {

@@ -169,7 +169,7 @@ async fn read(
     // 2. Populate request fields
     ctx.set_client_id(&req.client_id);
     ctx.set_organization_slug(req.organization_slug);
-    ctx.set_vault_id(req.vault_id);
+    ctx.set_vault_slug(req.vault_slug);
     ctx.set_key(&req.key);
     ctx.set_consistency("linearizable");
 
@@ -220,7 +220,7 @@ async fn test_read_emits_wide_event() {
     let request = Request::new(ReadRequest {
         client_id: "test_client".to_string(),
         organization_slug: 1,
-        vault_id: 1,
+        vault_slug: 1,
         key: "test_key".to_string(),
     });
 
@@ -261,7 +261,7 @@ async fn test_read_emits_wide_event() {
 | `set_client_id(id)`    | Idempotency client identifier |
 | `set_sequence(seq)`    | Per-client sequence number    |
 | `set_organization_slug(id)` | Target organization              |
-| `set_vault_id(id)`     | Target vault                  |
+| `set_vault_slug(slug)` | Target vault                  |
 | `set_actor(actor)`     | Identity performing operation |
 
 ### System Context

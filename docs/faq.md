@@ -81,7 +81,7 @@ For manual backup, trigger a snapshot:
 
 ```bash
 grpcurl -plaintext localhost:50051 \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   ledger.v1.AdminService/CreateSnapshot
 ```
 
@@ -239,7 +239,7 @@ For persistent logging, configure a log aggregator (Loki, CloudWatch, etc.).
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 

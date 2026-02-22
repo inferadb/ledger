@@ -21,6 +21,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use inferadb_ledger_types::types::{
     BlockHeader, ChainCommitment, Entity, Operation, OrganizationId, OrganizationSlug,
     Relationship, SetCondition, ShardBlock, ShardId, Transaction, VaultBlock, VaultEntry, VaultId,
+    VaultSlug,
 };
 use proptest::prelude::*;
 
@@ -159,6 +160,14 @@ pub fn arb_organization_id() -> impl Strategy<Value = OrganizationId> {
 /// (timestamp bits + machine/sequence bits) while staying within safe integer bounds.
 pub fn arb_organization_slug() -> impl Strategy<Value = OrganizationSlug> {
     ((1u64 << 22)..(1u64 << 53)).prop_map(OrganizationSlug::new)
+}
+
+/// Generates an arbitrary [`VaultSlug`] as a valid Snowflake-structured `u64`.
+///
+/// Produces values in the range `2^22..2^53` to simulate realistic Snowflake IDs
+/// (timestamp bits + machine/sequence bits) while staying within safe integer bounds.
+pub fn arb_vault_slug() -> impl Strategy<Value = VaultSlug> {
+    ((1u64 << 22)..(1u64 << 53)).prop_map(VaultSlug::new)
 }
 
 /// Generates an arbitrary [`VaultId`] in the range 1-9,999.

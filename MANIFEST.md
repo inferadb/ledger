@@ -40,7 +40,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: Re-exports core types, errors, hashing utilities, and codec
 - **Key Types/Functions**:
   - Public modules: `audit`, `codec`, `config`, `error`, `hash`, `merkle`, `snowflake`, `types`, `validation`
-  - Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `ShardId`, `UserId`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, etc.
+  - Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, etc.
 - **Insights**: Clean public API surface, excellent organization
 
 #### `audit.rs` (394 lines)
@@ -119,26 +119,28 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `define_id!` macro: Generates newtypes with derives, Display (prefixed), FromStr, serde
   - `OrganizationId(i64)`: Internal storage key (display `"org:42"`), generated via `define_id!`
   - `OrganizationSlug(u64)`: External Snowflake identifier (display raw number), hand-implemented (not `define_id!` — `u64` not `i64`, no prefix)
+  - `VaultSlug(u64)`: External Snowflake identifier for vaults (same hand-implemented pattern as `OrganizationSlug`)
   - `VaultId`, `UserId`, `ShardId`: Newtype IDs (replaced type aliases)
   - `BlockHeader`: version, height, prev_hash, timestamp, tx_merkle_root, state_root
   - `Transaction`: organization, vault, operations (fallible builder with validation)
   - `Operation`: 5 variants (CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity)
   - `Entity`: key, value, ttl, version
   - `Relationship`: resource, relation, subject (authorization tuple)
-- **Insights**: Dual-ID architecture: `OrganizationId(i64)` for B+ tree key density (internal only), `OrganizationSlug(u64)` for external Snowflake IDs (API-facing). Fallible Transaction builder validates constraints (max 100 ops, max 1MB size).
+- **Insights**: Dual-ID architecture for both organizations and vaults: internal sequential IDs (`OrganizationId`/`VaultId`, `i64`) for B+ tree key density, external Snowflake IDs (`OrganizationSlug`/`VaultSlug`, `u64`) for API-facing use. Fallible Transaction builder validates constraints (max 100 ops, max 1MB size).
 
 #### `snowflake.rs` (273 lines)
 
-- **Purpose**: Snowflake-style globally unique ID generation for node IDs and organization slugs
+- **Purpose**: Snowflake-style globally unique ID generation for node IDs, organization slugs, and vault slugs
 - **Key Types/Functions**:
   - `generate() -> Result<u64, SnowflakeError>`: Core ID generation (42-bit timestamp + 22-bit sequence)
   - `generate_organization_slug() -> Result<OrganizationSlug, SnowflakeError>`: Convenience wrapper
+  - `generate_vault_slug() -> Result<VaultSlug, SnowflakeError>`: Convenience wrapper for vault slugs
   - `extract_timestamp(id: u64) -> u64`: Extract millisecond timestamp from ID
   - `extract_sequence(id: u64) -> u64`: Extract sequence number from ID
   - `SnowflakeError`: snafu error with `SystemClock` variant
   - Custom epoch: 2024-01-01 00:00:00 UTC (~139 years range)
   - Thread-safe via `parking_lot::Mutex` global state
-- **Insights**: Extracted from `server/src/node_id.rs` (Task 3) so all crates can generate IDs without depending on `server`. No worker/datacenter bits — organization slug generation happens on Raft leader only (single writer). 4.2M IDs/ms capacity. 11 unit tests.
+- **Insights**: Extracted from `server/src/node_id.rs` (Task 3) so all crates can generate IDs without depending on `server`. No worker/datacenter bits — slug generation (organization and vault) happens on Raft leader only (single writer). 4.2M IDs/ms capacity. Shared generator between org and vault slugs.
 
 #### `validation.rs` (562 lines)
 
@@ -302,8 +304,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `Entities`, `Relationships`, `RelationshipsBySubject`: Table implementations
   - `BucketCommitments`, `BlockArchive`: State and archive tables
   - `OrganizationMeta`: Organization metadata (keyed by internal `i64`)
-  - `OrganizationSlugIndex` (table ID 15): Slug→internal ID mapping (`u64` → `i64`)
-- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 16 tables total.
+  - `OrganizationSlugIndex` (table ID 15): Org slug→internal ID mapping (`u64` → `i64`)
+  - `VaultSlugIndex` (table ID 16): Vault slug→internal ID mapping (`u64` → `i64`)
+- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 17 tables total.
 
 #### `types.rs`
 
@@ -493,12 +496,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `system/service.rs` (538 lines)
 
-- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup
+- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup, vault slug storage
 - **Key Types/Functions**:
   - `create_organization()`, `delete_organization()`, `list_organizations()`
   - `get_organization_by_slug(slug: OrganizationSlug)`: Slug-based lookup (replaces name-based)
   - `update_organization_status()`, `assign_organization_to_shard()`
-- **Insights**: Slug index always created alongside organization registration. Name-based lookup removed (organization names are not unique).
+  - `register_vault_slug()`, `remove_vault_slug()`, `get_vault_id_by_slug()`: Vault slug index operations
+- **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → vault_id). Name-based lookup removed (organization names are not unique).
 
 #### `system/keys.rs` (237 lines)
 
@@ -506,8 +510,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `ORG_PREFIX` (`"org:"`), `ORG_SEQ_KEY` (`"_meta:seq:organization"`): Key constants
   - `organization_key(OrganizationId)`, `organization_slug_key(OrganizationSlug)`: Key constructors
+  - `vault_slug_key(VaultSlug)`: Vault slug index key constructor (format: `"_idx:vault:slug:{slug}"`)
   - `parse_organization_key()`: Key parser
-- **Insights**: Dedicated key scheme for system metadata. Slug index key format: `"_idx:org:slug:{slug}"`. Name-based index removed (organization names are not unique).
+- **Insights**: Dedicated key scheme for system metadata. Org slug index: `"_idx:org:slug:{slug}"`. Vault slug index: `"_idx:vault:slug:{slug}"`. Name-based index removed (organization names are not unique).
 
 #### `system/types.rs` (221 lines)
 
@@ -547,7 +552,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `impl From<types::Entity> for proto::Entity`: Infallible domain→proto
   - `impl TryFrom<proto::Entity> for types::Entity`: Fallible proto→domain (validation)
-  - Covers all domain types: Block, Transaction, Operation, Entity, Relationship, etc.
+  - `vault_entry_to_proto_block()`: Accepts explicit `VaultSlug` parameter (not derived from internal `VaultId`)
+  - Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, etc.
   - 43 unit tests + 4 proptests validating round-trip conversions
 - **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Comprehensive test coverage prevents serialization bugs.
 
@@ -555,8 +561,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: prost-generated Rust code from proto definitions
 - **Key Types/Functions**:
-  - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, etc.
+  - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, VaultSlug, etc.
   - Service traits: ReadService, WriteService, AdminService, HealthService, DiscoveryService, RaftService
+  - Proto `VaultSlug { uint64 slug }` replaces former `VaultId { int64 id }` in all external-facing RPCs
   - 258 struct/enum types, 159 functions
 - **Insights**: Large generated file. Regular updates needed when .proto changes. Consider splitting .proto into smaller files if this grows further.
 
@@ -584,8 +591,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: openraft LogStore and StateMachine implementation, log storage, snapshot building
 - **Structure**:
   - `log_storage/mod.rs` (4061 lines) — Metadata constants, `ShardChainState`, re-exports, test suite
-  - `log_storage/types.rs` (293 lines) — `AppliedState`, `CombinedSnapshot`, `OrganizationMeta`, `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps (`slug_index`, `id_to_slug`).
-  - `log_storage/accessor.rs` (201 lines) — `AppliedStateAccessor` (17 pub query methods including `resolve_slug_to_id` and `resolve_id_to_slug`)
+  - `log_storage/types.rs` (293 lines) — `AppliedState`, `CombinedSnapshot`, `OrganizationMeta`, `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations (`slug_index`, `id_to_slug`) and vaults (`vault_slug_index`, `vault_id_to_slug`). `VaultMeta` includes `slug: VaultSlug` for denormalized access.
+  - `log_storage/accessor.rs` (201 lines) — `AppliedStateAccessor` (19 pub query methods including org slug resolution `resolve_slug_to_id`/`resolve_id_to_slug` and vault slug resolution `resolve_vault_slug_to_id`/`resolve_vault_id_to_slug`)
   - `log_storage/store.rs` (250 lines) — `RaftLogStore` struct definition, creation/config/accessor methods
   - `log_storage/operations.rs` (737 lines) — `apply_request()` state machine dispatch logic
   - `log_storage/raft_impl.rs` (646 lines) — `RaftLogReader`, `RaftSnapshotBuilder`, `RaftStorage` trait impls, error conversion helpers
@@ -612,9 +619,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `LedgerTypeConfig`: openraft type config (NodeId, Entry, SnapshotData, etc.)
   - `LedgerNodeId`: Newtype for node ID (Snowflake ID)
-  - `LedgerRequest`: 14 variants for all operations (CreateOrganization with slug, CreateVault, CreateEntity, ReadEntity, CreateRelationship, etc.)
-  - `LedgerResponse`: Operation results (OrganizationCreated, VaultCreated, success/error)
-- **Insights**: Type-safe Raft integration. LedgerRequest is the state machine input type. `CreateOrganization` includes a pre-generated `OrganizationSlug` for atomic slug index insertion.
+  - `LedgerRequest`: 14 variants for all operations (CreateOrganization with slug, CreateVault with slug, CreateEntity, ReadEntity, CreateRelationship, etc.)
+  - `LedgerResponse`: Operation results (OrganizationCreated with slug, VaultCreated with slug, success/error)
+- **Insights**: Type-safe Raft integration. LedgerRequest is the state machine input type. Both `CreateOrganization` and `CreateVault` include pre-generated slugs (`OrganizationSlug`/`VaultSlug`) for atomic slug index insertion during state machine apply.
 
 #### `error.rs` (606 lines)
 
@@ -695,7 +702,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `services/forward_client.rs`: Leader forwarding
 - `services/multi_shard_read.rs`: Multi-shard read coordination
 - `services/multi_shard_write.rs`: Multi-shard write coordination (2PC + saga)
-- `services/slug_resolver.rs` (280 lines): Organization slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Methods: `extract_slug`, `resolve`, `resolve_slug` (reverse), `extract_and_resolve`, `extract_and_resolve_optional`. 14 unit tests.
+- `services/slug_resolver.rs` (280 lines): Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. 33 unit tests (14 org + 19 vault).
 - `services/shard_resolver.rs`: Organization→shard routing
 - `services/error_details.rs`: ErrorDetails proto builder
 
@@ -709,7 +716,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
 - `metrics.rs`: Prometheus metrics with SLI histograms
-- `otel.rs` (580 lines): OpenTelemetry tracing setup and OTLP exporter configuration
+- `otel.rs` (580 lines): OpenTelemetry tracing setup and OTLP exporter configuration. `SpanAttributes` uses `vault_slug` key.
 
 #### Enterprise Features
 
@@ -741,8 +748,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `raft_network.rs`: gRPC-based Raft transport
 - `proto_compat.rs`: Orphan rule workarounds
 - `trace_context.rs`: W3C Trace Context
-- `wide_events.rs`: Canonical log lines
-- `proof.rs`: Merkle proof generation
+- `wide_events.rs`: Canonical log lines (vault_slug field, `set_target(organization, vault_slug)`)
+- `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `shard_router.rs`: Dynamic shard routing
 - `saga_orchestrator.rs`: Distributed transaction orchestration
 - `vip_cache.rs` (524 lines): VIP organization cache with static + dynamic discovery, `u64` organization slugs
@@ -772,9 +779,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: LedgerClient with 36 public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
   - `LedgerClient::new(config) -> Result<Self>`: Create client
-  - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation)
+  - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation) — all accept `vault_slug: u64`
   - Relationship ops: `check_permission()`, `create_relationship()`, `delete_relationship()`
-  - Admin ops: `create_organization()`, `create_vault()`, `list_vaults()`
+  - Admin ops: `create_organization()`, `create_vault()` (returns `VaultInfo` with `vault_slug: u64`), `list_vaults()`
   - All methods use `with_retry_cancellable()` for retry + cancellation
   - `with_metrics()` wrapper for user-perceived latency
 - **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency.
@@ -900,9 +907,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: MockLedgerClient for testing
 - **Key Types/Functions**:
-  - `MockLedgerClient`: In-memory mock with HashMap storage
+  - `MockLedgerClient`: In-memory mock with HashMap storage, keyed by `(org_slug: u64, vault_slug: u64, ...)`
   - All LedgerClient methods implemented (no network)
-- **Insights**: Enables unit testing without server. In-memory state for fast tests. Large due to comprehensive mock implementations and inline tests.
+- **Insights**: Enables unit testing without server. In-memory state for fast tests. Tuple keys use vault slugs (`u64`), not internal IDs. Large due to comprehensive mock implementations and inline tests.
 
 ---
 
@@ -1076,7 +1083,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: 24 proptest strategy generators for all domain types
 - **Key Types/Functions** (all `pub fn arb_*() -> impl Strategy<Value = T>`):
   - Primitives: `arb_key()`, `arb_value()`, `arb_small_value()`, `arb_hash()`, `arb_tx_id()`, `arb_timestamp()`
-  - IDs: `arb_organization_id()`, `arb_organization_slug()`, `arb_vault_id()`, `arb_shard_id()`
+  - IDs: `arb_organization_id()`, `arb_organization_slug()`, `arb_vault_id()`, `arb_vault_slug()`, `arb_shard_id()`
   - Relationship components: `arb_resource()`, `arb_relation()`, `arb_subject()`
   - Domain types: `arb_entity()`, `arb_relationship()`, `arb_set_condition()`, `arb_operation()`, `arb_operation_sequence()`
   - Blocks: `arb_transaction()`, `arb_block_header()`, `arb_vault_block()`, `arb_vault_entry()`, `arb_shard_block()`, `arb_chain_commitment()`
@@ -1148,7 +1155,7 @@ The codebase has comprehensive observability:
 
 - **OpenTelemetry tracing**: W3C Trace Context propagation across services. OTLP exporter for traces/metrics. Configurable sampling ratio.
 - **Prometheus metrics**: 100+ metrics covering SLI/SLO, resource saturation, batch queues, rate limiting, hot keys, circuit breakers, etc. Custom histogram buckets for SLI.
-- **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, organization_slug, vault_id, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
+- **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, organization_slug, vault_slug, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
 - **Wide events**: Structured logging with tracing crate. Context propagation via spans.
 - **SDK metrics**: Client-side metrics (request latency, retries, circuit state, connection pool) via `SdkMetrics` trait. Noop default for zero overhead.
 - **Audit logging**: File-based audit logger (JSON Lines) with fsync for durability. Prometheus metrics for audit events.
@@ -1188,12 +1195,12 @@ The codebase has excellent documentation:
 
 ### 8. Dual-ID Architecture
 
-Organizations use two identifiers:
+Both organizations and vaults use two identifiers:
 
-- **`OrganizationId(i64)`** — Internal sequential ID for B+ tree key density and storage performance. Generated via `_meta:seq:organization` counter. Never exposed in APIs.
-- **`OrganizationSlug(u64)`** — External Snowflake ID (42-bit timestamp + 22-bit sequence). The sole identifier in gRPC APIs and SDK. Generated via `types::snowflake::generate_organization_slug()`.
+- **`OrganizationId(i64)`** / **`VaultId(i64)`** — Internal sequential IDs for B+ tree key density and storage performance. Generated via `SequenceCounters`. Never exposed in APIs.
+- **`OrganizationSlug(u64)`** / **`VaultSlug(u64)`** — External Snowflake IDs (42-bit timestamp + 22-bit sequence). The sole identifiers in gRPC APIs and SDK. Generated via `types::snowflake::generate_organization_slug()` / `generate_vault_slug()`.
 
-Translation happens at the gRPC service boundary via `SlugResolver`, backed by `AppliedState`'s bidirectional `slug_index` / `id_to_slug` maps. All internal subsystems (rate limiter, quota checker, storage, state machine) operate on `OrganizationId`. Responses use reverse lookup to embed slugs.
+Translation happens at the gRPC service boundary via `SlugResolver`, backed by `AppliedState`'s bidirectional maps (`slug_index`/`id_to_slug` for orgs, `vault_slug_index`/`vault_id_to_slug` for vaults). All internal subsystems (rate limiter, quota checker, storage, state machine) operate on internal IDs. Responses use reverse lookup to embed slugs. `VaultMeta` stores its slug for denormalized access in list/get responses.
 
 ### 9. Code Quality Achievements
 

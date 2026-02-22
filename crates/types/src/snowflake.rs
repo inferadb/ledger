@@ -2,7 +2,7 @@
 //!
 //! Generates 64-bit IDs that are globally unique, roughly time-ordered, and
 //! monotonically increasing within a single process. Used for both node IDs
-//! and organization slugs.
+//! organization slugs, and vault slugs.
 //!
 //! # ID Structure
 //!
@@ -30,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use snafu::Snafu;
 
-use crate::types::OrganizationSlug;
+use crate::types::{OrganizationSlug, VaultSlug};
 
 /// Custom epoch: 2024-01-01 00:00:00 UTC (milliseconds since Unix epoch).
 const EPOCH_MS: u64 = 1_704_067_200_000;
@@ -132,6 +132,19 @@ pub fn generate() -> Result<u64, SnowflakeError> {
 /// Unix epoch.
 pub fn generate_organization_slug() -> Result<OrganizationSlug, SnowflakeError> {
     generate().map(OrganizationSlug::new)
+}
+
+/// Generates a new [`VaultSlug`] from a Snowflake ID.
+///
+/// Convenience wrapper around [`generate()`] that returns the ID wrapped in
+/// the `VaultSlug` newtype.
+///
+/// # Errors
+///
+/// Returns [`SnowflakeError::SystemClock`] if the system clock is before the
+/// Unix epoch.
+pub fn generate_vault_slug() -> Result<VaultSlug, SnowflakeError> {
+    generate().map(VaultSlug::new)
 }
 
 /// Extracts the timestamp portion from a Snowflake ID.
@@ -269,5 +282,24 @@ mod tests {
         let ts = extract_timestamp(id);
         let seq = extract_sequence(id);
         assert_eq!((ts << SEQUENCE_BITS) | seq, id);
+    }
+
+    #[test]
+    fn test_generate_vault_slug() {
+        let slug = generate_vault_slug().unwrap();
+        assert!(slug.value() > 0, "vault slug should be non-zero");
+
+        // Verify the slug can be decomposed as a valid Snowflake ID
+        let timestamp = extract_timestamp(slug.value());
+        assert!(timestamp > 0, "slug timestamp should be positive");
+    }
+
+    #[test]
+    fn test_vault_slugs_are_unique() {
+        let mut slugs = HashSet::new();
+        for _ in 0..100 {
+            let slug = generate_vault_slug().unwrap();
+            assert!(slugs.insert(slug.value()), "vault slugs should be unique");
+        }
     }
 }

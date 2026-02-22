@@ -46,7 +46,7 @@ async fn create_organization(
 async fn create_vault(
     addr: std::net::SocketAddr,
     organization_id: i64,
-) -> Result<i64, Box<dyn std::error::Error>> {
+) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
@@ -59,15 +59,16 @@ async fn create_vault(
         })
         .await?;
 
-    let vault_id = response.into_inner().vault_id.map(|v| v.id).ok_or("No vault_id in response")?;
-    Ok(vault_id)
+    let vault_slug =
+        response.into_inner().vault.map(|v| v.slug).ok_or("No vault_slug in response")?;
+    Ok(vault_slug)
 }
 
 /// Writes an entity and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
     value: &[u8],
 ) -> Result<u64, Box<dyn std::error::Error>> {
@@ -77,7 +78,7 @@ async fn write_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "multi-shard-test".to_string(),
         }),
@@ -111,7 +112,7 @@ async fn write_entity(
 async fn read_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
@@ -120,7 +121,7 @@ async fn read_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -148,15 +149,15 @@ async fn test_multi_shard_write_and_read() {
 
     // Create organization (gets assigned to a data shard)
     let ns_id = create_organization(node.addr, "ms-write-read").await.expect("create organization");
-    let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
+    let vault_slug = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Write entity
     let height =
-        write_entity(node.addr, ns_id, vault_id, "key1", b"value1").await.expect("write entity");
+        write_entity(node.addr, ns_id, vault_slug, "key1", b"value1").await.expect("write entity");
     assert!(height > 0, "block height should be positive");
 
     // Read it back
-    let value = read_entity(node.addr, ns_id, vault_id, "key1").await.expect("read entity");
+    let value = read_entity(node.addr, ns_id, vault_slug, "key1").await.expect("read entity");
     assert_eq!(value, Some(b"value1".to_vec()), "should read back written value");
 }
 
@@ -209,14 +210,14 @@ async fn test_multi_shard_batch_write() {
     let node = cluster.any_node();
 
     let ns_id = create_organization(node.addr, "ms-batch").await.expect("create organization");
-    let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
+    let vault_slug = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Submit a batch write with multiple operations
     let mut client = create_write_client(node.addr).await.expect("connect");
 
     let request = inferadb_ledger_proto::proto::BatchWriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id as u64 }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-client".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::BatchWriteOperation {
@@ -260,9 +261,9 @@ async fn test_multi_shard_batch_write() {
 
     // Verify both keys are readable
     let val1 =
-        read_entity(node.addr, ns_id, vault_id, "batch-key-1").await.expect("read batch key 1");
+        read_entity(node.addr, ns_id, vault_slug, "batch-key-1").await.expect("read batch key 1");
     let val2 =
-        read_entity(node.addr, ns_id, vault_id, "batch-key-2").await.expect("read batch key 2");
+        read_entity(node.addr, ns_id, vault_slug, "batch-key-2").await.expect("read batch key 2");
 
     assert_eq!(val1, Some(b"batch-val-1".to_vec()), "first batch key should be readable");
     assert_eq!(val2, Some(b"batch-val-2".to_vec()), "second batch key should be readable");
@@ -282,14 +283,14 @@ async fn test_multi_shard_write_idempotency() {
     let node = cluster.any_node();
 
     let ns_id = create_organization(node.addr, "ms-idempotent").await.expect("create organization");
-    let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
+    let vault_slug = create_vault(node.addr, ns_id).await.expect("create vault");
 
     let mut client = create_write_client(node.addr).await.expect("connect");
     let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id as u64 }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "idempotent-ms".to_string() }),
         idempotency_key: idempotency_key.clone(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -345,7 +346,7 @@ async fn test_multi_shard_write_nonexistent_organization() {
     // Write to organization 99999 which doesn't exist
     let request = inferadb_ledger_proto::proto::WriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 99999 }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "nonexistent-ns".to_string(),
         }),
@@ -415,20 +416,20 @@ async fn test_multi_shard_concurrent_writes() {
         let ns_id = create_organization(node.addr, &format!("concurrent-{}", i))
             .await
             .expect("create organization");
-        let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
-        organizations.push((ns_id, vault_id));
+        let vault_slug = create_vault(node.addr, ns_id).await.expect("create vault");
+        organizations.push((ns_id, vault_slug));
     }
 
     // Spawn concurrent writes to all organizations
     let addr = node.addr;
     let mut handles = Vec::new();
 
-    for (i, &(ns_id, vault_id)) in organizations.iter().enumerate() {
+    for (i, &(ns_id, vault_slug)) in organizations.iter().enumerate() {
         let handle = tokio::spawn(async move {
             for j in 0..5 {
                 let key = format!("concurrent-{}-{}", i, j);
                 let value = format!("value-{}-{}", i, j);
-                write_entity(addr, ns_id, vault_id, &key, value.as_bytes())
+                write_entity(addr, ns_id, vault_slug, &key, value.as_bytes())
                     .await
                     .expect("concurrent write");
             }
@@ -442,11 +443,11 @@ async fn test_multi_shard_concurrent_writes() {
     }
 
     // Verify all writes are readable
-    for (i, &(ns_id, vault_id)) in organizations.iter().enumerate() {
+    for (i, &(ns_id, vault_slug)) in organizations.iter().enumerate() {
         for j in 0..5 {
             let key = format!("concurrent-{}-{}", i, j);
             let expected = format!("value-{}-{}", i, j);
-            let value = read_entity(addr, ns_id, vault_id, &key)
+            let value = read_entity(addr, ns_id, vault_slug, &key)
                 .await
                 .expect("read after concurrent writes");
             assert_eq!(

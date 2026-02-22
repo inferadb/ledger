@@ -5,7 +5,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, OrganizationUsage, VaultId};
+use inferadb_ledger_types::{
+    OrganizationId, OrganizationSlug, OrganizationUsage, VaultId, VaultSlug,
+};
 use parking_lot::RwLock;
 
 use super::types::{AppliedState, OrganizationMeta, VaultHealthStatus, VaultMeta};
@@ -191,6 +193,20 @@ impl AppliedStateAccessor {
     /// Returns `None` if the ID is not registered in the reverse index.
     pub fn resolve_id_to_slug(&self, id: OrganizationId) -> Option<OrganizationSlug> {
         self.state.read().id_to_slug.get(&id).copied()
+    }
+
+    /// Resolves an external vault slug to its internal ID.
+    ///
+    /// Returns `None` if the slug is not registered in the vault slug index.
+    pub fn resolve_vault_slug_to_id(&self, slug: VaultSlug) -> Option<VaultId> {
+        self.state.read().vault_slug_index.get(&slug).copied()
+    }
+
+    /// Resolves an internal vault ID to its external slug.
+    ///
+    /// Returns `None` if the ID is not registered in the vault reverse index.
+    pub fn resolve_vault_id_to_slug(&self, id: VaultId) -> Option<VaultSlug> {
+        self.state.read().vault_id_to_slug.get(&id).copied()
     }
 
     /// Creates an accessor from a pre-built state (for testing).

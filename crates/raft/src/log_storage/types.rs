@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use inferadb_ledger_state::system::OrganizationStatus;
 use inferadb_ledger_types::{
-    Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction, VaultId,
+    Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction, VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
@@ -56,12 +56,18 @@ pub struct AppliedState {
     /// Replicated via Raft consensus and survives restarts via snapshot.
     #[serde(default)]
     pub organization_storage_bytes: HashMap<OrganizationId, u64>,
-    /// Slug → internal ID mapping for fast resolution.
+    /// Organization slug → internal ID mapping for fast resolution.
     #[serde(default)]
     pub slug_index: HashMap<OrganizationSlug, OrganizationId>,
-    /// Internal ID → slug reverse mapping for response construction.
+    /// Internal organization ID → slug reverse mapping for response construction.
     #[serde(default)]
     pub id_to_slug: HashMap<OrganizationId, OrganizationSlug>,
+    /// Vault slug → internal vault ID mapping for fast resolution.
+    #[serde(default)]
+    pub vault_slug_index: HashMap<VaultSlug, VaultId>,
+    /// Internal vault ID → slug reverse mapping for response construction.
+    #[serde(default)]
+    pub vault_id_to_slug: HashMap<VaultId, VaultSlug>,
 }
 
 /// Combined snapshot containing both metadata and entity state.
@@ -107,6 +113,8 @@ pub struct VaultMeta {
     pub organization_id: OrganizationId,
     /// Vault ID.
     pub vault_id: VaultId,
+    /// External Snowflake slug for API lookups (generated before Raft proposal).
+    pub slug: VaultSlug,
     /// Human-readable name (optional).
     pub name: Option<String>,
     /// Whether the vault is deleted.

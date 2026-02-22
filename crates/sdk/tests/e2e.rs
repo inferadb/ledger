@@ -99,12 +99,12 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
     LedgerClient::new(config).await.expect("client creation")
 }
 
-/// Creates a test organization and vault, returning (organization_slug, vault_id).
-async fn setup_test_org_vault(client: &LedgerClient) -> (OrganizationSlug, i64) {
+/// Creates a test organization and vault, returning (organization_slug, vault_slug).
+async fn setup_test_org_vault(client: &LedgerClient) -> (OrganizationSlug, u64) {
     let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
     let org = client.create_organization(&ns_name).await.expect("create organization");
     let vault_info = client.create_vault(org.slug).await.expect("create vault");
-    (org.slug, vault_info.vault_id)
+    (org.slug, vault_info.vault_slug)
 }
 
 /// Finds the leader endpoint via `GetClusterInfo`.
@@ -163,19 +163,19 @@ async fn test_write_read_cycle() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "e2e-write-read").await;
-    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&client).await;
 
     // Write an entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice Data".to_vec())];
     let write_result =
-        client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+        client.write(ns_id, Some(vault_slug), ops).await.expect("write should succeed");
 
     assert!(!write_result.tx_id.is_empty(), "should have tx_id");
     assert!(write_result.block_height > 0, "should have block height");
 
     // Read the entity back
     let read_result =
-        client.read(ns_id, Some(vault_id), "user:alice").await.expect("read should succeed");
+        client.read(ns_id, Some(vault_slug), "user:alice").await.expect("read should succeed");
 
     assert_eq!(read_result, Some(b"Alice Data".to_vec()), "should read back written value");
 }
@@ -186,21 +186,21 @@ async fn test_multiple_writes_reads() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "e2e-multi-rw").await;
-    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&client).await;
 
     // Write multiple entities
     for i in 0..5 {
         let key = format!("item:{}", i);
         let value = format!("value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value)];
-        client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+        client.write(ns_id, Some(vault_slug), ops).await.expect("write should succeed");
     }
 
     // Read all entities back
     for i in 0..5 {
         let key = format!("item:{}", i);
         let expected = format!("value-{}", i).into_bytes();
-        let result = client.read(ns_id, Some(vault_id), &key).await.expect("read should succeed");
+        let result = client.read(ns_id, Some(vault_slug), &key).await.expect("read should succeed");
         assert_eq!(result, Some(expected), "should read back value for {}", key);
     }
 }
@@ -211,14 +211,14 @@ async fn test_batch_read() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "e2e-batch-read").await;
-    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&client).await;
 
     // Write several entities
     for i in 0..3 {
         let key = format!("batch:{}", i);
         let value = format!("batch-value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value)];
-        client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+        client.write(ns_id, Some(vault_slug), ops).await.expect("write should succeed");
     }
 
     // Batch read including a missing key
@@ -229,7 +229,7 @@ async fn test_batch_read() {
         "batch:missing".to_string(),
     ];
     let results =
-        client.batch_read(ns_id, Some(vault_id), keys).await.expect("batch read should succeed");
+        client.batch_read(ns_id, Some(vault_slug), keys).await.expect("batch read should succeed");
 
     assert_eq!(results.len(), 4);
     assert_eq!(results[0], ("batch:0".to_string(), Some(b"batch-value-0".to_vec())));
@@ -258,12 +258,12 @@ async fn test_write_replication_to_followers() {
     let leader_ep = find_leader_endpoint(&endpoints).await;
     let leader_client = create_single_endpoint_client(&leader_ep, "repl-leader").await;
 
-    let (ns_id, vault_id) = setup_test_org_vault(&leader_client).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&leader_client).await;
 
     // Write through the leader
     let ops = vec![Operation::set_entity("repl:key", b"replicated-data".to_vec())];
     let result =
-        leader_client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+        leader_client.write(ns_id, Some(vault_slug), ops).await.expect("write should succeed");
     assert!(result.block_height > 0);
 
     // Wait for replication
@@ -278,7 +278,7 @@ async fn test_write_replication_to_followers() {
             create_single_endpoint_client(ep, &format!("repl-follower-{}", i)).await;
 
         let read_result = follower_client
-            .read(ns_id, Some(vault_id), "repl:key")
+            .read(ns_id, Some(vault_slug), "repl:key")
             .await
             .expect("read from follower should succeed");
 
@@ -304,11 +304,11 @@ async fn test_three_node_write_replication() {
     let leader_ep = find_leader_endpoint(&endpoints).await;
     let client = create_single_endpoint_client(&leader_ep, "repl-3node").await;
 
-    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&client).await;
 
     // Write through the leader
     let ops = vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec())];
-    client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+    client.write(ns_id, Some(vault_slug), ops).await.expect("write should succeed");
 
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -318,7 +318,7 @@ async fn test_three_node_write_replication() {
         let reader = create_single_endpoint_client(ep, &format!("repl-reader-{}", i)).await;
 
         let result =
-            reader.read(ns_id, Some(vault_id), "replicated:key").await.expect("read from node");
+            reader.read(ns_id, Some(vault_slug), "replicated:key").await.expect("read from node");
 
         assert_eq!(
             result,
@@ -339,17 +339,17 @@ async fn test_multiple_client_sessions() {
     let endpoints = require_cluster!();
 
     let client1 = create_sdk_client(&endpoints, "session-1").await;
-    let (ns_id, vault_id) = setup_test_org_vault(&client1).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&client1).await;
 
     // First session writes
     let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec())];
-    let first_result = client1.write(ns_id, Some(vault_id), ops1).await.expect("first write");
+    let first_result = client1.write(ns_id, Some(vault_slug), ops1).await.expect("first write");
 
     // Second independent session
     let client2 = create_sdk_client(&endpoints, "session-2").await;
 
     let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec())];
-    let second_result = client2.write(ns_id, Some(vault_id), ops2).await.expect("second write");
+    let second_result = client2.write(ns_id, Some(vault_slug), ops2).await.expect("second write");
 
     // Both writes should succeed with unique tx_ids
     assert!(!first_result.tx_id.is_empty());
@@ -357,8 +357,8 @@ async fn test_multiple_client_sessions() {
     assert_ne!(first_result.tx_id, second_result.tx_id, "should have different tx_ids");
 
     // Read back both keys
-    let value1 = client2.read(ns_id, Some(vault_id), "session:key1").await.expect("read first");
-    let value2 = client2.read(ns_id, Some(vault_id), "session:key2").await.expect("read second");
+    let value1 = client2.read(ns_id, Some(vault_slug), "session:key1").await.expect("read first");
+    let value2 = client2.read(ns_id, Some(vault_slug), "session:key2").await.expect("read second");
 
     assert_eq!(value1, Some(b"from-session-1".to_vec()));
     assert_eq!(value2, Some(b"from-session-2".to_vec()));
@@ -374,10 +374,10 @@ async fn test_watch_blocks_stream_setup() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "stream-client").await;
-    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&client).await;
 
     // Start watching blocks from height 1 (genesis)
-    let stream_result = client.watch_blocks(ns_id, vault_id, 1).await;
+    let stream_result = client.watch_blocks(ns_id, vault_slug, 1).await;
 
     assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", stream_result.err());
 }
@@ -393,7 +393,7 @@ async fn test_data_persistence_across_sessions() {
 
     // Setup: create organization/vault
     let setup_client = create_sdk_client(&endpoints, "setup-client").await;
-    let (ns_id, vault_id) = setup_test_org_vault(&setup_client).await;
+    let (ns_id, vault_slug) = setup_test_org_vault(&setup_client).await;
 
     // First client session — write data
     {
@@ -403,7 +403,7 @@ async fn test_data_persistence_across_sessions() {
             let key = format!("persist:{}", i);
             let value = format!("data-{}", i).into_bytes();
             let ops = vec![Operation::set_entity(&key, value)];
-            client.write(ns_id, Some(vault_id), ops).await.expect("write should succeed");
+            client.write(ns_id, Some(vault_slug), ops).await.expect("write should succeed");
         }
     } // Client dropped
 
@@ -414,7 +414,7 @@ async fn test_data_persistence_across_sessions() {
         for i in 0..5 {
             let key = format!("persist:{}", i);
             let expected = format!("data-{}", i).into_bytes();
-            let read_result = client.read(ns_id, Some(vault_id), &key).await.expect("read");
+            let read_result = client.read(ns_id, Some(vault_slug), &key).await.expect("read");
             assert_eq!(read_result, Some(expected), "should read {}", key);
         }
 
@@ -423,10 +423,10 @@ async fn test_data_persistence_across_sessions() {
         let value = b"data-5".to_vec();
         let ops = vec![Operation::set_entity(key, value.clone())];
         let result =
-            client.write(ns_id, Some(vault_id), ops).await.expect("write from new session");
+            client.write(ns_id, Some(vault_slug), ops).await.expect("write from new session");
         assert!(!result.tx_id.is_empty(), "should have tx_id");
 
-        let read_result = client.read(ns_id, Some(vault_id), key).await.expect("read new write");
+        let read_result = client.read(ns_id, Some(vault_slug), key).await.expect("read new write");
         assert_eq!(read_result, Some(value));
     }
 }
@@ -454,7 +454,7 @@ async fn test_admin_operations() {
 
     // Create a vault
     let vault_info = client.create_vault(org_slug).await.expect("create vault");
-    assert!(vault_info.vault_id > 0, "should get valid vault ID");
+    assert!(vault_info.vault_slug > 0, "should get valid vault slug");
 
     // List organizations
     let organizations = client.list_organizations().await.expect("list organizations");

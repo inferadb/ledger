@@ -168,7 +168,7 @@ mod tests {
     use std::sync::Arc;
 
     use inferadb_ledger_state::system::OrganizationStatus;
-    use inferadb_ledger_types::{OrganizationSlug, ShardId, config::RuntimeConfig};
+    use inferadb_ledger_types::{OrganizationSlug, ShardId, VaultSlug, config::RuntimeConfig};
     use parking_lot::RwLock;
 
     use super::*;
@@ -269,6 +269,7 @@ mod tests {
                 VaultMeta {
                     organization_id: ns,
                     vault_id: vid,
+                    slug: VaultSlug::new(vid.value() as u64),
                     name: None,
                     deleted: false,
                     last_write_timestamp: 0,
@@ -318,6 +319,7 @@ mod tests {
             VaultMeta {
                 organization_id: ns,
                 vault_id: VaultId::new(1),
+                slug: VaultSlug::new(1),
                 name: None,
                 deleted: false,
                 last_write_timestamp: 0,
@@ -329,6 +331,7 @@ mod tests {
             VaultMeta {
                 organization_id: ns,
                 vault_id: VaultId::new(2),
+                slug: VaultSlug::new(2),
                 name: None,
                 deleted: true,
                 last_write_timestamp: 0,

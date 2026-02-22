@@ -21,7 +21,7 @@
 //! |-------|--------|-------------|
 //! | Identity | `request_id`, `service`, `method` | Request routing |
 //! | Client | `client_id`, `sequence`, `actor`, `sdk_version`, `source_ip` | Client metadata |
-//! | Target | `organization`, `vault_id` | Scope of the operation |
+//! | Target | `organization`, `vault_slug` | Scope of the operation |
 //! | System | `node_id`, `is_leader`, `raft_term`, `shard_id` | Cluster state |
 //! | Write | `operations_count`, `operation_types`, `bytes_written`, `raft_round_trips` | Write metrics |
 //! | Read | `key`, `keys_count`, `found_count`, `bytes_read` | Read metrics |
@@ -504,7 +504,7 @@ pub struct RequestContext {
 
     // Target
     organization: Option<u64>,
-    vault_id: Option<i64>,
+    vault_slug: Option<u64>,
 
     // System context (populated externally)
     node_id: Option<u64>,
@@ -591,7 +591,7 @@ impl RequestContext {
             sequence: None,
             actor: None,
             organization: None,
-            vault_id: None,
+            vault_slug: None,
             node_id: None,
             is_leader: None,
             raft_term: None,
@@ -688,9 +688,9 @@ impl RequestContext {
     // =========================================================================
 
     /// Sets the target organization and vault.
-    pub fn set_target(&mut self, organization: u64, vault_id: i64) {
+    pub fn set_target(&mut self, organization: u64, vault_slug: u64) {
         self.organization = Some(organization);
-        self.vault_id = Some(vault_id);
+        self.vault_slug = Some(vault_slug);
     }
 
     /// Sets the organization only.
@@ -698,9 +698,9 @@ impl RequestContext {
         self.organization = Some(organization);
     }
 
-    /// Sets the vault ID only.
-    pub fn set_vault_id(&mut self, vault_id: i64) {
-        self.vault_id = Some(vault_id);
+    /// Sets the vault slug only.
+    pub fn set_vault_slug(&mut self, vault_slug: u64) {
+        self.vault_slug = Some(vault_slug);
     }
 
     // =========================================================================
@@ -1163,7 +1163,7 @@ impl RequestContext {
             sequence = self.sequence,
             actor = self.actor.as_deref(),
             organization = self.organization,
-            vault_id = self.vault_id,
+            vault_slug = self.vault_slug,
             node_id = self.node_id,
             is_leader = self.is_leader,
             raft_term = self.raft_term,
@@ -1218,7 +1218,7 @@ impl RequestContext {
                 client_id: self.client_id.clone(),
                 sequence: self.sequence,
                 organization: self.organization,
-                vault_id: self.vault_id,
+                vault_slug: self.vault_slug,
                 service: Some(self.service),
                 method: Some(self.method),
                 actor: self.actor.clone(),
@@ -1375,7 +1375,7 @@ mod tests {
         let mut ctx = RequestContext::new("WriteService", "write");
         ctx.set_target(1, 2);
         assert_eq!(ctx.organization, Some(1));
-        assert_eq!(ctx.vault_id, Some(2));
+        assert_eq!(ctx.vault_slug, Some(2));
         ctx.suppress_emission();
     }
 
@@ -2796,7 +2796,7 @@ mod tests {
 
         // Target
         assert!(event.contains("\"organization\":1"), "missing organization");
-        assert!(event.contains("\"vault_id\":2"), "missing vault_id");
+        assert!(event.contains("\"vault_slug\":2"), "missing vault_slug");
 
         // System
         assert!(event.contains("\"node_id\":100"), "missing node_id");

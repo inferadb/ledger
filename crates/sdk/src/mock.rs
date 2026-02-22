@@ -63,14 +63,14 @@ use parking_lot::RwLock;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, transport::Server};
 
-/// Key for client state: (organization, vault_id, client_id)
-type ClientKey = (u64, i64, String);
+/// Key for client state: (organization, vault_slug, client_id)
+type ClientKey = (u64, u64, String);
 
-/// Key for entity storage: (organization, vault_id, key)
-type EntityKey = (u64, i64, String);
+/// Key for entity storage: (organization, vault_slug, key)
+type EntityKey = (u64, u64, String);
 
-/// Key for idempotency cache: (organization, vault_id, client_id, idempotency_key)
-type IdempotencyKey = (u64, i64, String, Vec<u8>);
+/// Key for idempotency cache: (organization, vault_slug, client_id, idempotency_key)
+type IdempotencyKey = (u64, u64, String, Vec<u8>);
 
 /// Value for idempotency cache: (tx_id, block_height, assigned_sequence)
 type IdempotencyCacheEntry = (Vec<u8>, u64, u64);
@@ -108,20 +108,20 @@ struct MockState {
     /// Current block height (incremented on each write)
     block_height: AtomicU64,
 
-    /// Relationships storage: (organization, vault_id) -> Vec<Relationship>
-    relationships: RwLock<HashMap<(u64, i64), Vec<proto::Relationship>>>,
+    /// Relationships storage: (organization, vault_slug) -> Vec<Relationship>
+    relationships: RwLock<HashMap<(u64, u64), Vec<proto::Relationship>>>,
 
     /// Organization info: organization -> OrganizationInfo
     organizations: RwLock<HashMap<u64, OrganizationData>>,
 
-    /// Vault info: (organization, vault_id) -> VaultData
-    vaults: RwLock<HashMap<(u64, i64), VaultData>>,
+    /// Vault info: (organization, vault_slug) -> VaultData
+    vaults: RwLock<HashMap<(u64, u64), VaultData>>,
 
     /// Next organization ID to assign
     next_organization: AtomicU64,
 
     /// Next vault ID to assign
-    next_vault_id: AtomicU64,
+    next_vault_slug: AtomicU64,
 
     /// Peer info for discovery
     peers: RwLock<Vec<proto::PeerInfo>>,
@@ -148,7 +148,7 @@ impl MockState {
         Self {
             block_height: AtomicU64::new(1),
             next_organization: AtomicU64::new(1),
-            next_vault_id: AtomicU64::new(1),
+            next_vault_slug: AtomicU64::new(1),
             ..Default::default()
         }
     }
@@ -284,18 +284,18 @@ impl MockLedgerServer {
     pub fn set_entity(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         key: &str,
         value: &[u8],
     ) {
-        self.set_entity_with_options(organization, vault_id, key, value, 1, None);
+        self.set_entity_with_options(organization, vault_slug, key, value, 1, None);
     }
 
     /// Sets an entity value with version and optional expiration.
     pub fn set_entity_with_options(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         key: &str,
         value: &[u8],
         version: u64,
@@ -303,15 +303,15 @@ impl MockLedgerServer {
     ) {
         let mut entities = self.state.entities.write();
         entities.insert(
-            (organization.value(), vault_id, key.to_string()),
+            (organization.value(), vault_slug, key.to_string()),
             (value.to_vec(), version, expires_at),
         );
     }
 
     /// Removes an entity from storage.
-    pub fn remove_entity(&self, organization: OrganizationSlug, vault_id: i64, key: &str) {
+    pub fn remove_entity(&self, organization: OrganizationSlug, vault_slug: u64, key: &str) {
         let mut entities = self.state.entities.write();
-        entities.remove(&(organization.value(), vault_id, key.to_string()));
+        entities.remove(&(organization.value(), vault_slug, key.to_string()));
     }
 
     /// Sets the last committed sequence for a client.
@@ -320,23 +320,23 @@ impl MockLedgerServer {
     pub fn set_client_state(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         client_id: &str,
         seq: u64,
     ) {
         let mut sequences = self.state.client_sequences.write();
-        sequences.insert((organization.value(), vault_id, client_id.to_string()), seq);
+        sequences.insert((organization.value(), vault_slug, client_id.to_string()), seq);
     }
 
     /// Returns the last committed sequence for a client.
     pub fn get_client_state(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         client_id: &str,
     ) -> Option<u64> {
         let sequences = self.state.client_sequences.read();
-        sequences.get(&(organization.value(), vault_id, client_id.to_string())).copied()
+        sequences.get(&(organization.value(), vault_slug, client_id.to_string())).copied()
     }
 
     /// Injects UNAVAILABLE errors for the next N requests.
@@ -372,13 +372,13 @@ impl MockLedgerServer {
     pub fn add_relationship(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         resource: &str,
         relation: &str,
         subject: &str,
     ) {
         let mut relationships = self.state.relationships.write();
-        let entry = relationships.entry((organization.value(), vault_id)).or_default();
+        let entry = relationships.entry((organization.value(), vault_slug)).or_default();
         entry.push(proto::Relationship {
             resource: resource.to_string(),
             relation: relation.to_string(),
@@ -400,10 +400,10 @@ impl MockLedgerServer {
     }
 
     /// Adds a vault for admin tests.
-    pub fn add_vault(&self, organization: OrganizationSlug, vault_id: i64) {
+    pub fn add_vault(&self, organization: OrganizationSlug, vault_slug: u64) {
         let mut vaults = self.state.vaults.write();
         vaults.insert(
-            (organization.value(), vault_id),
+            (organization.value(), vault_slug),
             VaultData {
                 height: 1,
                 state_root: vec![0u8; 32],
@@ -481,10 +481,10 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let entities = self.state.entities.read();
-        let key = (organization, vault_id, req.key);
+        let key = (organization, vault_slug, req.key);
 
         let (value, block_height) = match entities.get(&key) {
             Some((v, ..)) => (Some(v.clone()), self.state.block_height.load(Ordering::SeqCst)),
@@ -504,14 +504,14 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let entities = self.state.entities.read();
         let results: Vec<proto::BatchReadResult> = req
             .keys
             .iter()
             .map(|key| {
-                let entity_key = (organization, vault_id, key.clone());
+                let entity_key = (organization, vault_slug, key.clone());
                 match entities.get(&entity_key) {
                     Some((v, ..)) => proto::BatchReadResult {
                         key: key.clone(),
@@ -539,10 +539,10 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let entities = self.state.entities.read();
-        let key = (organization, vault_id, req.key);
+        let key = (organization, vault_slug, req.key);
         let block_height = self.state.block_height.load(Ordering::SeqCst);
 
         let value = entities.get(&key).map(|(v, ..)| v.clone());
@@ -552,7 +552,7 @@ impl ReadService for MockReadService {
         let block_header = proto::BlockHeader {
             height: block_height,
             organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault_id: Some(proto::VaultId { id: vault_id }),
+            vault: Some(proto::VaultSlug { slug: vault_slug }),
             previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
             tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
             state_root: Some(proto::Hash { value: state_root.clone() }),
@@ -587,10 +587,10 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let entities = self.state.entities.read();
-        let key = (organization, vault_id, req.key);
+        let key = (organization, vault_slug, req.key);
         let value = entities.get(&key).map(|(v, ..)| v.clone());
 
         Ok(Response::new(proto::HistoricalReadResponse {
@@ -622,13 +622,13 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let block = proto::Block {
             header: Some(proto::BlockHeader {
                 height: req.height,
                 organization: Some(proto::OrganizationSlug { slug: organization }),
-                vault_id: Some(proto::VaultId { id: vault_id }),
+                vault: Some(proto::VaultSlug { slug: vault_slug }),
                 previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
                 tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
                 state_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -651,14 +651,14 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let blocks: Vec<proto::Block> = (req.start_height..=req.end_height)
             .map(|height| proto::Block {
                 header: Some(proto::BlockHeader {
                     height,
                     organization: Some(proto::OrganizationSlug { slug: organization }),
-                    vault_id: Some(proto::VaultId { id: vault_id }),
+                    vault: Some(proto::VaultSlug { slug: vault_slug }),
                     previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
                     tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
                     state_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -701,11 +701,11 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
 
         let sequences = self.state.client_sequences.read();
-        let last_seq = sequences.get(&(organization, vault_id, client_id)).copied().unwrap_or(0);
+        let last_seq = sequences.get(&(organization, vault_slug, client_id)).copied().unwrap_or(0);
 
         Ok(Response::new(proto::GetClientStateResponse { last_committed_sequence: last_seq }))
     }
@@ -720,10 +720,10 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let relationships = self.state.relationships.read();
-        let rels = relationships.get(&(organization, vault_id)).cloned().unwrap_or_default();
+        let rels = relationships.get(&(organization, vault_slug)).cloned().unwrap_or_default();
 
         // Apply filters
         let filtered: Vec<proto::Relationship> = rels
@@ -751,11 +751,11 @@ impl ReadService for MockReadService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let relationships = self.state.relationships.read();
         let resources: Vec<String> = relationships
-            .get(&(organization, vault_id))
+            .get(&(organization, vault_slug))
             .map(|rels| {
                 rels.iter()
                     .filter(|r| r.resource.starts_with(&format!("{}:", req.resource_type)))
@@ -843,12 +843,12 @@ impl WriteService for MockWriteService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let idempotency_key = req.idempotency_key;
 
         // Check idempotency cache
-        let cache_key = (organization, vault_id, client_id.clone(), idempotency_key.clone());
+        let cache_key = (organization, vault_slug, client_id.clone(), idempotency_key.clone());
         {
             let cache = self.state.idempotency_cache.read();
             if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
@@ -877,16 +877,17 @@ impl WriteService for MockWriteService {
                     match op_inner {
                         proto::operation::Op::SetEntity(set) => {
                             entities.insert(
-                                (organization, vault_id, set.key),
+                                (organization, vault_slug, set.key),
                                 (set.value, block_height, set.expires_at),
                             );
                         },
                         proto::operation::Op::DeleteEntity(del) => {
-                            entities.remove(&(organization, vault_id, del.key));
+                            entities.remove(&(organization, vault_slug, del.key));
                         },
                         proto::operation::Op::CreateRelationship(rel) => {
                             let mut relationships = self.state.relationships.write();
-                            let entry = relationships.entry((organization, vault_id)).or_default();
+                            let entry =
+                                relationships.entry((organization, vault_slug)).or_default();
                             entry.push(proto::Relationship {
                                 resource: rel.resource,
                                 relation: rel.relation,
@@ -895,7 +896,7 @@ impl WriteService for MockWriteService {
                         },
                         proto::operation::Op::DeleteRelationship(del) => {
                             let mut relationships = self.state.relationships.write();
-                            if let Some(rels) = relationships.get_mut(&(organization, vault_id)) {
+                            if let Some(rels) = relationships.get_mut(&(organization, vault_slug)) {
                                 rels.retain(|r| {
                                     r.resource != del.resource
                                         || r.relation != del.relation
@@ -904,7 +905,7 @@ impl WriteService for MockWriteService {
                             }
                         },
                         proto::operation::Op::ExpireEntity(expire) => {
-                            entities.remove(&(organization, vault_id, expire.key));
+                            entities.remove(&(organization, vault_slug, expire.key));
                         },
                     }
                 }
@@ -912,7 +913,7 @@ impl WriteService for MockWriteService {
         }
 
         // Assign server sequence and update client state
-        let client_key = (organization, vault_id, client_id);
+        let client_key = (organization, vault_slug, client_id);
         let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
             let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
@@ -948,12 +949,12 @@ impl WriteService for MockWriteService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let idempotency_key = req.idempotency_key;
 
         // Check idempotency cache
-        let cache_key = (organization, vault_id, client_id.clone(), idempotency_key.clone());
+        let cache_key = (organization, vault_slug, client_id.clone(), idempotency_key.clone());
         {
             let cache = self.state.idempotency_cache.read();
             if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
@@ -983,17 +984,17 @@ impl WriteService for MockWriteService {
                         match op_inner {
                             proto::operation::Op::SetEntity(set) => {
                                 entities.insert(
-                                    (organization, vault_id, set.key),
+                                    (organization, vault_slug, set.key),
                                     (set.value, block_height, set.expires_at),
                                 );
                             },
                             proto::operation::Op::DeleteEntity(del) => {
-                                entities.remove(&(organization, vault_id, del.key));
+                                entities.remove(&(organization, vault_slug, del.key));
                             },
                             proto::operation::Op::CreateRelationship(rel) => {
                                 let mut relationships = self.state.relationships.write();
                                 let entry =
-                                    relationships.entry((organization, vault_id)).or_default();
+                                    relationships.entry((organization, vault_slug)).or_default();
                                 entry.push(proto::Relationship {
                                     resource: rel.resource,
                                     relation: rel.relation,
@@ -1002,7 +1003,8 @@ impl WriteService for MockWriteService {
                             },
                             proto::operation::Op::DeleteRelationship(del) => {
                                 let mut relationships = self.state.relationships.write();
-                                if let Some(rels) = relationships.get_mut(&(organization, vault_id))
+                                if let Some(rels) =
+                                    relationships.get_mut(&(organization, vault_slug))
                                 {
                                     rels.retain(|r| {
                                         r.resource != del.resource
@@ -1012,7 +1014,7 @@ impl WriteService for MockWriteService {
                                 }
                             },
                             proto::operation::Op::ExpireEntity(expire) => {
-                                entities.remove(&(organization, vault_id, expire.key));
+                                entities.remove(&(organization, vault_slug, expire.key));
                             },
                         }
                     }
@@ -1021,7 +1023,7 @@ impl WriteService for MockWriteService {
         }
 
         // Assign server sequence and update client state
-        let client_key = (organization, vault_id, client_id);
+        let client_key = (organization, vault_slug, client_id);
         let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
             let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
@@ -1163,12 +1165,12 @@ impl AdminService for MockAdminService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = self.state.next_vault_id.fetch_add(1, Ordering::SeqCst) as i64;
+        let vault_slug = self.state.next_vault_slug.fetch_add(1, Ordering::SeqCst);
 
         {
             let mut vaults = self.state.vaults.write();
             vaults.insert(
-                (organization, vault_id),
+                (organization, vault_slug),
                 VaultData {
                     height: 1,
                     state_root: vec![0u8; 32],
@@ -1178,11 +1180,11 @@ impl AdminService for MockAdminService {
         }
 
         Ok(Response::new(proto::CreateVaultResponse {
-            vault_id: Some(proto::VaultId { id: vault_id }),
+            vault: Some(proto::VaultSlug { slug: vault_slug }),
             genesis: Some(proto::BlockHeader {
                 height: 0,
                 organization: Some(proto::OrganizationSlug { slug: organization }),
-                vault_id: Some(proto::VaultId { id: vault_id }),
+                vault: Some(proto::VaultSlug { slug: vault_slug }),
                 previous_hash: None,
                 tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
                 state_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -1211,16 +1213,16 @@ impl AdminService for MockAdminService {
 
         let req = request.into_inner();
         let organization = req.organization.map_or(0, |n| n.slug);
-        let vault_id = req.vault_id.map_or(0, |v| v.id);
+        let vault_slug = req.vault.map_or(0, |v| v.slug);
 
         let vaults = self.state.vaults.read();
         let data = vaults
-            .get(&(organization, vault_id))
+            .get(&(organization, vault_slug))
             .ok_or_else(|| Status::not_found("Vault not found"))?;
 
         Ok(Response::new(proto::GetVaultResponse {
             organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault_id: Some(proto::VaultId { id: vault_id }),
+            vault: Some(proto::VaultSlug { slug: vault_slug }),
             height: data.height,
             state_root: Some(proto::Hash { value: data.state_root.clone() }),
             nodes: vec![],
@@ -1239,9 +1241,9 @@ impl AdminService for MockAdminService {
         let vaults = self.state.vaults.read();
         let responses: Vec<proto::GetVaultResponse> = vaults
             .iter()
-            .map(|((organization, vault_id), data)| proto::GetVaultResponse {
+            .map(|((organization, vault_slug), data)| proto::GetVaultResponse {
                 organization: Some(proto::OrganizationSlug { slug: *organization }),
-                vault_id: Some(proto::VaultId { id: *vault_id }),
+                vault: Some(proto::VaultSlug { slug: *vault_slug }),
                 height: data.height,
                 state_root: Some(proto::Hash { value: data.state_root.clone() }),
                 nodes: vec![],
@@ -2131,10 +2133,10 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let vault_info = client.create_vault(ORG).await.unwrap();
-            assert!(vault_info.vault_id > 0);
+            assert!(vault_info.vault_slug > 0);
 
-            let fetched = client.get_vault(ORG, vault_info.vault_id).await.unwrap();
-            assert_eq!(fetched.vault_id, vault_info.vault_id);
+            let fetched = client.get_vault(ORG, vault_info.vault_slug).await.unwrap();
+            assert_eq!(fetched.vault_slug, vault_info.vault_slug);
         }
 
         #[tokio::test]
@@ -2289,7 +2291,7 @@ mod tests {
         #[tokio::test]
         async fn test_read_organization_level_without_vault() {
             let server = MockLedgerServer::start().await.unwrap();
-            // Set entity at organization level (vault_id = 0 is treated as default)
+            // Set entity at organization level (vault_slug = 0 is treated as default)
             server.set_entity(ORG, 0, "ns-entity", b"organization data");
             let client = create_client_for_mock(&server).await;
 
@@ -2299,7 +2301,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_write_with_none_vault_id() {
+        async fn test_write_with_none_vault_slug() {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
@@ -2308,7 +2310,7 @@ mod tests {
 
             assert!(!result.tx_id.is_empty());
 
-            // Read back with None vault_id
+            // Read back with None vault_slug
             let value = client.read(ORG, None, "ns:key").await.unwrap();
             assert_eq!(value, Some(b"value".to_vec()));
         }

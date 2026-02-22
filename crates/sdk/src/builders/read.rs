@@ -55,7 +55,7 @@ pub struct HasKeys(());
 pub struct BatchReadBuilder<'a, S = NoKeys> {
     client: &'a LedgerClient,
     organization: OrganizationSlug,
-    vault_id: Option<i64>,
+    vault_slug: Option<u64>,
     keys: Vec<String>,
     consistency: ReadConsistency,
     cancellation: Option<tokio_util::sync::CancellationToken>,
@@ -67,12 +67,12 @@ impl<'a> BatchReadBuilder<'a, NoKeys> {
     pub(crate) fn new(
         client: &'a LedgerClient,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
     ) -> Self {
         Self {
             client,
             organization,
-            vault_id,
+            vault_slug,
             keys: Vec::new(),
             consistency: ReadConsistency::Eventual,
             cancellation: None,
@@ -87,7 +87,7 @@ impl<'a, S> BatchReadBuilder<'a, S> {
         BatchReadBuilder {
             client: self.client,
             organization: self.organization,
-            vault_id: self.vault_id,
+            vault_slug: self.vault_slug,
             keys: self.keys,
             consistency: self.consistency,
             cancellation: self.cancellation,
@@ -153,19 +153,21 @@ impl<'a> BatchReadBuilder<'a, HasKeys> {
                 self.client
                     .batch_read_with_token(
                         self.organization,
-                        self.vault_id,
+                        self.vault_slug,
                         self.keys,
                         token.clone(),
                     )
                     .await
             },
             (ReadConsistency::Eventual, None) => {
-                self.client.batch_read(self.organization, self.vault_id, self.keys).await
+                self.client.batch_read(self.organization, self.vault_slug, self.keys).await
             },
             (ReadConsistency::Linearizable, _) => {
                 // batch_read_consistent doesn't have a _with_token variant;
                 // client-level cancellation still applies.
-                self.client.batch_read_consistent(self.organization, self.vault_id, self.keys).await
+                self.client
+                    .batch_read_consistent(self.organization, self.vault_slug, self.keys)
+                    .await
             },
         }
     }
@@ -248,7 +250,7 @@ mod tests {
         let client = test_client().await;
         let builder = client.batch_read_builder(OrganizationSlug::new(42), Some(99)).key("k");
         assert_eq!(builder.organization, OrganizationSlug::new(42));
-        assert_eq!(builder.vault_id, Some(99));
+        assert_eq!(builder.vault_slug, Some(99));
     }
 
     #[tokio::test]

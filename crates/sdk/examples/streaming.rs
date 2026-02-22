@@ -48,8 +48,8 @@ async fn main() -> Result<()> {
     println!("Created organization with slug: {organization}");
 
     let vault_info = client.create_vault(organization).await?;
-    let vault_id = vault_info.vault_id;
-    println!("Created vault: {vault_id}");
+    let vault_slug = vault_info.vault_slug;
+    println!("Created vault: {vault_slug}");
 
     // -------------------------------------------------------------------------
     // 3. Start watching blocks from height 1 (genesis)
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     // Clone client for the writer task
     let writer_client = client.clone();
     let writer_ns = organization;
-    let writer_vault = vault_id;
+    let writer_vault = vault_slug;
 
     // Spawn a task to write data periodically (generates blocks)
     let writer_handle = tokio::spawn(async move {
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 4. Subscribe to block stream and process announcements
     // -------------------------------------------------------------------------
-    let mut stream = client.watch_blocks(organization, vault_id, 1).await?;
+    let mut stream = client.watch_blocks(organization, vault_slug, 1).await?;
 
     // Process blocks for 10 seconds
     let result = timeout(Duration::from_secs(10), async {

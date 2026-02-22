@@ -37,7 +37,7 @@ Fields are categorized by requirement level:
 | `client_id`    | Conditional | String | When provided            | Idempotency client identifier (max 128 chars) | `"api_acme_corp"`                        |
 | `sequence`     | Conditional | u64    | When provided            | Per-client sequence number                    | `42`                                     |
 | `organization_slug` | Conditional | i64    | When targeting organization | Target organization                              | `1001`                                   |
-| `vault_id`     | Conditional | i64    | When targeting vault     | Target vault (0 for organization-level ops)      | `2001`                                   |
+| `vault_slug`   | Conditional | u64    | When targeting vault     | Target vault (0 for organization-level ops)      | `7180591718400`                           |
 | `actor`        | Conditional | String | When authenticated       | Identity performing operation                 | `"user:123"`                             |
 
 ### System Context

@@ -15,12 +15,13 @@ pub struct OrganizationSlug {
     #[prost(uint64, tag = "1")]
     pub slug: u64,
 }
-/// Unique vault identifier (relationship store within an organization)
-/// Sequential int64 assigned by Ledger leader from "\_meta:seq:vault"
+/// External Snowflake identifier for a vault.
+/// This is the only vault identifier exposed to API consumers.
+/// Internal sequential VaultId(i64) is used for storage but never appears in the API.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct VaultId {
-    #[prost(int64, tag = "1")]
-    pub id: i64,
+pub struct VaultSlug {
+    #[prost(uint64, tag = "1")]
+    pub slug: u64,
 }
 /// Unique shard identifier (Raft group hosting multiple organizations)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -141,7 +142,7 @@ pub struct BlockHeader {
     pub organization: ::core::option::Option<OrganizationSlug>,
     /// Vault within organization
     #[prost(message, optional, tag = "3")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(message, optional, tag = "4")]
     pub previous_hash: ::core::option::Option<Hash>,
     #[prost(message, optional, tag = "5")]
@@ -176,7 +177,7 @@ pub struct BlockAnnouncement {
     pub organization: ::core::option::Option<OrganizationSlug>,
     /// Vault within organization
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(uint64, tag = "3")]
     pub height: u64,
     #[prost(message, optional, tag = "4")]
@@ -413,9 +414,9 @@ pub struct StateProof {
 pub struct ReadRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
-    /// Omit for organization-level entity reads
+    /// Omit for organization-level reads
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(string, tag = "3")]
     pub key: ::prost::alloc::string::String,
     /// Default: EVENTUAL (any replica)
@@ -436,7 +437,7 @@ pub struct BatchReadRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// Keys to read (max 1000)
     #[prost(string, repeated, tag = "3")]
     pub keys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -475,9 +476,9 @@ pub struct BatchReadResult {
 pub struct VerifiedReadRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
-    /// Omit for organization-level entity reads
+    /// Omit for organization-level reads
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(string, tag = "3")]
     pub key: ::prost::alloc::string::String,
     /// Read at specific height (0 or omit = current)
@@ -514,9 +515,9 @@ pub struct VerifiedReadResponse {
 pub struct HistoricalReadRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
-    /// Omit for organization-level entity reads
+    /// Omit for organization-level reads
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(string, tag = "3")]
     pub key: ::prost::alloc::string::String,
     /// Required: block height to read from
@@ -554,7 +555,7 @@ pub struct WatchBlocksRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// First block height to stream. Must be >= 1 (0 is rejected with INVALID_ARGUMENT).
     ///
     /// Streaming behavior:
@@ -583,7 +584,7 @@ pub struct GetBlockRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(uint64, tag = "3")]
     pub height: u64,
 }
@@ -599,7 +600,7 @@ pub struct GetBlockRangeRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// First block to return (inclusive)
     #[prost(uint64, tag = "3")]
     pub start_height: u64,
@@ -621,7 +622,7 @@ pub struct GetTipRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetTipResponse {
@@ -636,9 +637,9 @@ pub struct GetTipResponse {
 pub struct GetClientStateRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
-    /// Omit for organization-level entity writes
+    /// Omit for organization-level writes
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(message, optional, tag = "3")]
     pub client_id: ::core::option::Option<ClientId>,
 }
@@ -652,7 +653,7 @@ pub struct ListRelationshipsRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// Filter by resource (exact match)
     #[prost(string, optional, tag = "3")]
     pub resource: ::core::option::Option<::prost::alloc::string::String>,
@@ -691,7 +692,7 @@ pub struct ListResourcesRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// Type prefix (e.g., "document" matches "document:\*")
     #[prost(string, tag = "3")]
     pub resource_type: ::prost::alloc::string::String,
@@ -741,9 +742,9 @@ pub struct ListEntitiesRequest {
     /// Default: EVENTUAL (any replica)
     #[prost(enumeration = "ReadConsistency", tag = "7")]
     pub consistency: i32,
-    /// Omit for organization-level entities (vault_id=0)
+    /// Omit for organization-level entities
     #[prost(message, optional, tag = "8")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListEntitiesResponse {
@@ -763,7 +764,7 @@ pub struct WriteRequest {
     pub organization: ::core::option::Option<OrganizationSlug>,
     /// Required for relationships; omit for organization-level entities
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(message, optional, tag = "3")]
     pub client_id: ::core::option::Option<ClientId>,
     /// 16-byte UUID for idempotent retries (server rejects reuse with different payload)
@@ -891,9 +892,9 @@ pub struct ErrorDetails {
 pub struct BatchWriteRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
-    /// All writes must target same scope
+    /// All writes target same vault scope
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// Batch-level idempotency (per-write client_id ignored)
     #[prost(message, optional, tag = "3")]
     pub client_id: ::core::option::Option<ClientId>,
@@ -910,7 +911,7 @@ pub struct BatchWriteRequest {
 /// Logical grouping of operations within a BatchWriteRequest.
 /// Purpose: Allows expressing ordered operation groups within an atomic batch.
 /// Processing: Groups are processed in array order (operations\[0\], then operations\[1\], etc.)
-/// All groups share the batch's organization, vault_id, client_id, and idempotency_key.
+/// All groups share the batch's organization, vault, client_id, and idempotency_key.
 /// Atomicity: The ENTIRE batch is atomic—if any operation fails, no changes are applied.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BatchWriteOperation {
@@ -1052,8 +1053,8 @@ pub struct ListOrganizationsResponse {
     #[prost(bytes = "vec", optional, tag = "2")]
     pub next_page_token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
-/// Create a new vault. VaultId is leader-assigned from \_meta:seq:vault
-/// and returned in CreateVaultResponse.
+/// Create a new vault. A VaultSlug (Snowflake ID) is generated
+/// and returned. Internal sequential VaultId is never exposed.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateVaultRequest {
     #[prost(message, optional, tag = "1")]
@@ -1078,7 +1079,7 @@ pub struct BlockRetentionPolicy {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateVaultResponse {
     #[prost(message, optional, tag = "1")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(message, optional, tag = "2")]
     pub genesis: ::core::option::Option<BlockHeader>,
 }
@@ -1087,7 +1088,7 @@ pub struct DeleteVaultRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteVaultResponse {
@@ -1099,14 +1100,14 @@ pub struct GetVaultRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetVaultResponse {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     #[prost(uint64, tag = "3")]
     pub height: u64,
     #[prost(message, optional, tag = "4")]
@@ -1133,7 +1134,7 @@ pub struct CreateSnapshotRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateSnapshotResponse {
@@ -1149,7 +1150,7 @@ pub struct CheckIntegrityRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// Replay from genesis vs quick check
     #[prost(bool, tag = "3")]
     pub full_check: bool,
@@ -1177,7 +1178,7 @@ pub struct RecoverVaultRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// Force recovery even if vault is healthy (for testing/maintenance).
     /// Required for manual intervention after automatic recovery exhausted.
     #[prost(bool, tag = "3")]
@@ -1207,7 +1208,7 @@ pub struct SimulateDivergenceRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
     /// Expected state root (fake value for simulation).
     #[prost(message, optional, tag = "3")]
     pub expected_state_root: ::core::option::Option<Hash>,
@@ -1229,14 +1230,14 @@ pub struct SimulateDivergenceResponse {
     pub health_status: i32,
 }
 /// Force a garbage collection cycle for expired entities.
-/// If organization and vault_id are specified, only that vault is scanned.
+/// If organization and vault are specified, only that vault is scanned.
 /// If omitted, all vaults are scanned (cluster-wide GC).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ForceGcRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ForceGcResponse {
@@ -1482,9 +1483,9 @@ pub struct HealthCheckRequest {
     /// Organization for vault health check
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
-    /// If empty, check node health
+    /// Omit to check node health
     #[prost(message, optional, tag = "2")]
-    pub vault_id: ::core::option::Option<VaultId>,
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HealthCheckResponse {

@@ -49,7 +49,7 @@ async fn create_organization(
 async fn create_vault(
     addr: std::net::SocketAddr,
     organization_id: i64,
-) -> Result<i64, Box<dyn std::error::Error>> {
+) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
@@ -62,16 +62,17 @@ async fn create_vault(
         })
         .await?;
 
-    let vault_id = response.into_inner().vault_id.map(|v| v.id).ok_or("No vault_id in response")?;
+    let vault_slug =
+        response.into_inner().vault.map(|v| v.slug).ok_or("No vault_slug in response")?;
 
-    Ok(vault_id)
+    Ok(vault_slug)
 }
 
 /// Writes a key-value pair to a vault and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
     value: &[u8],
     client_id: &str,
@@ -82,7 +83,7 @@ async fn write_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -131,7 +132,7 @@ async fn test_watch_blocks_subscribe_before_writes() {
     // Create organization and vault
     let organization_id =
         create_organization(leader.addr, "watch-ns").await.expect("create organization");
-    let vault_id = create_vault(leader.addr, organization_id).await.expect("create vault");
+    let vault_slug = create_vault(leader.addr, organization_id).await.expect("create vault");
 
     // Subscribe to WatchBlocks BEFORE any writes
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
@@ -139,7 +140,7 @@ async fn test_watch_blocks_subscribe_before_writes() {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         start_height: 1,
     };
 
@@ -148,7 +149,7 @@ async fn test_watch_blocks_subscribe_before_writes() {
 
     // Now write data - this should trigger a real-time announcement
     let block_height =
-        write_entity(leader.addr, organization_id, vault_id, "key1", b"value1", "watch-client")
+        write_entity(leader.addr, organization_id, vault_slug, "key1", b"value1", "watch-client")
             .await
             .expect("write should succeed");
 
@@ -163,7 +164,7 @@ async fn test_watch_blocks_subscribe_before_writes() {
 
     // Verify announcement contents
     assert_eq!(announcement.organization.as_ref().map(|n| n.slug as i64), Some(organization_id));
-    assert_eq!(announcement.vault_id.as_ref().map(|v| v.id), Some(vault_id));
+    assert_eq!(announcement.vault.as_ref().map(|v| v.slug), Some(vault_slug));
     assert_eq!(announcement.height, 1);
     assert!(announcement.block_hash.is_some(), "should have block_hash");
     assert!(announcement.state_root.is_some(), "should have state_root");
@@ -188,14 +189,14 @@ async fn test_watch_blocks_historical_then_realtime() {
     // Create organization and vault
     let organization_id =
         create_organization(leader.addr, "watch-mid-ns").await.expect("create organization");
-    let vault_id = create_vault(leader.addr, organization_id).await.expect("create vault");
+    let vault_slug = create_vault(leader.addr, organization_id).await.expect("create vault");
 
     // Write 3 blocks BEFORE subscribing
     for i in 1..=3 {
         write_entity(
             leader.addr,
             organization_id,
-            vault_id,
+            vault_slug,
             &format!("key{}", i),
             format!("value{}", i).as_bytes(),
             "pre-subscribe-client",
@@ -210,7 +211,7 @@ async fn test_watch_blocks_historical_then_realtime() {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         start_height: 1,
     };
 
@@ -237,7 +238,7 @@ async fn test_watch_blocks_historical_then_realtime() {
         write_entity(
             leader.addr,
             organization_id,
-            vault_id,
+            vault_slug,
             &format!("key{}", i),
             format!("value{}", i).as_bytes(),
             "pre-subscribe-client",
@@ -275,7 +276,7 @@ async fn test_watch_blocks_multiple_subscribers() {
     // Create organization and vault
     let organization_id =
         create_organization(leader.addr, "multi-sub-ns").await.expect("create organization");
-    let vault_id = create_vault(leader.addr, organization_id).await.expect("create vault");
+    let vault_slug = create_vault(leader.addr, organization_id).await.expect("create vault");
 
     // Create 3 independent subscribers
     let mut streams = Vec::new();
@@ -285,7 +286,7 @@ async fn test_watch_blocks_multiple_subscribers() {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: organization_id as u64,
             }),
-            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
             start_height: 1,
         };
         let stream = read_client
@@ -300,7 +301,7 @@ async fn test_watch_blocks_multiple_subscribers() {
     write_entity(
         leader.addr,
         organization_id,
-        vault_id,
+        vault_slug,
         "shared-key",
         b"shared-value",
         "multi-client",
@@ -321,7 +322,7 @@ async fn test_watch_blocks_multiple_subscribers() {
             announcement.organization.as_ref().map(|n| n.slug as i64),
             Some(organization_id)
         );
-        assert_eq!(announcement.vault_id.as_ref().map(|v| v.id), Some(vault_id));
+        assert_eq!(announcement.vault.as_ref().map(|v| v.slug), Some(vault_slug));
     }
 }
 
@@ -349,7 +350,7 @@ async fn test_watch_blocks_vault_isolation() {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_a_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_a_id }),
         start_height: 1,
     };
 
@@ -388,7 +389,7 @@ async fn test_watch_blocks_vault_isolation() {
         .expect("announcement should be Ok");
 
     assert_eq!(
-        announcement.vault_id.as_ref().map(|v| v.id),
+        announcement.vault.as_ref().map(|v| v.slug),
         Some(vault_a_id),
         "Should only receive vault A announcement"
     );
@@ -420,7 +421,7 @@ async fn test_watch_blocks_lagging_subscriber() {
     // Create organization and vault
     let organization_id =
         create_organization(leader.addr, "lagging-ns").await.expect("create organization");
-    let vault_id = create_vault(leader.addr, organization_id).await.expect("create vault");
+    let vault_slug = create_vault(leader.addr, organization_id).await.expect("create vault");
 
     // Subscribe but don't consume any messages
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
@@ -428,7 +429,7 @@ async fn test_watch_blocks_lagging_subscriber() {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         start_height: 1,
     };
 
@@ -441,7 +442,7 @@ async fn test_watch_blocks_lagging_subscriber() {
         write_entity(
             leader.addr,
             organization_id,
-            vault_id,
+            vault_slug,
             &format!("lag-key-{}", i),
             format!("lag-value-{}", i).as_bytes(),
             &format!("lag-client-{}", i),
@@ -490,7 +491,7 @@ async fn test_watch_blocks_lagging_subscriber() {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         start_height: reconnect_height,
     };
 
@@ -519,14 +520,14 @@ async fn test_watch_blocks_reconnection_after_restart() {
     // Create organization and vault
     let organization_id =
         create_organization(leader.addr, "restart-ns").await.expect("create organization");
-    let vault_id = create_vault(leader.addr, organization_id).await.expect("create vault");
+    let vault_slug = create_vault(leader.addr, organization_id).await.expect("create vault");
 
     // Write initial blocks
     for i in 1..=3 {
         write_entity(
             leader.addr,
             organization_id,
-            vault_id,
+            vault_slug,
             &format!("restart-key-{}", i),
             format!("restart-value-{}", i).as_bytes(),
             "restart-client",
@@ -541,7 +542,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         start_height: 1,
     };
 
@@ -573,7 +574,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         start_height: last_height + 1, // Resume from where we left off
     };
 
@@ -588,7 +589,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
         write_entity(
             leader.addr,
             organization_id,
-            vault_id,
+            vault_slug,
             &format!("post-restart-key-{}", i),
             format!("post-restart-value-{}", i).as_bytes(),
             "restart-client",

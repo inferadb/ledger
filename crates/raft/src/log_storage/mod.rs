@@ -67,7 +67,7 @@ mod tests {
 
     use inferadb_ledger_state::system::OrganizationStatus;
     use inferadb_ledger_store::{FileBackend, tables};
-    use inferadb_ledger_types::{OrganizationId, ShardId, VaultId};
+    use inferadb_ledger_types::{OrganizationId, ShardId, VaultId, VaultSlug};
     use openraft::{
         CommittedLeaderId, Entry, EntryPayload, LogId, RaftStorage, Vote, storage::RaftLogReader,
     };
@@ -545,6 +545,7 @@ mod tests {
 
         let request = LedgerRequest::CreateVault {
             organization_id: OrganizationId::new(1),
+            slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
@@ -552,7 +553,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::VaultCreated { vault_id } => {
+            LedgerResponse::VaultCreated { vault_id, .. } => {
                 assert_eq!(vault_id, VaultId::new(1));
                 assert_eq!(
                     state.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
@@ -784,23 +785,25 @@ mod tests {
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault1, &mut state);
         let vault1_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault2, &mut state);
         let vault2_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
@@ -849,12 +852,13 @@ mod tests {
         // Create vault
         let create_vault = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
@@ -965,23 +969,25 @@ mod tests {
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault1, &mut state);
         let vault1_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault2, &mut state);
         let vault2_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
@@ -1654,12 +1660,13 @@ mod tests {
 
         let create_vault = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
@@ -1709,6 +1716,7 @@ mod tests {
         // Try to create vault - should be blocked
         let create_vault = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
@@ -1750,23 +1758,25 @@ mod tests {
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault1, &mut state);
         let vault1_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault2, &mut state);
         let vault2_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
@@ -1821,12 +1831,13 @@ mod tests {
 
         let create_vault = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
@@ -1869,6 +1880,7 @@ mod tests {
 
         let create_vault = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("existing-vault".to_string()),
             retention_policy: None,
         };
@@ -1881,6 +1893,7 @@ mod tests {
         // Try to create another vault - should be blocked
         let create_vault2 = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("new-vault".to_string()),
             retention_policy: None,
         };
@@ -1918,12 +1931,13 @@ mod tests {
         // Create vault before suspending
         let create_vault = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id } => vault_id,
+            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
@@ -1978,6 +1992,7 @@ mod tests {
         // Try to create vault in suspended organization - should fail
         let create_vault = LedgerRequest::CreateVault {
             organization_id,
+            slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
@@ -2252,16 +2267,19 @@ mod tests {
             },
             LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("production".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("staging".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(2),
+                slug: VaultSlug::new(1),
                 name: Some("main".to_string()),
                 retention_policy: None,
             },
@@ -2420,6 +2438,7 @@ mod tests {
         // Create vault on both nodes
         let create_vault = LedgerRequest::CreateVault {
             organization_id: OrganizationId::new(1),
+            slug: VaultSlug::new(1),
             name: Some("test".to_string()),
             retention_policy: None,
         };
@@ -2477,11 +2496,13 @@ mod tests {
             },
             LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("vault-a".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("vault-b".to_string()),
                 retention_policy: None,
             },
@@ -2623,6 +2644,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("vault1".to_string()),
                 retention_policy: None,
             },
@@ -2708,6 +2730,8 @@ mod tests {
             organization_storage_bytes: HashMap::new(),
             slug_index: HashMap::new(),
             id_to_slug: HashMap::new(),
+            vault_slug_index: HashMap::new(),
+            vault_id_to_slug: HashMap::new(),
         };
 
         // Add some data
@@ -2739,6 +2763,7 @@ mod tests {
             VaultMeta {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 deleted: false,
                 last_write_timestamp: 1234567899,
@@ -2844,6 +2869,8 @@ mod tests {
             organization_storage_bytes: HashMap::new(),
             slug_index: HashMap::new(),
             id_to_slug: HashMap::new(),
+            vault_slug_index: HashMap::new(),
+            vault_id_to_slug: HashMap::new(),
         };
 
         // Add state data
@@ -2881,6 +2908,7 @@ mod tests {
             VaultMeta {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("main-vault".to_string()),
                 deleted: false,
                 last_write_timestamp: 1234567890,
@@ -2995,6 +3023,8 @@ mod tests {
                 organization_storage_bytes: HashMap::new(),
                 slug_index: HashMap::new(),
                 id_to_slug: HashMap::new(),
+                vault_slug_index: HashMap::new(),
+                vault_id_to_slug: HashMap::new(),
             },
             vault_entities: HashMap::new(),
         };
@@ -3037,7 +3067,8 @@ mod tests {
     #[tokio::test]
     async fn test_block_announcements_sender_stored() {
         use inferadb_ledger_proto::proto::{
-            BlockAnnouncement, Hash, OrganizationSlug as ProtoOrganizationSlug, VaultId,
+            BlockAnnouncement, Hash, OrganizationSlug as ProtoOrganizationSlug,
+            VaultSlug as ProtoVaultSlug,
         };
 
         let dir = tempdir().expect("create temp dir");
@@ -3059,7 +3090,7 @@ mod tests {
         // Verify we can send through the stored sender
         let announcement = BlockAnnouncement {
             organization: Some(ProtoOrganizationSlug { slug: 1 }),
-            vault_id: Some(VaultId { id: 2 }),
+            vault: Some(ProtoVaultSlug { slug: 2 }),
             height: 3,
             block_hash: Some(Hash { value: vec![0u8; 32] }),
             state_root: Some(Hash { value: vec![0u8; 32] }),
@@ -3071,7 +3102,7 @@ mod tests {
         // Verify receiver gets the announcement
         let received = receiver.recv().await.expect("receive");
         assert_eq!(received.organization, announcement.organization);
-        assert_eq!(received.vault_id, announcement.vault_id);
+        assert_eq!(received.vault, announcement.vault);
         assert_eq!(received.height, announcement.height);
     }
 
@@ -3128,7 +3159,8 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use inferadb_ledger_proto::proto::{
-            BlockAnnouncement, OrganizationSlug as ProtoOrganizationSlug, VaultId as ProtoVaultId,
+            BlockAnnouncement, OrganizationSlug as ProtoOrganizationSlug,
+            VaultSlug as ProtoVaultSlug,
         };
         use openraft::RaftStorage;
 
@@ -3160,12 +3192,13 @@ mod tests {
 
             let create_vault = LedgerRequest::CreateVault {
                 organization_id,
+                slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
             };
             let (response, _) = store.apply_request(&create_vault, &mut state);
             let vault_id = match response {
-                LedgerResponse::VaultCreated { vault_id } => vault_id,
+                LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
                 _ => panic!("expected VaultCreated"),
             };
             assert_eq!(vault_id, VaultId::new(1));
@@ -3210,7 +3243,7 @@ mod tests {
 
         // Verify announcement contents
         assert_eq!(received.organization, Some(ProtoOrganizationSlug { slug: 42 }));
-        assert_eq!(received.vault_id, Some(ProtoVaultId { id: 1 }));
+        assert_eq!(received.vault, Some(ProtoVaultSlug { slug: 1 }));
         assert_eq!(received.height, 1);
         assert!(received.block_hash.is_some(), "block_hash should be set");
         assert!(received.state_root.is_some(), "state_root should be set");
@@ -3243,6 +3276,7 @@ mod tests {
 
             let create_vault = LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
             };
@@ -3461,6 +3495,7 @@ mod tests {
         store.apply_request(&create_ns, &mut state);
         let create_vault = LedgerRequest::CreateVault {
             organization_id: OrganizationId::new(1),
+            slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
@@ -3692,6 +3727,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3782,6 +3818,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3858,6 +3895,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3920,6 +3958,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3928,6 +3967,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(2),
+                slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
@@ -4028,6 +4068,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -4036,6 +4077,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
@@ -4096,6 +4138,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -4104,6 +4147,7 @@ mod tests {
         store.apply_request(
             &LedgerRequest::CreateVault {
                 organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
@@ -4155,6 +4199,7 @@ mod tests {
             store.apply_request(
                 &LedgerRequest::CreateVault {
                     organization_id: OrganizationId::new(1),
+                    slug: VaultSlug::new(1),
                     name: Some("v1".to_string()),
                     retention_policy: None,
                 },

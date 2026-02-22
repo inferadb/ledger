@@ -7,7 +7,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use inferadb_ledger_raft::{PageToken, PageTokenCodec};
+use inferadb_ledger_raft::pagination::{PageToken, PageTokenCodec};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {

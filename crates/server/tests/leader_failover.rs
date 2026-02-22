@@ -23,21 +23,21 @@ use std::{collections::HashSet, time::Duration};
 
 use common::{TestCluster, create_read_client, create_write_client};
 use inferadb_ledger_proto::proto::{
-    ClientId, OrganizationSlug, ReadRequest, VaultId, WriteRequest,
+    ClientId, OrganizationSlug, ReadRequest, VaultSlug, WriteRequest,
 };
 use serial_test::serial;
 
 /// Helper to create a write request with a single SetEntity operation.
 fn make_write_request(
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
     value: &[u8],
     client_id: &str,
 ) -> WriteRequest {
     WriteRequest {
         organization: Some(OrganizationSlug { slug: organization_id as u64 }),
-        vault_id: Some(VaultId { id: vault_id }),
+        vault: Some(VaultSlug { slug: vault_slug }),
         client_id: Some(ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -69,14 +69,14 @@ fn extract_block_height(response: inferadb_ledger_proto::proto::WriteResponse) -
 async fn read_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
 ) -> Option<Vec<u8>> {
     let mut client = create_read_client(addr).await.ok()?;
     let response = client
         .read(ReadRequest {
             organization: Some(OrganizationSlug { slug: organization_id as u64 }),
-            vault_id: Some(VaultId { id: vault_id }),
+            vault: Some(VaultSlug { slug: vault_slug }),
             key: key.to_string(),
             consistency: 0, // EVENTUAL (default)
         })

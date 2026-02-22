@@ -30,7 +30,7 @@
 //! depends on `inferadb_ledger_state::system::OrganizationStatus`.
 
 use inferadb_ledger_types::{
-    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId,
+    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, VaultSlug,
     merkle::MerkleProof as InternalMerkleProof,
 };
 use openraft::Vote;
@@ -408,16 +408,47 @@ impl From<InternalMerkleProof> for proto::MerkleProof {
 }
 
 // =============================================================================
+// VaultSlug conversions (inferadb_ledger_types::VaultSlug <-> proto::VaultSlug)
+// =============================================================================
+
+/// Converts a domain [`VaultSlug`] to its protobuf representation.
+impl From<VaultSlug> for proto::VaultSlug {
+    fn from(slug: VaultSlug) -> Self {
+        proto::VaultSlug { slug: slug.value() }
+    }
+}
+
+/// Converts a protobuf [`VaultSlug`](proto::VaultSlug) to the domain type.
+impl From<proto::VaultSlug> for VaultSlug {
+    fn from(proto: proto::VaultSlug) -> Self {
+        VaultSlug::new(proto.slug)
+    }
+}
+
+/// Converts a protobuf [`VaultSlug`](proto::VaultSlug) reference to the domain type.
+impl From<&proto::VaultSlug> for VaultSlug {
+    fn from(proto: &proto::VaultSlug) -> Self {
+        VaultSlug::new(proto.slug)
+    }
+}
+
+// =============================================================================
 // VaultEntry to Block conversion (special case - requires ShardBlock context)
 // =============================================================================
 
 /// Converts a VaultEntry from storage to a proto Block.
 ///
 /// This is a free function rather than a `From` impl because it requires additional
-/// context (the ShardBlock) to populate the block header timestamp and leader info.
+/// context (the ShardBlock and vault slug) to populate the block header.
+///
+/// The `vault_slug` parameter must be provided by the caller (service layer) since
+/// the conversion layer does not have access to the `AppliedState` slug index.
+/// The vault slug is the external Snowflake identifier — never the internal
+/// sequential `VaultId`.
 pub fn vault_entry_to_proto_block(
     entry: &inferadb_ledger_types::VaultEntry,
     shard_block: &inferadb_ledger_types::ShardBlock,
+    vault_slug: VaultSlug,
 ) -> proto::Block {
     use prost_types::Timestamp;
 
@@ -442,7 +473,7 @@ pub fn vault_entry_to_proto_block(
     let header = proto::BlockHeader {
         height: entry.vault_height,
         organization: Some(proto::OrganizationSlug { slug: entry.organization_id.value() as u64 }),
-        vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),
+        vault: Some(vault_slug.into()),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),
@@ -745,12 +776,47 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // VaultSlug conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_vault_slug_to_proto() {
+        let slug = VaultSlug::new(123_456_789);
+        let proto: proto::VaultSlug = slug.into();
+        assert_eq!(proto.slug, 123_456_789);
+    }
+
+    #[test]
+    fn test_proto_to_vault_slug() {
+        let proto = proto::VaultSlug { slug: 987_654_321 };
+        let slug: VaultSlug = proto.into();
+        assert_eq!(slug.value(), 987_654_321);
+    }
+
+    #[test]
+    fn test_proto_ref_to_vault_slug() {
+        let proto = proto::VaultSlug { slug: 555_666_777 };
+        let slug = VaultSlug::from(&proto);
+        assert_eq!(slug.value(), 555_666_777);
+    }
+
+    #[test]
+    fn test_vault_slug_roundtrip() {
+        let original = VaultSlug::new(42_000_000);
+        let proto: proto::VaultSlug = original.into();
+        let recovered = VaultSlug::from(proto);
+        assert_eq!(original, recovered);
+    }
+
+    // -------------------------------------------------------------------------
     // VaultEntry to Block conversion tests
     // -------------------------------------------------------------------------
 
     #[test]
     fn test_vault_entry_to_proto_block_empty_transactions() {
         use chrono::Utc;
+
+        let vault_slug = VaultSlug::new(9_999_999);
 
         let entry = inferadb_ledger_types::VaultEntry {
             organization_id: inferadb_ledger_types::OrganizationId::new(1),
@@ -773,12 +839,13 @@ mod tests {
             committed_index: 99,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block);
+        let block = vault_entry_to_proto_block(&entry, &shard_block, vault_slug);
 
         let header = block.header.expect("Block should have header");
         assert_eq!(header.height, 10);
         assert_eq!(header.organization.unwrap().slug, 1);
-        assert_eq!(header.vault_id.unwrap().id, 2);
+        // Vault slug is the external Snowflake identifier, not the internal VaultId
+        assert_eq!(header.vault.unwrap().slug, 9_999_999);
         assert_eq!(header.term, 5);
         assert_eq!(header.committed_index, 99);
         assert!(block.transactions.is_empty());
@@ -787,6 +854,8 @@ mod tests {
     #[test]
     fn test_vault_entry_to_proto_block_with_transaction() {
         use chrono::Utc;
+
+        let vault_slug = VaultSlug::new(77_777_777);
 
         let tx = inferadb_ledger_types::Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
@@ -822,13 +891,50 @@ mod tests {
             committed_index: 49,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block);
+        let block = vault_entry_to_proto_block(&entry, &shard_block, vault_slug);
 
+        let header = block.header.expect("Block should have header");
+        assert_eq!(header.vault.unwrap().slug, 77_777_777);
         assert_eq!(block.transactions.len(), 1);
         let proto_tx = &block.transactions[0];
         assert_eq!(proto_tx.client_id.as_ref().unwrap().id, "client-123");
         assert_eq!(proto_tx.sequence, 1);
         assert_eq!(proto_tx.operations.len(), 1);
+    }
+
+    #[test]
+    fn test_vault_entry_to_proto_block_slug_independent_of_vault_id() {
+        use chrono::Utc;
+
+        // The vault slug is independent of the internal VaultId — verify they differ
+        let vault_slug = VaultSlug::new(12_345_678);
+
+        let entry = inferadb_ledger_types::VaultEntry {
+            organization_id: inferadb_ledger_types::OrganizationId::new(1),
+            vault_id: inferadb_ledger_types::VaultId::new(99), // Internal ID is 99
+            vault_height: 1,
+            previous_vault_hash: Hash::default(),
+            transactions: vec![],
+            tx_merkle_root: Hash::default(),
+            state_root: Hash::default(),
+        };
+
+        let shard_block = inferadb_ledger_types::ShardBlock {
+            shard_id: inferadb_ledger_types::ShardId::new(1),
+            shard_height: 1,
+            previous_shard_hash: Hash::default(),
+            vault_entries: vec![],
+            timestamp: Utc::now(),
+            leader_id: "node-1".to_string(),
+            term: 1,
+            committed_index: 0,
+        };
+
+        let block = vault_entry_to_proto_block(&entry, &shard_block, vault_slug);
+        let header = block.header.unwrap();
+
+        // Vault slug in header should be 12_345_678 (external), NOT 99 (internal)
+        assert_eq!(header.vault.unwrap().slug, 12_345_678);
     }
 
     // -------------------------------------------------------------------------
@@ -1101,7 +1207,7 @@ mod tests {
         )]
 
         use inferadb_ledger_test_utils::strategies::{
-            arb_entity, arb_operation, arb_relationship, arb_set_condition,
+            arb_entity, arb_operation, arb_relationship, arb_set_condition, arb_vault_slug,
         };
         use proptest::prelude::*;
 
@@ -1148,6 +1254,14 @@ mod tests {
                 } else {
                     prop_assert_eq!(proto.expires_at, Some(entity.expires_at));
                 }
+            }
+
+            /// VaultSlug roundtrip: domain -> proto -> domain preserves value.
+            #[test]
+            fn vault_slug_roundtrip(slug in arb_vault_slug()) {
+                let proto: proto::VaultSlug = slug.into();
+                let recovered = VaultSlug::from(proto);
+                prop_assert_eq!(slug, recovered);
             }
         }
     }

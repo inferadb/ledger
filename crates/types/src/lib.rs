@@ -69,6 +69,8 @@ pub use types::{
     VaultEntry,
     VaultHealth,
     VaultId,
+    // External vault identifier
+    VaultSlug,
     WriteResult,
     WriteStatus,
 };

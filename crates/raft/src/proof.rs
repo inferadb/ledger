@@ -11,7 +11,7 @@ use inferadb_ledger_proto::proto;
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, Transaction, VaultId,
+    OrganizationId, OrganizationSlug, Transaction, VaultId, VaultSlug,
     hash::{Hash, tx_hash},
     merkle::MerkleTree,
 };
@@ -106,6 +106,7 @@ pub fn generate_write_proof(
     organization_id: OrganizationId,
     organization_slug: Option<OrganizationSlug>,
     vault_id: VaultId,
+    vault_slug: Option<VaultSlug>,
     vault_height: u64,
     tx_index: usize,
 ) -> Result<WriteProof> {
@@ -142,7 +143,7 @@ pub fn generate_write_proof(
         organization: Some(proto::OrganizationSlug {
             slug: organization_slug.map_or(entry.organization_id.value() as u64, |s| s.value()),
         }),
-        vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),
+        vault: Some(proto::VaultSlug { slug: vault_slug.map_or(0, |s| s.value()) }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),

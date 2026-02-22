@@ -87,8 +87,8 @@ pub struct WriteSuccess {
 /// #     .servers(ServerSource::from_static(["http://localhost:50051"]))
 /// #     .client_id("example")
 /// #     .build()?).await?;
-/// # let (organization, vault_id, start_height) = (OrganizationSlug::new(1), 1i64, 1u64);
-/// let mut stream = client.watch_blocks(organization, vault_id, start_height).await?;
+/// # let (organization, vault_slug, start_height) = (OrganizationSlug::new(1), 1u64, 1u64);
+/// let mut stream = client.watch_blocks(organization, vault_slug, start_height).await?;
 /// while let Some(announcement) = stream.next().await {
 ///     let block = announcement?;
 ///     println!("New block at height {}: {:?}", block.height, block.block_hash);
@@ -100,8 +100,8 @@ pub struct WriteSuccess {
 pub struct BlockAnnouncement {
     /// Organization containing the vault.
     pub organization: OrganizationSlug,
-    /// Vault within the organization.
-    pub vault_id: i64,
+    /// Vault slug (Snowflake ID) within the organization.
+    pub vault_slug: u64,
     /// Block height (1-indexed).
     pub height: u64,
     /// Hash of the block header.
@@ -121,7 +121,7 @@ impl BlockAnnouncement {
 
         Self {
             organization: OrganizationSlug::new(proto.organization.map_or(0, |n| n.slug)),
-            vault_id: proto.vault_id.map_or(0, |v| v.id),
+            vault_slug: proto.vault.map_or(0, |v| v.slug),
             height: proto.height,
             block_hash: proto.block_hash.map(|h| h.value).unwrap_or_default(),
             state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
@@ -225,8 +225,8 @@ impl OrganizationInfo {
 pub struct VaultInfo {
     /// Organization slug for this vault.
     pub organization: OrganizationSlug,
-    /// Unique vault identifier within the organization.
-    pub vault_id: i64,
+    /// Unique vault slug (Snowflake ID) within the organization.
+    pub vault_slug: u64,
     /// Current block height.
     pub height: u64,
     /// Current state root (Merkle root).
@@ -244,7 +244,7 @@ impl VaultInfo {
     fn from_proto(proto: proto::GetVaultResponse) -> Self {
         Self {
             organization: OrganizationSlug::new(proto.organization.map_or(0, |n| n.slug)),
-            vault_id: proto.vault_id.map_or(0, |v| v.id),
+            vault_slug: proto.vault.map_or(0, |v| v.slug),
             height: proto.height,
             state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
             nodes: proto.nodes.into_iter().map(|n| n.id).collect(),
@@ -443,8 +443,8 @@ pub struct BlockHeader {
     pub height: u64,
     /// Organization slug for the vault.
     pub organization: OrganizationSlug,
-    /// Vault within the organization.
-    pub vault_id: i64,
+    /// Vault slug (Snowflake ID) within the organization.
+    pub vault_slug: u64,
     /// Hash of the previous block header.
     pub previous_hash: Vec<u8>,
     /// Merkle root of transactions in this block.
@@ -471,7 +471,7 @@ impl BlockHeader {
         Self {
             height: proto.height,
             organization: OrganizationSlug::new(proto.organization.map_or(0, |n| n.slug)),
-            vault_id: proto.vault_id.map_or(0, |v| v.id),
+            vault_slug: proto.vault.map_or(0, |v| v.slug),
             previous_hash: proto.previous_hash.map(|h| h.value).unwrap_or_default(),
             tx_merkle_root: proto.tx_merkle_root.map(|h| h.value).unwrap_or_default(),
             state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
@@ -689,8 +689,8 @@ pub struct ListEntitiesOpts {
     /// Read consistency level.
     #[builder(default)]
     pub consistency: ReadConsistency,
-    /// Vault ID for vault-scoped entities (None = organization-level, uses vault_id=0).
-    pub vault_id: Option<i64>,
+    /// Vault slug for vault-scoped entities (None = organization-level).
+    pub vault_slug: Option<u64>,
 }
 
 impl ListEntitiesOpts {
@@ -736,8 +736,8 @@ impl ListEntitiesOpts {
     }
 
     /// Scopes to a specific vault (for vault-level entities).
-    pub fn vault(mut self, vault_id: i64) -> Self {
-        self.vault_id = Some(vault_id);
+    pub fn vault(mut self, vault_slug: u64) -> Self {
+        self.vault_slug = Some(vault_slug);
         self
     }
 }
@@ -897,8 +897,8 @@ impl ListResourcesOpts {
 /// #     .servers(ServerSource::from_static(["http://localhost:50051"]))
 /// #     .client_id("example")
 /// #     .build()?).await?;
-/// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
-/// let result = client.verified_read(organization, Some(vault_id), "key", VerifyOpts::new()).await?;
+/// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
+/// let result = client.verified_read(organization, Some(vault_slug), "key", VerifyOpts::new()).await?;
 /// if let Some(verified) = result {
 ///     // Verify the proof is valid
 ///     assert!(verified.verify()?);
@@ -1431,9 +1431,9 @@ impl LedgerClient {
     pub fn write_builder(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
     ) -> crate::builders::WriteBuilder<'_> {
-        crate::builders::WriteBuilder::new(self, organization, vault_id)
+        crate::builders::WriteBuilder::new(self, organization, vault_slug)
     }
 
     /// Creates a fluent batch read builder for the given organization and optional vault.
@@ -1458,9 +1458,9 @@ impl LedgerClient {
     pub fn batch_read_builder(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
     ) -> crate::builders::BatchReadBuilder<'_> {
-        crate::builders::BatchReadBuilder::new(self, organization, vault_id)
+        crate::builders::BatchReadBuilder::new(self, organization, vault_slug)
     }
 
     /// Creates a fluent relationship query builder for the given organization and vault.
@@ -1485,9 +1485,9 @@ impl LedgerClient {
     pub fn relationship_query(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
     ) -> crate::builders::RelationshipQueryBuilder<'_> {
-        crate::builders::RelationshipQueryBuilder::new(self, organization, vault_id)
+        crate::builders::RelationshipQueryBuilder::new(self, organization, vault_slug)
     }
 
     /// Returns the client's cancellation token.
@@ -1548,12 +1548,12 @@ impl LedgerClient {
     /// ```no_run
     /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// # let operations = vec![];
     /// let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     ///
     /// // Perform operations...
-    /// client.write(organization, Some(vault_id), operations).await?;
+    /// client.write(organization, Some(vault_slug), operations).await?;
     ///
     /// // Graceful shutdown before application exit
     /// client.shutdown().await;
@@ -1711,7 +1711,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization containing the data
-    /// * `vault_id` - Optional vault ID (omit for organization-level entities)
+    /// * `vault_slug` - Optional vault ID (omit for organization-level entities)
     /// * `key` - The key to read
     ///
     /// # Returns
@@ -1728,22 +1728,22 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// // Read an organization-level entity
     /// let value = client.read(organization, None, "user:123").await?;
     ///
     /// // Read a vault-level entity
-    /// let value = client.read(organization, Some(vault_id), "key").await?;
+    /// let value = client.read(organization, Some(vault_slug), "key").await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn read(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         key: impl Into<String>,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(organization, vault_id, key.into(), ReadConsistency::Eventual, None)
+        self.read_internal(organization, vault_slug, key.into(), ReadConsistency::Eventual, None)
             .await
     }
 
@@ -1756,7 +1756,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization containing the data
-    /// * `vault_id` - Optional vault ID (omit for organization-level entities)
+    /// * `vault_slug` - Optional vault ID (omit for organization-level entities)
     /// * `key` - The key to read
     ///
     /// # Returns
@@ -1773,20 +1773,26 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// // Read with strong consistency guarantee
-    /// let value = client.read_consistent(organization, Some(vault_id), "key").await?;
+    /// let value = client.read_consistent(organization, Some(vault_slug), "key").await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn read_consistent(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         key: impl Into<String>,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(organization, vault_id, key.into(), ReadConsistency::Linearizable, None)
-            .await
+        self.read_internal(
+            organization,
+            vault_slug,
+            key.into(),
+            ReadConsistency::Linearizable,
+            None,
+        )
+        .await
     }
 
     /// Reads a value by key with a per-request cancellation token.
@@ -1805,13 +1811,13 @@ impl LedgerClient {
     pub async fn read_with_token(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         key: impl Into<String>,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<Option<Vec<u8>>> {
         self.read_internal(
             organization,
-            vault_id,
+            vault_slug,
             key.into(),
             ReadConsistency::Eventual,
             Some(&token),
@@ -1837,7 +1843,7 @@ impl LedgerClient {
     pub async fn write_with_token(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         operations: Vec<Operation>,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<WriteSuccess> {
@@ -1845,7 +1851,8 @@ impl LedgerClient {
 
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_write(organization, vault_id, &operations, idempotency_key, Some(&token)).await
+        self.execute_write(organization, vault_slug, &operations, idempotency_key, Some(&token))
+            .await
     }
 
     /// Batch read with a per-request cancellation token.
@@ -1860,13 +1867,13 @@ impl LedgerClient {
     pub async fn batch_read_with_token(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         keys: impl IntoIterator<Item = impl Into<String>>,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
         self.batch_read_internal(
             organization,
-            vault_id,
+            vault_slug,
             keys.into_iter().map(Into::into).collect(),
             ReadConsistency::Eventual,
             Some(&token),
@@ -1888,7 +1895,7 @@ impl LedgerClient {
     pub async fn batch_write_with_token(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         batches: Vec<Vec<Operation>>,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<WriteSuccess> {
@@ -1896,7 +1903,7 @@ impl LedgerClient {
 
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_batch_write(organization, vault_id, &batches, idempotency_key, Some(&token))
+        self.execute_batch_write(organization, vault_slug, &batches, idempotency_key, Some(&token))
             .await
     }
 
@@ -1908,7 +1915,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization containing the data
-    /// * `vault_id` - Optional vault ID (omit for organization-level entities)
+    /// * `vault_slug` - Optional vault ID (omit for organization-level entities)
     /// * `keys` - The keys to read (max 1000)
     ///
     /// # Returns
@@ -1926,10 +1933,10 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// let results = client.batch_read(
     ///     organization,
-    ///     Some(vault_id),
+    ///     Some(vault_slug),
     ///     vec!["key1", "key2", "key3"],
     /// ).await?;
     ///
@@ -1945,12 +1952,12 @@ impl LedgerClient {
     pub async fn batch_read(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         keys: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
         self.batch_read_internal(
             organization,
-            vault_id,
+            vault_slug,
             keys.into_iter().map(Into::into).collect(),
             ReadConsistency::Eventual,
             None,
@@ -1966,7 +1973,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization containing the data
-    /// * `vault_id` - Optional vault ID (omit for organization-level entities)
+    /// * `vault_slug` - Optional vault ID (omit for organization-level entities)
     /// * `keys` - The keys to read (max 1000)
     ///
     /// # Returns
@@ -1980,12 +1987,12 @@ impl LedgerClient {
     pub async fn batch_read_consistent(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         keys: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
         self.batch_read_internal(
             organization,
-            vault_id,
+            vault_slug,
             keys.into_iter().map(Into::into).collect(),
             ReadConsistency::Linearizable,
             None,
@@ -2002,7 +2009,7 @@ impl LedgerClient {
     async fn read_internal(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         key: String,
         consistency: ReadConsistency,
         request_token: Option<&tokio_util::sync::CancellationToken>,
@@ -2028,7 +2035,7 @@ impl LedgerClient {
 
                 let request = proto::ReadRequest {
                     organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault_id: vault_id.map(|id| proto::VaultId { id }),
+                    vault: vault_slug.map(|slug| proto::VaultSlug { slug }),
                     key: key.clone(),
                     consistency: consistency.to_proto() as i32,
                 };
@@ -2046,7 +2053,7 @@ impl LedgerClient {
     async fn batch_read_internal(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         keys: Vec<String>,
         consistency: ReadConsistency,
         request_token: Option<&tokio_util::sync::CancellationToken>,
@@ -2072,7 +2079,7 @@ impl LedgerClient {
 
                 let request = proto::BatchReadRequest {
                     organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault_id: vault_id.map(|id| proto::VaultId { id }),
+                    vault: vault_slug.map(|slug| proto::VaultSlug { slug }),
                     keys: keys.clone(),
                     consistency: consistency.to_proto() as i32,
                 };
@@ -2122,7 +2129,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization to write to
-    /// * `vault_id` - Optional vault ID (required for relationships)
+    /// * `vault_slug` - Optional vault ID (required for relationships)
     /// * `operations` - The operations to apply atomically
     ///
     /// # Returns
@@ -2143,10 +2150,10 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, Operation, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// let result = client.write(
     ///     organization,
-    ///     Some(vault_id),
+    ///     Some(vault_slug),
     ///     vec![
     ///         Operation::set_entity("user:123", b"data".to_vec()),
     ///         Operation::create_relationship("doc:456", "viewer", "user:123"),
@@ -2160,7 +2167,7 @@ impl LedgerClient {
     pub async fn write(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         operations: Vec<Operation>,
     ) -> Result<WriteSuccess> {
         self.check_shutdown(None)?;
@@ -2169,7 +2176,7 @@ impl LedgerClient {
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_write(organization, vault_id, &operations, idempotency_key, None).await
+        self.execute_write(organization, vault_slug, &operations, idempotency_key, None).await
     }
 
     /// Executes a single write attempt with retry for transient errors.
@@ -2179,7 +2186,7 @@ impl LedgerClient {
     async fn execute_write(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         operations: &[Operation],
         idempotency_key: uuid::Uuid,
         request_token: Option<&tokio_util::sync::CancellationToken>,
@@ -2235,7 +2242,7 @@ impl LedgerClient {
 
                     let request = proto::WriteRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: vault_id.map(|id| proto::VaultId { id }),
+                        vault: vault_slug.map(|slug| proto::VaultSlug { slug }),
                         client_id: Some(proto::ClientId { id: cid }),
                         idempotency_key: key_bytes,
                         operations: proto_ops,
@@ -2355,7 +2362,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization to write to
-    /// * `vault_id` - Optional vault ID (required for relationships)
+    /// * `vault_slug` - Optional vault ID (required for relationships)
     /// * `batches` - Groups of operations to apply atomically. Each inner `Vec<Operation>` is a
     ///   logical group processed in order.
     ///
@@ -2384,11 +2391,11 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, Operation, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// // Atomic transaction: create user AND grant permissions
     /// let result = client.batch_write(
     ///     organization,
-    ///     Some(vault_id),
+    ///     Some(vault_slug),
     ///     vec![
     ///         // First batch: create the user
     ///         vec![Operation::set_entity("user:123", b"alice".to_vec())],
@@ -2407,7 +2414,7 @@ impl LedgerClient {
     pub async fn batch_write(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         batches: Vec<Vec<Operation>>,
     ) -> Result<WriteSuccess> {
         self.check_shutdown(None)?;
@@ -2416,7 +2423,7 @@ impl LedgerClient {
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_batch_write(organization, vault_id, &batches, idempotency_key, None).await
+        self.execute_batch_write(organization, vault_slug, &batches, idempotency_key, None).await
     }
 
     /// Executes a single batch write attempt with retry for transient errors.
@@ -2426,7 +2433,7 @@ impl LedgerClient {
     async fn execute_batch_write(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         batches: &[Vec<Operation>],
         idempotency_key: uuid::Uuid,
         request_token: Option<&tokio_util::sync::CancellationToken>,
@@ -2486,7 +2493,7 @@ impl LedgerClient {
 
                     let request = proto::BatchWriteRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: vault_id.map(|id| proto::VaultId { id }),
+                        vault: vault_slug.map(|slug| proto::VaultSlug { slug }),
                         client_id: Some(proto::ClientId { id: cid }),
                         idempotency_key: key_bytes,
                         operations: batch_ops,
@@ -2570,7 +2577,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization containing the vault
-    /// * `vault_id` - The vault to watch for blocks
+    /// * `vault_slug` - The vault to watch for blocks
     /// * `start_height` - First block height to receive (must be >= 1)
     ///
     /// # Returns
@@ -2619,14 +2626,14 @@ impl LedgerClient {
     pub async fn watch_blocks(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         start_height: u64,
     ) -> Result<impl futures::Stream<Item = Result<BlockAnnouncement>>> {
         self.check_shutdown(None)?;
 
         // Get the initial stream
         let initial_stream =
-            self.create_watch_blocks_stream(organization, vault_id, start_height).await?;
+            self.create_watch_blocks_stream(organization, vault_slug, start_height).await?;
 
         // Create position tracker starting at the requested height
         let position = HeightTracker::new(start_height);
@@ -2653,7 +2660,7 @@ impl LedgerClient {
 
                     let request = proto::WatchBlocksRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: Some(proto::VaultId { id: vault_id }),
+                        vault: Some(proto::VaultSlug { slug: vault_slug }),
                         start_height: next_height,
                     };
 
@@ -2675,7 +2682,7 @@ impl LedgerClient {
     async fn create_watch_blocks_stream(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         start_height: u64,
     ) -> Result<tonic::Streaming<proto::BlockAnnouncement>> {
         let channel = self.pool.get_channel().await?;
@@ -2687,7 +2694,7 @@ impl LedgerClient {
 
         let request = proto::WatchBlocksRequest {
             organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            vault_id: Some(proto::VaultId { id: vault_id }),
+            vault: Some(proto::VaultSlug { slug: vault_slug }),
             start_height,
         };
 
@@ -3006,7 +3013,7 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let organization = OrganizationSlug::new(1);
     /// let vault = client.create_vault(organization).await?;
-    /// println!("Created vault with ID: {}", vault.vault_id);
+    /// println!("Created vault with slug: {}", vault.vault_slug);
     /// # Ok(())
     /// # }
     /// ```
@@ -3048,7 +3055,7 @@ impl LedgerClient {
                     // Note: CreateVaultResponse has limited fields compared to GetVaultResponse
                     Ok(VaultInfo {
                         organization,
-                        vault_id: response.vault_id.map_or(0, |v| v.id),
+                        vault_slug: response.vault.map_or(0, |v| v.slug),
                         height: 0,          // Genesis block
                         state_root: vec![], // Empty at genesis
                         nodes: vec![],      // Not returned in create response
@@ -3066,7 +3073,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization containing the vault
-    /// * `vault_id` - The vault ID to look up
+    /// * `vault_slug` - The vault ID to look up
     ///
     /// # Returns
     ///
@@ -3084,8 +3091,8 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
-    /// let info = client.get_vault(organization, vault_id).await?;
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
+    /// let info = client.get_vault(organization, vault_slug).await?;
     /// println!("Vault height: {}, status: {:?}", info.height, info.status);
     /// # Ok(())
     /// # }
@@ -3093,7 +3100,7 @@ impl LedgerClient {
     pub async fn get_vault(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
     ) -> Result<VaultInfo> {
         self.check_shutdown(None)?;
 
@@ -3120,7 +3127,7 @@ impl LedgerClient {
 
                     let request = proto::GetVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: Some(proto::VaultId { id: vault_id }),
+                        vault: Some(proto::VaultSlug { slug: vault_slug }),
                     };
 
                     let response =
@@ -3153,7 +3160,7 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// let vaults = client.list_vaults().await?;
     /// for v in vaults {
-    ///     println!("Vault {} in organization {}", v.vault_id, v.organization);
+    ///     println!("Vault {} in {}", v.vault_slug, v.organization);
     /// }
     /// # Ok(())
     /// # }
@@ -3291,7 +3298,7 @@ impl LedgerClient {
                         ),
                     );
 
-                    let request = proto::HealthCheckRequest { organization: None, vault_id: None };
+                    let request = proto::HealthCheckRequest { organization: None, vault: None };
 
                     let response = client.check(tonic::Request::new(request)).await?.into_inner();
 
@@ -3310,7 +3317,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - The organization containing the vault
-    /// * `vault_id` - The vault to check
+    /// * `vault_slug` - The vault to check
     ///
     /// # Returns
     ///
@@ -3338,7 +3345,7 @@ impl LedgerClient {
     pub async fn health_check_vault(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
     ) -> Result<HealthCheckResult> {
         self.check_shutdown(None)?;
 
@@ -3365,7 +3372,7 @@ impl LedgerClient {
 
                     let request = proto::HealthCheckRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: Some(proto::VaultId { id: vault_id }),
+                        vault: Some(proto::VaultSlug { slug: vault_slug }),
                     };
 
                     let response = client.check(tonic::Request::new(request)).await?.into_inner();
@@ -3390,7 +3397,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - Organization containing the data.
-    /// * `vault_id` - Optional vault ID (None for organization-level entities).
+    /// * `vault_slug` - Optional vault ID (None for organization-level entities).
     /// * `key` - Entity key to read.
     /// * `opts` - Verification options (height, chain proof).
     ///
@@ -3409,8 +3416,8 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VerifyOpts};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
-    /// let result = client.verified_read(organization, Some(vault_id), "user:123", VerifyOpts::new()).await?;
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
+    /// let result = client.verified_read(organization, Some(vault_slug), "user:123", VerifyOpts::new()).await?;
     /// if let Some(verified) = result {
     ///     // Verify the proof before using the value
     ///     verified.verify()?;
@@ -3422,7 +3429,7 @@ impl LedgerClient {
     pub async fn verified_read(
         &self,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
         key: impl Into<String>,
         opts: VerifyOpts,
     ) -> Result<Option<VerifiedValue>> {
@@ -3452,7 +3459,7 @@ impl LedgerClient {
 
                     let request = proto::VerifiedReadRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: vault_id.map(|id| proto::VaultId { id }),
+                        vault: vault_slug.map(|slug| proto::VaultSlug { slug }),
                         key: key.clone(),
                         at_height: opts.at_height,
                         include_chain_proof: opts.include_chain_proof,
@@ -3552,7 +3559,7 @@ impl LedgerClient {
                         limit: opts.limit,
                         page_token: opts.page_token.clone().unwrap_or_default(),
                         consistency: opts.consistency.to_proto() as i32,
-                        vault_id: opts.vault_id.map(|id| proto::VaultId { id }),
+                        vault: opts.vault_slug.map(|slug| proto::VaultSlug { slug }),
                     };
 
                     let response =
@@ -3581,7 +3588,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - Organization containing the vault.
-    /// * `vault_id` - Vault containing the relationships.
+    /// * `vault_slug` - Vault containing the relationships.
     /// * `opts` - Query options including filters, pagination, and consistency.
     ///
     /// # Errors
@@ -3595,11 +3602,11 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, ListRelationshipsOpts, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// // List all relationships for a document
     /// let result = client.list_relationships(
     ///     organization,
-    ///     vault_id,
+    ///     vault_slug,
     ///     ListRelationshipsOpts::new().resource("document:123")
     /// ).await?;
     ///
@@ -3612,7 +3619,7 @@ impl LedgerClient {
     pub async fn list_relationships(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         opts: ListRelationshipsOpts,
     ) -> Result<PagedResult<Relationship>> {
         self.check_shutdown(None)?;
@@ -3640,7 +3647,7 @@ impl LedgerClient {
 
                     let request = proto::ListRelationshipsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: Some(proto::VaultId { id: vault_id }),
+                        vault: Some(proto::VaultSlug { slug: vault_slug }),
                         resource: opts.resource.clone(),
                         relation: opts.relation.clone(),
                         subject: opts.subject.clone(),
@@ -3677,7 +3684,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `organization` - Organization containing the vault.
-    /// * `vault_id` - Vault containing the relationships.
+    /// * `vault_slug` - Vault containing the relationships.
     /// * `opts` - Query options including type filter, pagination, and consistency.
     ///
     /// # Errors
@@ -3691,11 +3698,11 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::{LedgerClient, ListResourcesOpts, OrganizationSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault_id) = (OrganizationSlug::new(1), 1i64);
+    /// # let (organization, vault_slug) = (OrganizationSlug::new(1), 1u64);
     /// // List all document resources
     /// let result = client.list_resources(
     ///     organization,
-    ///     vault_id,
+    ///     vault_slug,
     ///     ListResourcesOpts::with_type("document")
     /// ).await?;
     ///
@@ -3708,7 +3715,7 @@ impl LedgerClient {
     pub async fn list_resources(
         &self,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
         opts: ListResourcesOpts,
     ) -> Result<PagedResult<String>> {
         self.check_shutdown(None)?;
@@ -3736,7 +3743,7 @@ impl LedgerClient {
 
                     let request = proto::ListResourcesRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault_id: Some(proto::VaultId { id: vault_id }),
+                        vault: Some(proto::VaultSlug { slug: vault_slug }),
                         resource_type: opts.resource_type.clone(),
                         at_height: opts.at_height,
                         limit: opts.limit,
@@ -4025,8 +4032,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_with_none_vault_id() {
-        // Test that read works with None vault_id (organization-level reads)
+    async fn test_read_with_none_vault_slug() {
+        // Test that read works with None vault_slug (organization-level reads)
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://127.0.0.1:59995"]))
             .client_id("test-client")
@@ -4042,7 +4049,7 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        // This tests the API signature - None for vault_id should work
+        // This tests the API signature - None for vault_slug should work
         let result = client.read(ORG, None, "user:123").await;
         assert!(result.is_err(), "expected connection error");
     }
@@ -4371,7 +4378,7 @@ mod tests {
 
         let proto_announcement = proto::BlockAnnouncement {
             organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault_id: Some(proto::VaultId { id: 2 }),
+            vault: Some(proto::VaultSlug { slug: 2 }),
             height: 100,
             block_hash: Some(proto::Hash { value: vec![0x12, 0x34] }),
             state_root: Some(proto::Hash { value: vec![0xab, 0xcd] }),
@@ -4381,7 +4388,7 @@ mod tests {
         let announcement = BlockAnnouncement::from_proto(proto_announcement);
 
         assert_eq!(announcement.organization, ORG);
-        assert_eq!(announcement.vault_id, 2);
+        assert_eq!(announcement.vault_slug, 2);
         assert_eq!(announcement.height, 100);
         assert_eq!(announcement.block_hash, vec![0x12, 0x34]);
         assert_eq!(announcement.state_root, vec![0xab, 0xcd]);
@@ -4392,7 +4399,7 @@ mod tests {
     fn test_block_announcement_from_proto_with_missing_optional_fields() {
         let proto_announcement = proto::BlockAnnouncement {
             organization: None,
-            vault_id: None,
+            vault: None,
             height: 50,
             block_hash: None,
             state_root: None,
@@ -4402,7 +4409,7 @@ mod tests {
         let announcement = BlockAnnouncement::from_proto(proto_announcement);
 
         assert_eq!(announcement.organization, OrganizationSlug::new(0));
-        assert_eq!(announcement.vault_id, 0);
+        assert_eq!(announcement.vault_slug, 0);
         assert_eq!(announcement.height, 50);
         assert!(announcement.block_hash.is_empty());
         assert!(announcement.state_root.is_empty());
@@ -4413,7 +4420,7 @@ mod tests {
     fn test_block_announcement_equality() {
         let a = BlockAnnouncement {
             organization: ORG,
-            vault_id: 2,
+            vault_slug: 2,
             height: 100,
             block_hash: vec![0x12],
             state_root: vec![0xab],
@@ -4422,7 +4429,7 @@ mod tests {
 
         let b = BlockAnnouncement {
             organization: ORG,
-            vault_id: 2,
+            vault_slug: 2,
             height: 100,
             block_hash: vec![0x12],
             state_root: vec![0xab],
@@ -4436,7 +4443,7 @@ mod tests {
     fn test_block_announcement_clone() {
         let original = BlockAnnouncement {
             organization: ORG,
-            vault_id: 2,
+            vault_slug: 2,
             height: 100,
             block_hash: vec![0x12, 0x34],
             state_root: vec![0xab, 0xcd],
@@ -4491,7 +4498,7 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        // Both should fail with connection error (testing different vault_ids work)
+        // Both should fail with connection error (testing different vault_slugs work)
         let result1 = client.watch_blocks(ORG, 1, 1).await;
         let result2 = client.watch_blocks(ORG, 2, 1).await;
 
@@ -4646,7 +4653,7 @@ mod tests {
     fn test_vault_info_from_proto() {
         let proto = proto::GetVaultResponse {
             organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault_id: Some(proto::VaultId { id: 10 }),
+            vault: Some(proto::VaultSlug { slug: 10 }),
             height: 1000,
             state_root: Some(proto::Hash { value: vec![1, 2, 3, 4] }),
             nodes: vec![
@@ -4661,7 +4668,7 @@ mod tests {
         let info = VaultInfo::from_proto(proto);
 
         assert_eq!(info.organization, ORG);
-        assert_eq!(info.vault_id, 10);
+        assert_eq!(info.vault_slug, 10);
         assert_eq!(info.height, 1000);
         assert_eq!(info.state_root, vec![1, 2, 3, 4]);
         assert_eq!(info.nodes, vec!["node-200", "node-201"]);
@@ -4673,7 +4680,7 @@ mod tests {
     fn test_vault_info_from_proto_with_missing_fields() {
         let proto = proto::GetVaultResponse {
             organization: None,
-            vault_id: None,
+            vault: None,
             height: 0,
             state_root: None,
             nodes: vec![],
@@ -4685,7 +4692,7 @@ mod tests {
         let info = VaultInfo::from_proto(proto);
 
         assert_eq!(info.organization, OrganizationSlug::new(0));
-        assert_eq!(info.vault_id, 0);
+        assert_eq!(info.vault_slug, 0);
         assert_eq!(info.height, 0);
         assert!(info.state_root.is_empty());
         assert!(info.nodes.is_empty());
@@ -4712,7 +4719,7 @@ mod tests {
     fn test_vault_info_equality() {
         let info1 = VaultInfo {
             organization: ORG,
-            vault_id: 2,
+            vault_slug: 2,
             height: 100,
             state_root: vec![1, 2, 3],
             nodes: vec!["node-1".to_string(), "node-2".to_string()],
@@ -5195,7 +5202,7 @@ mod tests {
         let proto_header = proto::BlockHeader {
             height: 100,
             organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault_id: Some(proto::VaultId { id: 2 }),
+            vault: Some(proto::VaultSlug { slug: 2 }),
             previous_hash: Some(proto::Hash { value: vec![1; 32] }),
             tx_merkle_root: Some(proto::Hash { value: vec![2; 32] }),
             state_root: Some(proto::Hash { value: vec![3; 32] }),
@@ -5208,7 +5215,7 @@ mod tests {
         let header = BlockHeader::from_proto(proto_header);
         assert_eq!(header.height, 100);
         assert_eq!(header.organization, ORG);
-        assert_eq!(header.vault_id, 2);
+        assert_eq!(header.vault_slug, 2);
         assert_eq!(header.previous_hash, vec![1; 32]);
         assert_eq!(header.tx_merkle_root, vec![2; 32]);
         assert_eq!(header.state_root, vec![3; 32]);
@@ -5225,7 +5232,7 @@ mod tests {
         let proto_header = proto::BlockHeader {
             height: 1,
             organization: None,
-            vault_id: None,
+            vault: None,
             previous_hash: None,
             tx_merkle_root: None,
             state_root: None,
@@ -5238,7 +5245,7 @@ mod tests {
         let header = BlockHeader::from_proto(proto_header);
         assert_eq!(header.height, 1);
         assert_eq!(header.organization, OrganizationSlug::new(0));
-        assert_eq!(header.vault_id, 0);
+        assert_eq!(header.vault_slug, 0);
         assert!(header.previous_hash.is_empty());
         assert!(header.tx_merkle_root.is_empty());
         assert!(header.state_root.is_empty());
@@ -5255,7 +5262,7 @@ mod tests {
                 proto::BlockHeader {
                     height: 101,
                     organization: Some(proto::OrganizationSlug { slug: 1 }),
-                    vault_id: Some(proto::VaultId { id: 0 }),
+                    vault: Some(proto::VaultSlug { slug: 0 }),
                     previous_hash: Some(proto::Hash { value: vec![0; 32] }),
                     tx_merkle_root: Some(proto::Hash { value: vec![1; 32] }),
                     state_root: Some(proto::Hash { value: vec![2; 32] }),
@@ -5267,7 +5274,7 @@ mod tests {
                 proto::BlockHeader {
                     height: 102,
                     organization: Some(proto::OrganizationSlug { slug: 1 }),
-                    vault_id: Some(proto::VaultId { id: 0 }),
+                    vault: Some(proto::VaultSlug { slug: 0 }),
                     previous_hash: Some(proto::Hash { value: vec![3; 32] }),
                     tx_merkle_root: Some(proto::Hash { value: vec![4; 32] }),
                     state_root: Some(proto::Hash { value: vec![5; 32] }),
@@ -5298,7 +5305,7 @@ mod tests {
             headers: vec![BlockHeader {
                 height: 101,
                 organization: ORG,
-                vault_id: 0,
+                vault_slug: 0,
                 previous_hash: vec![1, 2, 3, 4], // Must match trusted_hash
                 tx_merkle_root: vec![5, 6, 7, 8],
                 state_root: vec![9, 10, 11, 12],
@@ -5318,7 +5325,7 @@ mod tests {
             headers: vec![BlockHeader {
                 height: 101,
                 organization: ORG,
-                vault_id: 0,
+                vault_slug: 0,
                 previous_hash: vec![0, 0, 0, 0], // Wrong hash
                 tx_merkle_root: vec![5, 6, 7, 8],
                 state_root: vec![9, 10, 11, 12],
@@ -5372,7 +5379,7 @@ mod tests {
             block_header: Some(proto::BlockHeader {
                 height: 100,
                 organization: Some(proto::OrganizationSlug { slug: 1 }),
-                vault_id: Some(proto::VaultId { id: 0 }),
+                vault: Some(proto::VaultSlug { slug: 0 }),
                 previous_hash: Some(proto::Hash { value: vec![1; 32] }),
                 tx_merkle_root: Some(proto::Hash { value: vec![2; 32] }),
                 state_root: Some(proto::Hash { value: vec![3; 32] }),
@@ -5427,7 +5434,7 @@ mod tests {
             block_header: Some(proto::BlockHeader {
                 height: 100,
                 organization: Some(proto::OrganizationSlug { slug: 1 }),
-                vault_id: Some(proto::VaultId { id: 0 }),
+                vault: Some(proto::VaultSlug { slug: 0 }),
                 previous_hash: Some(proto::Hash { value: vec![1; 32] }),
                 tx_merkle_root: Some(proto::Hash { value: vec![2; 32] }),
                 state_root: Some(proto::Hash { value: vec![3; 32] }),
@@ -5454,7 +5461,7 @@ mod tests {
             block_header: BlockHeader {
                 height: 100,
                 organization: ORG,
-                vault_id: 0,
+                vault_slug: 0,
                 previous_hash: vec![0; 32],
                 tx_merkle_root: vec![0; 32],
                 state_root: state_root.clone(),
@@ -5484,7 +5491,7 @@ mod tests {
             block_header: BlockHeader {
                 height: 100,
                 organization: ORG,
-                vault_id: 0,
+                vault_slug: 0,
                 previous_hash: vec![0; 32],
                 tx_merkle_root: vec![0; 32],
                 state_root: vec![1, 2, 3, 4], // Expected root

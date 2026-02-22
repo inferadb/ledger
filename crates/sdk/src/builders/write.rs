@@ -62,7 +62,7 @@ pub struct HasOps(());
 pub struct WriteBuilder<'a, S = NoOps> {
     client: &'a LedgerClient,
     organization: OrganizationSlug,
-    vault_id: Option<i64>,
+    vault_slug: Option<u64>,
     operations: Vec<Operation>,
     /// Condition to apply to the *next* `.set()` call.
     pending_condition: Option<SetCondition>,
@@ -75,12 +75,12 @@ impl<'a> WriteBuilder<'a, NoOps> {
     pub(crate) fn new(
         client: &'a LedgerClient,
         organization: OrganizationSlug,
-        vault_id: Option<i64>,
+        vault_slug: Option<u64>,
     ) -> Self {
         Self {
             client,
             organization,
-            vault_id,
+            vault_slug,
             operations: Vec::new(),
             pending_condition: None,
             cancellation: None,
@@ -95,7 +95,7 @@ impl<'a, S> WriteBuilder<'a, S> {
         WriteBuilder {
             client: self.client,
             organization: self.organization,
-            vault_id: self.vault_id,
+            vault_slug: self.vault_slug,
             operations: self.operations,
             pending_condition: self.pending_condition,
             cancellation: self.cancellation,
@@ -225,10 +225,10 @@ impl<'a> WriteBuilder<'a, HasOps> {
         match self.cancellation {
             Some(token) => {
                 self.client
-                    .write_with_token(self.organization, self.vault_id, self.operations, token)
+                    .write_with_token(self.organization, self.vault_slug, self.operations, token)
                     .await
             },
-            None => self.client.write(self.organization, self.vault_id, self.operations).await,
+            None => self.client.write(self.organization, self.vault_slug, self.operations).await,
         }
     }
 }
@@ -428,14 +428,14 @@ mod tests {
         let builder =
             client.write_builder(OrganizationSlug::new(42), Some(99)).set("key", b"val".to_vec());
         assert_eq!(builder.organization, OrganizationSlug::new(42));
-        assert_eq!(builder.vault_id, Some(99));
+        assert_eq!(builder.vault_slug, Some(99));
     }
 
     #[tokio::test]
-    async fn write_builder_vault_id_none() {
+    async fn write_builder_vault_slug_none() {
         let client = test_client().await;
         let builder = client.write_builder(ORG, None).set("key", b"val".to_vec());
-        assert_eq!(builder.vault_id, None);
+        assert_eq!(builder.vault_slug, None);
     }
 
     #[tokio::test]

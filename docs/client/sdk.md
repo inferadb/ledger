@@ -28,11 +28,11 @@ async fn main() -> inferadb_ledger_sdk::Result<()> {
 
     // Write an entity
     let ops = vec![Operation::set_entity("user:123", b"data".to_vec())];
-    let result = client.write(1, None, ops).await?;
+    let result = client.write(organization_slug, None, ops).await?;
     println!("Committed at block {}", result.block_height);
 
     // Read it back
-    let value = client.read(1, None, "user:123").await?;
+    let value = client.read(organization_slug, None, "user:123").await?;
     println!("Value: {:?}", value);
 
     Ok(())
@@ -173,7 +173,7 @@ tracing_subscriber::registry()
 #[tracing::instrument]
 async fn process_request(client: &LedgerClient) -> Result<()> {
     // This read will include traceparent header linking to current span
-    let value = client.read(1, None, "key").await?;
+    let value = client.read(organization_slug, None, "key").await?;
     Ok(())
 }
 ```
@@ -227,7 +227,7 @@ After shutdown:
 let value = client.read(organization_slug, None, "user:123").await?;
 
 // Read from vault (relationship context)
-let value = client.read(organization_slug, Some(vault_id), "key").await?;
+let value = client.read(organization_slug, Some(vault_slug), "key").await?;
 ```
 
 ### Consistent Read
@@ -263,7 +263,7 @@ use inferadb_ledger_sdk::VerifyOpts;
 
 let verified = client.verified_read(
     organization_slug,
-    vault_id,
+    vault_slug,
     "user:123",
     VerifyOpts::default(),
 ).await?;
@@ -312,7 +312,7 @@ let opts = ListRelationshipsOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_relationships(organization_slug, vault_id, opts).await?;
+let page = client.list_relationships(organization_slug, vault_slug, opts).await?;
 for rel in page.items {
     println!("{} is {} of {}", rel.subject, rel.relation, rel.resource);
 }
@@ -329,7 +329,7 @@ let opts = ListResourcesOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_resources(organization_slug, vault_id, opts).await?;
+let page = client.list_resources(organization_slug, vault_slug, opts).await?;
 ```
 
 ## Write Operations
@@ -386,7 +386,7 @@ let ops = vec![
     Operation::create_relationship("doc:1", "owner", "user:123"),
 ];
 
-let result = client.write(organization_slug, Some(vault_id), ops).await?;
+let result = client.write(organization_slug, Some(vault_slug), ops).await?;
 println!("Transaction ID: {}", result.tx_id);
 println!("Block height: {}", result.block_height);
 ```
@@ -408,7 +408,7 @@ let ops = vec![
     Operation::create_relationship("org:acme", "member", "user:123"),
 ];
 
-let result = client.batch_write(organization_slug, Some(vault_id), ops).await?;
+let result = client.batch_write(organization_slug, Some(vault_slug), ops).await?;
 ```
 
 If any conditional operation fails, the entire batch is rejected atomically.
@@ -422,7 +422,7 @@ Subscribe to new blocks in real-time:
 ```rust
 use futures::StreamExt;
 
-let mut stream = client.watch_blocks(organization_slug, vault_id, start_height).await?;
+let mut stream = client.watch_blocks(organization_slug, vault_slug, start_height).await?;
 
 while let Some(result) = stream.next().await {
     match result {
@@ -450,10 +450,10 @@ The SDK handles stream reconnection automatically:
 
 ```rust
 // Get current tip, then subscribe from next block
-let vault_info = client.get_vault(organization_slug, vault_id).await?;
+let vault_info = client.get_vault(organization_slug, vault_slug).await?;
 let stream = client.watch_blocks(
     organization_slug,
-    vault_id,
+    vault_slug,
     vault_info.height + 1,
 ).await?;
 ```
@@ -478,12 +478,12 @@ let organizations = client.list_organizations(None).await?;
 ### Vault Management
 
 ```rust
-// Create vault
+// Create vault (returns Snowflake slug)
 let vault = client.create_vault(organization_slug).await?;
-println!("Vault ID: {}", vault.id);
+println!("Vault slug: {}", vault.vault_slug);
 
 // Get vault info
-let info = client.get_vault(organization_slug, vault.id).await?;
+let info = client.get_vault(organization_slug, vault.vault_slug).await?;
 println!("Height: {}, State root: {:?}", info.height, info.state_root);
 
 // List vaults
@@ -505,7 +505,7 @@ println!("Status: {:?}", result.status);
 println!("Leader: {}", result.is_leader);
 
 // Vault-specific health
-let vault_health = client.health_check_vault(organization_slug, vault_id).await?;
+let vault_health = client.health_check_vault(organization_slug, vault_slug).await?;
 ```
 
 ## Error Handling
@@ -624,10 +624,10 @@ For advanced use cases:
 ```rust
 // Get current sequence state
 let tracker = client.sequences();
-let seq = tracker.get(organization_slug, vault_id).await;
+let seq = tracker.get(organization_slug, vault_slug).await;
 
 // Recover from server if state is lost
-let state = client.get_client_state(organization_slug, vault_id).await?;
+let state = client.get_client_state(organization_slug, vault_slug).await?;
 println!("Last committed: {}", state.last_committed_sequence);
 ```
 

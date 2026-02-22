@@ -502,7 +502,7 @@ mod tests {
         // Create a block announcement at height 5
         let announcement = proto::BlockAnnouncement {
             organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault_id: Some(proto::VaultId { id: 2 }),
+            vault: Some(proto::VaultSlug { slug: 2 }),
             height: 5,
             block_hash: None,
             state_root: None,
@@ -524,7 +524,7 @@ mod tests {
         for height in 1..=10 {
             let announcement = proto::BlockAnnouncement {
                 organization: Some(proto::OrganizationSlug { slug: 1 }),
-                vault_id: Some(proto::VaultId { id: 0 }),
+                vault: Some(proto::VaultSlug { slug: 0 }),
                 height,
                 block_hash: None,
                 state_root: None,
@@ -554,7 +554,7 @@ mod tests {
         // Height 0 is technically invalid but tracker should handle it gracefully
         let announcement = proto::BlockAnnouncement {
             organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault_id: Some(proto::VaultId { id: 0 }),
+            vault: Some(proto::VaultSlug { slug: 0 }),
             height: 0,
             block_hash: None,
             state_root: None,

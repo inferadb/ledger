@@ -1,6 +1,6 @@
 //! Key patterns for the `_system` organization.
 
-use inferadb_ledger_types::{NodeId, OrganizationId, OrganizationSlug, UserId};
+use inferadb_ledger_types::{NodeId, OrganizationId, OrganizationSlug, UserId, VaultSlug};
 
 /// Key pattern generators for `_system` organization entities.
 ///
@@ -89,6 +89,17 @@ impl SystemKeys {
     /// Pattern: `_idx:org:slug:{slug}` → organization_id
     pub fn organization_slug_key(slug: OrganizationSlug) -> String {
         format!("_idx:org:slug:{}", slug.value())
+    }
+
+    // ========================================================================
+    // Vault Keys
+    // ========================================================================
+
+    /// Index key for vault slug lookup.
+    ///
+    /// Pattern: `_idx:vault:slug:{slug}` → vault_id
+    pub fn vault_slug_key(slug: VaultSlug) -> String {
+        format!("_idx:vault:slug:{}", slug.value())
     }
 
     // ========================================================================
@@ -206,6 +217,11 @@ mod tests {
             SystemKeys::organization_slug_key(OrganizationSlug::new(12345)),
             "_idx:org:slug:12345"
         );
+    }
+
+    #[test]
+    fn test_vault_slug_key() {
+        assert_eq!(SystemKeys::vault_slug_key(VaultSlug::new(67890)), "_idx:vault:slug:67890");
     }
 
     #[test]

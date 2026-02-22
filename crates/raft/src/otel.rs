@@ -234,7 +234,7 @@ pub struct SpanAttributes {
     pub client_id: Option<String>,
     pub sequence: Option<u64>,
     pub organization: Option<u64>,
-    pub vault_id: Option<i64>,
+    pub vault_slug: Option<u64>,
     pub service: Option<&'static str>,
     pub method: Option<&'static str>,
     pub actor: Option<String>,
@@ -312,7 +312,7 @@ impl SpanAttributes {
         push_attr!("client_id", self.client_id);
         push_attr!("sequence", self.sequence, |v| v as i64);
         push_attr!("organization", self.organization, |v| v as i64);
-        push_attr!("vault_id", self.vault_id, |v| v);
+        push_attr!("vault_slug", self.vault_slug, |v| v as i64);
         if let Some(v) = self.service {
             attrs.push(KeyValue::new("service", v));
         }
@@ -497,7 +497,7 @@ mod tests {
             client_id: Some("client1".to_string()),
             sequence: Some(42),
             organization: Some(1),
-            vault_id: Some(2),
+            vault_slug: Some(2),
             service: Some("WriteService"),
             method: Some("write"),
             outcome: Some("success".to_string()),

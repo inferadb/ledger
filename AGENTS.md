@@ -138,6 +138,8 @@ inferadb-ledger-types   — Hash primitives, Merkle proofs, config, errors
 - Relationship → authorization tuple (resource, relation, subject)
 - Shard → organizations sharing a Raft group
 
+**Dual-ID architecture:** Organizations and vaults use sequential internal IDs (`OrganizationId`/`VaultId`, `i64`) for storage and Snowflake slugs (`OrganizationSlug`/`VaultSlug`, `u64`) for external APIs. The `SlugResolver` translates at gRPC service boundaries.
+
 ## Error Handling
 
 Use `snafu` with implicit location tracking. Never use `thiserror` or `anyhow`.

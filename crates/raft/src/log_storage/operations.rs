@@ -295,7 +295,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 )
             },
 
-            LedgerRequest::CreateVault { organization_id, name, retention_policy } => {
+            LedgerRequest::CreateVault { organization_id, slug, name, retention_policy } => {
                 // Check organization status before creating vault
                 if let Some(org_meta) = state.organizations.get(organization_id) {
                     match org_meta.status {
@@ -345,13 +345,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     VaultMeta {
                         organization_id: *organization_id,
                         vault_id,
+                        slug: *slug,
                         name: name.clone(),
                         deleted: false,
                         last_write_timestamp: 0, // No writes yet
                         retention_policy: retention_policy.unwrap_or_default(),
                     },
                 );
-                (LedgerResponse::VaultCreated { vault_id }, None)
+
+                // Insert into bidirectional vault slug index
+                state.vault_slug_index.insert(*slug, vault_id);
+                state.vault_id_to_slug.insert(vault_id, *slug);
+
+                (LedgerResponse::VaultCreated { vault_id, slug: *slug }, None)
             },
 
             LedgerRequest::DeleteOrganization { organization_id } => {
@@ -425,6 +431,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault) = state.vaults.get_mut(&key) {
                     vault.deleted = true;
+
+                    // Clean up vault slug index
+                    if let Some(slug) = state.vault_id_to_slug.remove(vault_id) {
+                        state.vault_slug_index.remove(&slug);
+                    }
 
                     // Check if organization is in Deleting state and this was the last vault
                     if let Some(org) = state.organizations.get_mut(organization_id)

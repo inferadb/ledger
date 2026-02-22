@@ -1,6 +1,6 @@
 //! Core type definitions for InferaDB Ledger.
 //!
-//! Defines identifier types (OrganizationId, OrganizationSlug, VaultId, etc.),
+//! Defines identifier types (OrganizationId, OrganizationSlug, VaultId, VaultSlug, etc.),
 //! block and transaction structures, operations, and conditions.
 
 use std::fmt;
@@ -140,6 +140,61 @@ impl fmt::Display for OrganizationSlug {
 }
 
 impl std::str::FromStr for OrganizationSlug {
+    type Err = <u64 as std::str::FromStr>::Err;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.parse::<u64>().map(Self)
+    }
+}
+
+/// Snowflake-generated external identifier for a vault.
+///
+/// Wraps a `u64` Snowflake ID that is the sole external identifier for
+/// vaults in gRPC APIs and the SDK. The display format is the raw
+/// number without prefix for API clarity.
+///
+/// # Display
+///
+/// Displays as the raw number: `1234567890`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VaultSlug(u64);
+
+impl VaultSlug {
+    /// Creates a new slug from a raw Snowflake ID value.
+    #[inline]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw Snowflake ID value.
+    #[inline]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for VaultSlug {
+    #[inline]
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<VaultSlug> for u64 {
+    #[inline]
+    fn from(slug: VaultSlug) -> Self {
+        slug.0
+    }
+}
+
+impl fmt::Display for VaultSlug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for VaultSlug {
     type Err = <u64 as std::str::FromStr>::Err;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
@@ -1104,5 +1159,91 @@ mod tests {
         let a = OrganizationUsage { storage_bytes: 100, vault_count: 3 };
         let b = a; // Copy
         assert_eq!(a, b); // Both accessible — Copy trait
+    }
+
+    // ========================================================================
+    // VaultSlug Tests
+    // ========================================================================
+
+    #[test]
+    fn test_vault_slug_new_and_value() {
+        let slug = VaultSlug::new(123_456_789);
+        assert_eq!(slug.value(), 123_456_789);
+    }
+
+    #[test]
+    fn test_vault_slug_display_raw_number() {
+        let slug = VaultSlug::new(987_654_321);
+        assert_eq!(format!("{slug}"), "987654321");
+    }
+
+    #[test]
+    fn test_vault_slug_from_u64() {
+        let slug: VaultSlug = 42_u64.into();
+        assert_eq!(slug.value(), 42);
+    }
+
+    #[test]
+    fn test_vault_slug_into_u64() {
+        let slug = VaultSlug::new(100);
+        let raw: u64 = slug.into();
+        assert_eq!(raw, 100);
+    }
+
+    #[test]
+    fn test_vault_slug_parse_from_str() {
+        let slug: VaultSlug = "12345".parse().expect("valid u64 string");
+        assert_eq!(slug.value(), 12345);
+    }
+
+    #[test]
+    fn test_vault_slug_parse_invalid_str() {
+        let result = "not_a_number".parse::<VaultSlug>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vault_slug_serde_roundtrip() {
+        let slug = VaultSlug::new(42_000_000);
+        let json = serde_json::to_string(&slug).unwrap();
+        assert_eq!(json, "42000000"); // transparent serialization
+        let deserialized: VaultSlug = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, slug);
+    }
+
+    #[test]
+    fn test_vault_slug_equality() {
+        assert_eq!(VaultSlug::new(1), VaultSlug::new(1));
+        assert_ne!(VaultSlug::new(1), VaultSlug::new(2));
+    }
+
+    #[test]
+    fn test_vault_slug_ordering() {
+        assert!(VaultSlug::new(1) < VaultSlug::new(2));
+        assert!(VaultSlug::new(100) > VaultSlug::new(50));
+    }
+
+    #[test]
+    fn test_vault_slug_hash_map_key() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(VaultSlug::new(1), "vault-a");
+        map.insert(VaultSlug::new(2), "vault-b");
+        assert_eq!(map.get(&VaultSlug::new(1)), Some(&"vault-a"));
+        assert_eq!(map.get(&VaultSlug::new(3)), None);
+    }
+
+    #[test]
+    fn test_vault_slug_copy_semantics() {
+        let slug = VaultSlug::new(42);
+        let slug2 = slug; // Copy
+        assert_eq!(slug, slug2); // Original still accessible
+    }
+
+    #[test]
+    fn test_vault_slug_zero() {
+        let slug = VaultSlug::new(0);
+        assert_eq!(slug.value(), 0);
+        assert_eq!(format!("{slug}"), "0");
     }
 }

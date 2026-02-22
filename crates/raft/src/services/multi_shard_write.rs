@@ -110,8 +110,9 @@ impl MultiShardWriteService {
             Err(_) => return (None, None),
         };
 
-        // Resolve internal ID to slug for response construction
+        // Resolve internal IDs to slugs for response construction
         let slug = ctx.applied_state.resolve_id_to_slug(organization_id);
+        let vault_slug = ctx.applied_state.resolve_vault_id_to_slug(vault_id);
 
         // Use the proof module's implementation
         match proof::generate_write_proof(
@@ -119,6 +120,7 @@ impl MultiShardWriteService {
             organization_id,
             slug,
             vault_id,
+            vault_slug,
             vault_height,
             0,
         ) {
@@ -175,7 +177,7 @@ impl MultiShardWriteService {
 
 #[tonic::async_trait]
 impl WriteService for MultiShardWriteService {
-    #[instrument(skip(self, request), fields(client_id, organization_id, vault_id))]
+    #[instrument(skip(self, request), fields(client_id, organization_id, vault_slug))]
     async fn write(
         &self,
         request: Request<WriteRequest>,
@@ -194,8 +196,9 @@ impl WriteService for MultiShardWriteService {
         let system = self.resolver.system_shard()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+        let ctx = self.resolver.resolve(organization_id)?;
         let vault_id =
-            inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+            SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         // Actor is set by upstream Engine/Control services - Ledger uses "system" internally
         let actor = "system".to_string();
 
@@ -214,7 +217,7 @@ impl WriteService for MultiShardWriteService {
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_id", vault_id.value());
+        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
 
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
@@ -282,9 +285,6 @@ impl WriteService for MultiShardWriteService {
         self.record_hot_keys(vault_id, &req.operations);
 
         // Server-assigned sequences: no gap check needed
-
-        // Resolve shard for this organization
-        let ctx = self.resolver.resolve(organization_id)?;
 
         // Build request
         let ledger_request =
@@ -387,7 +387,7 @@ impl WriteService for MultiShardWriteService {
 
     #[instrument(
         skip(self, request),
-        fields(client_id, sequence, organization_id, vault_id, batch_size)
+        fields(client_id, sequence, organization_id, vault_slug, batch_size)
     )]
     async fn batch_write(
         &self,
@@ -407,8 +407,9 @@ impl WriteService for MultiShardWriteService {
         let system = self.resolver.system_shard()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+        let ctx = self.resolver.resolve(organization_id)?;
         let vault_id =
-            inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+            SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -431,7 +432,7 @@ impl WriteService for MultiShardWriteService {
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_id", vault_id.value());
+        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
         tracing::Span::current().record("batch_size", batch_size);
 
         // Check idempotency cache
@@ -502,9 +503,6 @@ impl WriteService for MultiShardWriteService {
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &all_operations);
-
-        // Resolve shard
-        let ctx = self.resolver.resolve(organization_id)?;
 
         // Build request with flattened operations
         let ledger_request =

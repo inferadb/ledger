@@ -444,8 +444,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                                 .get(&entry.organization_id)
                                 .map_or(entry.organization_id.value() as u64, |s| s.value()),
                         }),
-                        vault_id: Some(inferadb_ledger_proto::proto::VaultId {
-                            id: entry.vault_id.value(),
+                        vault: Some(inferadb_ledger_proto::proto::VaultSlug {
+                            slug: state
+                                .vault_id_to_slug
+                                .get(&entry.vault_id)
+                                .map_or(0, |s| s.value()),
                         }),
                         height: entry.vault_height,
                         block_hash: Some(inferadb_ledger_proto::proto::Hash {

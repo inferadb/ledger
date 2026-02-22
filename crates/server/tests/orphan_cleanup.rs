@@ -46,7 +46,7 @@ async fn create_organization(
 async fn write_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
     value: &serde_json::Value,
     client_id: &str,
@@ -57,7 +57,7 @@ async fn write_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -88,7 +88,7 @@ async fn write_entity(
 async fn read_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
@@ -97,7 +97,7 @@ async fn read_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };

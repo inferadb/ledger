@@ -161,7 +161,7 @@ for i := 0; i < maxRetries; i++ {
 ```bash
 # Get current tip to find available height
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 

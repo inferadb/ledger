@@ -32,7 +32,7 @@ Look for:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
@@ -124,7 +124,7 @@ grpcurl -plaintext \
 ```bash
 # Get current tip
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
@@ -173,7 +173,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetNodeInfo
 ```bash
 # Check vault health
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 
 # Check metrics

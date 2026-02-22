@@ -28,7 +28,7 @@ use inferadb_ledger_proto::{
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId};
+use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId, VaultSlug};
 use openraft::Raft;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -159,7 +159,12 @@ impl ReadServiceImpl {
                     .resolve_id_to_slug(entry.organization_id)
                     .map_or(entry.organization_id.value() as u64, |s| s.value()),
             }),
-            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: entry.vault_id.value() }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug {
+                slug: self
+                    .applied_state
+                    .resolve_vault_id_to_slug(entry.vault_id)
+                    .map_or(0, |s| s.value()),
+            }),
             previous_hash: Some(inferadb_ledger_proto::proto::Hash {
                 value: entry.previous_vault_hash.to_vec(),
             }),
@@ -402,8 +407,11 @@ impl ReadServiceImpl {
                             .resolve_id_to_slug(entry.organization_id)
                             .map_or(entry.organization_id.value() as u64, |s| s.value()),
                     }),
-                    vault_id: Some(inferadb_ledger_proto::proto::VaultId {
-                        id: entry.vault_id.value(),
+                    vault: Some(inferadb_ledger_proto::proto::VaultSlug {
+                        slug: self
+                            .applied_state
+                            .resolve_vault_id_to_slug(entry.vault_id)
+                            .map_or(0, |s| s.value()),
                     }),
                     height: entry.vault_height,
                     block_hash: Some(inferadb_ledger_proto::proto::Hash {
@@ -474,9 +482,11 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        ctx.set_target(org_slug, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug, vault_slug_val);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(organization_id, vault_id);
@@ -598,9 +608,11 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        ctx.set_target(org_slug, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug, vault_slug_val);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(organization_id, vault_id);
@@ -716,9 +728,11 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        ctx.set_target(org_slug, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug, vault_slug_val);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(organization_id, vault_id);
@@ -855,9 +869,11 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        ctx.set_target(org_slug, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug, vault_slug_val);
 
         // Get block archive - required for historical reads
         let archive = match &self.block_archive {
@@ -1048,7 +1064,8 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let start_height = req.start_height;
 
         // Validate start_height >= 1
@@ -1103,7 +1120,7 @@ impl ReadService for ReadServiceImpl {
         // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
         // not slug-to-internal-id, since announcements carry the original slug)
         let watch_slug = req.organization.as_ref().map_or(0u64, |n| n.slug);
-        let vault_raw = vault_id.value();
+        let vault_slug_raw = req.vault.as_ref().map_or(0u64, |v| v.slug);
         let broadcast_stream =
             tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
                 async move {
@@ -1116,7 +1133,7 @@ impl ReadService for ReadServiceImpl {
                                 return None;
                             }
                             // Filter by vault
-                            if announcement.vault_id.as_ref().map_or(0, |v| v.id) != vault_raw {
+                            if announcement.vault.as_ref().map_or(0, |v| v.slug) != vault_slug_raw {
                                 return None;
                             }
                             // Skip blocks we already sent from history
@@ -1153,7 +1170,8 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let height = req.height;
 
         // Find the shard height containing this vault block
@@ -1178,7 +1196,10 @@ impl ReadService for ReadServiceImpl {
                 && e.vault_height == height
         });
 
-        let block = vault_entry.map(|entry| vault_entry_to_proto_block(entry, &shard_block));
+        let vault_slug =
+            self.applied_state.resolve_vault_id_to_slug(vault_id).unwrap_or(VaultSlug::new(0));
+        let block =
+            vault_entry.map(|entry| vault_entry_to_proto_block(entry, &shard_block, vault_slug));
 
         Ok(Response::new(GetBlockResponse { block }))
     }
@@ -1202,7 +1223,8 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let start_height = req.start_height;
         let end_height = req.end_height;
 
@@ -1234,7 +1256,11 @@ impl ReadService for ReadServiceImpl {
                     && e.vault_id == vault_id
                     && e.vault_height == height
             }) {
-                blocks.push(vault_entry_to_proto_block(entry, &shard_block));
+                let vault_slug = self
+                    .applied_state
+                    .resolve_vault_id_to_slug(vault_id)
+                    .unwrap_or(VaultSlug::new(0));
+                blocks.push(vault_entry_to_proto_block(entry, &shard_block, vault_slug));
             }
         }
 
@@ -1256,7 +1282,8 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
 
         let height = if vault_id.value() != 0 {
             // Specific vault requested
@@ -1299,7 +1326,8 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
         // Server-assigned sequences: Query the persistent AppliedState directly
@@ -1325,7 +1353,8 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from all filter parameters for token validation
@@ -1447,7 +1476,8 @@ impl ReadService for ReadServiceImpl {
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from filter parameters for token validation
@@ -1533,7 +1563,8 @@ impl ReadService for ReadServiceImpl {
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
         // Use vault_id from request, defaulting to 0 for organization-level entities
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id =
+            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
 
         // Compute query hash from filter parameters for token validation
         // This prevents clients from changing filters mid-pagination

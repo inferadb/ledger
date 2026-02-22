@@ -11,7 +11,7 @@ This document covers read and write operations, error handling, and pagination.
 ```rust
 struct WriteRequest {
     organization_slug: OrganizationSlug,
-    vault_id: Option<VaultId>,  // None for organization-level entities
+    vault_slug: Option<u64>,    // None for organization-level entities
     client_id: ClientId,
     sequence: u64,
     operations: Vec<Operation>,
@@ -85,14 +85,14 @@ message SetCondition {
 
 - Single `client_id` per batch (set at batch level)
 - Batch has single sequence number (all writes share it)
-- All writes must target same scope (all with `vault_id` OR all without)
+- All writes must target same scope (all with `vault_slug` OR all without)
 
 **Example: Unique email constraint**
 
 ```rust
 ledger.batch_write(BatchWriteRequest {
     organization_slug,
-    vault_id: None,  // Entities are organization-level
+    vault_slug: None,  // Entities are organization-level
     client_id: ClientId { id: "my-client".into() },
     sequence: 1,
     operations: vec![
@@ -150,14 +150,14 @@ message SetEntity {
 // Fast read (no proof)
 let entity = client.read(ReadRequest {
     organization_slug,
-    vault_id,
+    vault_slug,
     key: "user:123".into(),
 }).await?;
 
 // Verified read (includes proof)
 let verified = client.verified_read(VerifiedReadRequest {
     organization_slug,
-    vault_id,
+    vault_slug,
     key: "user:123".into(),
     include_chain_proof: false,
 }).await?;
@@ -170,7 +170,7 @@ Read multiple keys in a single RPC call for higher throughput:
 ```rust
 let results = client.batch_read(BatchReadRequest {
     organization_slug,
-    vault_id: Some(vault_id),
+    vault_slug: Some(vault_slug),
     keys: vec!["user:1".into(), "user:2".into(), "user:3".into()],
     consistency: ReadConsistency::Eventual,
 }).await?;
@@ -189,7 +189,7 @@ for result in results.results {
 | Field          | Type            | Description                     |
 | -------------- | --------------- | ------------------------------- |
 | `organization_slug` | OrganizationSlug     | Target organization                |
-| `vault_id`     | VaultId         | (Optional) Target vault         |
+| `vault`        | VaultSlug       | (Optional) Target vault         |
 | `keys`         | string[]        | Keys to read (max 1000)         |
 | `consistency`  | ReadConsistency | Consistency level for all reads |
 
@@ -218,7 +218,7 @@ Read state as it existed at a specific block height:
 // Historical read (proofs optional)
 let entity = client.historical_read(HistoricalReadRequest {
     organization_slug,
-    vault_id,
+    vault_slug,
     key: "user:123".into(),
     at_height: 1000,
     include_proof: false,  // Set true for verification
@@ -258,7 +258,7 @@ Default: Reads go to any replica. For strict consistency, read from leader or us
 ```rust
 let relationships = client.list_relationships(ListRelationshipsRequest {
     organization_slug,
-    vault_id,
+    vault_slug,
     resource: Some("doc:readme".into()),  // Filter by resource
     relation: Some("viewer".into()),       // Filter by relation
     subject: None,                          // No subject filter
@@ -300,7 +300,7 @@ Page tokens are opaque to clients—base64-encoded, server-managed cursors.
 struct PageToken {
     version: u8,
     organization_slug: i64,
-    vault_id: i64,
+    vault_id: i64,  // Internal ID (not exposed to clients)
     last_key: Vec<u8>,
     at_height: u64,        // Consistent reads
     query_hash: [u8; 8],   // Prevents filter changes
@@ -331,10 +331,10 @@ Subscribe to new blocks via gRPC streaming:
 
 ```rust
 // Get current tip, then subscribe from tip+1
-let tip = client.get_tip(GetTipRequest { organization_slug, vault_id }).await?;
+let tip = client.get_tip(GetTipRequest { organization_slug, vault_slug }).await?;
 let stream = client.watch_blocks(WatchBlocksRequest {
     organization_slug,
-    vault_id,
+    vault_slug,
     start_height: tip.height + 1,
 }).await?;
 
@@ -360,7 +360,7 @@ let stream = client.watch_blocks(WatchBlocksRequest {
 | `UNAUTHENTICATED`     | Missing or invalid credentials     | Bad API key, expired session       |
 | `PERMISSION_DENIED`   | Valid auth but insufficient access | Write to read-only vault           |
 | `INVALID_ARGUMENT`    | Malformed request                  | Invalid key format, bad page_token |
-| `NOT_FOUND`           | Resource doesn't exist             | Unknown organization_slug, vault_id     |
+| `NOT_FOUND`           | Resource doesn't exist             | Unknown organization_slug, vault_slug   |
 | `UNAVAILABLE`         | Temporary failure                  | Leader election, node down         |
 | `RESOURCE_EXHAUSTED`  | Rate limit or quota                | Too many requests                  |
 | `FAILED_PRECONDITION` | Precondition failed                | Height unavailable (pruned)        |

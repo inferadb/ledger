@@ -82,9 +82,11 @@ impl HealthService for HealthServiceImpl {
     ) -> Result<Response<HealthCheckResponse>, Status> {
         let req = request.into_inner();
 
-        // If a vault_id is specified, check vault health
-        if let Some(vault_id_proto) = req.vault_id {
-            let vault_id = inferadb_ledger_types::VaultId::new(vault_id_proto.id);
+        // If a vault slug is specified, check vault health
+        if let Some(vault_slug_proto) = req.vault {
+            let slug_resolver = SlugResolver::new(self.applied_state.clone());
+            let vault_id = slug_resolver
+                .resolve_vault(inferadb_ledger_types::VaultSlug::new(vault_slug_proto.slug))?;
             // Get organization_id from request, default to 0 if not provided
             let organization_id = match req.organization.as_ref() {
                 Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())

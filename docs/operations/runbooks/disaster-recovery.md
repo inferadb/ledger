@@ -72,9 +72,9 @@ inferadb-ledger --single --data /data
 grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults
 
 # Run integrity check
-for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault_id.id'); do
+for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}, \"full_check\": true}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}, \"full_check\": true}" \
     localhost:50051 ledger.v1.AdminService/CheckIntegrity
 done
 ```
@@ -128,10 +128,10 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations
 grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults
 
 # Verify block heights
-for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault_id.id'); do
+for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   echo "Vault $vault:"
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
     localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
 done
 ```
@@ -181,7 +181,7 @@ curl -s localhost:9090/metrics | grep determinism_bug
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "AFFECTED_VAULT"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
   localhost:50051 ledger.v1.AdminService/GetVault
 ```
 
@@ -191,7 +191,7 @@ Status will be `DIVERGED`.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "AFFECTED_VAULT"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
   localhost:50051 ledger.v1.AdminService/RecoverVault
 ```
 
@@ -202,13 +202,13 @@ grpcurl -plaintext \
 for node in node1 node2 node3; do
   echo "$node:"
   grpcurl -plaintext $node:50051 \
-    -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "AFFECTED_VAULT"}}' \
+    -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
     ledger.v1.AdminService/CheckIntegrity
 done
 
 # Snapshot from healthy node
 grpcurl -plaintext healthy-node:50051 \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "AFFECTED_VAULT"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
   ledger.v1.AdminService/CreateSnapshot
 
 # Remove corrupted node, let it resync from snapshot

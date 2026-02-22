@@ -91,7 +91,7 @@ Response:
 
 ```json
 {
-  "vaultId": { "id": "1" },
+  "vault": { "slug": "7180591718400" },
   "genesis": {
     "height": "0",
     "stateRoot": "..."
@@ -131,7 +131,7 @@ grpcurl -plaintext \
 grpcurl -plaintext \
   -d '{
     "organization_slug": {"id": "1"},
-    "vault_id": {"id": "1"},
+    "vault": {"slug": "7180591718400"},
     "client_id": {"id": "quickstart"},
     "sequence": "2",
     "operations": [{
@@ -152,7 +152,7 @@ grpcurl -plaintext \
 grpcurl -plaintext \
   -d '{
     "organization_slug": {"id": "1"},
-    "vault_id": {"id": "1"},
+    "vault": {"slug": "7180591718400"},
     "resource": "doc:readme",
     "relation": "viewer"
   }' \
@@ -186,18 +186,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create organization
     let ns = client.create_organization("my_app").await?;
-    println!("Created organization: {}", ns.id);
+    println!("Created organization: {}", ns.slug);
 
-    // Create vault
-    let vault = client.create_vault(ns.id).await?;
-    println!("Created vault: {}", vault.id);
+    // Create vault (returns a Snowflake vault slug)
+    let vault = client.create_vault(ns.slug).await?;
+    println!("Created vault: {}", vault.vault_slug);
 
     // Write entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice".to_vec())];
-    client.write(ns.id, None, ops).await?;
+    client.write(ns.slug, None, ops).await?;
 
     // Read it back
-    let entity = client.read(ns.id, None, "user:alice").await?;
+    let entity = client.read(ns.slug, None, "user:alice").await?;
     println!("Read: {:?}", entity);
 
     Ok(())

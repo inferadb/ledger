@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    NodeId, Operation, OrganizationId, OrganizationSlug, ShardId, VaultId, decode, encode,
+    NodeId, Operation, OrganizationId, OrganizationSlug, ShardId, VaultId, VaultSlug, decode,
+    encode,
 };
 use snafu::{ResultExt, Snafu};
 
@@ -392,6 +393,60 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         self.register_organization(&registry, slug)
     }
+
+    // ========================================================================
+    // Vault Slug Index
+    // ========================================================================
+
+    /// Registers a vault slug → internal ID mapping.
+    ///
+    /// Stores the mapping in the system vault for persistent slug resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the write operation fails.
+    pub fn register_vault_slug(&self, slug: VaultSlug, vault_id: VaultId) -> Result<()> {
+        let key = SystemKeys::vault_slug_key(slug);
+        let value = vault_id.value().to_string().into_bytes();
+
+        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
+
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        Ok(())
+    }
+
+    /// Removes a vault slug mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the delete operation fails.
+    pub fn remove_vault_slug(&self, slug: VaultSlug) -> Result<()> {
+        let key = SystemKeys::vault_slug_key(slug);
+
+        let ops = vec![Operation::DeleteEntity { key }];
+
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        Ok(())
+    }
+
+    /// Looks up the internal vault ID for a given vault slug.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the read operation fails.
+    pub fn get_vault_id_by_slug(&self, slug: VaultSlug) -> Result<Option<VaultId>> {
+        let key = SystemKeys::vault_slug_key(slug);
+
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+
+        Ok(entity_opt.and_then(|entity| {
+            let id_str = String::from_utf8_lossy(&entity.value);
+            id_str.parse::<VaultId>().ok()
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -534,5 +589,88 @@ mod tests {
         let updated = svc.get_organization(OrganizationId::new(1)).unwrap().unwrap();
         assert_eq!(updated.status, OrganizationStatus::Suspended);
         assert_eq!(updated.config_version, 2); // Incremented
+    }
+
+    #[test]
+    fn test_register_and_get_vault_slug() {
+        let svc = create_test_service();
+
+        let slug = VaultSlug::new(12345);
+        let vault_id = VaultId::new(1);
+
+        svc.register_vault_slug(slug, vault_id).unwrap();
+
+        let result = svc.get_vault_id_by_slug(slug).unwrap();
+        assert_eq!(result, Some(vault_id));
+    }
+
+    #[test]
+    fn test_get_vault_slug_not_found() {
+        let svc = create_test_service();
+
+        let result = svc.get_vault_id_by_slug(VaultSlug::new(99999)).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_remove_vault_slug() {
+        let svc = create_test_service();
+
+        let slug = VaultSlug::new(11111);
+        let vault_id = VaultId::new(5);
+
+        svc.register_vault_slug(slug, vault_id).unwrap();
+        assert!(svc.get_vault_id_by_slug(slug).unwrap().is_some());
+
+        svc.remove_vault_slug(slug).unwrap();
+        assert_eq!(svc.get_vault_id_by_slug(slug).unwrap(), None);
+    }
+
+    #[test]
+    fn test_multiple_vault_slugs() {
+        let svc = create_test_service();
+
+        let slug1 = VaultSlug::new(100);
+        let slug2 = VaultSlug::new(200);
+        let vault1 = VaultId::new(1);
+        let vault2 = VaultId::new(2);
+
+        svc.register_vault_slug(slug1, vault1).unwrap();
+        svc.register_vault_slug(slug2, vault2).unwrap();
+
+        assert_eq!(svc.get_vault_id_by_slug(slug1).unwrap(), Some(vault1));
+        assert_eq!(svc.get_vault_id_by_slug(slug2).unwrap(), Some(vault2));
+    }
+
+    #[test]
+    fn test_vault_and_org_slugs_independent() {
+        let svc = create_test_service();
+
+        // Register an org slug and a vault slug with the same numeric value
+        let org_slug = OrganizationSlug::new(42);
+        let vault_slug = VaultSlug::new(42);
+        let vault_id = VaultId::new(7);
+
+        let registry = OrganizationRegistry {
+            organization_id: OrganizationId::new(1),
+            name: "test-org".to_string(),
+            shard_id: ShardId::new(1),
+            member_nodes: vec![],
+            status: OrganizationStatus::Active,
+            config_version: 1,
+            created_at: Utc::now(),
+        };
+
+        svc.register_organization(&registry, org_slug).unwrap();
+        svc.register_vault_slug(vault_slug, vault_id).unwrap();
+
+        // Org slug lookup returns org, not vault
+        let org = svc.get_organization_by_slug(org_slug).unwrap();
+        assert!(org.is_some());
+        assert_eq!(org.unwrap().organization_id, OrganizationId::new(1));
+
+        // Vault slug lookup returns vault, not org
+        let vault = svc.get_vault_id_by_slug(vault_slug).unwrap();
+        assert_eq!(vault, Some(vault_id));
     }
 }

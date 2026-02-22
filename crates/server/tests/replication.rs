@@ -35,7 +35,7 @@ async fn test_ordered_replication() {
             }),
             idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-            vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
             operations: vec![inferadb_ledger_proto::proto::Operation {
                 op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                     inferadb_ledger_proto::proto::SetEntity {
@@ -89,7 +89,7 @@ async fn test_follower_state_consistency() {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
         operations: (0..10)
             .map(|i| inferadb_ledger_proto::proto::BatchWriteOperation {
                 operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -145,7 +145,7 @@ async fn test_replication_after_delay() {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -169,7 +169,7 @@ async fn test_replication_after_delay() {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {

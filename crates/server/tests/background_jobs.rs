@@ -52,7 +52,7 @@ async fn test_auto_recovery_job_starts() {
         create_health_client_from_url(cluster.any_endpoint()).await.expect("connect to health");
 
     let response = health_client
-        .check(proto::HealthCheckRequest { organization: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization: None, vault: None })
         .await
         .expect("health check");
 
@@ -68,7 +68,7 @@ async fn test_auto_recovery_job_starts() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let response = health_client
-        .check(proto::HealthCheckRequest { organization: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization: None, vault: None })
         .await
         .expect("second health check");
 
@@ -114,8 +114,8 @@ async fn test_vault_health_tracking() {
         .await
         .expect("create vault");
 
-    let vault_id = vault_response.into_inner().vault_id.map(|v| v.id).unwrap();
-    assert!(vault_id > 0, "vault should have valid ID");
+    let vault_slug = vault_response.into_inner().vault.map(|v| v.slug).unwrap();
+    assert!(vault_slug > 0, "vault should have valid ID");
 
     // Wait for auto-recovery job to potentially scan the new vault
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -125,7 +125,7 @@ async fn test_vault_health_tracking() {
         create_health_client_from_url(&leader_ep).await.expect("connect to health");
 
     let response = health_client
-        .check(proto::HealthCheckRequest { organization: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization: None, vault: None })
         .await
         .expect("health check after vault creation");
 
@@ -153,7 +153,7 @@ async fn test_learner_refresh_job_starts() {
             create_health_client_from_url(endpoint).await.expect("connect to health");
 
         let response = health_client
-            .check(proto::HealthCheckRequest { organization: None, vault_id: None })
+            .check(proto::HealthCheckRequest { organization: None, vault: None })
             .await
             .expect("health check");
 

@@ -479,7 +479,7 @@ spec:
 
 ```bash
 kubectl exec ledger-0 -- grpcurl -plaintext localhost:50051 \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   ledger.v1.AdminService/CreateSnapshot
 ```
 

@@ -50,7 +50,7 @@ use crate::{
 pub struct RelationshipQueryBuilder<'a> {
     client: &'a LedgerClient,
     organization: OrganizationSlug,
-    vault_id: i64,
+    vault_slug: u64,
     resource: Option<String>,
     relation: Option<String>,
     subject: Option<String>,
@@ -65,12 +65,12 @@ impl<'a> RelationshipQueryBuilder<'a> {
     pub(crate) fn new(
         client: &'a LedgerClient,
         organization: OrganizationSlug,
-        vault_id: i64,
+        vault_slug: u64,
     ) -> Self {
         Self {
             client,
             organization,
-            vault_id,
+            vault_slug,
             resource: None,
             relation: None,
             subject: None,
@@ -147,7 +147,7 @@ impl<'a> RelationshipQueryBuilder<'a> {
             page_token: self.page_token,
             consistency: self.consistency,
         };
-        self.client.list_relationships(self.organization, self.vault_id, opts).await
+        self.client.list_relationships(self.organization, self.vault_slug, opts).await
     }
 }
 
@@ -163,7 +163,7 @@ mod tests {
         let client = test_client().await;
         let builder = client.relationship_query(ORG, 2);
         assert_eq!(builder.organization, ORG);
-        assert_eq!(builder.vault_id, 2);
+        assert_eq!(builder.vault_slug, 2);
         assert!(builder.resource.is_none());
         assert!(builder.relation.is_none());
         assert!(builder.subject.is_none());

@@ -48,7 +48,7 @@ async fn create_organization(
 async fn create_vault(
     addr: std::net::SocketAddr,
     organization_id: i64,
-) -> Result<i64, Box<dyn std::error::Error>> {
+) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
@@ -61,9 +61,10 @@ async fn create_vault(
         })
         .await?;
 
-    let vault_id = response.into_inner().vault_id.map(|v| v.id).ok_or("No vault_id in response")?;
+    let vault_slug =
+        response.into_inner().vault.map(|v| v.slug).ok_or("No vault_slug in response")?;
 
-    Ok(vault_id)
+    Ok(vault_slug)
 }
 
 /// Writes an entity to _system organization.
@@ -77,7 +78,7 @@ async fn write_system_entity(
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 0 }), /* _system */
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 0 }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 0 }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -108,7 +109,7 @@ async fn write_system_entity(
 async fn read_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_id: i64,
+    vault_slug: u64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
@@ -117,7 +118,7 @@ async fn read_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -250,7 +251,7 @@ async fn test_delete_user_saga_state_transitions() {
     // Create organization for the user's membership
     let ns_id =
         create_organization(leader.addr, "delete-user-test-ns").await.expect("create organization");
-    let _vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let _vault_slug = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Create a DeleteUser saga
     let saga_id = "test-delete-user-1".to_string();

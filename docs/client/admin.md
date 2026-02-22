@@ -157,7 +157,7 @@ grpcurl -plaintext \
 
 | Field      | Type        | Description                                  |
 | ---------- | ----------- | -------------------------------------------- |
-| `vault_id` | VaultId     | Assigned vault identifier                    |
+| `vault`    | VaultSlug   | Assigned vault slug (Snowflake identifier)   |
 | `genesis`  | BlockHeader | Genesis block header with initial state root |
 
 ### DeleteVault
@@ -166,7 +166,7 @@ Marks a vault for deletion. Vault must be empty.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.AdminService/DeleteVault
 ```
 
@@ -176,7 +176,7 @@ Retrieves vault metadata and current state.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.AdminService/GetVault
 ```
 
@@ -185,7 +185,7 @@ grpcurl -plaintext \
 | Field              | Type                 | Description              |
 | ------------------ | -------------------- | ------------------------ |
 | `organization_slug`     | OrganizationSlug          | Parent organization         |
-| `vault_id`         | VaultId              | Vault identifier         |
+| `vault`            | VaultSlug            | Vault slug               |
 | `height`           | uint64               | Current block height     |
 | `state_root`       | Hash                 | Current state root       |
 | `nodes`            | NodeId[]             | Hosting nodes            |
@@ -276,7 +276,7 @@ Triggers a manual snapshot for a vault.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.AdminService/CreateSnapshot
 ```
 
@@ -295,12 +295,12 @@ Runs an integrity check on a vault.
 ```bash
 # Quick check
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}, "full_check": false}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}, "full_check": false}' \
   localhost:50051 ledger.v1.AdminService/CheckIntegrity
 
 # Full replay from genesis
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}, "full_check": true}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}, "full_check": true}' \
   localhost:50051 ledger.v1.AdminService/CheckIntegrity
 ```
 
@@ -317,7 +317,7 @@ Recovers a diverged vault by replaying transactions from block archive.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.AdminService/RecoverVault
 ```
 
@@ -341,7 +341,7 @@ Simulates vault divergence for testing recovery procedures. Forces a vault into 
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}, "expected_state_root": {"bytes": "AAAA..."}, "computed_state_root": {"bytes": "BBBB..."}, "at_height": 100}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}, "expected_state_root": {"bytes": "AAAA..."}, "computed_state_root": {"bytes": "BBBB..."}, "at_height": 100}' \
   localhost:50051 ledger.v1.AdminService/SimulateDivergence
 ```
 
@@ -350,7 +350,7 @@ grpcurl -plaintext \
 | Field                 | Type        | Description                          |
 | --------------------- | ----------- | ------------------------------------ |
 | `organization_slug`        | OrganizationSlug | Target organization                     |
-| `vault_id`            | VaultId     | Target vault                         |
+| `vault`               | VaultSlug   | Target vault                         |
 | `expected_state_root` | Hash        | Fake expected state root             |
 | `computed_state_root` | Hash        | Fake computed state root (different) |
 | `at_height`           | uint64      | Height where "divergence" occurred   |
@@ -371,7 +371,7 @@ Forces a garbage collection cycle for expired entities.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   localhost:50051 ledger.v1.AdminService/ForceGc
 ```
 

@@ -25,9 +25,9 @@ Verification ensures backups can be restored successfully.
 ### 1. Trigger Snapshot
 
 ```bash
-for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault_id.id'); do
+for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
     localhost:50051 ledger.v1.AdminService/CreateSnapshot
 done
 ```
@@ -35,9 +35,9 @@ done
 ### 2. Run Integrity Check
 
 ```bash
-for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault_id.id'); do
+for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}, \"full_check\": false}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}, \"full_check\": false}" \
     localhost:50051 ledger.v1.AdminService/CheckIntegrity
 done
 ```
@@ -123,17 +123,17 @@ grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListVaults
 
 ```bash
 # For each vault, run full integrity check
-for vault in $(grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault_id.id'); do
+for vault in $(grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   echo "Checking vault $vault..."
 
   # Get expected state from production
   PROD_TIP=$(grpcurl -plaintext localhost:50051 \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
     ledger.v1.ReadService/GetTip)
 
   # Get restored state
   RESTORE_TIP=$(grpcurl -plaintext localhost:50052 \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
     ledger.v1.ReadService/GetTip)
 
   # Compare (height may differ if snapshot is older)
@@ -142,7 +142,7 @@ for vault in $(grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListVau
 
   # Full integrity check
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}, \"full_check\": true}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}, \"full_check\": true}" \
     localhost:50052 ledger.v1.AdminService/CheckIntegrity
 done
 ```

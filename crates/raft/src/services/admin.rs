@@ -16,7 +16,7 @@ use inferadb_ledger_proto::proto::{
     ListBackupsRequest, ListBackupsResponse, ListOrganizationsRequest, ListOrganizationsResponse,
     ListVaultsRequest, ListVaultsResponse, NodeId, OrganizationSlug, RecoverVaultRequest,
     RecoverVaultResponse, RestoreBackupRequest, RestoreBackupResponse, ShardId,
-    UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto, VaultId,
+    UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto, VaultSlug as ProtoVaultSlug,
     admin_service_server::AdminService,
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer};
@@ -618,9 +618,13 @@ impl AdminService for AdminServiceImpl {
             policy
         });
 
-        // Submit create vault through Raft
+        // Generate vault slug via Snowflake before Raft proposal
+        let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug()
+            .map_err(|e| Status::internal(format!("Failed to generate vault slug: {}", e)))?;
+
         let ledger_request = LedgerRequest::CreateVault {
             organization_id,
+            slug: vault_slug,
             name: None, // CreateVaultRequest doesn't have name field
             retention_policy,
         };
@@ -653,8 +657,8 @@ impl AdminService for AdminServiceImpl {
             };
 
         match result.data {
-            LedgerResponse::VaultCreated { vault_id } => {
-                ctx.set_vault_id(vault_id.value());
+            LedgerResponse::VaultCreated { vault_id, slug } => {
+                ctx.set_vault_slug(slug.value());
                 ctx.set_success();
                 metrics::record_organization_operation(organization_id.value(), "admin");
                 metrics::record_organization_latency(
@@ -684,7 +688,7 @@ impl AdminService for AdminServiceImpl {
                 let genesis = BlockHeader {
                     height: 0,
                     organization: Some(OrganizationSlug { slug: org_slug.value() }),
-                    vault_id: Some(VaultId { id: vault_id.value() }),
+                    vault: Some(ProtoVaultSlug { slug: slug.value() }),
                     previous_hash: Some(Hash { value: ZERO_HASH.to_vec() }),
                     tx_merkle_root: Some(Hash {
                         value: ZERO_HASH.to_vec(), // Empty transaction list
@@ -700,7 +704,7 @@ impl AdminService for AdminServiceImpl {
                 };
 
                 Ok(Response::new(CreateVaultResponse {
-                    vault_id: Some(VaultId { id: vault_id.value() }),
+                    vault: Some(ProtoVaultSlug { slug: slug.value() }),
                     genesis: Some(genesis),
                 }))
             },
@@ -755,12 +759,12 @@ impl AdminService for AdminServiceImpl {
             })?;
 
         let vault_id =
-            req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing vault_id");
-                Status::invalid_argument("Missing vault_id")
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_target(org_slug_val, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug_val, vault_slug_val);
 
         // Submit delete vault through Raft
         let ledger_request = LedgerRequest::DeleteVault { organization_id, vault_id };
@@ -887,25 +891,25 @@ impl AdminService for AdminServiceImpl {
             })?;
 
         let vault_id =
-            req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing vault_id");
-                Status::invalid_argument("Missing vault_id")
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_target(org_slug_val, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug_val, vault_slug_val);
 
         // Get vault metadata and height
         let vault_meta = self.applied_state.get_vault(organization_id, vault_id);
         let height = self.applied_state.vault_height(organization_id, vault_id);
 
         match vault_meta {
-            Some(_vault) => {
+            Some(vault) => {
                 ctx.set_block_height(height);
                 ctx.set_success();
                 let org_slug = slug_resolver.resolve_slug(organization_id)?;
                 Ok(Response::new(GetVaultResponse {
                     organization: Some(OrganizationSlug { slug: org_slug.value() }),
-                    vault_id: Some(VaultId { id: vault_id.value() }),
+                    vault: Some(ProtoVaultSlug { slug: vault.slug.value() }),
                     height,
                     state_root: None,
                     nodes: vec![],
@@ -948,7 +952,7 @@ impl AdminService for AdminServiceImpl {
                     let org_slug = slug_resolver.resolve_slug(v.organization_id)?;
                     Ok(inferadb_ledger_proto::proto::GetVaultResponse {
                         organization: Some(OrganizationSlug { slug: org_slug.value() }),
-                        vault_id: Some(VaultId { id: v.vault_id.value() }),
+                        vault: Some(ProtoVaultSlug { slug: v.slug.value() }),
                         height,
                         state_root: None,
                         nodes: vec![],
@@ -1058,13 +1062,13 @@ impl AdminService for AdminServiceImpl {
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let org_slug_val = req.organization.as_ref().map(|n| n.slug);
         let organization_id = slug_resolver.extract_and_resolve_optional(&req.organization)?;
-        let vault_id = req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id));
+        let vault_id = slug_resolver.extract_and_resolve_vault_optional(&req.vault)?;
 
         if let Some(slug_val) = org_slug_val {
             ctx.set_organization(slug_val);
         }
-        if let Some(v_id) = vault_id {
-            ctx.set_vault_id(v_id.value());
+        if let Some(ref v) = req.vault {
+            ctx.set_vault_slug(v.slug);
         }
 
         // Get all vault heights to check
@@ -1763,12 +1767,12 @@ impl AdminService for AdminServiceImpl {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
         let vault_id =
-            req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "vault_id required");
-                Status::invalid_argument("vault_id required")
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_target(org_slug_val, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug_val, vault_slug_val);
 
         // Check current vault health
         let current_health = self.applied_state.vault_health(organization_id, vault_id);
@@ -2112,12 +2116,12 @@ impl AdminService for AdminServiceImpl {
             })?;
 
         let vault_id =
-            req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing vault_id");
-                Status::invalid_argument("Missing vault_id")
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_target(org_slug_val, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug_val, vault_slug_val);
 
         // Extract fake state roots for the simulated divergence
         let expected_root: [u8; 32] = req
@@ -2253,10 +2257,13 @@ impl AdminService for AdminServiceImpl {
         // Determine which vaults to scan
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let vault_heights: Vec<((DomainOrganizationId, DomainVaultId), u64)> =
-            if let (Some(ref org_slug_proto), Some(ref v)) = (req.organization, req.vault_id) {
+            if let (Some(ref org_slug_proto), Some(ref vault_slug_proto)) =
+                (req.organization, req.vault)
+            {
                 let org_id = slug_resolver.extract_and_resolve(&Some(*org_slug_proto))?;
-                let v_id = DomainVaultId::new(v.id);
-                ctx.set_target(org_slug_proto.slug, v_id.value());
+                let v_id = slug_resolver
+                    .resolve_vault(inferadb_ledger_types::VaultSlug::new(vault_slug_proto.slug))?;
+                ctx.set_target(org_slug_proto.slug, vault_slug_proto.slug);
                 // Single vault
                 let height = self.applied_state.vault_height(org_id, v_id);
                 vec![((org_id, v_id), height)]

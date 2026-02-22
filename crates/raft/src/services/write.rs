@@ -413,12 +413,22 @@ impl WriteServiceImpl {
             return (None, None);
         };
 
-        // Resolve internal ID to slug for response construction
-        let slug = self.applied_state.as_ref().and_then(|s| s.resolve_id_to_slug(organization_id));
+        // Resolve internal IDs to slugs for response construction
+        let org_slug =
+            self.applied_state.as_ref().and_then(|s| s.resolve_id_to_slug(organization_id));
+        let vault_slug =
+            self.applied_state.as_ref().and_then(|s| s.resolve_vault_id_to_slug(vault_id));
 
         // Use the proof module's SNAFU-based implementation
-        match proof::generate_write_proof(archive, organization_id, slug, vault_id, vault_height, 0)
-        {
+        match proof::generate_write_proof(
+            archive,
+            organization_id,
+            org_slug,
+            vault_id,
+            vault_slug,
+            vault_height,
+            0,
+        ) {
             Ok(write_proof) => (Some(write_proof.block_header), Some(write_proof.tx_proof)),
             Err(e) => {
                 // Log with appropriate severity based on error type
@@ -529,7 +539,16 @@ impl WriteService for WriteServiceImpl {
             )
         };
 
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id = if let Some(ref state) = self.applied_state {
+            SlugResolver::new(state.clone()).extract_and_resolve_vault(&req.vault)?
+        } else {
+            VaultId::new(
+                req.vault
+                    .as_ref()
+                    .map(|v| v.slug as i64)
+                    .ok_or_else(|| Status::invalid_argument("Missing vault"))?,
+            )
+        };
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -546,7 +565,8 @@ impl WriteService for WriteServiceImpl {
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        ctx.set_target(org_slug, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug, vault_slug_val);
 
         // Populate write operation fields
         let operation_types = Self::extract_operation_types(&req.operations);
@@ -941,7 +961,16 @@ impl WriteService for WriteServiceImpl {
             )
         };
 
-        let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
+        let vault_id = if let Some(ref state) = self.applied_state {
+            SlugResolver::new(state.clone()).extract_and_resolve_vault(&req.vault)?
+        } else {
+            VaultId::new(
+                req.vault
+                    .as_ref()
+                    .map(|v| v.slug as i64)
+                    .ok_or_else(|| Status::invalid_argument("Missing vault"))?,
+            )
+        };
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -952,7 +981,8 @@ impl WriteService for WriteServiceImpl {
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        ctx.set_target(org_slug, vault_id.value());
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(org_slug, vault_slug_val);
 
         // Flatten all operations from all groups
         let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =

@@ -11,7 +11,7 @@ use std::{fmt, io::Cursor};
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
 use inferadb_ledger_types::{
-    Hash, OrganizationId, OrganizationSlug, SetCondition, ShardId, Transaction, VaultId,
+    Hash, OrganizationId, OrganizationSlug, SetCondition, ShardId, Transaction, VaultId, VaultSlug,
 };
 use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,8 @@ pub enum LedgerRequest {
     CreateVault {
         /// Organization to create the vault in.
         organization_id: OrganizationId,
+        /// External slug for API lookups (generated before Raft proposal).
+        slug: VaultSlug,
         /// Optional vault name (for display).
         name: Option<String>,
         /// Block retention policy for this vault.
@@ -232,8 +234,10 @@ pub enum LedgerResponse {
 
     /// Vault created.
     VaultCreated {
-        /// Assigned vault ID.
+        /// Assigned internal vault ID.
         vault_id: VaultId,
+        /// External Snowflake slug for API lookups.
+        slug: VaultSlug,
     },
 
     /// Organization deleted.
@@ -352,8 +356,8 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
                 write!(f, "OrganizationCreated(id={}, shard={})", organization_id, shard_id)
             },
-            LedgerResponse::VaultCreated { vault_id } => {
-                write!(f, "VaultCreated(id={})", vault_id)
+            LedgerResponse::VaultCreated { vault_id, slug } => {
+                write!(f, "VaultCreated(id={}, slug={})", vault_id, slug)
             },
             LedgerResponse::UserCreated { user_id } => {
                 write!(f, "UserCreated(id={})", user_id)
@@ -482,7 +486,7 @@ mod tests {
     // ============================================
 
     mod proptest_raft_log {
-        use inferadb_ledger_types::{OrganizationId, ShardId, VaultId};
+        use inferadb_ledger_types::{OrganizationId, ShardId, VaultId, VaultSlug};
         use openraft::{CommittedLeaderId, LogId};
         use proptest::prelude::*;
 
@@ -634,6 +638,7 @@ mod tests {
                     },
                     1 => LedgerRequest::CreateVault {
                         organization_id,
+                        slug: VaultSlug::new(42),
                         name: Some(name.clone()),
                         retention_policy: None,
                     },

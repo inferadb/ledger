@@ -75,11 +75,17 @@ pub enum TableId {
     // ========================================================================
     /// Organization slug → internal ID mapping for external identifier resolution.
     OrganizationSlugIndex = 15,
+
+    // ========================================================================
+    // Vault Index Tables
+    // ========================================================================
+    /// Vault slug → internal ID mapping for external identifier resolution.
+    VaultSlugIndex = 16,
 }
 
 impl TableId {
     /// Total number of tables.
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
 
     /// Returns the key type for this table.
     #[inline]
@@ -109,6 +115,9 @@ impl TableId {
 
             // u64 keys (organization slug → internal ID)
             Self::OrganizationSlugIndex => KeyType::U64,
+
+            // u64 keys (vault slug → internal ID)
+            Self::VaultSlugIndex => KeyType::U64,
         }
     }
 
@@ -132,6 +141,7 @@ impl TableId {
             Self::TimeTravelConfig => "time_travel_config",
             Self::TimeTravelIndex => "time_travel_index",
             Self::OrganizationSlugIndex => "organization_slug_index",
+            Self::VaultSlugIndex => "vault_slug_index",
         }
     }
 
@@ -154,6 +164,7 @@ impl TableId {
             Self::TimeTravelConfig,
             Self::TimeTravelIndex,
             Self::OrganizationSlugIndex,
+            Self::VaultSlugIndex,
         ]
     }
 
@@ -177,6 +188,7 @@ impl TableId {
             13 => Some(Self::TimeTravelConfig),
             14 => Some(Self::TimeTravelIndex),
             15 => Some(Self::OrganizationSlugIndex),
+            16 => Some(Self::VaultSlugIndex),
             _ => None,
         }
     }
@@ -334,6 +346,14 @@ impl Table for OrganizationSlugIndex {
     type ValueType = Vec<u8>;
 }
 
+/// Vault slug index: maps external vault slugs to internal vault IDs.
+pub struct VaultSlugIndex;
+impl Table for VaultSlugIndex {
+    const ID: TableId = TableId::VaultSlugIndex;
+    type KeyType = u64;
+    type ValueType = Vec<u8>;
+}
+
 // ============================================================================
 // Table Directory Entry
 // ============================================================================
@@ -341,7 +361,7 @@ impl Table for OrganizationSlugIndex {
 /// On-disk representation of a table's metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct TableEntry {
-    /// Table identifier (0-15).
+    /// Table identifier (0-16).
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,
