@@ -7,7 +7,8 @@
 //! ## Character Whitelists
 //!
 //! - Entity keys: `[a-zA-Z0-9:/_.-]` — safe for storage paths and log output.
-//! - Organization names: `[a-z0-9-]{1,63}` — DNS-safe labels for routing.
+//! - Organization names: Unicode display names (configurable character limit). No control
+//!   characters, no leading/trailing whitespace, no consecutive whitespace.
 //! - Relationship strings: `[a-zA-Z0-9:/_.-#]` — same as keys plus `#` for subject fragments (e.g.,
 //!   `user:456#member`).
 
@@ -96,18 +97,20 @@ pub fn validate_value(value: &[u8], config: &ValidationConfig) -> Result<(), Val
     Ok(())
 }
 
-/// Validates an organization name against configured limits and DNS-safe whitelist.
+/// Validates an organization name against configured limits.
 ///
 /// Organization names must:
 /// - Be non-empty
-/// - Not exceed `config.max_organization_name_bytes` in UTF-8 byte length
-/// - Contain only `[a-z0-9-]`
-/// - Not start or end with a hyphen
+/// - Not exceed `config.max_organization_name_chars` in Unicode character count
+/// - Contain no ASCII control characters (0x00-0x1F, 0x7F)
+/// - Have no leading or trailing whitespace
+/// - Contain no consecutive whitespace
+///
+/// Unicode letters, digits, punctuation, and single spaces are all permitted.
 ///
 /// # Errors
 ///
-/// Returns [`ValidationError`] if the name is empty, exceeds `max_organization_name_bytes`,
-/// starts or ends with a hyphen, or contains characters outside `[a-z0-9-]`.
+/// Returns [`ValidationError`] if the name violates any constraint.
 pub fn validate_organization_name(
     name: &str,
     config: &ValidationConfig,
@@ -118,32 +121,54 @@ pub fn validate_organization_name(
             constraint: "must not be empty".to_string(),
         });
     }
-    if name.len() > config.max_organization_name_bytes {
+
+    let char_count = name.chars().count();
+    if char_count > config.max_organization_name_chars {
         return Err(ValidationError {
             field: "organization_name".to_string(),
             constraint: format!(
-                "length {} bytes exceeds maximum {} bytes",
-                name.len(),
-                config.max_organization_name_bytes
+                "length {} characters exceeds maximum {} characters",
+                char_count, config.max_organization_name_chars
             ),
         });
     }
-    if name.starts_with('-') || name.ends_with('-') {
+
+    if name.starts_with(char::is_whitespace) {
         return Err(ValidationError {
             field: "organization_name".to_string(),
-            constraint: "must not start or end with a hyphen".to_string(),
+            constraint: "must not have leading whitespace".to_string(),
         });
     }
-    if let Some(pos) = name.find(|c: char| !is_organization_char(c)) {
+
+    if name.ends_with(char::is_whitespace) {
         return Err(ValidationError {
             field: "organization_name".to_string(),
-            constraint: format!(
-                "contains invalid character {:?} at byte offset {}; allowed: [a-z0-9-]",
-                name[pos..].chars().next().unwrap_or('\0'),
-                pos
-            ),
+            constraint: "must not have trailing whitespace".to_string(),
         });
     }
+
+    if let Some(offset) = name.chars().position(|c| c.is_ascii_control()) {
+        return Err(ValidationError {
+            field: "organization_name".to_string(),
+            constraint: format!("contains ASCII control character at character offset {offset}"),
+        });
+    }
+
+    let mut prev_was_whitespace = false;
+    for (i, c) in name.chars().enumerate() {
+        if c.is_whitespace() {
+            if prev_was_whitespace {
+                return Err(ValidationError {
+                    field: "organization_name".to_string(),
+                    constraint: format!("contains consecutive whitespace at character offset {i}"),
+                });
+            }
+            prev_was_whitespace = true;
+        } else {
+            prev_was_whitespace = false;
+        }
+    }
+
     Ok(())
 }
 
@@ -246,11 +271,6 @@ pub fn validate_batch_payload_bytes(
 /// Checks if a character is allowed in entity keys.
 fn is_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '_' | '.' | '-')
-}
-
-/// Checks if a character is allowed in organization names.
-fn is_organization_char(c: char) -> bool {
-    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
 }
 
 /// Checks if a character is allowed in relationship strings.
@@ -385,13 +405,56 @@ mod tests {
     #[test]
     fn test_validate_organization_name_valid_simple() {
         let config = default_config();
+        assert!(validate_organization_name("My Organization", &config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_organization_name_valid_lowercase_hyphen() {
+        let config = default_config();
         assert!(validate_organization_name("my-organization", &config).is_ok());
     }
 
     #[test]
     fn test_validate_organization_name_valid_digits() {
         let config = default_config();
-        assert!(validate_organization_name("ns-123", &config).is_ok());
+        assert!(validate_organization_name("Org 123", &config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_organization_name_with_spaces() {
+        let config = default_config();
+        assert!(validate_organization_name("Microsoft Corporation", &config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_organization_name_punctuation_valid() {
+        let config = default_config();
+        assert!(validate_organization_name("OpenAI, LLC.", &config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_organization_name_unicode_valid() {
+        let config = default_config();
+        assert!(
+            validate_organization_name("Soci\u{00e9}t\u{00e9} G\u{00e9}n\u{00e9}rale", &config)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_organization_name_mixed_scripts() {
+        let config = default_config();
+        assert!(validate_organization_name("\u{30C8}\u{30E8}\u{30BF}", &config).is_ok());
+        assert!(
+            validate_organization_name("\u{041C}\u{043E}\u{0441}\u{043A}\u{0432}\u{0430}", &config)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_organization_name_single_char() {
+        let config = default_config();
+        assert!(validate_organization_name("a", &config).is_ok());
     }
 
     #[test]
@@ -403,73 +466,75 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_organization_name_uppercase() {
-        let config = default_config();
-        let err = validate_organization_name("MyOrganization", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
-    }
-
-    #[test]
-    fn test_validate_organization_name_starts_with_hyphen() {
-        let config = default_config();
-        let err = validate_organization_name("-ns", &config).unwrap_err();
-        assert!(err.constraint.contains("hyphen"));
-    }
-
-    #[test]
-    fn test_validate_organization_name_ends_with_hyphen() {
-        let config = default_config();
-        let err = validate_organization_name("ns-", &config).unwrap_err();
-        assert!(err.constraint.contains("hyphen"));
-    }
-
-    #[test]
     fn test_validate_organization_name_exactly_at_limit() {
         let config =
-            ValidationConfig { max_organization_name_bytes: 10, ..ValidationConfig::default() };
+            ValidationConfig { max_organization_name_chars: 10, ..ValidationConfig::default() };
+        // 10 ASCII characters = 10 chars
         assert!(validate_organization_name("a234567890", &config).is_ok());
     }
 
     #[test]
-    fn test_validate_organization_name_one_byte_over_limit() {
+    fn test_validate_organization_name_one_char_over_limit() {
         let config =
-            ValidationConfig { max_organization_name_bytes: 10, ..ValidationConfig::default() };
+            ValidationConfig { max_organization_name_chars: 10, ..ValidationConfig::default() };
         let err = validate_organization_name("a2345678901", &config).unwrap_err();
         assert!(err.constraint.contains("exceeds maximum"));
+        assert!(err.constraint.contains("characters"));
     }
 
     #[test]
-    fn test_validate_organization_name_underscore_rejected() {
-        let config = default_config();
-        let err = validate_organization_name("my_organization", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
+    fn test_validate_organization_name_multibyte_char_limit() {
+        // 3 CJK characters = 3 chars (9 UTF-8 bytes)
+        let config =
+            ValidationConfig { max_organization_name_chars: 3, ..ValidationConfig::default() };
+        assert!(validate_organization_name("\u{6771}\u{4EAC}\u{90FD}", &config).is_ok());
+
+        // 4 CJK characters exceeds limit of 3
+        let err =
+            validate_organization_name("\u{6771}\u{4EAC}\u{90FD}\u{5E02}", &config).unwrap_err();
+        assert!(err.constraint.contains("4 characters exceeds maximum 3"));
     }
 
     #[test]
-    fn test_validate_organization_name_dot_rejected() {
+    fn test_validate_organization_name_leading_space_rejected() {
         let config = default_config();
-        let err = validate_organization_name("my.organization", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
+        let err = validate_organization_name(" org", &config).unwrap_err();
+        assert!(err.constraint.contains("leading whitespace"));
     }
 
     #[test]
-    fn test_validate_organization_name_unicode_rejected() {
+    fn test_validate_organization_name_trailing_space_rejected() {
         let config = default_config();
-        let err = validate_organization_name("n\u{00e9}space", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
+        let err = validate_organization_name("org ", &config).unwrap_err();
+        assert!(err.constraint.contains("trailing whitespace"));
     }
 
     #[test]
-    fn test_validate_organization_name_control_char_rejected() {
+    fn test_validate_organization_name_consecutive_spaces_rejected() {
         let config = default_config();
-        let err = validate_organization_name("ns\x00name", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
+        let err = validate_organization_name("my  org", &config).unwrap_err();
+        assert!(err.constraint.contains("consecutive whitespace"));
     }
 
     #[test]
-    fn test_validate_organization_name_single_char() {
+    fn test_validate_organization_name_tab_rejected() {
         let config = default_config();
-        assert!(validate_organization_name("a", &config).is_ok());
+        let err = validate_organization_name("org\tname", &config).unwrap_err();
+        assert!(err.constraint.contains("control character"));
+    }
+
+    #[test]
+    fn test_validate_organization_name_newline_rejected() {
+        let config = default_config();
+        let err = validate_organization_name("org\nname", &config).unwrap_err();
+        assert!(err.constraint.contains("control character"));
+    }
+
+    #[test]
+    fn test_validate_organization_name_null_byte_rejected() {
+        let config = default_config();
+        let err = validate_organization_name("org\x00name", &config).unwrap_err();
+        assert!(err.constraint.contains("control character"));
     }
 
     // =========================================================================

@@ -464,8 +464,8 @@ const fn default_max_batch_payload_bytes() -> usize {
     100 * 1024 * 1024 // 100 MB
 }
 
-/// Default maximum organization name length in bytes.
-const fn default_max_organization_name_bytes() -> usize {
+/// Default maximum organization name length in Unicode characters.
+const fn default_max_organization_name_chars() -> usize {
     256
 }
 
@@ -516,12 +516,17 @@ pub struct ValidationConfig {
     /// Must be >= 1. Default: 100 MB.
     #[serde(default = "default_max_batch_payload_bytes")]
     pub max_batch_payload_bytes: usize,
-    /// Maximum organization name length in bytes.
+    /// Maximum organization name length in Unicode characters.
     ///
-    /// Organization names must also match `[a-z0-9-]{1,N}`.
+    /// Organization names may contain any Unicode characters except ASCII
+    /// control characters (0x00-0x1F, 0x7F). Leading/trailing whitespace
+    /// and consecutive whitespace are rejected.
     /// Must be >= 1. Default: 256.
-    #[serde(default = "default_max_organization_name_bytes")]
-    pub max_organization_name_bytes: usize,
+    #[serde(
+        default = "default_max_organization_name_chars",
+        alias = "max_organization_name_bytes"
+    )]
+    pub max_organization_name_chars: usize,
     /// Maximum relationship string length in bytes.
     ///
     /// Applies to resource, relation, and subject fields.
@@ -537,7 +542,7 @@ impl Default for ValidationConfig {
             max_value_bytes: default_max_value_bytes(),
             max_operations_per_write: default_max_operations_per_write(),
             max_batch_payload_bytes: default_max_batch_payload_bytes(),
-            max_organization_name_bytes: default_max_organization_name_bytes(),
+            max_organization_name_chars: default_max_organization_name_chars(),
             max_relationship_string_bytes: default_max_relationship_string_bytes(),
         }
     }
@@ -556,8 +561,8 @@ impl ValidationConfig {
         #[builder(default = default_max_value_bytes())] max_value_bytes: usize,
         #[builder(default = default_max_operations_per_write())] max_operations_per_write: usize,
         #[builder(default = default_max_batch_payload_bytes())] max_batch_payload_bytes: usize,
-        #[builder(default = default_max_organization_name_bytes())]
-        max_organization_name_bytes: usize,
+        #[builder(default = default_max_organization_name_chars())]
+        max_organization_name_chars: usize,
         #[builder(default = default_max_relationship_string_bytes())]
         max_relationship_string_bytes: usize,
     ) -> Result<Self, ConfigError> {
@@ -566,7 +571,7 @@ impl ValidationConfig {
             max_value_bytes,
             max_operations_per_write,
             max_batch_payload_bytes,
-            max_organization_name_bytes,
+            max_organization_name_chars,
             max_relationship_string_bytes,
         };
         config.validate()?;
@@ -603,9 +608,9 @@ impl ValidationConfig {
                 message: "max_batch_payload_bytes must be >= 1".to_string(),
             });
         }
-        if self.max_organization_name_bytes == 0 {
+        if self.max_organization_name_chars == 0 {
             return Err(ConfigError::Validation {
-                message: "max_organization_name_bytes must be >= 1".to_string(),
+                message: "max_organization_name_chars must be >= 1".to_string(),
             });
         }
         if self.max_relationship_string_bytes == 0 {

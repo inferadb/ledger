@@ -217,18 +217,6 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 self.write_entity(SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, &ns_key, &ns_value)
                     .await?;
 
-                // Write organization name index
-                let name_idx_key = format!("_idx:organization:name:{}", saga.input.org_name);
-                let name_idx_value =
-                    serde_json::json!({ "organization_id": organization_id.value() });
-                self.write_entity(
-                    SYSTEM_ORGANIZATION_ID,
-                    SYSTEM_VAULT_ID,
-                    &name_idx_key,
-                    &name_idx_value,
-                )
-                .await?;
-
                 saga.transition(CreateOrgSagaState::OrganizationCreated {
                     user_id,
                     organization_id,
@@ -609,7 +597,7 @@ mod tests {
         let input = CreateOrgInput {
             user_name: "Alice".to_string(),
             user_email: "alice@example.com".to_string(),
-            org_name: "acme".to_string(),
+            org_name: "Acme Corporation".to_string(),
             existing_user_id: None,
         };
 

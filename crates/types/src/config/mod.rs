@@ -1104,7 +1104,7 @@ mod tests {
             .max_value_bytes(1024)
             .max_operations_per_write(500)
             .max_batch_payload_bytes(50 * 1024 * 1024)
-            .max_organization_name_bytes(128)
+            .max_organization_name_chars(128)
             .max_relationship_string_bytes(512)
             .build()
             .unwrap();
@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(config.max_value_bytes, 1024);
         assert_eq!(config.max_operations_per_write, 500);
         assert_eq!(config.max_batch_payload_bytes, 50 * 1024 * 1024);
-        assert_eq!(config.max_organization_name_bytes, 128);
+        assert_eq!(config.max_organization_name_chars, 128);
         assert_eq!(config.max_relationship_string_bytes, 512);
     }
 
@@ -1141,8 +1141,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_config_max_organization_name_bytes_zero() {
-        let result = ValidationConfig::builder().max_organization_name_bytes(0).build();
+    fn test_validation_config_max_organization_name_chars_zero() {
+        let result = ValidationConfig::builder().max_organization_name_chars(0).build();
         assert!(result.is_err());
     }
 

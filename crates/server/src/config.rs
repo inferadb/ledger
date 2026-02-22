@@ -1130,8 +1130,8 @@ pub fn generate_runtime_config_example() -> String {
         v.max_batch_payload_bytes
     ));
     output.push_str(&format!(
-        "max_organization_name_bytes = {} # Maximum organization name length\n",
-        v.max_organization_name_bytes
+        "max_organization_name_chars = {} # Maximum organization name length (characters)\n",
+        v.max_organization_name_chars
     ));
     output.push_str(&format!(
         "max_relationship_string_bytes = {} # Maximum relationship string length\n",

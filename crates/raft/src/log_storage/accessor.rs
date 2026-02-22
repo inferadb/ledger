@@ -57,17 +57,6 @@ impl AppliedStateAccessor {
             .cloned()
     }
 
-    /// Returns organization metadata by name.
-    pub fn get_organization_by_name(&self, name: &str) -> Option<OrganizationMeta> {
-        use inferadb_ledger_state::system::OrganizationStatus;
-        self.state
-            .read()
-            .organizations
-            .values()
-            .find(|ns| ns.status != OrganizationStatus::Deleted && ns.name == name)
-            .cloned()
-    }
-
     /// Lists all active organizations.
     pub fn list_organizations(&self) -> Vec<OrganizationMeta> {
         use inferadb_ledger_state::system::OrganizationStatus;
