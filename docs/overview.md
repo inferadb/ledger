@@ -14,20 +14,20 @@ Ledger is InferaDB's storage layer—a blockchain database for cryptographically
 
 | Term             | Definition                                                                                                                           |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **Namespace**    | Storage unit per organization. Contains entities, vaults, relationships. Isolated with separate Raft consensus per shard.            |
-| **Vault**        | Relationship store within a namespace. Maintains its own cryptographic chain (separate `state_root`, `previous_hash`, block height). |
-| **Entity**       | Key-value data in a namespace (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                       |
+| **Organization**    | Storage unit per organization. Contains entities, vaults, relationships. Isolated with separate Raft consensus per shard.            |
+| **Vault**        | Relationship store within an organization. Maintains its own cryptographic chain (separate `state_root`, `previous_hash`, block height). |
+| **Entity**       | Key-value data in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                       |
 | **Relationship** | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                          |
-| **`_system`**    | Special namespace for global data: user accounts and namespace routing. Replicated to all nodes.                                     |
+| **`_system`**    | Special organization for global data: user accounts and organization routing. Replicated to all nodes.                                     |
 
 ## Hierarchy
 
 ```
-_system namespace (global)
+_system organization (global)
 ├── Users (global accounts)
-└── Namespace routing table
+└── Organization routing table
 
-org namespace (per-organization)
+org (per-organization)
 ├── Organization metadata
 ├── Members, Teams, Clients
 ├── Vault A (relationships + grants) ─── separate chain
@@ -39,15 +39,15 @@ org namespace (per-organization)
 
 | Level     | Isolated                          | Shared                 |
 | --------- | --------------------------------- | ---------------------- |
-| Namespace | Entities, vaults, keys            | Shard (Raft consensus) |
-| Vault     | Cryptographic chain, `state_root` | Namespace storage      |
+| Organization | Entities, vaults, keys            | Shard (Raft consensus) |
+| Vault     | Cryptographic chain, `state_root` | Organization storage      |
 | Shard     | Physical nodes                    | Cluster                |
 
-Namespaces share physical nodes and Raft groups but maintain independent data. Vaults within a namespace share storage but maintain separate cryptographic chains.
+Organizations share physical nodes and Raft groups but maintain independent data. Vaults within an organization share storage but maintain separate cryptographic chains.
 
 ## Shard Groups
 
-A naive 1:1 namespace-to-Raft mapping doesn't scale. Multiple namespaces share a single Raft group (shard). Within each namespace, vaults maintain independent cryptographic chains.
+A naive 1:1 organization-to-Raft mapping doesn't scale. Multiple organizations share a single Raft group (shard). Within each organization, vaults maintain independent cryptographic chains.
 
 **What's shared (per shard group):**
 
@@ -63,7 +63,7 @@ A naive 1:1 namespace-to-Raft mapping doesn't scale. Multiple namespaces share a
 
 ### Scaling
 
-| Namespaces | Vaults (avg 3/ns) | Vaults/Shard | Shard Groups | Raft Machines | Heartbeats |
+| Organizations | Vaults (avg 3/ns) | Vaults/Shard | Shard Groups | Raft Machines | Heartbeats |
 | ---------- | ----------------- | ------------ | ------------ | ------------- | ---------- |
 | 1,000      | 3,000             | 100          | 30           | 90            | ~600/sec   |
 | 10,000     | 30,000            | 100          | 300          | 900           | ~6K/sec    |
@@ -71,10 +71,10 @@ A naive 1:1 namespace-to-Raft mapping doesn't scale. Multiple namespaces share a
 
 ### Shard Assignment
 
-- New namespaces assigned to shard with lowest load
-- All vaults within a namespace reside on the same shard (locality)
-- Namespaces can migrate between shards (coordinated via `_system`)
-- High-traffic namespaces can be promoted to dedicated shards
+- New organizations assigned to shard with lowest load
+- All vaults within an organization reside on the same shard (locality)
+- Organizations can migrate between shards (coordinated via `_system`)
+- High-traffic organizations can be promoted to dedicated shards
 
 ## Block Structure
 
@@ -93,7 +93,7 @@ struct ShardBlock {
 }
 
 struct VaultEntry {
-    namespace_id: NamespaceId,
+    organization_slug: OrganizationSlug,
     vault_id: VaultId,
     vault_height: u64,
     previous_vault_hash: Hash,
@@ -103,7 +103,7 @@ struct VaultEntry {
 }
 ```
 
-Each `VaultEntry` computes `tx_merkle_root` from its own transactions only. Clients verify transaction inclusion without accessing other namespaces' data.
+Each `VaultEntry` computes `tx_merkle_root` from its own transactions only. Clients verify transaction inclusion without accessing other organizations' data.
 
 **Physical storage**: ShardBlocks only (single write path). VaultBlocks extracted on-demand via O(1) offset lookup.
 
@@ -113,7 +113,7 @@ Ledger uses **leader-assigned sequential IDs**. The leader assigns IDs during bl
 
 | ID Type       | Size     | Generated By  | Strategy                                             |
 | ------------- | -------- | ------------- | ---------------------------------------------------- |
-| `NamespaceId` | int64    | Ledger Leader | Sequential from `_meta:seq:namespace` (0 = \_system) |
+| `OrganizationSlug` | int64    | Ledger Leader | Sequential from `_meta:seq:organization` (0 = \_system) |
 | `VaultId`     | int64    | Ledger Leader | Sequential from `_meta:seq:vault`                    |
 | `UserId`      | int64    | Ledger Leader | Sequential from `_meta:seq:user`                     |
 | `UserEmailId` | int64    | Ledger Leader | Sequential from `_meta:seq:user_email`               |
@@ -122,10 +122,10 @@ Ledger uses **leader-assigned sequential IDs**. The leader assigns IDs during bl
 | `NodeId`      | string   | Admin         | Configuration (hostname or UUID)                     |
 | `ShardId`     | uint32   | Admin         | Sequential at shard creation                         |
 
-**Sequence counters** stored in `_system` namespace:
+**Sequence counters** stored in `_system` organization:
 
 ```
-_meta:seq:namespace    → next NamespaceId (starts at 1; 0 = _system)
+_meta:seq:organization    → next OrganizationSlug (starts at 1; 0 = _system)
 _meta:seq:vault        → next VaultId
 _meta:seq:user         → next UserId
 _meta:seq:user_email   → next UserEmailId
@@ -141,7 +141,7 @@ _meta:seq:email_verify → next TokenId
 
 ## Key Patterns
 
-### In `_system` (namespace_id = 0)
+### In `_system` (organization_slug = 0)
 
 | Entity Type       | Key Pattern                  | Example                        |
 | ----------------- | ---------------------------- | ------------------------------ |
@@ -149,11 +149,11 @@ _meta:seq:email_verify → next TokenId
 | User email        | `user_email:{id}`            | `user_email:1`                 |
 | Email index       | `_idx:email:{email}`         | `_idx:email:alice@example.com` |
 | User emails index | `_idx:user_emails:{user_id}` | `_idx:user_emails:1`           |
-| Namespace routing | `ns:{namespace_id}`          | `ns:1`                         |
+| Organization routing | `ns:{organization_slug}`          | `ns:1`                         |
 | Node info         | `node:{id}`                  | `node:A`                       |
 | Sequence counter  | `_meta:seq:{entity_type}`    | `_meta:seq:user`               |
 
-### In Organization Namespace
+### In an Organization
 
 | Entity Type        | Key Pattern                           | Example                       |
 | ------------------ | ------------------------------------- | ----------------------------- |
@@ -194,12 +194,12 @@ Ledger offers two read consistency levels:
 ```bash
 # Eventually consistent read (default)
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "key": "user:alice"}' \
+  -d '{"organization_slug": {"id": "1"}, "key": "user:alice"}' \
   localhost:50051 ledger.v1.ReadService/Read
 
 # Linearizable read
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "key": "user:alice", "linearizable": true}' \
+  -d '{"organization_slug": {"id": "1"}, "key": "user:alice", "linearizable": true}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 

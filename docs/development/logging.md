@@ -12,7 +12,7 @@ let mut ctx = RequestContext::new("MyService", "my_method");
 
 // Fields populated as information becomes available
 ctx.set_client_id(&req.client_id);
-ctx.set_namespace_id(req.namespace_id);
+ctx.set_organization_slug(req.organization_slug);
 
 // Outcome set before return
 ctx.set_success();
@@ -83,7 +83,7 @@ Add fields as information becomes available during request processing:
 // From request proto
 let req = request.into_inner();
 ctx.set_client_id(&req.client_id);
-ctx.set_namespace_id(req.namespace_id);
+ctx.set_organization_slug(req.organization_slug);
 
 // System context (from Raft state)
 ctx.set_system_context(
@@ -168,7 +168,7 @@ async fn read(
 
     // 2. Populate request fields
     ctx.set_client_id(&req.client_id);
-    ctx.set_namespace_id(req.namespace_id);
+    ctx.set_organization_slug(req.organization_slug);
     ctx.set_vault_id(req.vault_id);
     ctx.set_key(&req.key);
     ctx.set_consistency("linearizable");
@@ -219,7 +219,7 @@ async fn test_read_emits_wide_event() {
     let service = create_test_service();
     let request = Request::new(ReadRequest {
         client_id: "test_client".to_string(),
-        namespace_id: 1,
+        organization_slug: 1,
         vault_id: 1,
         key: "test_key".to_string(),
     });
@@ -260,7 +260,7 @@ async fn test_read_emits_wide_event() {
 | ---------------------- | ----------------------------- |
 | `set_client_id(id)`    | Idempotency client identifier |
 | `set_sequence(seq)`    | Per-client sequence number    |
-| `set_namespace_id(id)` | Target namespace              |
+| `set_organization_slug(id)` | Target organization              |
 | `set_vault_id(id)`     | Target vault                  |
 | `set_actor(actor)`     | Identity performing operation |
 
@@ -270,7 +270,7 @@ async fn test_read_emits_wide_event() {
 | --------------------------------------------------- | ------------------------ |
 | `set_system_context(node_id, is_leader, raft_term)` | Set all system fields    |
 | `set_shard_id(id)`                                  | Shard routing identifier |
-| `set_is_vip(is_vip)`                                | VIP namespace indicator  |
+| `set_is_vip(is_vip)`                                | VIP organization indicator  |
 
 ### Operation Fields
 

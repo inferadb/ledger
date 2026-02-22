@@ -1,12 +1,12 @@
 //! Multi-shard read service implementation.
 //!
-//! Routes read requests to the appropriate shard based on namespace.
-//! Each namespace is assigned to a shard, and requests are routed to the
+//! Routes read requests to the appropriate shard based on organization.
+//! Each organization is assigned to a shard, and requests are routed to the
 //! state layer for that shard.
 //!
 //! ## Request Forwarding
 //!
-//! When a namespace is on a remote shard, this service forwards the request
+//! When an organization is on a remote shard, this service forwards the request
 //! via gRPC using `ForwardClient`. This enables transparent multi-shard reads
 //! where clients don't need to know which node hosts their data.
 
@@ -23,7 +23,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::{NamespaceId, VaultId};
+use inferadb_ledger_types::{OrganizationId, VaultId};
 use tempfile::TempDir;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
@@ -36,11 +36,12 @@ use crate::{
     services::{
         ForwardClient,
         shard_resolver::{RemoteShardInfo, ResolveResult, ShardResolver},
+        slug_resolver::SlugResolver,
     },
     trace_context,
 };
 
-/// Routes read requests to the correct shard based on namespace ID.
+/// Routes read requests to the correct shard based on organization ID.
 ///
 /// Supports both local processing and remote forwarding for transparent
 /// multi-shard deployments.
@@ -89,14 +90,18 @@ impl MultiShardReadService {
     }
 
     /// Checks consistency requirements for a read request.
-    fn check_consistency(&self, namespace_id: NamespaceId, consistency: i32) -> Result<(), Status> {
+    fn check_consistency(
+        &self,
+        organization_id: OrganizationId,
+        consistency: i32,
+    ) -> Result<(), Status> {
         let consistency =
             ReadConsistency::try_from(consistency).unwrap_or(ReadConsistency::Unspecified);
 
         match consistency {
             ReadConsistency::Linearizable => {
                 // Linearizable reads require this node to be the leader
-                let ctx = self.resolver.resolve(namespace_id)?;
+                let ctx = self.resolver.resolve(organization_id)?;
                 let metrics = ctx.raft.metrics().borrow().clone();
                 if metrics.current_leader.is_none() {
                     return Err(Status::unavailable(
@@ -122,12 +127,12 @@ impl MultiShardReadService {
         &self,
         req: &HistoricalReadRequest,
         ctx: &crate::services::shard_resolver::ShardContext,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         start: Instant,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
         // Check that requested height doesn't exceed current tip
-        let tip_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let tip_height = ctx.applied_state.vault_height(organization_id, vault_id);
         if req.at_height > tip_height {
             return Err(Status::invalid_argument(format!(
                 "Requested height {} exceeds current tip {}",
@@ -154,7 +159,7 @@ impl MultiShardReadService {
         for height in 1..=req.at_height {
             // Find shard height for this vault block
             let shard_height =
-                match ctx.block_archive.find_shard_height(namespace_id, vault_id, height) {
+                match ctx.block_archive.find_shard_height(organization_id, vault_id, height) {
                     Ok(Some(h)) => h,
                     Ok(None) => continue, // Block might not exist at this height (sparse)
                     Err(e) => {
@@ -170,7 +175,9 @@ impl MultiShardReadService {
 
             // Find the vault entry
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+                e.organization_id == organization_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
@@ -225,7 +232,7 @@ impl MultiShardReadService {
         &self,
         req: &WatchBlocksRequest,
         ctx: &crate::services::shard_resolver::ShardContext,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
     ) -> Result<
         Response<Pin<Box<dyn futures::Stream<Item = Result<BlockAnnouncement, Status>> + Send>>>,
@@ -246,7 +253,7 @@ impl MultiShardReadService {
         })?;
 
         // Get current tip for this vault
-        let current_tip = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let current_tip = ctx.applied_state.vault_height(organization_id, vault_id);
 
         // Subscribe BEFORE reading historical blocks to avoid missing any
         let receiver = announcements.subscribe();
@@ -255,7 +262,7 @@ impl MultiShardReadService {
         let historical_blocks: Vec<BlockAnnouncement> = if start_height <= current_tip {
             self.fetch_historical_announcements(
                 ctx,
-                namespace_id,
+                organization_id,
                 vault_id,
                 start_height,
                 current_tip,
@@ -265,7 +272,7 @@ impl MultiShardReadService {
         };
 
         info!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             vault_id = vault_id.value(),
             start_height,
             current_tip,
@@ -281,14 +288,16 @@ impl MultiShardReadService {
         let last_historical_height =
             if start_height <= current_tip { current_tip } else { start_height - 1 };
 
-        // Create broadcast stream filtered by namespace and vault
+        // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
+        // not slug-to-internal-id, since announcements carry the original slug)
+        let watch_slug = req.organization_slug.as_ref().map_or(0u64, |n| n.slug);
         let broadcast_stream = BroadcastStream::new(receiver).filter_map(move |result| {
             async move {
                 match result {
                     Ok(announcement) => {
-                        // Filter by namespace
-                        if announcement.namespace_id.as_ref().map_or(0, |n| n.id)
-                            != namespace_id.value()
+                        // Filter by organization
+                        if announcement.organization_slug.as_ref().map_or(0, |n| n.slug)
+                            != watch_slug
                         {
                             return None;
                         }
@@ -317,7 +326,7 @@ impl MultiShardReadService {
     fn fetch_historical_announcements(
         &self,
         ctx: &crate::services::shard_resolver::ShardContext,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         start_height: u64,
         end_height: u64,
@@ -327,7 +336,7 @@ impl MultiShardReadService {
         for height in start_height..=end_height {
             // Find shard height for this vault block
             let shard_height = match ctx.block_archive.find_shard_height(
-                namespace_id,
+                organization_id,
                 vault_id,
                 height,
             ) {
@@ -350,7 +359,9 @@ impl MultiShardReadService {
 
             // Find the vault entry
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+                e.organization_id == organization_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
             }) {
                 // Compute block hash from vault entry (hash of previous_hash || state_root ||
                 // tx_merkle_root) For announcements, we use the tx_merkle_root as a
@@ -363,8 +374,11 @@ impl MultiShardReadService {
                     Some(inferadb_ledger_proto::proto::Hash { value: entry.state_root.to_vec() });
 
                 announcements.push(BlockAnnouncement {
-                    namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
-                        id: namespace_id.value(),
+                    organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                        slug: ctx
+                            .applied_state
+                            .resolve_id_to_slug(organization_id)
+                            .map_or(organization_id.value() as u64, |s| s.value()),
                     }),
                     vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id.value() }),
                     height,
@@ -384,43 +398,40 @@ impl MultiShardReadService {
 
 #[tonic::async_trait]
 impl ReadService for MultiShardReadService {
-    #[instrument(skip(self, request), fields(namespace_id, vault_id, key))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id, key))]
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         let start = Instant::now();
         let req = request.into_inner();
 
-        // Extract namespace_id for routing
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        // Extract organization_id for routing
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Record span fields
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("key", &req.key);
 
         // Check consistency requirements
-        self.check_consistency(namespace_id, req.consistency)?;
+        self.check_consistency(organization_id, req.consistency)?;
 
-        // Resolve shard for this namespace
-        let ctx = self.resolver.resolve(namespace_id)?;
+        // Resolve shard for this organization
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Check vault health - diverged vaults cannot be read
-        let health = ctx.applied_state.vault_health(namespace_id, vault_id);
+        let health = ctx.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             warn!(
-                namespace_id = namespace_id.value(),
+                organization_id = organization_id.value(),
                 vault_id = vault_id.value(),
                 at_height,
                 "Read rejected: vault has diverged"
             );
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
-                namespace_id.value(),
+                organization_id.value(),
                 vault_id.value(),
                 at_height
             )));
@@ -439,13 +450,13 @@ impl ReadService for MultiShardReadService {
         metrics::record_read(true, latency);
 
         // Get current block height for this vault
-        let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = ctx.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
     }
 
     /// Batches read multiple keys in a single RPC call.
-    #[instrument(skip(self, request), fields(namespace_id, vault_id, batch_size))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id, batch_size))]
     async fn batch_read(
         &self,
         request: Request<inferadb_ledger_proto::proto::BatchReadRequest>,
@@ -455,13 +466,10 @@ impl ReadService for MultiShardReadService {
         let start = Instant::now();
         let req = request.into_inner();
 
-        // Extract namespace_id for routing
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        // Extract organization_id for routing
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Limit batch size
@@ -475,28 +483,28 @@ impl ReadService for MultiShardReadService {
         }
 
         // Record span fields
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("batch_size", req.keys.len());
 
         // Check consistency requirements
-        self.check_consistency(namespace_id, req.consistency)?;
+        self.check_consistency(organization_id, req.consistency)?;
 
-        // Resolve shard for this namespace
-        let ctx = self.resolver.resolve(namespace_id)?;
+        // Resolve shard for this organization
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Check vault health - diverged vaults cannot be read
-        let health = ctx.applied_state.vault_health(namespace_id, vault_id);
+        let health = ctx.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             warn!(
-                namespace_id = namespace_id.value(),
+                organization_id = organization_id.value(),
                 vault_id = vault_id.value(),
                 at_height,
                 "BatchRead rejected: vault has diverged"
             );
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
-                namespace_id.value(),
+                organization_id.value(),
                 vault_id.value(),
                 at_height
             )));
@@ -529,12 +537,12 @@ impl ReadService for MultiShardReadService {
         }
 
         // Get current block height
-        let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = ctx.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(BatchReadResponse { results, block_height }))
     }
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id, key))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id, key))]
     async fn verified_read(
         &self,
         request: Request<VerifiedReadRequest>,
@@ -542,27 +550,24 @@ impl ReadService for MultiShardReadService {
         let start = Instant::now();
         let req = request.into_inner();
 
-        // Extract namespace_id for routing
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        // Extract organization_id for routing
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("key", &req.key);
 
         // Resolve shard
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Check vault health
-        let health = ctx.applied_state.vault_health(namespace_id, vault_id);
+        let health = ctx.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             warn!(
-                namespace_id = namespace_id.value(),
+                organization_id = organization_id.value(),
                 vault_id = vault_id.value(),
                 at_height,
                 "Verified read rejected: vault has diverged"
@@ -570,7 +575,7 @@ impl ReadService for MultiShardReadService {
             metrics::record_verified_read(false, start.elapsed().as_secs_f64());
             return Err(Status::unavailable(format!(
                 "Vault {}:{} has diverged at height {}",
-                namespace_id.value(),
+                organization_id.value(),
                 vault_id.value(),
                 at_height
             )));
@@ -589,7 +594,7 @@ impl ReadService for MultiShardReadService {
         metrics::record_verified_read(true, latency);
 
         // Get block height
-        let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = ctx.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(VerifiedReadResponse {
             value: entity.map(|e| e.value),
@@ -602,29 +607,26 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id))]
     async fn get_tip(
         &self,
         request: Request<GetTipRequest>,
     ) -> Result<Response<GetTipResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
 
         // Resolve shard
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Get vault height from applied state
-        let height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let height = ctx.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(GetTipResponse {
             height,
@@ -633,30 +635,27 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id))]
     async fn list_relationships(
         &self,
         request: Request<ListRelationshipsRequest>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
 
         // Check consistency
-        self.check_consistency(namespace_id, req.consistency)?;
+        self.check_consistency(organization_id, req.consistency)?;
 
         // Resolve shard
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Read from state layer - simple listing without complex pagination
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
@@ -700,7 +699,7 @@ impl ReadService for MultiShardReadService {
                 .collect()
         };
 
-        let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = ctx.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(ListRelationshipsResponse {
             relationships,
@@ -709,31 +708,28 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(namespace_id))]
+    #[instrument(skip(self, request), fields(organization_id))]
     async fn list_entities(
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
 
         // Check consistency
-        self.check_consistency(namespace_id, req.consistency)?;
+        self.check_consistency(organization_id, req.consistency)?;
 
         // Resolve shard
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
 
-        // Entities are namespace-level (stored in vault_id=0 by convention)
+        // Entities are organization-level (stored in vault_id=0 by convention)
         let vault_id = VaultId::new(0);
 
         // Read from state layer (internally thread-safe via inferadb-ledger-store MVCC)
@@ -760,7 +756,7 @@ impl ReadService for MultiShardReadService {
             })
             .collect();
 
-        let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = ctx.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(ListEntitiesResponse {
             entities,
@@ -769,30 +765,27 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id))]
     async fn list_resources(
         &self,
         request: Request<ListResourcesRequest>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
 
         // Check consistency
-        self.check_consistency(namespace_id, req.consistency)?;
+        self.check_consistency(organization_id, req.consistency)?;
 
         // Resolve shard
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Read from state layer - list relationships and extract unique resources
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
@@ -813,7 +806,7 @@ impl ReadService for MultiShardReadService {
         resources.dedup();
         resources.truncate(limit);
 
-        let block_height = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = ctx.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(ListResourcesResponse {
             resources,
@@ -822,31 +815,28 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id))]
     async fn get_client_state(
         &self,
         request: Request<GetClientStateRequest>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or_default();
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
 
         // Resolve shard
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Get client sequence from applied state
         let last_committed_sequence =
-            ctx.applied_state.client_sequence(namespace_id, vault_id, client_id);
+            ctx.applied_state.client_sequence(organization_id, vault_id, client_id);
 
         Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }
@@ -854,24 +844,21 @@ impl ReadService for MultiShardReadService {
     // Block-related methods - simplified implementations
     // Full block retrieval would require per-shard block archive infrastructure
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id, height))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id, height))]
     async fn get_block(
         &self,
         request: Request<GetBlockRequest>,
     ) -> Result<Response<GetBlockResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
 
         // Block retrieval is complex for multi-shard
         // Return None for now - full implementation would use vault_entry_to_proto_block helper
         warn!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             "get_block: block retrieval not yet fully implemented for multi-shard"
         );
 
@@ -885,20 +872,17 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
 
         // Resolve shard to get current tip
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        let current_tip = ctx.applied_state.vault_height(namespace_id, vault_id);
+        let current_tip = ctx.applied_state.vault_height(organization_id, vault_id);
 
         warn!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             "get_block_range: not yet optimized for multi-shard"
         );
 
@@ -906,7 +890,7 @@ impl ReadService for MultiShardReadService {
         Ok(Response::new(GetBlockRangeResponse { blocks: vec![], current_tip }))
     }
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id, at_height))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id, at_height))]
     async fn historical_read(
         &self,
         request: Request<HistoricalReadRequest>,
@@ -916,15 +900,12 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract identifiers
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("at_height", req.at_height);
 
@@ -936,15 +917,15 @@ impl ReadService for MultiShardReadService {
         // Check if resolver supports forwarding
         if self.resolver.supports_forwarding() {
             // Use resolve_with_forward to handle both local and remote shards
-            match self.resolver.resolve_with_forward(namespace_id)? {
+            match self.resolver.resolve_with_forward(organization_id)? {
                 ResolveResult::Local(ctx) => {
                     // Process locally using block archive
-                    self.historical_read_local(&req, &ctx, namespace_id, vault_id, start).await
+                    self.historical_read_local(&req, &ctx, organization_id, vault_id, start).await
                 },
                 ResolveResult::Remote(remote) => {
                     // Forward to the remote shard
                     debug!(
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         shard_id = remote.shard_id.value(),
                         "Forwarding historical_read to remote shard"
                     );
@@ -954,15 +935,15 @@ impl ReadService for MultiShardReadService {
             }
         } else {
             // Simple resolver - use local shard directly
-            let ctx = self.resolver.resolve(namespace_id)?;
-            self.historical_read_local(&req, &ctx, namespace_id, vault_id, start).await
+            let ctx = self.resolver.resolve(organization_id)?;
+            self.historical_read_local(&req, &ctx, organization_id, vault_id, start).await
         }
     }
 
     type WatchBlocksStream =
         Pin<Box<dyn futures::Stream<Item = Result<BlockAnnouncement, Status>> + Send>>;
 
-    #[instrument(skip(self, request), fields(namespace_id, vault_id, start_height))]
+    #[instrument(skip(self, request), fields(organization_id, vault_id, start_height))]
     async fn watch_blocks(
         &self,
         request: Request<WatchBlocksRequest>,
@@ -971,30 +952,27 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract identifiers
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("start_height", req.start_height);
 
         // Check if resolver supports forwarding
         if self.resolver.supports_forwarding() {
             // Use resolve_with_forward to handle both local and remote shards
-            match self.resolver.resolve_with_forward(namespace_id)? {
+            match self.resolver.resolve_with_forward(organization_id)? {
                 ResolveResult::Local(ctx) => {
                     // Process locally using broadcast channel
-                    self.watch_blocks_local(&req, &ctx, namespace_id, vault_id).await
+                    self.watch_blocks_local(&req, &ctx, organization_id, vault_id).await
                 },
                 ResolveResult::Remote(remote) => {
                     // Forward to the remote shard
                     debug!(
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         shard_id = remote.shard_id.value(),
                         "Forwarding watch_blocks to remote shard"
                     );
@@ -1012,8 +990,8 @@ impl ReadService for MultiShardReadService {
             }
         } else {
             // Simple resolver - use local shard directly
-            let ctx = self.resolver.resolve(namespace_id)?;
-            self.watch_blocks_local(&req, &ctx, namespace_id, vault_id).await
+            let ctx = self.resolver.resolve(organization_id)?;
+            self.watch_blocks_local(&req, &ctx, organization_id, vault_id).await
         }
     }
 }

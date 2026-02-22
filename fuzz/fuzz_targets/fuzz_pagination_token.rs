@@ -50,7 +50,7 @@ fn fuzz_roundtrip(data: &[u8]) {
         return;
     }
 
-    let namespace_id = i64::from_le_bytes([
+    let organization_id = i64::from_le_bytes([
         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]);
     let vault_id = i64::from_le_bytes([
@@ -64,7 +64,7 @@ fn fuzz_roundtrip(data: &[u8]) {
 
     let token = PageToken {
         version: 1,
-        namespace_id,
+        organization_id,
         vault_id,
         last_key,
         at_height,

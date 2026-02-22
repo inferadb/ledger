@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{
-    NamespaceId, VaultId,
+    OrganizationId, VaultId,
     audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
     config::ValidationConfig,
     validation,
@@ -71,19 +71,19 @@ pub(crate) fn build_audit_event(
     }
 }
 
-/// Checks all rate limit tiers (backpressure, namespace, client).
+/// Checks all rate limit tiers (backpressure, organization, client).
 ///
 /// Returns `Status::resource_exhausted` with `retry-after-ms` metadata and
 /// structured [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) if rejected.
 pub(crate) fn check_rate_limit(
     rate_limiter: Option<&Arc<RateLimiter>>,
     client_id: &str,
-    namespace_id: NamespaceId,
+    organization_id: OrganizationId,
 ) -> Result<(), Status> {
     if let Some(limiter) = rate_limiter {
-        limiter.check(client_id, namespace_id).map_err(|rejection| {
+        limiter.check(client_id, organization_id).map_err(|rejection| {
             warn!(
-                namespace_id = namespace_id.value(),
+                organization_id = organization_id.value(),
                 level = rejection.level.as_str(),
                 reason = rejection.reason.as_str(),
                 "Rate limit exceeded"
@@ -96,7 +96,7 @@ pub(crate) fn check_rate_limit(
             // Build structured error details with rate limit context
             let retry_ms = i32::try_from(rejection.retry_after_ms).unwrap_or(i32::MAX);
             let mut context = std::collections::HashMap::new();
-            context.insert("namespace_id".to_owned(), namespace_id.value().to_string());
+            context.insert("organization_slug".to_owned(), organization_id.value().to_string());
             context.insert("level".to_owned(), rejection.level.as_str().to_owned());
             context.insert("reason".to_owned(), rejection.reason.as_str().to_owned());
 
@@ -126,30 +126,30 @@ pub(crate) fn check_rate_limit(
     Ok(())
 }
 
-/// Checks whether creating a new vault would exceed the namespace vault quota.
+/// Checks whether creating a new vault would exceed the organization vault quota.
 ///
 /// Returns `Status::resource_exhausted` with structured
 /// [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) including current/max values if the
 /// quota is exceeded.
 pub(crate) fn check_vault_quota(
     quota_checker: Option<&crate::quota::QuotaChecker>,
-    namespace_id: NamespaceId,
+    organization_id: OrganizationId,
 ) -> Result<(), Status> {
     let checker = match quota_checker {
         Some(c) => c,
         None => return Ok(()),
     };
 
-    if let Err(exceeded) = checker.check_vault_count(namespace_id) {
+    if let Err(exceeded) = checker.check_vault_count(organization_id) {
         warn!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             current = exceeded.current,
             limit = exceeded.limit,
             "Vault count quota exceeded"
         );
 
         let mut context = std::collections::HashMap::new();
-        context.insert("namespace_id".to_owned(), namespace_id.value().to_string());
+        context.insert("organization_slug".to_owned(), organization_id.value().to_string());
         context.insert("resource".to_owned(), exceeded.resource.to_string());
         context.insert("current".to_owned(), exceeded.current.to_string());
         context.insert("limit".to_owned(), exceeded.limit.to_string());
@@ -173,7 +173,7 @@ pub(crate) fn check_vault_quota(
 }
 
 /// Checks whether a write operation's estimated payload would exceed
-/// the namespace storage quota.
+/// the organization storage quota.
 ///
 /// `estimated_bytes` is the sum of key + value sizes for all operations.
 /// Returns `Status::resource_exhausted` with structured
@@ -181,7 +181,7 @@ pub(crate) fn check_vault_quota(
 /// quota is exceeded.
 pub(crate) fn check_storage_quota(
     quota_checker: Option<&crate::quota::QuotaChecker>,
-    namespace_id: NamespaceId,
+    organization_id: OrganizationId,
     estimated_bytes: u64,
 ) -> Result<(), Status> {
     let checker = match quota_checker {
@@ -189,16 +189,16 @@ pub(crate) fn check_storage_quota(
         None => return Ok(()),
     };
 
-    if let Err(exceeded) = checker.check_storage_estimate(namespace_id, estimated_bytes) {
+    if let Err(exceeded) = checker.check_storage_estimate(organization_id, estimated_bytes) {
         warn!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             estimated_bytes,
             limit = exceeded.limit,
             "Storage quota exceeded"
         );
 
         let mut context = std::collections::HashMap::new();
-        context.insert("namespace_id".to_owned(), namespace_id.value().to_string());
+        context.insert("organization_slug".to_owned(), organization_id.value().to_string());
         context.insert("resource".to_owned(), exceeded.resource.to_string());
         context.insert("estimated_bytes".to_owned(), estimated_bytes.to_string());
         context.insert("limit".to_owned(), exceeded.limit.to_string());
@@ -505,13 +505,13 @@ mod tests {
     #[test]
     fn test_check_vault_quota_none_checker_passes() {
         // No quota checker → always passes
-        let result = check_vault_quota(None, NamespaceId::new(1));
+        let result = check_vault_quota(None, OrganizationId::new(1));
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_check_storage_quota_none_checker_passes() {
-        let result = check_storage_quota(None, NamespaceId::new(1), u64::MAX);
+        let result = check_storage_quota(None, OrganizationId::new(1), u64::MAX);
         assert!(result.is_ok());
     }
 }

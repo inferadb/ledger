@@ -109,8 +109,8 @@ mod tests {
 [rate_limit]
 client_burst = 500
 client_rate = 50.0
-namespace_burst = 2000
-namespace_rate = 200.0
+organization_burst = 2000
+organization_rate = 200.0
 backpressure_threshold = 800
 "#
         )
@@ -136,8 +136,8 @@ backpressure_threshold = 800
 [rate_limit]
 client_burst = 0
 client_rate = 50.0
-namespace_burst = 2000
-namespace_rate = 200.0
+organization_burst = 2000
+organization_rate = 200.0
 backpressure_threshold = 800
 "#
         )
@@ -192,8 +192,8 @@ backpressure_threshold = 800
 [rate_limit]
 client_burst = 999
 client_rate = 99.0
-namespace_burst = 4999
-namespace_rate = 499.0
+organization_burst = 4999
+organization_rate = 499.0
 backpressure_threshold = 1500
 "#
         )
@@ -215,8 +215,8 @@ backpressure_threshold = 1500
 [rate_limit]
 client_burst = 0
 client_rate = 50.0
-namespace_burst = 2000
-namespace_rate = 200.0
+organization_burst = 2000
+organization_rate = 200.0
 backpressure_threshold = 800
 "#
         )

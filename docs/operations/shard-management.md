@@ -1,6 +1,6 @@
 # Shard Management
 
-Shards are Raft groups that host one or more namespaces. This guide covers shard concepts and management.
+Shards are Raft groups that host one or more organizations. This guide covers shard concepts and management.
 
 ## Overview
 
@@ -13,12 +13,12 @@ Shards are Raft groups that host one or more namespaces. This guide covers shard
 │   │  (System Shard)     │     │                     │       │
 │   │                     │     │                     │       │
 │   │  ┌───────────────┐  │     │  ┌───────────────┐  │       │
-│   │  │ Namespace A   │  │     │  │ Namespace C   │  │       │
+│   │  │ Organization A   │  │     │  │ Organization C   │  │       │
 │   │  │ (vaults 1-3)  │  │     │  │ (vaults 1-2)  │  │       │
 │   │  └───────────────┘  │     │  └───────────────┘  │       │
 │   │                     │     │                     │       │
 │   │  ┌───────────────┐  │     │  ┌───────────────┐  │       │
-│   │  │ Namespace B   │  │     │  │ Namespace D   │  │       │
+│   │  │ Organization B   │  │     │  │ Organization D   │  │       │
 │   │  │ (vaults 1-5)  │  │     │  │ (vaults 1-10) │  │       │
 │   │  └───────────────┘  │     │  └───────────────┘  │       │
 │   │                     │     │                     │       │
@@ -31,21 +31,21 @@ Shards are Raft groups that host one or more namespaces. This guide covers shard
 **Key concepts:**
 
 - **Shard**: A Raft group with its own leader election and consensus
-- **Namespace**: Isolated storage unit assigned to exactly one shard
-- **Vault**: Blockchain within a namespace
+- **Organization**: Isolated storage unit assigned to exactly one shard
+- **Vault**: Blockchain within an organization
 - **System Shard (Shard 0)**: Hosts cluster metadata and routing tables
 
 ## Shard Architecture
 
 ### Single-Shard Deployment (Default)
 
-Most deployments use a single shard (Shard 0) for all namespaces:
+Most deployments use a single shard (Shard 0) for all organizations:
 
 ```
 ┌─────────────────────────────────────┐
 │            Shard 0                  │
 │                                     │
-│  All namespaces, all vaults         │
+│  All organizations, all vaults         │
 │  Nodes: all cluster nodes           │
 │                                     │
 └─────────────────────────────────────┘
@@ -64,7 +64,7 @@ Most deployments use a single shard (Shard 0) for all namespaces:
 
 ### Multi-Shard Deployment
 
-For larger deployments, namespaces can be distributed across multiple shards:
+For larger deployments, organizations can be distributed across multiple shards:
 
 **Benefits:**
 
@@ -78,35 +78,35 @@ For larger deployments, namespaces can be distributed across multiple shards:
 - Data exceeds single-node storage
 - Regulatory requirements for data isolation
 
-## Namespace-to-Shard Assignment
+## Organization-to-Shard Assignment
 
 ### Automatic Assignment
 
-By default, namespaces are assigned to the shard with lowest load:
+By default, organizations are assigned to the shard with lowest load:
 
 ```bash
 grpcurl -plaintext \
   -d '{"name": "acme_corp"}' \
-  localhost:50051 ledger.v1.AdminService/CreateNamespace
+  localhost:50051 ledger.v1.AdminService/CreateOrganization
 ```
 
 Response includes assigned shard:
 
 ```json
 {
-  "namespace_id": { "id": "1" },
+  "organization_slug": { "id": "1" },
   "shard_id": { "id": 0 }
 }
 ```
 
 ### Explicit Assignment
 
-Specify a shard when creating a namespace:
+Specify a shard when creating an organization:
 
 ```bash
 grpcurl -plaintext \
   -d '{"name": "acme_corp", "shard_id": {"id": 1}}' \
-  localhost:50051 ledger.v1.AdminService/CreateNamespace
+  localhost:50051 ledger.v1.AdminService/CreateOrganization
 ```
 
 This is useful for:
@@ -117,19 +117,19 @@ This is useful for:
 
 ## Viewing Shard Information
 
-### Get Namespace Shard
+### Get Organization Shard
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}}' \
-  localhost:50051 ledger.v1.AdminService/GetNamespace
+  -d '{"organization_slug": {"id": "1"}}' \
+  localhost:50051 ledger.v1.AdminService/GetOrganization
 ```
 
 Response:
 
 ```json
 {
-  "namespace_id": { "id": "1" },
+  "organization_slug": { "id": "1" },
   "name": "acme_corp",
   "shard_id": { "id": 0 },
   "member_nodes": [
@@ -137,13 +137,13 @@ Response:
     { "id": "234567890" },
     { "id": "345678901" }
   ],
-  "status": "NAMESPACE_STATUS_ACTIVE"
+  "status": "ORGANIZATION_STATUS_ACTIVE"
 }
 ```
 
 ### Get System State
 
-View all namespace-to-shard assignments:
+View all organization-to-shard assignments:
 
 ```bash
 grpcurl -plaintext \
@@ -156,20 +156,20 @@ Response includes routing table:
 {
   "version": 42,
   "nodes": [...],
-  "namespaces": [
+  "organizations": [
     {
-      "namespace_id": {"id": "1"},
+      "organization_slug": {"id": "1"},
       "name": "acme_corp",
       "shard_id": {"id": 0},
       "members": [{"id": "123"}, {"id": "234"}, {"id": "345"}],
-      "status": "NAMESPACE_STATUS_ACTIVE"
+      "status": "ORGANIZATION_STATUS_ACTIVE"
     },
     {
-      "namespace_id": {"id": "2"},
+      "organization_slug": {"id": "2"},
       "name": "other_org",
       "shard_id": {"id": 1},
       "members": [{"id": "456"}, {"id": "567"}, {"id": "678"}],
-      "status": "NAMESPACE_STATUS_ACTIVE"
+      "status": "ORGANIZATION_STATUS_ACTIVE"
     }
   ]
 }
@@ -180,7 +180,7 @@ Response includes routing table:
 Clients use the routing table to send requests to the correct shard:
 
 1. **Cache system state** from `GetSystemState`
-2. **Look up shard** for target namespace
+2. **Look up shard** for target organization
 3. **Send request** to any node in that shard
 4. **Invalidate cache** when `system_version` changes
 
@@ -190,13 +190,13 @@ Example client routing:
 // Fetch routing table
 let state = client.get_system_state().await?;
 
-// Find shard for namespace
-let namespace_entry = state.namespaces
+// Find shard for organization
+let organization_entry = state.organizations
     .iter()
-    .find(|ns| ns.namespace_id == target_namespace_id)
-    .ok_or(Error::NamespaceNotFound)?;
+    .find(|ns| ns.organization_slug == target_organization_slug)
+    .ok_or(Error::OrganizationNotFound)?;
 
-let shard_members = &namespace_entry.members;
+let shard_members = &organization_entry.members;
 
 // Connect to any member of the shard
 let node = shard_members.choose(&mut rand::thread_rng());
@@ -234,16 +234,16 @@ Nodes are added to shards when:
 
 1. Cluster bootstrap assigns initial shard membership
 2. `JoinCluster` RPC adds a node to the system shard
-3. Namespace creation on a new shard triggers shard formation
+3. Organization creation on a new shard triggers shard formation
 
 ### Shard Rebalancing
 
-Currently, namespace-to-shard assignment is permanent. Rebalancing requires:
+Currently, organization-to-shard assignment is permanent. Rebalancing requires:
 
-1. Create new namespace on target shard
+1. Create new organization on target shard
 2. Migrate data (application-level)
 3. Update client routing
-4. Delete old namespace
+4. Delete old organization
 
 Future versions may support automated shard migration.
 
@@ -255,7 +255,7 @@ Future versions may support automated shard migration.
 | -------------------- | ------------------ | ---------------------- |
 | Write throughput     | ~10k ops/sec       | Add shard at 80%       |
 | Total entities       | ~100M              | Add shard at 80M       |
-| Namespaces per shard | Unlimited          | 100 for manageability  |
+| Organizations per shard | Unlimited          | 100 for manageability  |
 | Nodes per shard      | 3-7 voters         | 3 for most deployments |
 
 ### When to Add Shards
@@ -272,10 +272,10 @@ inferadb_ledger_raft_proposals_pending > 30
 
 ## Best Practices
 
-### Namespace Placement
+### Organization Placement
 
-- **Correlated data**: Same shard for namespaces that are queried together
-- **High-volume namespaces**: Isolate to dedicated shards
+- **Correlated data**: Same shard for organizations that are queried together
+- **High-volume organizations**: Isolate to dedicated shards
 - **Geographic requirements**: Place on region-local shards
 
 ### Shard Sizing

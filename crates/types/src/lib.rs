@@ -1,7 +1,7 @@
 //! Core types, errors, and cryptographic primitives for InferaDB Ledger.
 //!
 //! Provides the foundational types used throughout the ledger:
-//! - Newtype identifiers (`NamespaceId`, `VaultId`, `UserId`, `ShardId`)
+//! - Newtype identifiers (`OrganizationId`, `OrganizationSlug`, `VaultId`, `UserId`, `ShardId`)
 //! - Data structures for blocks, transactions, and operations
 //! - Configuration types with validated builders
 //! - Cryptographic hashing functions (SHA-256, seahash)
@@ -24,6 +24,8 @@ pub mod error;
 pub mod hash;
 /// Merkle tree construction and verification.
 pub mod merkle;
+/// Snowflake-style globally unique ID generation.
+pub mod snowflake;
 /// Core domain types: identifiers, blocks, transactions, operations.
 pub mod types;
 /// Input validation for gRPC request fields.
@@ -47,12 +49,14 @@ pub use types::{
     Entity,
     // Raft node ID
     LedgerNodeId,
-    NamespaceId,
-    // Resource accounting
-    NamespaceUsage,
     NodeId,
     // Enums
     Operation,
+    OrganizationId,
+    // External organization identifier
+    OrganizationSlug,
+    // Resource accounting
+    OrganizationUsage,
     Relationship,
     SetCondition,
     ShardBlock,

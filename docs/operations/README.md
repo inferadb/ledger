@@ -27,7 +27,7 @@ Operational documentation for running InferaDB Ledger in production.
 | --------------------------------------- | ---------------------------------------- |
 | [Security](security.md)                 | Trust model, network security, hardening |
 | [Multi-Region](multi-region.md)         | Geographic distribution patterns         |
-| [Shard Management](shard-management.md) | Namespace-to-shard routing               |
+| [Shard Management](shard-management.md) | Organization-to-shard routing               |
 
 ## Maintenance & Recovery
 
@@ -54,7 +54,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check
 
 # Vault-specific health
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.HealthService/Check
 ```
 
@@ -72,8 +72,8 @@ grpcurl -plaintext \
 # Cluster info
 grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetClusterInfo
 
-# List namespaces
-grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListNamespaces
+# List organizations
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations
 
 # Metrics
 curl localhost:9090/metrics

@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{NamespaceId, Operation, Transaction, VaultId};
+use inferadb_ledger_types::{Operation, OrganizationId, Transaction, VaultId};
 use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -98,7 +98,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
     /// Submit ExpireEntity operations through Raft.
     async fn expire_entities(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         expired: Vec<(String, u64)>,
     ) -> Result<(), String> {
@@ -127,12 +127,12 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         };
 
         let request =
-            LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
+            LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
         self.raft.client_write(request).await.map_err(|e| format!("Raft write failed: {}", e))?;
 
         info!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             vault_id = vault_id.value(),
             count = expired.len(),
             "GC expired entities"
@@ -155,7 +155,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         // Get all active vaults from the applied state registry
         let vault_heights = self.applied_state.all_vault_heights();
 
-        for ((namespace_id, vault_id), _height) in vault_heights {
+        for ((organization_id, vault_id), _height) in vault_heights {
             let expired = self.find_expired_entities(vault_id);
             if expired.is_empty() {
                 continue;
@@ -163,16 +163,16 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
             debug!(
                 trace_id = %trace_ctx.trace_id,
-                namespace_id = namespace_id.value(),
+                organization_id = organization_id.value(),
                 vault_id = vault_id.value(),
                 count = expired.len(),
                 "Found expired entities"
             );
 
-            if let Err(e) = self.expire_entities(namespace_id, vault_id, expired).await {
+            if let Err(e) = self.expire_entities(organization_id, vault_id, expired).await {
                 warn!(
                     trace_id = %trace_ctx.trace_id,
-                    namespace_id = namespace_id.value(),
+                    organization_id = organization_id.value(),
                     vault_id = vault_id.value(),
                     error = %e,
                     "GC cycle failed"

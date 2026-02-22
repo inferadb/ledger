@@ -357,8 +357,8 @@ Use the provided Helm chart or raw manifests.
 
 ```bash
 helm install ledger ./deploy/helm/inferadb-ledger \
-  --namespace inferadb \
-  --create-namespace
+  --organization inferadb \
+  --create-organization
 ```
 
 **Kustomize:**

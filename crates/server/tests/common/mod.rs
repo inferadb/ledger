@@ -509,7 +509,7 @@ impl MultiShardTestNode {
 /// MultiShardTestCluster
 ///     |
 ///     +-- Node 1 (MultiRaftManager)
-///     |       +-- Shard 0 (system): namespace/vault metadata
+///     |       +-- Shard 0 (system): organization/vault metadata
 ///     |       +-- Shard 1 (data): entity storage
 ///     |       +-- Shard 2 (data): entity storage
 ///     |

@@ -21,7 +21,7 @@
 //! |-------|--------|-------------|
 //! | Identity | `request_id`, `service`, `method` | Request routing |
 //! | Client | `client_id`, `sequence`, `actor`, `sdk_version`, `source_ip` | Client metadata |
-//! | Target | `namespace_id`, `vault_id` | Scope of the operation |
+//! | Target | `organization_slug`, `vault_id` | Scope of the operation |
 //! | System | `node_id`, `is_leader`, `raft_term`, `shard_id` | Cluster state |
 //! | Write | `operations_count`, `operation_types`, `bytes_written`, `raft_round_trips` | Write metrics |
 //! | Read | `key`, `keys_count`, `found_count`, `bytes_read` | Read metrics |
@@ -33,7 +33,7 @@
 //!
 //! High-volume deployments can reduce log volume via [`SamplingConfig`]:
 //! - Errors and slow requests are always logged (100% sample rate)
-//! - VIP namespaces get elevated sampling (default 50%)
+//! - VIP organizations get elevated sampling (default 50%)
 //! - Normal writes sample at 10%, reads at 1%
 //! - Admin operations are always logged
 //!
@@ -155,7 +155,7 @@ pub struct SamplingConfig {
     #[builder(default = 1.0)]
     pub slow_rate: f64,
 
-    /// Sample rate for VIP namespaces (0.0-1.0). Default: 0.5 (50%).
+    /// Sample rate for VIP organizations (0.0-1.0). Default: 0.5 (50%).
     #[builder(default = 0.5)]
     pub vip_rate: f64,
 
@@ -179,9 +179,9 @@ pub struct SamplingConfig {
     #[builder(default = 1000.0)]
     pub slow_threshold_admin_ms: f64,
 
-    /// List of VIP namespace IDs with elevated sampling.
+    /// List of VIP organization IDs with elevated sampling.
     #[builder(default)]
-    pub vip_namespaces: Vec<i64>,
+    pub vip_organizations: Vec<u64>,
 
     /// Whether sampling is enabled. Default: true.
     #[builder(default = true)]
@@ -211,7 +211,7 @@ impl SamplingConfig {
 /// Sampling decisions are made at event emission time based on:
 /// 1. Outcome (errors always sampled at 100%)
 /// 2. Latency (slow requests always sampled at 100%)
-/// 3. Namespace VIP status
+/// 3. Organization VIP status
 /// 4. Operation type
 ///
 /// The decision is deterministic: `seahash(request_id) % 10000 < (rate * 10000)`.
@@ -247,7 +247,7 @@ impl Sampler {
         outcome: Option<&Outcome>,
         duration_ms: f64,
         operation_type: OperationType,
-        namespace_id: Option<i64>,
+        organization_slug: Option<u64>,
     ) -> bool {
         // If sampling is disabled, always emit
         if !self.config.enabled {
@@ -274,8 +274,8 @@ impl Sampler {
             return true;
         }
 
-        // Rule 4: VIP namespaces get elevated sampling
-        if namespace_id.is_some_and(|ns_id| self.config.vip_namespaces.contains(&ns_id)) {
+        // Rule 4: VIP organizations get elevated sampling
+        if organization_slug.is_some_and(|org_id| self.config.vip_organizations.contains(&org_id)) {
             return self.sample_at_rate(request_id, self.config.vip_rate);
         }
 
@@ -503,7 +503,7 @@ pub struct RequestContext {
     actor: Option<String>,
 
     // Target
-    namespace_id: Option<i64>,
+    organization_slug: Option<u64>,
     vault_id: Option<i64>,
 
     // System context (populated externally)
@@ -537,7 +537,7 @@ pub struct RequestContext {
 
     // Operation-specific (admin)
     admin_action: Option<&'static str>,
-    target_namespace_name: Option<String>,
+    target_organization_name: Option<String>,
     retention_mode: Option<String>,
     recovery_force: Option<bool>,
 
@@ -590,7 +590,7 @@ impl RequestContext {
             client_id: None,
             sequence: None,
             actor: None,
-            namespace_id: None,
+            organization_slug: None,
             vault_id: None,
             node_id: None,
             is_leader: None,
@@ -614,7 +614,7 @@ impl RequestContext {
             found: None,
             value_size_bytes: None,
             admin_action: None,
-            target_namespace_name: None,
+            target_organization_name: None,
             retention_mode: None,
             recovery_force: None,
             outcome: None,
@@ -687,15 +687,15 @@ impl RequestContext {
     // Target setters
     // =========================================================================
 
-    /// Sets the target namespace and vault.
-    pub fn set_target(&mut self, namespace_id: i64, vault_id: i64) {
-        self.namespace_id = Some(namespace_id);
+    /// Sets the target organization and vault.
+    pub fn set_target(&mut self, organization_slug: u64, vault_id: i64) {
+        self.organization_slug = Some(organization_slug);
         self.vault_id = Some(vault_id);
     }
 
-    /// Sets the namespace ID only.
-    pub fn set_namespace_id(&mut self, namespace_id: i64) {
-        self.namespace_id = Some(namespace_id);
+    /// Sets the organization slug only.
+    pub fn set_organization_slug(&mut self, organization_slug: u64) {
+        self.organization_slug = Some(organization_slug);
     }
 
     /// Sets the vault ID only.
@@ -741,9 +741,9 @@ impl RequestContext {
         self.shard_id = Some(shard_id);
     }
 
-    /// Sets the VIP status for this request's namespace.
+    /// Sets the VIP status for this request's organization.
     ///
-    /// This field indicates whether the namespace received elevated
+    /// This field indicates whether the organization received elevated
     /// sampling rates due to VIP status.
     pub fn set_is_vip(&mut self, is_vip: bool) {
         self.is_vip = Some(is_vip);
@@ -856,14 +856,14 @@ impl RequestContext {
 
     /// Sets the admin action being performed.
     ///
-    /// Example values: "create_namespace", "delete_vault", "recover_vault"
+    /// Example values: "create_organization", "delete_vault", "recover_vault"
     pub fn set_admin_action(&mut self, action: &'static str) {
         self.admin_action = Some(action);
     }
 
-    /// Sets the target namespace name for namespace operations.
-    pub fn set_target_namespace_name(&mut self, name: &str) {
-        self.target_namespace_name = Some(truncate_string(name, 128));
+    /// Sets the target organization name for organization operations.
+    pub fn set_target_organization_name(&mut self, name: &str) {
+        self.target_organization_name = Some(truncate_string(name, 128));
     }
 
     /// Sets the retention mode for vault creation.
@@ -1133,7 +1133,7 @@ impl RequestContext {
                 self.outcome.as_ref(),
                 duration_ms,
                 self.operation_type,
-                self.namespace_id,
+                self.organization_slug,
             )
         }) {
             // Event sampled out, don't emit
@@ -1162,7 +1162,7 @@ impl RequestContext {
             client_id = self.client_id.as_deref(),
             sequence = self.sequence,
             actor = self.actor.as_deref(),
-            namespace_id = self.namespace_id,
+            organization_slug = self.organization_slug,
             vault_id = self.vault_id,
             node_id = self.node_id,
             is_leader = self.is_leader,
@@ -1186,7 +1186,7 @@ impl RequestContext {
             found = self.found,
             value_size_bytes = self.value_size_bytes,
             admin_action = self.admin_action,
-            target_namespace_name = self.target_namespace_name.as_deref(),
+            target_organization_name = self.target_organization_name.as_deref(),
             retention_mode = self.retention_mode.as_deref(),
             recovery_force = self.recovery_force,
             outcome = outcome_str,
@@ -1217,7 +1217,7 @@ impl RequestContext {
                 request_id: Some(self.request_id.to_string()),
                 client_id: self.client_id.clone(),
                 sequence: self.sequence,
-                namespace_id: self.namespace_id,
+                organization_slug: self.organization_slug,
                 vault_id: self.vault_id,
                 service: Some(self.service),
                 method: Some(self.method),
@@ -1374,7 +1374,7 @@ mod tests {
     fn test_set_target() {
         let mut ctx = RequestContext::new("WriteService", "write");
         ctx.set_target(1, 2);
-        assert_eq!(ctx.namespace_id, Some(1));
+        assert_eq!(ctx.organization_slug, Some(1));
         assert_eq!(ctx.vault_id, Some(2));
         ctx.suppress_emission();
     }
@@ -1518,9 +1518,9 @@ mod tests {
     #[test]
     fn test_field_overwrite() {
         let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_namespace_id(1);
-        ctx.set_namespace_id(2);
-        assert_eq!(ctx.namespace_id, Some(2));
+        ctx.set_organization_slug(1);
+        ctx.set_organization_slug(2);
+        assert_eq!(ctx.organization_slug, Some(2));
         ctx.suppress_emission();
     }
 
@@ -1703,7 +1703,7 @@ mod tests {
         let (_, events) = with_json_capturing_subscriber(|| {
             let mut ctx = RequestContext::new("WriteService", "write");
             ctx.set_client_id("test_client");
-            ctx.set_namespace_id(42);
+            ctx.set_organization_slug(42);
             ctx.set_success();
         });
 
@@ -1716,7 +1716,10 @@ mod tests {
         assert!(obj.contains_key("service"), "service field should be at top level");
         assert!(obj.contains_key("method"), "method field should be at top level");
         assert!(obj.contains_key("client_id"), "client_id field should be at top level");
-        assert!(obj.contains_key("namespace_id"), "namespace_id field should be at top level");
+        assert!(
+            obj.contains_key("organization_slug"),
+            "organization_slug field should be at top level"
+        );
         assert!(obj.contains_key("outcome"), "outcome field should be at top level");
     }
 
@@ -2011,7 +2014,7 @@ mod tests {
         assert!((config.slow_threshold_read_ms - 10.0).abs() < f64::EPSILON);
         assert!((config.slow_threshold_write_ms - 100.0).abs() < f64::EPSILON);
         assert!((config.slow_threshold_admin_ms - 1000.0).abs() < f64::EPSILON);
-        assert!(config.vip_namespaces.is_empty());
+        assert!(config.vip_organizations.is_empty());
         assert!(config.enabled);
     }
 
@@ -2152,16 +2155,16 @@ mod tests {
     }
 
     #[test]
-    fn test_sampler_vip_namespaces_elevated_rate() {
-        // VIP namespaces should have higher sampling rate
+    fn test_sampler_vip_organizations_elevated_rate() {
+        // VIP organizations should have higher sampling rate
         let config = SamplingConfig::builder()
             .vip_rate(1.0) // 100% for VIP
             .read_rate(0.0) // 0% for normal
-            .vip_namespaces(vec![42, 100])
+            .vip_organizations(vec![42, 100])
             .build();
         let sampler = Sampler::new(config);
 
-        // VIP namespace should always be sampled
+        // VIP organization should always be sampled
         for _ in 0..100 {
             let request_id = Uuid::new_v4();
             assert!(
@@ -2172,22 +2175,22 @@ mod tests {
                     OperationType::Read,
                     Some(42),
                 ),
-                "VIP namespace should be sampled at 100%"
+                "VIP organization should be sampled at 100%"
             );
         }
     }
 
     #[test]
-    fn test_sampler_non_vip_namespace_normal_rate() {
-        // Non-VIP namespaces should use normal sampling rates
+    fn test_sampler_non_vip_organization_normal_rate() {
+        // Non-VIP organizations should use normal sampling rates
         let config = SamplingConfig::builder()
             .vip_rate(1.0)
             .read_rate(0.0) // 0% for normal reads
-            .vip_namespaces(vec![42])
+            .vip_organizations(vec![42])
             .build();
         let sampler = Sampler::new(config);
 
-        // Non-VIP namespace (99) should NOT be sampled at 0% rate
+        // Non-VIP organization (99) should NOT be sampled at 0% rate
         let mut sampled_count = 0;
         for _ in 0..100 {
             let request_id = Uuid::new_v4();
@@ -2201,7 +2204,7 @@ mod tests {
                 sampled_count += 1;
             }
         }
-        assert_eq!(sampled_count, 0, "Non-VIP namespace at 0% rate should never be sampled");
+        assert_eq!(sampled_count, 0, "Non-VIP organization at 0% rate should never be sampled");
     }
 
     #[test]
@@ -2359,39 +2362,39 @@ mod tests {
 
     #[test]
     fn test_set_admin_action() {
-        let mut ctx = RequestContext::new("AdminService", "create_namespace");
+        let mut ctx = RequestContext::new("AdminService", "create_organization");
         assert!(ctx.admin_action.is_none());
 
-        ctx.set_admin_action("create_namespace");
-        assert!(matches!(ctx.admin_action, Some("create_namespace")));
+        ctx.set_admin_action("create_organization");
+        assert!(matches!(ctx.admin_action, Some("create_organization")));
 
         // Overwrite works
-        ctx.set_admin_action("delete_namespace");
-        assert!(matches!(ctx.admin_action, Some("delete_namespace")));
+        ctx.set_admin_action("delete_organization");
+        assert!(matches!(ctx.admin_action, Some("delete_organization")));
 
         ctx.suppress_emission();
     }
 
     #[test]
-    fn test_set_target_namespace_name() {
-        let mut ctx = RequestContext::new("AdminService", "create_namespace");
-        assert!(ctx.target_namespace_name.is_none());
+    fn test_set_target_organization_name() {
+        let mut ctx = RequestContext::new("AdminService", "create_organization");
+        assert!(ctx.target_organization_name.is_none());
 
-        ctx.set_target_namespace_name("my-namespace");
-        assert!(matches!(ctx.target_namespace_name, Some(ref n) if n == "my-namespace"));
+        ctx.set_target_organization_name("my-organization");
+        assert!(matches!(ctx.target_organization_name, Some(ref n) if n == "my-organization"));
 
         ctx.suppress_emission();
     }
 
     #[test]
-    fn test_target_namespace_name_truncation() {
-        let mut ctx = RequestContext::new("AdminService", "create_namespace");
+    fn test_target_organization_name_truncation() {
+        let mut ctx = RequestContext::new("AdminService", "create_organization");
         let long_name = "x".repeat(200);
 
-        ctx.set_target_namespace_name(&long_name);
+        ctx.set_target_organization_name(&long_name);
         // Should truncate to 125 chars + "..." = 128 chars total (max_len - 3 + 3)
-        assert!(matches!(ctx.target_namespace_name, Some(ref n) if n.len() == 128));
-        assert!(matches!(ctx.target_namespace_name, Some(ref n) if n.ends_with("...")));
+        assert!(matches!(ctx.target_organization_name, Some(ref n) if n.len() == 128));
+        assert!(matches!(ctx.target_organization_name, Some(ref n) if n.ends_with("...")));
 
         ctx.suppress_emission();
     }
@@ -2426,16 +2429,16 @@ mod tests {
 
     #[test]
     fn test_admin_context_with_all_fields() {
-        let mut ctx = RequestContext::new("AdminService", "create_namespace");
+        let mut ctx = RequestContext::new("AdminService", "create_organization");
         ctx.set_operation_type(OperationType::Admin);
-        ctx.set_admin_action("create_namespace");
-        ctx.set_target_namespace_name("test-namespace");
+        ctx.set_admin_action("create_organization");
+        ctx.set_target_organization_name("test-organization");
         ctx.set_node_id(12345);
         ctx.set_is_leader(true);
         ctx.set_raft_term(42);
 
-        assert!(matches!(ctx.admin_action, Some("create_namespace")));
-        assert!(matches!(ctx.target_namespace_name, Some(ref n) if n == "test-namespace"));
+        assert!(matches!(ctx.admin_action, Some("create_organization")));
+        assert!(matches!(ctx.target_organization_name, Some(ref n) if n == "test-organization"));
         assert!(matches!(ctx.node_id, Some(12345)));
         assert!(matches!(ctx.is_leader, Some(true)));
         assert!(matches!(ctx.raft_term, Some(42)));
@@ -2480,7 +2483,7 @@ mod tests {
     fn test_is_vip_in_json_output() {
         let (_, events) = with_json_capturing_subscriber(|| {
             let mut ctx = RequestContext::new("WriteService", "write");
-            ctx.set_namespace_id(42);
+            ctx.set_organization_slug(42);
             ctx.set_is_vip(true);
             ctx.set_success();
         });
@@ -2488,7 +2491,7 @@ mod tests {
         assert!(!events.is_empty(), "Expected at least one event");
         let json: serde_json::Value = serde_json::from_str(&events[0]).unwrap_or_default();
         assert_eq!(json["is_vip"], serde_json::Value::Bool(true));
-        assert_eq!(json["namespace_id"], serde_json::Value::Number(42.into()));
+        assert_eq!(json["organization_slug"], serde_json::Value::Number(42.into()));
     }
 
     // === Trace Context Tests ===
@@ -2795,7 +2798,7 @@ mod tests {
         assert!(event.contains("\"client_id\":\"client_123\""), "missing client_id");
 
         // Target
-        assert!(event.contains("\"namespace_id\":1"), "missing namespace_id");
+        assert!(event.contains("\"organization_slug\":1"), "missing organization_slug");
         assert!(event.contains("\"vault_id\":2"), "missing vault_id");
 
         // System

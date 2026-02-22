@@ -1,22 +1,22 @@
 //! Shard router for multi-shard request routing.
 //!
-//! Routes requests to the correct shard based on namespace. Maintains a local
-//! cache of namespace to shard mappings with TTL-based invalidation.
+//! Routes requests to the correct shard based on organization. Maintains a local
+//! cache of organization to shard mappings with TTL-based invalidation.
 //!
 //! ## Architecture
 //!
 //! InferaDB uses a multi-Raft architecture where each shard is an independent
-//! Raft group. The `_system` namespace stores the routing table mapping
-//! namespaces to shards. This router provides:
+//! Raft group. The `_system` organization stores the routing table mapping
+//! organizations to shards. This router provides:
 //!
-//! - Namespace → shard lookups via `_system`
+//! - Organization → shard lookups via `_system`
 //! - Cached routing with TTL-based expiration
 //! - Connection pooling to shard leaders
 //! - Leader hint tracking for fast routing
 //!
 //! ## Routing Flow
 //!
-//! 1. Check local cache for namespace → shard mapping
+//! 1. Check local cache for organization → shard mapping
 //! 2. If miss or stale, query `_system` for current mapping
 //! 3. Connect to shard leader (using `leader_hint` or discovery)
 //! 4. Cache the connection for subsequent requests
@@ -34,9 +34,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_state::system::{NamespaceStatus, SystemNamespaceService};
+use inferadb_ledger_state::system::{OrganizationStatus, SystemOrganizationService};
 use inferadb_ledger_store::{FileBackend, StorageBackend};
-use inferadb_ledger_types::{NamespaceId, ShardId};
+use inferadb_ledger_types::{OrganizationId, ShardId};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 use tonic::transport::Channel;
@@ -49,13 +49,13 @@ use tracing::{debug, info, warn};
 /// Errors that can occur during shard routing.
 #[derive(Debug, Snafu)]
 pub enum RoutingError {
-    /// Namespace not found in routing table.
-    #[snafu(display("Namespace {namespace_id} not found"))]
-    NamespaceNotFound { namespace_id: NamespaceId },
+    /// Organization not found in routing table.
+    #[snafu(display("Organization {organization_id} not found"))]
+    OrganizationNotFound { organization_id: OrganizationId },
 
-    /// Namespace is not active (migrating, suspended, deleted).
-    #[snafu(display("Namespace {namespace_id} is {status:?}"))]
-    NamespaceUnavailable { namespace_id: NamespaceId, status: NamespaceStatus },
+    /// Organization is not active (migrating, suspended, deleted).
+    #[snafu(display("Organization {organization_id} is {status:?}"))]
+    OrganizationUnavailable { organization_id: OrganizationId, status: OrganizationStatus },
 
     /// Shard has no available nodes.
     #[snafu(display("Shard {shard_id} has no available nodes"))]
@@ -77,13 +77,13 @@ pub type Result<T> = std::result::Result<T, RoutingError>;
 // Routing Info (Public)
 // ============================================================================
 
-/// Public routing information for a namespace.
+/// Public routing information for an organization.
 ///
 /// This is the public view of cached routing data, suitable for
 /// use by other components (like MultiRaftManager).
 #[derive(Debug, Clone)]
 pub struct RoutingInfo {
-    /// Shard hosting this namespace.
+    /// Shard hosting this organization.
     pub shard_id: ShardId,
     /// Member nodes in the shard.
     pub member_nodes: Vec<String>,
@@ -95,10 +95,10 @@ pub struct RoutingInfo {
 // Cache Entry (Internal)
 // ============================================================================
 
-/// Cached routing information for a namespace (internal).
+/// Cached routing information for an organization (internal).
 #[derive(Debug, Clone)]
 struct CacheEntry {
-    /// Shard hosting this namespace.
+    /// Shard hosting this organization.
     shard_id: ShardId,
     /// Member nodes in the shard.
     member_nodes: Vec<String>,
@@ -178,13 +178,13 @@ impl Default for RouterConfig {
 
 /// Shard router for routing requests to the correct shard.
 ///
-/// Maintains a cache of namespace → shard mappings and manages
+/// Maintains a cache of organization → shard mappings and manages
 /// connections to shard leaders.
 pub struct ShardRouter<B: StorageBackend + 'static = FileBackend> {
-    /// System namespace service for namespace lookups.
-    system: Arc<SystemNamespaceService<B>>,
-    /// Cached namespace → shard mappings.
-    cache: RwLock<HashMap<NamespaceId, CacheEntry>>,
+    /// System organization service for organization lookups.
+    system: Arc<SystemOrganizationService<B>>,
+    /// Cached organization → shard mappings.
+    cache: RwLock<HashMap<OrganizationId, CacheEntry>>,
     /// Active shard connections.
     connections: RwLock<HashMap<ShardId, ShardConnection>>,
     /// Router configuration.
@@ -193,12 +193,12 @@ pub struct ShardRouter<B: StorageBackend + 'static = FileBackend> {
 
 impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Creates a new shard router.
-    pub fn new(system: Arc<SystemNamespaceService<B>>) -> Self {
+    pub fn new(system: Arc<SystemOrganizationService<B>>) -> Self {
         Self::with_config(system, RouterConfig::default())
     }
 
     /// Creates a new shard router with custom configuration.
-    pub fn with_config(system: Arc<SystemNamespaceService<B>>, config: RouterConfig) -> Self {
+    pub fn with_config(system: Arc<SystemOrganizationService<B>>, config: RouterConfig) -> Self {
         Self {
             system,
             cache: RwLock::new(HashMap::new()),
@@ -209,47 +209,47 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
     /// Routes a request to the appropriate shard.
     ///
-    /// Returns the shard connection for the namespace. The connection
+    /// Returns the shard connection for the organization. The connection
     /// may be cached or freshly established.
     ///
     /// # Errors
     ///
-    /// Returns a routing error if the namespace is not found in the routing
+    /// Returns a routing error if the organization is not found in the routing
     /// table or the gRPC connection to the target shard cannot be established.
-    pub async fn route(&self, namespace_id: NamespaceId) -> Result<ShardConnection> {
+    pub async fn route(&self, organization_id: OrganizationId) -> Result<ShardConnection> {
         // 1. Check cache
-        let routing = self.get_routing_internal(namespace_id)?;
+        let routing = self.get_routing_internal(organization_id)?;
 
         // 2. Get or create connection
         self.get_connection(routing.shard_id, &routing.member_nodes, routing.leader_hint.as_deref())
             .await
     }
 
-    /// Returns routing information for a namespace (public API).
+    /// Returns routing information for an organization (public API).
     ///
-    /// Returns the shard assignment and member nodes for the namespace.
+    /// Returns the shard assignment and member nodes for the organization.
     /// Uses cached data if fresh, otherwise queries `_system`.
     ///
     /// # Errors
     ///
-    /// Returns a routing error if the namespace is not found in the `_system`
-    /// namespace store or is not assigned to any shard.
-    pub fn get_routing(&self, namespace_id: NamespaceId) -> Result<RoutingInfo> {
-        self.get_routing_internal(namespace_id).map(|entry| entry.to_routing_info())
+    /// Returns a routing error if the organization is not found in the `_system`
+    /// organization store or is not assigned to any shard.
+    pub fn get_routing(&self, organization_id: OrganizationId) -> Result<RoutingInfo> {
+        self.get_routing_internal(organization_id).map(|entry| entry.to_routing_info())
     }
 
-    /// Returns routing information for a namespace (internal).
+    /// Returns routing information for an organization (internal).
     ///
     /// Uses cached data if fresh, otherwise queries `_system`.
-    fn get_routing_internal(&self, namespace_id: NamespaceId) -> Result<CacheEntry> {
+    fn get_routing_internal(&self, organization_id: OrganizationId) -> Result<CacheEntry> {
         // Check cache first
         {
             let cache = self.cache.read();
-            if let Some(entry) = cache.get(&namespace_id)
+            if let Some(entry) = cache.get(&organization_id)
                 && !entry.is_stale(self.config.cache_ttl)
             {
                 debug!(
-                    namespace_id = namespace_id.value(),
+                    organization_id = organization_id.value(),
                     shard_id = entry.shard_id.value(),
                     "Cache hit"
                 );
@@ -258,21 +258,21 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         // Cache miss or stale - query _system
-        self.refresh_routing(namespace_id)
+        self.refresh_routing(organization_id)
     }
 
     /// Refreshes routing information from `_system`.
-    fn refresh_routing(&self, namespace_id: NamespaceId) -> Result<CacheEntry> {
+    fn refresh_routing(&self, organization_id: OrganizationId) -> Result<CacheEntry> {
         let registry = self
             .system
-            .get_namespace(namespace_id)
+            .get_organization(organization_id)
             .context(SystemLookupSnafu)?
-            .ok_or(RoutingError::NamespaceNotFound { namespace_id })?;
+            .ok_or(RoutingError::OrganizationNotFound { organization_id })?;
 
-        // Check namespace status
-        if registry.status != NamespaceStatus::Active {
-            return Err(RoutingError::NamespaceUnavailable {
-                namespace_id,
+        // Check organization status
+        if registry.status != OrganizationStatus::Active {
+            return Err(RoutingError::OrganizationUnavailable {
+                organization_id,
                 status: registry.status,
             });
         }
@@ -288,11 +288,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         // Update cache
         {
             let mut cache = self.cache.write();
-            cache.insert(namespace_id, entry.clone());
+            cache.insert(organization_id, entry.clone());
         }
 
         info!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             shard_id = registry.shard_id.value(),
             config_version = registry.config_version,
             "Refreshed routing cache"
@@ -422,13 +422,13 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         })
     }
 
-    /// Invalidate cached routing for a namespace.
+    /// Invalidate cached routing for an organization.
     ///
     /// Invalidates cached routing when a redirect indicates stale data.
-    pub fn invalidate(&self, namespace_id: NamespaceId) {
+    pub fn invalidate(&self, organization_id: OrganizationId) {
         let mut cache = self.cache.write();
-        if cache.remove(&namespace_id).is_some() {
-            debug!(namespace_id = namespace_id.value(), "Invalidated routing cache");
+        if cache.remove(&organization_id).is_some() {
+            debug!(organization_id = organization_id.value(), "Invalidated routing cache");
         }
     }
 
@@ -445,13 +445,13 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Updates leader hint after successful request.
     ///
     /// Updates the leader hint when a response indicates the actual leader.
-    pub fn update_leader_hint(&self, namespace_id: NamespaceId, leader_node: &str) {
+    pub fn update_leader_hint(&self, organization_id: OrganizationId, leader_node: &str) {
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&namespace_id)
+        if let Some(entry) = cache.get_mut(&organization_id)
             && entry.leader_hint.as_deref() != Some(leader_node)
         {
             entry.leader_hint = Some(leader_node.to_string());
-            debug!(namespace_id = namespace_id.value(), leader_node, "Updated leader hint");
+            debug!(organization_id = organization_id.value(), leader_node, "Updated leader hint");
         }
     }
 
@@ -463,7 +463,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         let stale_entries = cache.values().filter(|e| e.is_stale(self.config.cache_ttl)).count();
 
         RouterStats {
-            cached_namespaces: cache.len(),
+            cached_organizations: cache.len(),
             stale_entries,
             active_connections: connections.len(),
         }
@@ -488,8 +488,8 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 /// Statistics about the router's cache state.
 #[derive(Debug, Clone, Default)]
 pub struct RouterStats {
-    /// Number of cached namespace routings.
-    pub cached_namespaces: usize,
+    /// Number of cached organization routings.
+    pub cached_organizations: usize,
     /// Number of stale cache entries.
     pub stale_entries: usize,
     /// Number of active shard connections.
@@ -517,7 +517,7 @@ mod tests {
             Database::<FileBackend>::create(temp_dir.join("test.db")).expect("create database"),
         );
         let state = Arc::new(StateLayer::new(db));
-        let system = Arc::new(SystemNamespaceService::new(Arc::clone(&state)));
+        let system = Arc::new(SystemOrganizationService::new(Arc::clone(&state)));
 
         let router = ShardRouter::new(system);
         (router, state, temp_dir)
@@ -598,12 +598,12 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_not_found() {
+    fn test_organization_not_found() {
         let (router, _, _temp) = create_test_router();
 
-        let result = router.get_routing(NamespaceId::new(999));
+        let result = router.get_routing(OrganizationId::new(999));
         assert!(
-            matches!(result, Err(RoutingError::NamespaceNotFound { namespace_id }) if namespace_id == NamespaceId::new(999))
+            matches!(result, Err(RoutingError::OrganizationNotFound { organization_id }) if organization_id == OrganizationId::new(999))
         );
     }
 
@@ -615,7 +615,7 @@ mod tests {
         {
             let mut cache = router.cache.write();
             cache.insert(
-                NamespaceId::new(1),
+                OrganizationId::new(1),
                 CacheEntry {
                     shard_id: ShardId::new(1),
                     member_nodes: vec!["node-1".to_string()],
@@ -626,11 +626,11 @@ mod tests {
             );
         }
 
-        assert_eq!(router.stats().cached_namespaces, 1);
+        assert_eq!(router.stats().cached_organizations, 1);
 
-        router.invalidate(NamespaceId::new(1));
+        router.invalidate(OrganizationId::new(1));
 
-        assert_eq!(router.stats().cached_namespaces, 0);
+        assert_eq!(router.stats().cached_organizations, 0);
     }
 
     #[test]
@@ -638,7 +638,7 @@ mod tests {
         let (router, _, _temp) = create_test_router();
 
         let stats = router.stats();
-        assert_eq!(stats.cached_namespaces, 0);
+        assert_eq!(stats.cached_organizations, 0);
         assert_eq!(stats.stale_entries, 0);
         assert_eq!(stats.active_connections, 0);
     }
@@ -651,7 +651,7 @@ mod tests {
         {
             let mut cache = router.cache.write();
             cache.insert(
-                NamespaceId::new(1),
+                OrganizationId::new(1),
                 CacheEntry {
                     shard_id: ShardId::new(1),
                     member_nodes: vec![],
@@ -664,124 +664,152 @@ mod tests {
 
         router.clear();
 
-        assert_eq!(router.stats().cached_namespaces, 0);
+        assert_eq!(router.stats().cached_organizations, 0);
     }
 
     #[test]
-    fn test_routing_after_namespace_registration() {
+    fn test_routing_after_organization_registration() {
         let (router, state, _temp) = create_test_router();
 
-        // Register a namespace in _system
-        let registry = inferadb_ledger_state::system::NamespaceRegistry {
-            namespace_id: NamespaceId::new(42),
+        // Register an organization in _system
+        let registry = inferadb_ledger_state::system::OrganizationRegistry {
+            organization_id: OrganizationId::new(42),
             name: "test-ns".to_string(),
             shard_id: ShardId::new(3),
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
-            status: inferadb_ledger_state::system::NamespaceStatus::Active,
+            status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
         };
-        let system = SystemNamespaceService::new(Arc::clone(&state));
-        system.register_namespace(&registry).expect("register namespace");
+        let system = SystemOrganizationService::new(Arc::clone(&state));
+        system
+            .register_organization(
+                &registry,
+                inferadb_ledger_types::OrganizationSlug::new(
+                    registry.organization_id.value() as u64
+                ),
+            )
+            .expect("register organization");
 
-        // Router should resolve the namespace to shard 3
-        let info = router.get_routing(NamespaceId::new(42)).expect("get routing");
+        // Router should resolve the organization to shard 3
+        let info = router.get_routing(OrganizationId::new(42)).expect("get routing");
         assert_eq!(info.shard_id, ShardId::new(3));
         assert_eq!(info.member_nodes.len(), 2);
         assert!(info.leader_hint.is_some(), "should have a leader hint");
 
         // Should be cached now
-        assert_eq!(router.stats().cached_namespaces, 1);
+        assert_eq!(router.stats().cached_organizations, 1);
     }
 
     #[test]
     fn test_routing_cache_populated_on_lookup() {
         let (router, state, _temp) = create_test_router();
 
-        // Register two namespaces on different shards
-        let system = SystemNamespaceService::new(Arc::clone(&state));
+        // Register two organizations on different shards
+        let system = SystemOrganizationService::new(Arc::clone(&state));
 
         for (ns_id, shard_id) in [(10, 1), (20, 2)] {
-            let registry = inferadb_ledger_state::system::NamespaceRegistry {
-                namespace_id: NamespaceId::new(ns_id),
+            let registry = inferadb_ledger_state::system::OrganizationRegistry {
+                organization_id: OrganizationId::new(ns_id),
                 name: format!("ns-{}", ns_id),
                 shard_id: ShardId::new(shard_id),
                 member_nodes: vec![format!("node-{}:50051", shard_id)],
-                status: inferadb_ledger_state::system::NamespaceStatus::Active,
+                status: inferadb_ledger_state::system::OrganizationStatus::Active,
                 config_version: 1,
                 created_at: chrono::Utc::now(),
             };
-            system.register_namespace(&registry).expect("register");
+            system
+                .register_organization(
+                    &registry,
+                    inferadb_ledger_types::OrganizationSlug::new(
+                        registry.organization_id.value() as u64
+                    ),
+                )
+                .expect("register");
         }
 
         // Look up both — should independently resolve
-        let info1 = router.get_routing(NamespaceId::new(10)).expect("ns 10");
-        let info2 = router.get_routing(NamespaceId::new(20)).expect("ns 20");
+        let info1 = router.get_routing(OrganizationId::new(10)).expect("ns 10");
+        let info2 = router.get_routing(OrganizationId::new(20)).expect("ns 20");
 
         assert_eq!(info1.shard_id, ShardId::new(1));
         assert_eq!(info2.shard_id, ShardId::new(2));
 
         // Both should be cached
-        assert_eq!(router.stats().cached_namespaces, 2);
+        assert_eq!(router.stats().cached_organizations, 2);
     }
 
     #[test]
     fn test_update_leader_hint_changes_cached_hint() {
         let (router, state, _temp) = create_test_router();
 
-        // Register namespace
-        let system = SystemNamespaceService::new(Arc::clone(&state));
-        let registry = inferadb_ledger_state::system::NamespaceRegistry {
-            namespace_id: NamespaceId::new(5),
+        // Register organization
+        let system = SystemOrganizationService::new(Arc::clone(&state));
+        let registry = inferadb_ledger_state::system::OrganizationRegistry {
+            organization_id: OrganizationId::new(5),
             name: "hint-test".to_string(),
             shard_id: ShardId::new(1),
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
-            status: inferadb_ledger_state::system::NamespaceStatus::Active,
+            status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
         };
-        system.register_namespace(&registry).expect("register");
+        system
+            .register_organization(
+                &registry,
+                inferadb_ledger_types::OrganizationSlug::new(
+                    registry.organization_id.value() as u64
+                ),
+            )
+            .expect("register");
 
         // Populate cache by doing a lookup
-        let info = router.get_routing(NamespaceId::new(5)).expect("initial routing");
+        let info = router.get_routing(OrganizationId::new(5)).expect("initial routing");
         assert_eq!(info.leader_hint.as_deref(), Some("node-a:50051"));
 
         // Update leader hint
-        router.update_leader_hint(NamespaceId::new(5), "node-b:50051");
+        router.update_leader_hint(OrganizationId::new(5), "node-b:50051");
 
         // Re-read from cache (should use updated hint)
-        let info2 = router.get_routing(NamespaceId::new(5)).expect("updated routing");
+        let info2 = router.get_routing(OrganizationId::new(5)).expect("updated routing");
         assert_eq!(info2.leader_hint.as_deref(), Some("node-b:50051"));
     }
 
     #[test]
-    fn test_routing_unavailable_namespace_status() {
+    fn test_routing_unavailable_organization_status() {
         let (router, state, _temp) = create_test_router();
 
-        // Register a namespace with Suspended status
-        let system = SystemNamespaceService::new(Arc::clone(&state));
-        let registry = inferadb_ledger_state::system::NamespaceRegistry {
-            namespace_id: NamespaceId::new(77),
+        // Register an organization with Suspended status
+        let system = SystemOrganizationService::new(Arc::clone(&state));
+        let registry = inferadb_ledger_state::system::OrganizationRegistry {
+            organization_id: OrganizationId::new(77),
             name: "suspended-ns".to_string(),
             shard_id: ShardId::new(1),
             member_nodes: vec!["node-1:50051".to_string()],
-            status: inferadb_ledger_state::system::NamespaceStatus::Suspended,
+            status: inferadb_ledger_state::system::OrganizationStatus::Suspended,
             config_version: 1,
             created_at: chrono::Utc::now(),
         };
-        system.register_namespace(&registry).expect("register");
+        system
+            .register_organization(
+                &registry,
+                inferadb_ledger_types::OrganizationSlug::new(
+                    registry.organization_id.value() as u64
+                ),
+            )
+            .expect("register");
 
-        // Routing should fail with NamespaceUnavailable
-        let result = router.get_routing(NamespaceId::new(77));
+        // Routing should fail with OrganizationUnavailable
+        let result = router.get_routing(OrganizationId::new(77));
         assert!(
             matches!(
                 result,
-                Err(RoutingError::NamespaceUnavailable {
-                    namespace_id,
-                    status: inferadb_ledger_state::system::NamespaceStatus::Suspended
-                }) if namespace_id == NamespaceId::new(77)
+                Err(RoutingError::OrganizationUnavailable {
+                    organization_id,
+                    status: inferadb_ledger_state::system::OrganizationStatus::Suspended
+                }) if organization_id == OrganizationId::new(77)
             ),
-            "expected NamespaceUnavailable, got: {:?}",
+            "expected OrganizationUnavailable, got: {:?}",
             result
         );
     }

@@ -1,20 +1,20 @@
 //! Admin service implementation.
 //!
-//! Handles namespace and vault management, cluster membership, snapshots, and integrity checks.
+//! Handles organization and vault management, cluster membership, snapshots, and integrity checks.
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
     BackupInfo, BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
-    ClusterMemberRole, CreateBackupRequest, CreateBackupResponse, CreateNamespaceRequest,
-    CreateNamespaceResponse, CreateSnapshotRequest, CreateSnapshotResponse, CreateVaultRequest,
-    CreateVaultResponse, DeleteNamespaceRequest, DeleteNamespaceResponse, DeleteVaultRequest,
+    ClusterMemberRole, CreateBackupRequest, CreateBackupResponse, CreateOrganizationRequest,
+    CreateOrganizationResponse, CreateSnapshotRequest, CreateSnapshotResponse, CreateVaultRequest,
+    CreateVaultResponse, DeleteOrganizationRequest, DeleteOrganizationResponse, DeleteVaultRequest,
     DeleteVaultResponse, GetClusterInfoRequest, GetClusterInfoResponse, GetConfigRequest,
-    GetConfigResponse, GetNamespaceRequest, GetNamespaceResponse, GetNodeInfoRequest,
-    GetNodeInfoResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
+    GetConfigResponse, GetNodeInfoRequest, GetNodeInfoResponse, GetOrganizationRequest,
+    GetOrganizationResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
     JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
-    ListBackupsRequest, ListBackupsResponse, ListNamespacesRequest, ListNamespacesResponse,
-    ListVaultsRequest, ListVaultsResponse, NamespaceId, NodeId, RecoverVaultRequest,
+    ListBackupsRequest, ListBackupsResponse, ListOrganizationsRequest, ListOrganizationsResponse,
+    ListVaultsRequest, ListVaultsResponse, NodeId, OrganizationSlug, RecoverVaultRequest,
     RecoverVaultResponse, RestoreBackupRequest, RestoreBackupResponse, ShardId,
     UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto, VaultId,
     admin_service_server::AdminService,
@@ -22,7 +22,7 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
-    NamespaceId as DomainNamespaceId, ShardId as DomainShardId, VaultEntry,
+    OrganizationId as DomainOrganizationId, ShardId as DomainShardId, VaultEntry,
     VaultId as DomainVaultId, ZERO_HASH,
     audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
     config::ValidationConfig,
@@ -36,15 +36,17 @@ use tonic::{Request, Response, Status};
 use crate::{
     error::{ServiceError, classify_raft_error},
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
-    metrics, trace_context,
+    metrics,
+    services::slug_resolver::SlugResolver,
+    trace_context,
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
     },
     wide_events::{OperationType, RequestContext, Sampler},
 };
 
-/// Handles namespace and vault lifecycle, cluster membership, snapshots, and runtime configuration
-/// via Raft consensus.
+/// Handles organization and vault lifecycle, cluster membership, snapshots, and runtime
+/// configuration via Raft consensus.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct AdminServiceImpl {
@@ -91,7 +93,7 @@ pub struct AdminServiceImpl {
     /// Snapshot manager for reading Raft snapshots during backup.
     #[builder(default)]
     snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
-    /// Per-namespace resource quota checker.
+    /// Per-organization resource quota checker.
     #[builder(default)]
     quota_checker: Option<crate::quota::QuotaChecker>,
 }
@@ -144,7 +146,7 @@ impl AdminServiceImpl {
         self
     }
 
-    /// Sets the per-namespace resource quota checker.
+    /// Sets the per-organization resource quota checker.
     #[must_use]
     pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
         self.quota_checker = Some(checker);
@@ -179,10 +181,10 @@ impl AdminServiceImpl {
 
 #[tonic::async_trait]
 impl AdminService for AdminServiceImpl {
-    async fn create_namespace(
+    async fn create_organization(
         &self,
-        request: Request<CreateNamespaceRequest>,
-    ) -> Result<Response<CreateNamespaceResponse>, Status> {
+        request: Request<CreateOrganizationRequest>,
+    ) -> Result<Response<CreateOrganizationResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
 
@@ -192,11 +194,11 @@ impl AdminService for AdminServiceImpl {
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "create_namespace");
+        let mut ctx = RequestContext::new("AdminService", "create_organization");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("create_namespace");
-        ctx.set_target_namespace_name(&req.name);
+        ctx.set_admin_action("create_organization");
+        ctx.set_target_organization_name(&req.name);
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
@@ -212,22 +214,28 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        // Validate namespace name
-        validation::validate_namespace_name(&req.name, &self.validation_config)
+        // Validate organization name
+        validation::validate_organization_name(&req.name, &self.validation_config)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        // Submit create namespace through Raft
+        // Generate a Snowflake slug for the organization
+        let slug = inferadb_ledger_types::snowflake::generate_organization_slug().map_err(|e| {
+            Status::internal(format!("Failed to generate organization slug: {}", e))
+        })?;
+
+        // Submit create organization through Raft
         // Map proto ShardId to domain ShardId newtype
         // Convert proto quota to domain type
-        let quota = req.quota.map(|q| inferadb_ledger_types::config::NamespaceQuota {
+        let quota = req.quota.map(|q| inferadb_ledger_types::config::OrganizationQuota {
             max_storage_bytes: q.max_storage_bytes,
             max_vaults: q.max_vaults,
             max_write_ops_per_sec: q.max_write_ops_per_sec,
             max_read_ops_per_sec: q.max_read_ops_per_sec,
         });
 
-        let ledger_request = LedgerRequest::CreateNamespace {
+        let ledger_request = LedgerRequest::CreateOrganization {
             name: req.name,
+            slug,
             shard_id: req.shard_id.map(|s| DomainShardId::new(s.id)),
             quota,
         };
@@ -259,35 +267,37 @@ impl AdminService for AdminServiceImpl {
                 },
             };
 
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
         match result.data {
-            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                ctx.set_namespace_id(namespace_id.value());
+            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+                ctx.set_organization_slug(slug.value());
                 ctx.set_success();
-                metrics::record_namespace_operation(namespace_id.value(), "admin");
-                metrics::record_namespace_latency(
-                    namespace_id.value(),
+                metrics::record_organization_operation(organization_id.value(), "admin");
+                metrics::record_organization_latency(
+                    organization_id.value(),
                     "admin",
                     ctx.elapsed_secs(),
                 );
                 self.emit_audit_event(
                     &self.build_audit_event(
-                        AuditAction::CreateNamespace,
+                        AuditAction::CreateOrganization,
                         "system",
-                        AuditResource::namespace(namespace_id)
+                        AuditResource::organization(organization_id)
                             .with_detail(format!("shard:{}", shard_id.value())),
                         AuditOutcome::Success,
                         Some(&trace_ctx.trace_id),
                     ),
                 );
-                Ok(Response::new(CreateNamespaceResponse {
-                    namespace_id: Some(NamespaceId { id: namespace_id.value() }),
+                let org_slug = slug_resolver.resolve_slug(organization_id)?;
+                Ok(Response::new(CreateOrganizationResponse {
+                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
                     shard_id: Some(ShardId { id: shard_id.value() }),
                 }))
             },
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
                 self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::CreateNamespace,
+                    AuditAction::CreateOrganization,
                     "system",
                     AuditResource::cluster(),
                     AuditOutcome::Failed {
@@ -305,10 +315,10 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
-    async fn delete_namespace(
+    async fn delete_organization(
         &self,
-        request: Request<DeleteNamespaceRequest>,
-    ) -> Result<Response<DeleteNamespaceResponse>, Status> {
+        request: Request<DeleteOrganizationRequest>,
+    ) -> Result<Response<DeleteOrganizationResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
 
@@ -318,10 +328,10 @@ impl AdminService for AdminServiceImpl {
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "delete_namespace");
+        let mut ctx = RequestContext::new("AdminService", "delete_organization");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("delete_namespace");
+        ctx.set_admin_action("delete_organization");
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
@@ -337,16 +347,17 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        let namespace_id =
-            req.namespace_id.as_ref().map(|n| DomainNamespaceId::new(n.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing namespace_id");
-                ServiceError::invalid_arg("Missing namespace_id")
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_namespace_id(namespace_id.value());
+        ctx.set_organization_slug(org_slug_val);
 
-        // Submit delete namespace through Raft
-        let ledger_request = LedgerRequest::DeleteNamespace { namespace_id };
+        // Submit delete organization through Raft
+        let ledger_request = LedgerRequest::DeleteOrganization { organization_id };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -376,23 +387,23 @@ impl AdminService for AdminServiceImpl {
             };
 
         match result.data {
-            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
                 if success {
                     ctx.set_success();
-                    metrics::record_namespace_operation(namespace_id.value(), "admin");
-                    metrics::record_namespace_latency(
-                        namespace_id.value(),
+                    metrics::record_organization_operation(organization_id.value(), "admin");
+                    metrics::record_organization_latency(
+                        organization_id.value(),
                         "admin",
                         ctx.elapsed_secs(),
                     );
                     self.emit_audit_event(&self.build_audit_event(
-                        AuditAction::DeleteNamespace,
+                        AuditAction::DeleteOrganization,
                         "system",
-                        AuditResource::namespace(namespace_id),
+                        AuditResource::organization(organization_id),
                         AuditOutcome::Success,
                         Some(&trace_ctx.trace_id),
                     ));
-                    Ok(Response::new(DeleteNamespaceResponse {
+                    Ok(Response::new(DeleteOrganizationResponse {
                         deleted_at: Some(
                             prost_types::Timestamp::from(std::time::SystemTime::now()),
                         ),
@@ -400,19 +411,19 @@ impl AdminService for AdminServiceImpl {
                 } else {
                     let vault_ids: Vec<String> =
                         blocking_vault_ids.iter().map(|id| id.value().to_string()).collect();
-                    ctx.set_error("PreconditionFailed", "Namespace has active vaults");
+                    ctx.set_error("PreconditionFailed", "Organization has active vaults");
                     self.emit_audit_event(&self.build_audit_event(
-                        AuditAction::DeleteNamespace,
+                        AuditAction::DeleteOrganization,
                         "system",
-                        AuditResource::namespace(namespace_id),
+                        AuditResource::organization(organization_id),
                         AuditOutcome::Failed {
                             code: "PreconditionFailed".to_string(),
-                            detail: "Namespace has active vaults".to_string(),
+                            detail: "Organization has active vaults".to_string(),
                         },
                         Some(&trace_ctx.trace_id),
                     ));
                     Err(ServiceError::precondition(format!(
-                        "Namespace has active vaults that must be deleted first: [{}]",
+                        "Organization has active vaults that must be deleted first: [{}]",
                         vault_ids.join(", ")
                     ))
                     .into())
@@ -421,9 +432,9 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
                 self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::DeleteNamespace,
+                    AuditAction::DeleteOrganization,
                     "system",
-                    AuditResource::namespace(namespace_id),
+                    AuditResource::organization(organization_id),
                     AuditOutcome::Failed {
                         code: "Unspecified".to_string(),
                         detail: message.clone(),
@@ -439,20 +450,20 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
-    async fn get_namespace(
+    async fn get_organization(
         &self,
-        request: Request<GetNamespaceRequest>,
-    ) -> Result<Response<GetNamespaceResponse>, Status> {
+        request: Request<GetOrganizationRequest>,
+    ) -> Result<Response<GetOrganizationResponse>, Status> {
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Create wide event context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "get_namespace");
+        let mut ctx = RequestContext::new("AdminService", "get_organization");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("get_namespace");
+        ctx.set_admin_action("get_organization");
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
@@ -468,31 +479,27 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        // Extract namespace from lookup oneof (by ID or name)
-        let ns_meta = match req.lookup {
-            Some(inferadb_ledger_proto::proto::get_namespace_request::Lookup::NamespaceId(n)) => {
-                ctx.set_namespace_id(n.id);
-                self.applied_state.get_namespace(DomainNamespaceId::new(n.id))
-            },
-            Some(inferadb_ledger_proto::proto::get_namespace_request::Lookup::Name(name)) => {
-                ctx.set_target_namespace_name(&name);
-                self.applied_state.get_namespace_by_name(&name)
-            },
-            None => {
-                ctx.set_error("InvalidArgument", "Missing namespace lookup");
-                return Err(ServiceError::invalid_arg("Missing namespace lookup").into());
-            },
-        };
+        // Extract organization from request
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        ctx.set_organization_slug(org_slug_val);
 
-        match ns_meta {
-            Some(ns) => {
-                ctx.set_namespace_id(ns.namespace_id.value());
+        let org_meta = self.applied_state.get_organization(organization_id);
+
+        match org_meta {
+            Some(org) => {
+                ctx.set_organization_slug(org_slug_val);
                 ctx.set_success();
-                let status = crate::proto_compat::namespace_status_to_proto(ns.status);
-                Ok(Response::new(GetNamespaceResponse {
-                    namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
-                    name: ns.name,
-                    shard_id: Some(ShardId { id: ns.shard_id.value() }),
+                let status = crate::proto_compat::organization_status_to_proto(org.status);
+                let org_slug = slug_resolver.resolve_slug(org.organization_id)?;
+                Ok(Response::new(GetOrganizationResponse {
+                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                    name: org.name,
+                    shard_id: Some(ShardId { id: org.shard_id.value() }),
                     member_nodes: vec![],
                     status: status.into(),
                     config_version: 0,
@@ -500,20 +507,20 @@ impl AdminService for AdminServiceImpl {
                 }))
             },
             None => {
-                ctx.set_error("NotFound", "Namespace not found");
-                Err(ServiceError::not_found("Namespace", "unknown").into())
+                ctx.set_error("NotFound", "Organization not found");
+                Err(ServiceError::not_found("Organization", "unknown").into())
             },
         }
     }
 
-    async fn list_namespaces(
+    async fn list_organizations(
         &self,
-        _request: Request<ListNamespacesRequest>,
-    ) -> Result<Response<ListNamespacesResponse>, Status> {
+        _request: Request<ListOrganizationsRequest>,
+    ) -> Result<Response<ListOrganizationsResponse>, Status> {
         // Create wide event context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "list_namespaces");
+        let mut ctx = RequestContext::new("AdminService", "list_organizations");
         ctx.set_operation_type(OperationType::Admin);
-        ctx.set_admin_action("list_namespaces");
+        ctx.set_admin_action("list_organizations");
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
@@ -521,29 +528,31 @@ impl AdminService for AdminServiceImpl {
             ctx.set_node_id(node_id);
         }
 
-        let namespaces = self
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let organizations = self
             .applied_state
-            .list_namespaces()
+            .list_organizations()
             .into_iter()
-            .map(|ns| {
-                let status = crate::proto_compat::namespace_status_to_proto(ns.status);
-                inferadb_ledger_proto::proto::GetNamespaceResponse {
-                    namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
-                    name: ns.name,
-                    shard_id: Some(ShardId { id: ns.shard_id.value() }),
+            .map(|org| {
+                let status = crate::proto_compat::organization_status_to_proto(org.status);
+                let org_slug = slug_resolver.resolve_slug(org.organization_id)?;
+                Ok(inferadb_ledger_proto::proto::GetOrganizationResponse {
+                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                    name: org.name,
+                    shard_id: Some(ShardId { id: org.shard_id.value() }),
                     member_nodes: vec![],
                     status: status.into(),
                     config_version: 0,
                     created_at: None,
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, Status>>()?;
 
         // Set count in context for observability
-        ctx.set_keys_count(namespaces.len());
+        ctx.set_keys_count(organizations.len());
         ctx.set_success();
 
-        Ok(Response::new(ListNamespacesResponse { namespaces, next_page_token: None }))
+        Ok(Response::new(ListOrganizationsResponse { organizations, next_page_token: None }))
     }
 
     async fn create_vault(
@@ -579,16 +588,17 @@ impl AdminService for AdminServiceImpl {
             ctx.set_node_id(node_id);
         }
 
-        let namespace_id =
-            req.namespace_id.as_ref().map(|n| DomainNamespaceId::new(n.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing namespace_id");
-                Status::invalid_argument("Missing namespace_id")
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_namespace_id(namespace_id.value());
+        ctx.set_organization_slug(org_slug_val);
 
         // Check vault count quota before submitting to Raft
-        super::helpers::check_vault_quota(self.quota_checker.as_ref(), namespace_id).map_err(
+        super::helpers::check_vault_quota(self.quota_checker.as_ref(), organization_id).map_err(
             |status| {
                 super::metadata::status_with_correlation(
                     status,
@@ -610,7 +620,7 @@ impl AdminService for AdminServiceImpl {
 
         // Submit create vault through Raft
         let ledger_request = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: None, // CreateVaultRequest doesn't have name field
             retention_policy,
         };
@@ -646,16 +656,16 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::VaultCreated { vault_id } => {
                 ctx.set_vault_id(vault_id.value());
                 ctx.set_success();
-                metrics::record_namespace_operation(namespace_id.value(), "admin");
-                metrics::record_namespace_latency(
-                    namespace_id.value(),
+                metrics::record_organization_operation(organization_id.value(), "admin");
+                metrics::record_organization_latency(
+                    organization_id.value(),
                     "admin",
                     ctx.elapsed_secs(),
                 );
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::CreateVault,
                     "system",
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Success,
                     Some(&trace_ctx.trace_id),
                 ));
@@ -670,9 +680,10 @@ impl AdminService for AdminServiceImpl {
                 let state_root = state.compute_state_root(vault_id).unwrap_or(ZERO_HASH);
 
                 // Build genesis block header (height 0)
+                let org_slug = slug_resolver.resolve_slug(organization_id)?;
                 let genesis = BlockHeader {
                     height: 0,
-                    namespace_id: Some(NamespaceId { id: namespace_id.value() }),
+                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
                     vault_id: Some(VaultId { id: vault_id.value() }),
                     previous_hash: Some(Hash { value: ZERO_HASH.to_vec() }),
                     tx_merkle_root: Some(Hash {
@@ -736,10 +747,11 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        let namespace_id =
-            req.namespace_id.as_ref().map(|n| DomainNamespaceId::new(n.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing namespace_id");
-                Status::invalid_argument("Missing namespace_id")
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
         let vault_id =
@@ -748,10 +760,10 @@ impl AdminService for AdminServiceImpl {
                 Status::invalid_argument("Missing vault_id")
             })?;
 
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        ctx.set_target(org_slug_val, vault_id.value());
 
         // Submit delete vault through Raft
-        let ledger_request = LedgerRequest::DeleteVault { namespace_id, vault_id };
+        let ledger_request = LedgerRequest::DeleteVault { organization_id, vault_id };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -784,16 +796,16 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::VaultDeleted { success } => {
                 if success {
                     ctx.set_success();
-                    metrics::record_namespace_operation(namespace_id.value(), "admin");
-                    metrics::record_namespace_latency(
-                        namespace_id.value(),
+                    metrics::record_organization_operation(organization_id.value(), "admin");
+                    metrics::record_organization_latency(
+                        organization_id.value(),
                         "admin",
                         ctx.elapsed_secs(),
                     );
                     self.emit_audit_event(&self.build_audit_event(
                         AuditAction::DeleteVault,
                         "system",
-                        AuditResource::vault(namespace_id, vault_id),
+                        AuditResource::vault(organization_id, vault_id),
                         AuditOutcome::Success,
                         Some(&trace_ctx.trace_id),
                     ));
@@ -807,7 +819,7 @@ impl AdminService for AdminServiceImpl {
                     self.emit_audit_event(&self.build_audit_event(
                         AuditAction::DeleteVault,
                         "system",
-                        AuditResource::vault(namespace_id, vault_id),
+                        AuditResource::vault(organization_id, vault_id),
                         AuditOutcome::Failed {
                             code: "DeleteFailed".to_string(),
                             detail: "Failed to delete vault".to_string(),
@@ -822,7 +834,7 @@ impl AdminService for AdminServiceImpl {
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::DeleteVault,
                     "system",
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Failed {
                         code: "Unspecified".to_string(),
                         detail: message.clone(),
@@ -867,10 +879,11 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        let namespace_id =
-            req.namespace_id.as_ref().map(|n| DomainNamespaceId::new(n.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing namespace_id");
-                Status::invalid_argument("Missing namespace_id")
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
         let vault_id =
@@ -879,18 +892,19 @@ impl AdminService for AdminServiceImpl {
                 Status::invalid_argument("Missing vault_id")
             })?;
 
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        ctx.set_target(org_slug_val, vault_id.value());
 
         // Get vault metadata and height
-        let vault_meta = self.applied_state.get_vault(namespace_id, vault_id);
-        let height = self.applied_state.vault_height(namespace_id, vault_id);
+        let vault_meta = self.applied_state.get_vault(organization_id, vault_id);
+        let height = self.applied_state.vault_height(organization_id, vault_id);
 
         match vault_meta {
             Some(_vault) => {
                 ctx.set_block_height(height);
                 ctx.set_success();
+                let org_slug = slug_resolver.resolve_slug(organization_id)?;
                 Ok(Response::new(GetVaultResponse {
-                    namespace_id: Some(NamespaceId { id: namespace_id.value() }),
+                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
                     vault_id: Some(VaultId { id: vault_id.value() }),
                     height,
                     state_root: None,
@@ -922,16 +936,18 @@ impl AdminService for AdminServiceImpl {
             ctx.set_node_id(node_id);
         }
 
-        // List all vaults across all namespaces
+        // List all vaults across all organizations
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let vaults = self
             .applied_state
             .all_vault_heights()
             .keys()
-            .filter_map(|(ns_id, vault_id)| {
-                self.applied_state.get_vault(*ns_id, *vault_id).map(|v| {
-                    let height = self.applied_state.vault_height(v.namespace_id, v.vault_id);
-                    inferadb_ledger_proto::proto::GetVaultResponse {
-                        namespace_id: Some(NamespaceId { id: v.namespace_id.value() }),
+            .filter_map(|(org_id, vault_id)| {
+                self.applied_state.get_vault(*org_id, *vault_id).map(|v| {
+                    let height = self.applied_state.vault_height(v.organization_id, v.vault_id);
+                    let org_slug = slug_resolver.resolve_slug(v.organization_id)?;
+                    Ok(inferadb_ledger_proto::proto::GetVaultResponse {
+                        organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
                         vault_id: Some(VaultId { id: v.vault_id.value() }),
                         height,
                         state_root: None,
@@ -939,10 +955,10 @@ impl AdminService for AdminServiceImpl {
                         leader: None,
                         status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
                         retention_policy: None,
-                    }
+                    })
                 })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, Status>>()?;
 
         // Set count in context for observability
         ctx.set_keys_count(vaults.len());
@@ -1039,22 +1055,24 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        let namespace_id = req.namespace_id.as_ref().map(|n| DomainNamespaceId::new(n.id));
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map(|n| n.slug);
+        let organization_id = slug_resolver.extract_and_resolve_optional(&req.organization_slug)?;
         let vault_id = req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id));
 
-        if let Some(ns_id) = namespace_id {
-            ctx.set_namespace_id(ns_id.value());
+        if let Some(slug_val) = org_slug_val {
+            ctx.set_organization_slug(slug_val);
         }
         if let Some(v_id) = vault_id {
             ctx.set_vault_id(v_id.value());
         }
 
         // Get all vault heights to check
-        let vault_heights: Vec<(DomainNamespaceId, DomainVaultId, u64)> =
-            if let (Some(ns), Some(v)) = (namespace_id, vault_id) {
+        let vault_heights: Vec<(DomainOrganizationId, DomainVaultId, u64)> =
+            if let (Some(org), Some(v)) = (organization_id, vault_id) {
                 // Specific vault
-                let height = self.applied_state.vault_height(ns, v);
-                if height > 0 { vec![(ns, v, height)] } else { vec![] }
+                let height = self.applied_state.vault_height(org, v);
+                if height > 0 { vec![(org, v, height)] } else { vec![] }
             } else {
                 // All vaults
                 self.applied_state
@@ -1081,7 +1099,7 @@ impl AdminService for AdminServiceImpl {
                 },
             };
 
-            for (ns_id, v_id, expected_height) in &vault_heights {
+            for (org_id, v_id, expected_height) in &vault_heights {
                 // Create temporary state for replay verification using temp directory
                 let temp_dir = match TempDir::new() {
                     Ok(d) => d,
@@ -1112,15 +1130,15 @@ impl AdminService for AdminServiceImpl {
 
                 // Replay all blocks for this vault
                 for height in 1..=*expected_height {
-                    let shard_height = match archive.find_shard_height(*ns_id, *v_id, height) {
+                    let shard_height = match archive.find_shard_height(*org_id, *v_id, height) {
                         Ok(Some(h)) => h,
                         Ok(None) => {
                             issues.push(IntegrityIssue {
                                 block_height: height,
                                 issue_type: "missing_block".to_string(),
                                 description: format!(
-                                    "Block not found in archive: ns={}, vault={}, height={}",
-                                    ns_id, v_id, height
+                                    "Block not found in archive: org={}, vault={}, height={}",
+                                    org_id, v_id, height
                                 ),
                             });
                             continue;
@@ -1149,7 +1167,9 @@ impl AdminService for AdminServiceImpl {
 
                     // Find the vault entry in this shard block
                     let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                        e.namespace_id == *ns_id && e.vault_id == *v_id && e.vault_height == height
+                        e.organization_id == *org_id
+                            && e.vault_id == *v_id
+                            && e.vault_height == height
                     });
 
                     let entry = match vault_entry {
@@ -1159,8 +1179,8 @@ impl AdminService for AdminServiceImpl {
                                 block_height: height,
                                 issue_type: "missing_entry".to_string(),
                                 description: format!(
-                                    "Vault entry not found in shard block: ns={}, vault={}",
-                                    ns_id, v_id
+                                    "Vault entry not found in shard block: org={}, vault={}",
+                                    org_id, v_id
                                 ),
                             });
                             continue;
@@ -1245,7 +1265,7 @@ impl AdminService for AdminServiceImpl {
             // Quick check: Verify state roots can be computed without errors
             let state = &*self.state;
 
-            for (_ns_id, v_id, height) in &vault_heights {
+            for (_org_id, v_id, height) in &vault_heights {
                 match state.compute_state_root(*v_id) {
                     Ok(_root) => {
                         // State root computed successfully - state is internally consistent
@@ -1736,10 +1756,11 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        let namespace_id =
-            req.namespace_id.as_ref().map(|n| DomainNamespaceId::new(n.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "namespace_id required");
-                Status::invalid_argument("namespace_id required")
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
         let vault_id =
             req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id)).ok_or_else(|| {
@@ -1747,10 +1768,10 @@ impl AdminService for AdminServiceImpl {
                 Status::invalid_argument("vault_id required")
             })?;
 
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        ctx.set_target(org_slug_val, vault_id.value());
 
         // Check current vault health
-        let current_health = self.applied_state.vault_health(namespace_id, vault_id);
+        let current_health = self.applied_state.vault_health(organization_id, vault_id);
 
         // Only recover diverged/recovering vaults unless force is set
         if !req.force {
@@ -1762,7 +1783,7 @@ impl AdminService for AdminServiceImpl {
                         message: "Vault is already healthy. Use force=true to recover anyway."
                             .to_string(),
                         health_status: VaultHealthProto::Healthy.into(),
-                        final_height: self.applied_state.vault_height(namespace_id, vault_id),
+                        final_height: self.applied_state.vault_height(organization_id, vault_id),
                         final_state_root: None,
                     }));
                 },
@@ -1784,7 +1805,7 @@ impl AdminService for AdminServiceImpl {
         };
 
         // Get expected height from applied state
-        let expected_height = self.applied_state.vault_height(namespace_id, vault_id);
+        let expected_height = self.applied_state.vault_height(organization_id, vault_id);
         if expected_height == 0 {
             ctx.set_error("NoBlocks", "Vault has no blocks to recover");
             return Ok(Response::new(RecoverVaultResponse {
@@ -1819,7 +1840,7 @@ impl AdminService for AdminServiceImpl {
 
         for height in 1..=expected_height {
             // Find shard height for this vault height
-            let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
+            let shard_height = match archive.find_shard_height(organization_id, vault_id, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     ctx.end_storage_timer();
@@ -1827,8 +1848,8 @@ impl AdminService for AdminServiceImpl {
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: format!(
-                            "Block not found in archive: ns={}, vault={}, height={}",
-                            namespace_id, vault_id, height
+                            "Block not found in archive: org={}, vault={}, height={}",
+                            organization_id, vault_id, height
                         ),
                         health_status: VaultHealthProto::Diverged.into(),
                         final_height: height - 1,
@@ -1866,7 +1887,9 @@ impl AdminService for AdminServiceImpl {
 
             // Find the vault entry
             let entry = match shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+                e.organization_id == organization_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
             }) {
                 Some(e) => e,
                 None => {
@@ -1958,14 +1981,14 @@ impl AdminService for AdminServiceImpl {
         ctx.start_raft_timer();
         if divergence_detected {
             tracing::error!(
-                namespace_id = namespace_id.value(),
+                organization_id = organization_id.value(),
                 vault_id = vault_id.value(),
                 "Recovery reproduced divergence - possible determinism bug"
             );
 
             // Update vault health to Diverged via Raft for cluster-wide consistency
             let health_request = LedgerRequest::UpdateVaultHealth {
-                namespace_id,
+                organization_id,
                 vault_id,
                 healthy: false,
                 expected_root: None, // Already diverged during recovery
@@ -1988,7 +2011,7 @@ impl AdminService for AdminServiceImpl {
                 &self.build_audit_event(
                     AuditAction::RecoverVault,
                     "system",
-                    AuditResource::vault(namespace_id, vault_id)
+                    AuditResource::vault(organization_id, vault_id)
                         .with_detail(format!("height:{expected_height},divergence_reproduced")),
                     AuditOutcome::Failed {
                         code: "DivergenceReproduced".to_string(),
@@ -2009,7 +2032,7 @@ impl AdminService for AdminServiceImpl {
         } else {
             // Update vault health to Healthy via Raft for cluster-wide consistency
             let health_request = LedgerRequest::UpdateVaultHealth {
-                namespace_id,
+                organization_id,
                 vault_id,
                 healthy: true,
                 expected_root: None,
@@ -2031,7 +2054,7 @@ impl AdminService for AdminServiceImpl {
                 &self.build_audit_event(
                     AuditAction::RecoverVault,
                     "system",
-                    AuditResource::vault(namespace_id, vault_id)
+                    AuditResource::vault(organization_id, vault_id)
                         .with_detail(format!("height:{expected_height}")),
                     AuditOutcome::Success,
                     Some(&trace_ctx.trace_id),
@@ -2081,10 +2104,11 @@ impl AdminService for AdminServiceImpl {
             trace_ctx.trace_flags,
         );
 
-        let namespace_id =
-            req.namespace_id.as_ref().map(|n| DomainNamespaceId::new(n.id)).ok_or_else(|| {
-                ctx.set_error("InvalidArgument", "Missing namespace_id");
-                Status::invalid_argument("Missing namespace_id")
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
             })?;
 
         let vault_id =
@@ -2093,7 +2117,7 @@ impl AdminService for AdminServiceImpl {
                 Status::invalid_argument("Missing vault_id")
             })?;
 
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        ctx.set_target(org_slug_val, vault_id.value());
 
         // Extract fake state roots for the simulated divergence
         let expected_root: [u8; 32] = req
@@ -2112,13 +2136,13 @@ impl AdminService for AdminServiceImpl {
             req.at_height
         } else {
             // Get current vault height if not specified
-            self.applied_state.vault_height(namespace_id, vault_id).max(1)
+            self.applied_state.vault_height(organization_id, vault_id).max(1)
         };
 
         ctx.set_block_height(at_height);
 
         tracing::warn!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             vault_id = vault_id.value(),
             at_height,
             "Simulating vault divergence for testing"
@@ -2126,7 +2150,7 @@ impl AdminService for AdminServiceImpl {
 
         // Update vault health to Diverged via Raft
         let health_request = LedgerRequest::UpdateVaultHealth {
-            namespace_id,
+            organization_id,
             vault_id,
             healthy: false,
             expected_root: Some(expected_root),
@@ -2146,7 +2170,7 @@ impl AdminService for AdminServiceImpl {
                     success: true,
                     message: format!(
                         "Vault {}:{} marked as diverged at height {}",
-                        namespace_id.value(),
+                        organization_id.value(),
                         vault_id.value(),
                         at_height
                     ),
@@ -2157,7 +2181,7 @@ impl AdminService for AdminServiceImpl {
                 ctx.end_raft_timer();
                 ctx.set_error("RaftError", &e.to_string());
                 tracing::error!(
-                    namespace_id = namespace_id.value(),
+                    organization_id = organization_id.value(),
                     vault_id = vault_id.value(),
                     error = %e,
                     "Failed to simulate divergence"
@@ -2227,21 +2251,26 @@ impl AdminService for AdminServiceImpl {
         let mut vaults_scanned = 0u64;
 
         // Determine which vaults to scan
-        let vault_heights: Vec<((DomainNamespaceId, DomainVaultId), u64)> =
-            if let (Some(ns), Some(v)) = (req.namespace_id, req.vault_id) {
-                let ns_id = DomainNamespaceId::new(ns.id);
-                let v_id = DomainVaultId::new(v.id);
-                ctx.set_target(ns_id.value(), v_id.value());
-                // Single vault
-                let height = self.applied_state.vault_height(ns_id, v_id);
-                vec![((ns_id, v_id), height)]
-            } else {
-                // All vaults
-                self.applied_state.all_vault_heights().into_iter().collect()
-            };
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let vault_heights: Vec<((DomainOrganizationId, DomainVaultId), u64)> = if let (
+            Some(ref org_slug_proto),
+            Some(ref v),
+        ) =
+            (req.organization_slug, req.vault_id)
+        {
+            let org_id = slug_resolver.extract_and_resolve(&Some(*org_slug_proto))?;
+            let v_id = DomainVaultId::new(v.id);
+            ctx.set_target(org_slug_proto.slug, v_id.value());
+            // Single vault
+            let height = self.applied_state.vault_height(org_id, v_id);
+            vec![((org_id, v_id), height)]
+        } else {
+            // All vaults
+            self.applied_state.all_vault_heights().into_iter().collect()
+        };
 
         ctx.start_raft_timer();
-        for ((namespace_id, vault_id), _height) in vault_heights {
+        for ((organization_id, vault_id), _height) in vault_heights {
             vaults_scanned += 1;
 
             // Find expired entities in this vault
@@ -2257,7 +2286,7 @@ impl AdminService for AdminServiceImpl {
                         })
                         .collect::<Vec<_>>(),
                     Err(e) => {
-                        tracing::warn!(namespace_id = namespace_id.value(), vault_id = vault_id.value(), error = %e, "Failed to list entities for GC");
+                        tracing::warn!(organization_id = organization_id.value(), vault_id = vault_id.value(), error = %e, "Failed to list entities for GC");
                         continue;
                     },
                 }
@@ -2288,14 +2317,14 @@ impl AdminService for AdminServiceImpl {
             };
 
             let gc_request =
-                LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
+                LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
             match self.raft.client_write(gc_request).await {
                 Ok(_) => {
                     total_expired += count as u64;
                 },
                 Err(e) => {
-                    tracing::warn!(namespace_id = namespace_id.value(), vault_id = vault_id.value(), error = %e, "GC write failed");
+                    tracing::warn!(organization_id = organization_id.value(), vault_id = vault_id.value(), error = %e, "GC write failed");
                 },
             }
         }
@@ -2703,7 +2732,7 @@ fn compute_vault_block_hash(entry: &VaultEntry) -> [u8; 32] {
     let mut hasher = Sha256::new();
 
     // Hash the vault block header fields
-    hasher.update(entry.namespace_id.value().to_le_bytes());
+    hasher.update(entry.organization_id.value().to_le_bytes());
     hasher.update(entry.vault_id.value().to_le_bytes());
     hasher.update(entry.vault_height.to_le_bytes());
     hasher.update(entry.previous_vault_hash);
@@ -2726,7 +2755,7 @@ mod tests {
     fn test_vault_block_hash_deterministic() {
         // Same input should always produce the same hash
         let entry = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(2),
             vault_height: 10,
             previous_vault_hash: [0u8; 32],
@@ -2744,7 +2773,7 @@ mod tests {
     #[test]
     fn test_vault_block_hash_different_for_different_inputs() {
         let entry1 = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(2),
             vault_height: 10,
             previous_vault_hash: [0u8; 32],
@@ -2754,7 +2783,7 @@ mod tests {
         };
 
         let entry2 = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(2),
             vault_height: 11, // Different height
             previous_vault_hash: [0u8; 32],
@@ -2772,7 +2801,7 @@ mod tests {
     #[test]
     fn test_vault_block_hash_different_state_root() {
         let entry1 = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(2),
             vault_height: 10,
             previous_vault_hash: [0u8; 32],
@@ -2782,7 +2811,7 @@ mod tests {
         };
 
         let entry2 = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(2),
             vault_height: 10,
             previous_vault_hash: [0u8; 32],
@@ -2801,7 +2830,7 @@ mod tests {
     fn test_vault_block_hash_chain_continuity() {
         // Simulate a chain of blocks
         let entry1 = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(1),
             vault_height: 1,
             previous_vault_hash: ZERO_HASH, // Genesis block
@@ -2813,7 +2842,7 @@ mod tests {
         let hash1 = compute_vault_block_hash(&entry1);
 
         let entry2 = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(1),
             vault_height: 2,
             previous_vault_hash: hash1, // Chain to previous block
@@ -2829,7 +2858,7 @@ mod tests {
 
         // If we create entry2 with wrong previous_vault_hash, it should differ
         let entry2_wrong = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(1),
             vault_height: 2,
             previous_vault_hash: ZERO_HASH, // Wrong previous hash
@@ -2848,7 +2877,7 @@ mod tests {
     #[test]
     fn test_vault_block_hash_includes_all_fields() {
         let base_entry = VaultEntry {
-            namespace_id: DomainNamespaceId::new(1),
+            organization_id: DomainOrganizationId::new(1),
             vault_id: DomainVaultId::new(2),
             vault_height: 3,
             previous_vault_hash: [4u8; 32],
@@ -2859,10 +2888,10 @@ mod tests {
 
         let base_hash = compute_vault_block_hash(&base_entry);
 
-        // Changing namespace_id should change hash
+        // Changing organization_id should change hash
         let mut modified = base_entry.clone();
-        modified.namespace_id = DomainNamespaceId::new(99);
-        assert_ne!(compute_vault_block_hash(&modified), base_hash, "namespace_id affects hash");
+        modified.organization_id = DomainOrganizationId::new(99);
+        assert_ne!(compute_vault_block_hash(&modified), base_hash, "organization_id affects hash");
 
         // Changing vault_id should change hash
         let mut modified = base_entry.clone();

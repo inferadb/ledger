@@ -15,8 +15,8 @@
 //!    automatically, keeping their state reasonably fresh under normal conditions.
 //!
 //! 2. **Background Refresh Job** (`LearnerRefreshJob`): Learners periodically poll voters via
-//!    `GetSystemState` RPC to refresh their cached system state (namespace registry, routing info).
-//!    This provides an additional layer of freshness beyond Raft replication.
+//!    `GetSystemState` RPC to refresh their cached system state (organization registry, routing
+//!    info). This provides an additional layer of freshness beyond Raft replication.
 //!
 //! The `LearnerCacheConfig` below provides configuration for cache TTL and refresh
 //! intervals. Staleness checks can be integrated into read paths if needed.
@@ -64,7 +64,7 @@ pub enum SystemRole {
     Learner,
 }
 
-/// Cluster membership state for the `_system` namespace.
+/// Cluster membership state for the `_system` organization.
 ///
 /// Manages the Voter/Learner model where:
 /// - Up to 5 nodes are Voters (participate in Raft elections)

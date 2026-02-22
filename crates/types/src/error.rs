@@ -16,7 +16,7 @@ use snafu::{Location, Snafu};
 
 use crate::{
     hash::Hash,
-    types::{NamespaceId, VaultId},
+    types::{OrganizationId, VaultId},
 };
 
 /// Unified result type for ledger operations.
@@ -84,8 +84,8 @@ pub enum ErrorCode {
     AppVaultDiverged = 3003,
     /// Vault temporarily unavailable (recovering or migrating).
     AppVaultUnavailable = 3004,
-    /// Namespace not found.
-    AppNamespaceNotFound = 3100,
+    /// Organization not found.
+    AppOrganizationNotFound = 3100,
     /// Vault not found.
     AppVaultNotFound = 3101,
     /// Entity not found.
@@ -106,7 +106,7 @@ pub enum ErrorCode {
     AppInvalidArgument = 3203,
     /// Internal error (unexpected state, invariant violation).
     AppInternal = 3204,
-    /// Namespace resource quota exceeded (storage, vault count, or rate).
+    /// Organization resource quota exceeded (storage, vault count, or rate).
     AppQuotaExceeded = 3205,
 }
 
@@ -138,7 +138,7 @@ impl ErrorCode {
             3002 => Some(Self::AppHashMismatch),
             3003 => Some(Self::AppVaultDiverged),
             3004 => Some(Self::AppVaultUnavailable),
-            3100 => Some(Self::AppNamespaceNotFound),
+            3100 => Some(Self::AppOrganizationNotFound),
             3101 => Some(Self::AppVaultNotFound),
             3102 => Some(Self::AppEntityNotFound),
             3103 => Some(Self::AppPreconditionFailed),
@@ -234,8 +234,8 @@ impl ErrorCode {
             Self::AppVaultUnavailable => {
                 "Retry after a short delay. The vault may be recovering or migrating."
             },
-            Self::AppNamespaceNotFound => {
-                "Verify the namespace exists via AdminService::get_namespace or create it."
+            Self::AppOrganizationNotFound => {
+                "Verify the organization exists via AdminService::get_organization or create it."
             },
             Self::AppVaultNotFound => {
                 "Verify the vault exists via AdminService::get_vault or create it."
@@ -264,7 +264,7 @@ impl ErrorCode {
                 "Unexpected state or invariant violation. Collect context and report as an issue."
             },
             Self::AppQuotaExceeded => {
-                "Namespace resource quota exceeded. Reduce usage or request a quota increase."
+                "Organization resource quota exceeded. Reduce usage or request a quota increase."
             },
         }
     }
@@ -287,7 +287,7 @@ impl fmt::Display for ErrorCode {
 /// | `HashMismatch`       | No        | Data corruption detected; trigger integrity check          |
 /// | `VaultDiverged`      | No        | Automatic recovery runs; wait for `VaultHealth::Healthy`   |
 /// | `VaultUnavailable`   | Yes       | Vault is recovering; retry after short delay               |
-/// | `NamespaceNotFound`  | No        | Verify namespace exists via `AdminService::get_namespace`  |
+/// | `OrganizationNotFound` | No      | Verify organization exists via `AdminService::get_organization` |
 /// | `VaultNotFound`      | No        | Verify vault exists via `AdminService::get_vault`          |
 /// | `EntityNotFound`     | No        | Expected for first reads; create the entity first          |
 /// | `PreconditionFailed` | No        | Re-read current state and retry with updated condition     |
@@ -298,7 +298,7 @@ impl fmt::Display for ErrorCode {
 /// | `Io`                 | Maybe     | Check filesystem permissions and disk health               |
 /// | `InvalidArgument`    | No        | Fix the request parameters                                 |
 /// | `Internal`           | No        | Unexpected state; report as issue with context             |
-/// | `QuotaExceeded`      | Yes       | Reduce usage or request a namespace quota increase         |
+/// | `QuotaExceeded`      | Yes       | Reduce usage or request an organization quota increase     |
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum LedgerError {
@@ -366,24 +366,24 @@ pub enum LedgerError {
         reason: String,
     },
 
-    /// Namespace not found in the cluster.
+    /// Organization not found in the cluster.
     ///
-    /// **Recovery**: Not retryable. Verify the namespace exists via
-    /// `AdminService::get_namespace` or create it with `create_namespace`.
-    #[snafu(display("Namespace {namespace_id} not found"))]
-    NamespaceNotFound {
-        /// Namespace identifier.
-        namespace_id: NamespaceId,
+    /// **Recovery**: Not retryable. Verify the organization exists via
+    /// `AdminService::get_organization` or create it with `create_organization`.
+    #[snafu(display("Organization {organization_id} not found"))]
+    OrganizationNotFound {
+        /// Organization identifier.
+        organization_id: OrganizationId,
     },
 
-    /// Vault not found within the namespace.
+    /// Vault not found within the organization.
     ///
     /// **Recovery**: Not retryable. Verify the vault exists via
     /// `AdminService::get_vault` or create it with `create_vault`.
-    #[snafu(display("Vault {vault_id} not found in namespace {namespace_id}"))]
+    #[snafu(display("Vault {vault_id} not found in organization {organization_id}"))]
     VaultNotFound {
-        /// Namespace identifier.
-        namespace_id: NamespaceId,
+        /// Organization identifier.
+        organization_id: OrganizationId,
         /// Vault identifier.
         vault_id: VaultId,
     },
@@ -505,7 +505,7 @@ impl LedgerError {
             Self::HashMismatch { .. } => ErrorCode::AppHashMismatch,
             Self::VaultDiverged { .. } => ErrorCode::AppVaultDiverged,
             Self::VaultUnavailable { .. } => ErrorCode::AppVaultUnavailable,
-            Self::NamespaceNotFound { .. } => ErrorCode::AppNamespaceNotFound,
+            Self::OrganizationNotFound { .. } => ErrorCode::AppOrganizationNotFound,
             Self::VaultNotFound { .. } => ErrorCode::AppVaultNotFound,
             Self::EntityNotFound { .. } => ErrorCode::AppEntityNotFound,
             Self::PreconditionFailed { .. } => ErrorCode::AppPreconditionFailed,
@@ -791,7 +791,7 @@ mod tests {
             ErrorCode::AppHashMismatch,
             ErrorCode::AppVaultDiverged,
             ErrorCode::AppVaultUnavailable,
-            ErrorCode::AppNamespaceNotFound,
+            ErrorCode::AppOrganizationNotFound,
             ErrorCode::AppVaultNotFound,
             ErrorCode::AppEntityNotFound,
             ErrorCode::AppPreconditionFailed,
@@ -885,7 +885,7 @@ mod tests {
             ErrorCode::AppHashMismatch,
             ErrorCode::AppVaultDiverged,
             ErrorCode::AppVaultUnavailable,
-            ErrorCode::AppNamespaceNotFound,
+            ErrorCode::AppOrganizationNotFound,
             ErrorCode::AppVaultNotFound,
             ErrorCode::AppEntityNotFound,
             ErrorCode::AppPreconditionFailed,
@@ -937,7 +937,7 @@ mod tests {
             ErrorCode::AppStorage,
             ErrorCode::AppHashMismatch,
             ErrorCode::AppVaultDiverged,
-            ErrorCode::AppNamespaceNotFound,
+            ErrorCode::AppOrganizationNotFound,
             ErrorCode::AppVaultNotFound,
             ErrorCode::AppEntityNotFound,
             ErrorCode::AppPreconditionFailed,
@@ -1003,8 +1003,8 @@ mod tests {
 
     #[test]
     fn test_ledger_error_not_found_not_retryable() {
-        let err = LedgerError::NamespaceNotFound { namespace_id: NamespaceId::new(1) };
-        assert_eq!(err.code(), ErrorCode::AppNamespaceNotFound);
+        let err = LedgerError::OrganizationNotFound { organization_id: OrganizationId::new(1) };
+        assert_eq!(err.code(), ErrorCode::AppOrganizationNotFound);
         assert!(!err.is_retryable());
     }
 
@@ -1031,9 +1031,9 @@ mod tests {
             LedgerError::HashMismatch { expected: Hash::default(), actual: Hash::default() },
             LedgerError::VaultDiverged { vault_id: VaultId::new(0), height: 0 },
             LedgerError::VaultUnavailable { vault_id: VaultId::new(0), reason: String::new() },
-            LedgerError::NamespaceNotFound { namespace_id: NamespaceId::new(0) },
+            LedgerError::OrganizationNotFound { organization_id: OrganizationId::new(0) },
             LedgerError::VaultNotFound {
-                namespace_id: NamespaceId::new(0),
+                organization_id: OrganizationId::new(0),
                 vault_id: VaultId::new(0),
             },
             LedgerError::EntityNotFound { key: String::new() },

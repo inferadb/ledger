@@ -51,7 +51,7 @@ async fn test_single_node_write_read() {
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "test-client".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
@@ -102,7 +102,7 @@ async fn test_write_idempotency() {
             id: "idempotent-client".to_string(),
         }),
         idempotency_key: idempotency_key.clone(),
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
@@ -211,7 +211,7 @@ async fn test_write_creates_retrievable_block() {
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "block-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
@@ -237,7 +237,7 @@ async fn test_write_creates_retrievable_block() {
 
     // Retrieve the block via GetBlock
     let get_block_request = inferadb_ledger_proto::proto::GetBlockRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         height: block_height,
     };
@@ -285,7 +285,7 @@ async fn test_three_node_write_replication() {
             id: "replication-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(

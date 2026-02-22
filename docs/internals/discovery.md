@@ -2,9 +2,9 @@
 
 # Discovery & Coordination
 
-This document covers the `_system` namespace, bootstrap discovery, node lifecycle, and namespace routing.
+This document covers the `_system` organization, bootstrap discovery, node lifecycle, and organization routing.
 
-## System Namespace
+## System Organization
 
 A dedicated `_system` Raft group serves as the authoritative service registry, replicated to all nodes.
 
@@ -17,15 +17,15 @@ A dedicated `_system` Raft group serves as the authoritative service registry, r
 
 ### Data Model
 
-The `_system` namespace stores individual entities (not a unified struct):
+The `_system` organization stores individual entities (not a unified struct):
 
 ```rust
-struct NamespaceRegistry {
-    namespace_id: NamespaceId,
+struct OrganizationRegistry {
+    organization_slug: OrganizationSlug,
     name: String,
     shard_id: ShardId,
     member_nodes: Vec<NodeId>,
-    status: NamespaceStatus,
+    status: OrganizationStatus,
     config_version: u64,
     created_at: DateTime<Utc>,
 }
@@ -40,7 +40,7 @@ struct NodeInfo {
 }
 ```
 
-Note: `leader_hint` is computed dynamically from Raft state, not stored in `NamespaceRegistry`.
+Note: `leader_hint` is computed dynamically from Raft state, not stored in `OrganizationRegistry`.
 
 ### Voter/Learner Scaling
 
@@ -149,11 +149,11 @@ New Node Startup:
   6. Once accepted, node receives full _system log
   7. Node persists peer list locally (survives restarts)
 
-Namespace Assignment:
-  1. Control creates namespace via CreateNamespace(name) → returns leader-assigned NamespaceId
-  2. _system assigns namespace to shard with lowest load
-  3. Shard leader initializes namespace state
-  4. Shard leader updates _system with NamespaceRegistry
+Organization Assignment:
+  1. Control creates organization via CreateOrganization(name) → returns leader-assigned OrganizationSlug
+  2. _system assigns organization to shard with lowest load
+  3. Shard leader initializes organization state
+  4. Shard leader updates _system with OrganizationRegistry
 ```
 
 ## Node Leave
@@ -228,12 +228,12 @@ fn validate_membership_change(current: &[NodeId], proposed: &[NodeId]) -> Result
 }
 ```
 
-## Namespace Routing
+## Organization Routing
 
-Clients route requests to the correct shard by looking up namespace → shard mappings in `_system`.
+Clients route requests to the correct shard by looking up organization → shard mappings in `_system`.
 
 ```
-Control request for namespace_id=1
+Control request for organization_slug=1
        │
        ▼
 Local cache? ─── Hit ──→ Fresh? ─── Yes ──→ Connect to shard leader
@@ -294,10 +294,10 @@ Fully decentralized:
 | Scenario                    | Behavior                                                 |
 | --------------------------- | -------------------------------------------------------- |
 | All bootstrap nodes down    | Control uses cached peer list from previous session      |
-| Namespace shard unknown     | Query any node's `_system` state for routing             |
+| Organization shard unknown     | Query any node's `_system` state for routing             |
 | Network partition           | Majority partition continues; minority becomes read-only |
 | Node crashes                | Removed from `_system` after 30s heartbeat timeout       |
 | Node gracefully leaves      | Immediately removed from `_system`, Raft reconfigures    |
 | `_system` leader fails      | Raft elects new leader automatically (<500ms)            |
 | Majority of nodes fail      | Cluster halts until quorum restored                      |
-| Namespace shard unavailable | Requests for that namespace fail; others unaffected      |
+| Organization shard unavailable | Requests for that organization fail; others unaffected      |

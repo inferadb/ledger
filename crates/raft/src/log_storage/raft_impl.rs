@@ -438,8 +438,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 for entry in &vault_entries {
                     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
                     let announcement = inferadb_ledger_proto::proto::BlockAnnouncement {
-                        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
-                            id: entry.namespace_id.value(),
+                        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                            slug: state
+                                .id_to_slug
+                                .get(&entry.organization_id)
+                                .map_or(entry.organization_id.value() as u64, |s| s.value()),
                         }),
                         vault_id: Some(inferadb_ledger_proto::proto::VaultId {
                             id: entry.vault_id.value(),
@@ -459,7 +462,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     // Ignore send errors - no receivers is valid (fire-and-forget)
                     let _ = sender.send(announcement);
                     tracing::debug!(
-                        namespace_id = entry.namespace_id.value(),
+                        organization_id = entry.organization_id.value(),
                         vault_id = entry.vault_id.value(),
                         height = entry.vault_height,
                         "Block announcement broadcast"
@@ -470,12 +473,12 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             // Update previous vault hashes for each entry
             for entry in &vault_entries {
                 let vault_block =
-                    shard_block.extract_vault_block(entry.namespace_id, entry.vault_id);
+                    shard_block.extract_vault_block(entry.organization_id, entry.vault_id);
                 if let Some(vb) = vault_block {
                     let block_hash = inferadb_ledger_types::hash::block_hash(&vb.header);
                     state
                         .previous_vault_hashes
-                        .insert((entry.namespace_id, entry.vault_id), block_hash);
+                        .insert((entry.organization_id, entry.vault_id), block_hash);
                 }
             }
 
@@ -578,14 +581,14 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             let mut entities_map = HashMap::new();
 
             // Get entities for each known vault
-            for &(namespace_id, vault_id) in state.vault_heights.keys() {
+            for &(organization_id, vault_id) in state.vault_heights.keys() {
                 // List all entities in this vault (up to 10000 per vault for snapshot)
                 match state_layer.list_entities(vault_id, None, None, 10000) {
                     Ok(entities) => {
                         if !entities.is_empty() {
                             entities_map.insert(vault_id, entities);
                             tracing::debug!(
-                                namespace_id = namespace_id.value(),
+                                organization_id = organization_id.value(),
                                 vault_id = vault_id.value(),
                                 count = entities_map.get(&vault_id).map(|e| e.len()).unwrap_or(0),
                                 "Collected entities for snapshot"
@@ -594,7 +597,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     },
                     Err(e) => {
                         tracing::warn!(
-                            namespace_id = namespace_id.value(),
+                            organization_id = organization_id.value(),
                             vault_id = vault_id.value(),
                             error = %e,
                             "Failed to list entities for snapshot"

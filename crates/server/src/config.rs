@@ -19,7 +19,7 @@ use crate::node_id;
 /// Configuration for wide events sampling.
 ///
 /// Controls tail sampling behavior: which events are logged based on
-/// outcome, latency, and namespace priority.
+/// outcome, latency, and organization priority.
 #[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct WideEventsSamplingConfig {
@@ -33,7 +33,7 @@ pub struct WideEventsSamplingConfig {
     #[builder(default = default_slow_rate())]
     pub slow_rate: f64,
 
-    /// Sample rate for VIP namespaces (0.0-1.0). Default: 0.5 (50%).
+    /// Sample rate for VIP organizations (0.0-1.0). Default: 0.5 (50%).
     #[serde(default = "default_vip_rate")]
     #[builder(default = default_vip_rate())]
     pub vip_rate: f64,
@@ -310,11 +310,11 @@ fn default_trace_raft_rpcs() -> bool {
     true
 }
 
-/// Configuration for dynamic VIP namespace discovery.
+/// Configuration for dynamic VIP organization discovery.
 ///
-/// VIP namespaces receive elevated sampling rates. VIP status can be configured
-/// statically via `vip_namespaces` list or dynamically discovered from the
-/// `_system` namespace metadata.
+/// VIP organizations receive elevated sampling rates. VIP status can be configured
+/// statically via `vip_organizations` list or dynamically discovered from the
+/// `_system` organization metadata.
 ///
 /// # Environment Variables
 ///
@@ -328,8 +328,8 @@ fn default_trace_raft_rpcs() -> bool {
 pub struct VipConfig {
     /// Whether dynamic VIP discovery from `_system` is enabled. Default: true.
     ///
-    /// When enabled, the system queries `_system` namespace for entities with
-    /// keys matching `vip:namespace:{namespace_id}` to determine VIP status.
+    /// When enabled, the system queries `_system` organization for entities with
+    /// keys matching `vip:organization:{organization_id}` to determine VIP status.
     #[serde(default = "default_vip_discovery_enabled")]
     #[builder(default = default_vip_discovery_enabled())]
     #[allow(dead_code)] // used by VipCache for dynamic discovery
@@ -343,10 +343,10 @@ pub struct VipConfig {
     #[builder(default = default_vip_cache_ttl_secs())]
     pub cache_ttl_secs: u64,
 
-    /// Name of the metadata tag used to mark VIP namespaces. Default: "vip".
+    /// Name of the metadata tag used to mark VIP organizations. Default: "vip".
     ///
     /// VIP tags are stored as entities in `_system` with key format
-    /// `{tag_name}:namespace:{namespace_id}`.
+    /// `{tag_name}:organization:{organization_id}`.
     #[serde(default = "default_vip_tag_name")]
     #[builder(default = default_vip_tag_name())]
     pub tag_name: String,
@@ -413,7 +413,7 @@ fn default_vip_tag_name() -> String {
 /// ```bash
 /// INFERADB__LEDGER__WIDE_EVENTS__ENABLED=true
 /// INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__WRITE_RATE=0.1
-/// INFERADB__LEDGER__WIDE_EVENTS__VIP_NAMESPACES=1,2,3
+/// INFERADB__LEDGER__WIDE_EVENTS__VIP_ORGANIZATIONS=1,2,3
 /// ```
 #[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
@@ -429,14 +429,14 @@ pub struct WideEventsConfig {
     #[builder(default)]
     pub sampling: WideEventsSamplingConfig,
 
-    /// List of VIP namespace IDs with elevated sampling rates.
+    /// List of VIP organization IDs with elevated sampling rates.
     /// These are static overrides that always receive VIP treatment.
     #[serde(default)]
     #[builder(default)]
     #[allow(dead_code)] // used by VipCache for static VIP override
-    pub vip_namespaces: Vec<i64>,
+    pub vip_organizations: Vec<u64>,
 
-    /// Dynamic VIP namespace discovery configuration.
+    /// Dynamic VIP organization discovery configuration.
     #[serde(default)]
     #[builder(default)]
     pub vip: VipConfig,
@@ -452,7 +452,7 @@ impl Default for WideEventsConfig {
         Self {
             enabled: default_wide_events_enabled(),
             sampling: WideEventsSamplingConfig::default(),
-            vip_namespaces: Vec::new(),
+            vip_organizations: Vec::new(),
             vip: VipConfig::default(),
             otel: OtelConfig::default(),
         }
@@ -465,7 +465,7 @@ impl WideEventsConfig {
         Self {
             enabled: true,
             sampling: WideEventsSamplingConfig::for_test(),
-            vip_namespaces: Vec::new(),
+            vip_organizations: Vec::new(),
             vip: VipConfig::for_test(),
             otel: OtelConfig::for_test(),
         }
@@ -1050,7 +1050,7 @@ pub fn generate_runtime_config_example() -> String {
     output.push('\n');
 
     output.push_str("# Rate limiting thresholds.\n");
-    output.push_str("# Controls per-client and per-namespace request rate limits.\n");
+    output.push_str("# Controls per-client and per-organization request rate limits.\n");
     output.push_str("[rate_limit]\n");
     let rl = inferadb_ledger_types::config::RateLimitConfig::default();
     output.push_str(&format!(
@@ -1062,12 +1062,12 @@ pub fn generate_runtime_config_example() -> String {
         rl.client_rate
     ));
     output.push_str(&format!(
-        "namespace_burst = {}        # Max burst per namespace\n",
-        rl.namespace_burst
+        "organization_burst = {}        # Max burst per organization\n",
+        rl.organization_burst
     ));
     output.push_str(&format!(
-        "namespace_rate = {:.1}       # Sustained rate per namespace (req/sec)\n",
-        rl.namespace_rate
+        "organization_rate = {:.1}       # Sustained rate per organization (req/sec)\n",
+        rl.organization_rate
     ));
     output.push_str(&format!(
         "backpressure_threshold = {} # Pending proposals before backpressure\n",
@@ -1130,8 +1130,8 @@ pub fn generate_runtime_config_example() -> String {
         v.max_batch_payload_bytes
     ));
     output.push_str(&format!(
-        "max_namespace_name_bytes = {} # Maximum namespace name length\n",
-        v.max_namespace_name_bytes
+        "max_organization_name_bytes = {} # Maximum organization name length\n",
+        v.max_organization_name_bytes
     ));
     output.push_str(&format!(
         "max_relationship_string_bytes = {} # Maximum relationship string length\n",
@@ -1139,16 +1139,17 @@ pub fn generate_runtime_config_example() -> String {
     ));
     output.push('\n');
 
-    output
-        .push_str("# Default namespace quota applied to new namespaces without explicit quotas.\n");
+    output.push_str(
+        "# Default organization quota applied to new organizations without explicit quotas.\n",
+    );
     output.push_str("[default_quota]\n");
-    let q = inferadb_ledger_types::config::NamespaceQuota::default();
+    let q = inferadb_ledger_types::config::OrganizationQuota::default();
     output.push_str(&format!(
-        "max_storage_bytes = {}  # Maximum storage per namespace (bytes)\n",
+        "max_storage_bytes = {}  # Maximum storage per organization (bytes)\n",
         q.max_storage_bytes
     ));
     output.push_str(&format!(
-        "max_vaults = {}           # Maximum vaults per namespace\n",
+        "max_vaults = {}           # Maximum vaults per organization\n",
         q.max_vaults
     ));
     output.push_str(&format!(
@@ -1548,7 +1549,7 @@ mod tests {
     fn test_wide_events_config_defaults() {
         let config = WideEventsConfig::default();
         assert!(config.enabled);
-        assert!(config.vip_namespaces.is_empty());
+        assert!(config.vip_organizations.is_empty());
         // Sampling defaults are covered by sampling config tests
     }
 
@@ -1556,7 +1557,7 @@ mod tests {
     fn test_wide_events_config_for_test() {
         let config = WideEventsConfig::for_test();
         assert!(config.enabled);
-        assert!(config.vip_namespaces.is_empty());
+        assert!(config.vip_organizations.is_empty());
         // Test config samples everything
         assert!((config.sampling.read_rate - 1.0).abs() < f64::EPSILON);
         assert!((config.sampling.write_rate - 1.0).abs() < f64::EPSILON);
@@ -1638,12 +1639,12 @@ mod tests {
         let config = WideEventsConfig::builder()
             .enabled(false)
             .sampling(sampling)
-            .vip_namespaces(vec![1, 2, 3])
+            .vip_organizations(vec![1, 2, 3])
             .build();
 
         assert!(!config.enabled);
         assert!((config.sampling.read_rate - 0.05).abs() < f64::EPSILON);
-        assert_eq!(config.vip_namespaces, vec![1, 2, 3]);
+        assert_eq!(config.vip_organizations, vec![1, 2, 3]);
     }
 
     // === OTEL Config Tests ===

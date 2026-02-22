@@ -132,11 +132,11 @@ inferadb-ledger-types   — Hash primitives, Merkle proofs, config, errors
 
 **Data model:**
 
-- Namespace → isolated storage per org
-- Vault → relationship store within namespace, owns its blockchain
+- Organization → isolated storage per tenant
+- Vault → relationship store within organization, owns its blockchain
 - Entity → key-value with TTL and versioning
 - Relationship → authorization tuple (resource, relation, subject)
-- Shard → namespaces sharing a Raft group
+- Shard → organizations sharing a Raft group
 
 ## Error Handling
 

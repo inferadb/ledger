@@ -19,13 +19,13 @@ fn default_client_rate() -> f64 {
     50.0
 }
 
-/// Default per-namespace token bucket capacity (max burst).
-fn default_namespace_burst() -> u64 {
+/// Default per-organization token bucket capacity (max burst).
+fn default_organization_burst() -> u64 {
     1000
 }
 
-/// Default per-namespace sustained rate (requests/sec).
-fn default_namespace_rate() -> f64 {
+/// Default per-organization sustained rate (requests/sec).
+fn default_organization_rate() -> f64 {
     500.0
 }
 
@@ -41,8 +41,8 @@ fn default_backpressure_threshold() -> u64 {
 /// 1. **Per-client** — prevents one bad actor from monopolizing the system. `client_burst` sets the
 ///    max burst, `client_rate` sets sustained requests/sec.
 ///
-/// 2. **Per-namespace** — ensures fair sharing across tenants in a multi-tenant shard.
-///    `namespace_burst` sets the max burst, `namespace_rate` sets sustained requests/sec.
+/// 2. **Per-organization** — ensures fair sharing across tenants in a multi-tenant shard.
+///    `organization_burst` sets the max burst, `organization_rate` sets sustained requests/sec.
 ///
 /// 3. **Global backpressure** — throttles all requests when Raft consensus is saturated.
 ///    `backpressure_threshold` is the pending proposal count above which requests are rejected.
@@ -54,8 +54,8 @@ fn default_backpressure_threshold() -> u64 {
 /// let config = RateLimitConfig::builder()
 ///     .client_burst(200)
 ///     .client_rate(100.0)
-///     .namespace_burst(2000)
-///     .namespace_rate(1000.0)
+///     .organization_burst(2000)
+///     .organization_rate(1000.0)
 ///     .backpressure_threshold(200)
 ///     .build()
 ///     .expect("valid rate limit config");
@@ -72,16 +72,16 @@ pub struct RateLimitConfig {
     /// Must be > 0.
     #[serde(default = "default_client_rate")]
     pub client_rate: f64,
-    /// Maximum burst size per namespace (token bucket capacity).
+    /// Maximum burst size per organization (token bucket capacity).
     ///
     /// Must be > 0.
-    #[serde(default = "default_namespace_burst")]
-    pub namespace_burst: u64,
-    /// Sustained requests per second per namespace (token refill rate).
+    #[serde(default = "default_organization_burst")]
+    pub organization_burst: u64,
+    /// Sustained requests per second per organization (token refill rate).
     ///
     /// Must be > 0.
-    #[serde(default = "default_namespace_rate")]
-    pub namespace_rate: f64,
+    #[serde(default = "default_organization_rate")]
+    pub organization_rate: f64,
     /// Pending Raft proposal count above which global backpressure activates.
     ///
     /// Must be > 0.
@@ -100,15 +100,15 @@ impl RateLimitConfig {
     pub fn new(
         #[builder(default = default_client_burst())] client_burst: u64,
         #[builder(default = default_client_rate())] client_rate: f64,
-        #[builder(default = default_namespace_burst())] namespace_burst: u64,
-        #[builder(default = default_namespace_rate())] namespace_rate: f64,
+        #[builder(default = default_organization_burst())] organization_burst: u64,
+        #[builder(default = default_organization_rate())] organization_rate: f64,
         #[builder(default = default_backpressure_threshold())] backpressure_threshold: u64,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             client_burst,
             client_rate,
-            namespace_burst,
-            namespace_rate,
+            organization_burst,
+            organization_rate,
             backpressure_threshold,
         };
         config.validate()?;
@@ -133,14 +133,14 @@ impl RateLimitConfig {
         if self.client_rate <= 0.0 {
             return Err(ConfigError::Validation { message: "client_rate must be > 0".to_string() });
         }
-        if self.namespace_burst == 0 {
+        if self.organization_burst == 0 {
             return Err(ConfigError::Validation {
-                message: "namespace_burst must be > 0".to_string(),
+                message: "organization_burst must be > 0".to_string(),
             });
         }
-        if self.namespace_rate <= 0.0 {
+        if self.organization_rate <= 0.0 {
             return Err(ConfigError::Validation {
-                message: "namespace_rate must be > 0".to_string(),
+                message: "organization_rate must be > 0".to_string(),
             });
         }
         if self.backpressure_threshold == 0 {
@@ -157,8 +157,8 @@ impl Default for RateLimitConfig {
         Self {
             client_burst: default_client_burst(),
             client_rate: default_client_rate(),
-            namespace_burst: default_namespace_burst(),
-            namespace_rate: default_namespace_rate(),
+            organization_burst: default_organization_burst(),
+            organization_rate: default_organization_rate(),
             backpressure_threshold: default_backpressure_threshold(),
         }
     }
@@ -464,8 +464,8 @@ const fn default_max_batch_payload_bytes() -> usize {
     100 * 1024 * 1024 // 100 MB
 }
 
-/// Default maximum namespace name length in bytes.
-const fn default_max_namespace_name_bytes() -> usize {
+/// Default maximum organization name length in bytes.
+const fn default_max_organization_name_bytes() -> usize {
     256
 }
 
@@ -476,7 +476,7 @@ const fn default_max_relationship_string_bytes() -> usize {
 
 /// Input validation configuration for gRPC request fields.
 ///
-/// Controls maximum sizes for entity keys, values, namespace names,
+/// Controls maximum sizes for entity keys, values, organization names,
 /// relationship strings, and batch limits. Applied at both the gRPC
 /// service boundary and in SDK operation constructors.
 ///
@@ -516,12 +516,12 @@ pub struct ValidationConfig {
     /// Must be >= 1. Default: 100 MB.
     #[serde(default = "default_max_batch_payload_bytes")]
     pub max_batch_payload_bytes: usize,
-    /// Maximum namespace name length in bytes.
+    /// Maximum organization name length in bytes.
     ///
-    /// Namespace names must also match `[a-z0-9-]{1,N}`.
+    /// Organization names must also match `[a-z0-9-]{1,N}`.
     /// Must be >= 1. Default: 256.
-    #[serde(default = "default_max_namespace_name_bytes")]
-    pub max_namespace_name_bytes: usize,
+    #[serde(default = "default_max_organization_name_bytes")]
+    pub max_organization_name_bytes: usize,
     /// Maximum relationship string length in bytes.
     ///
     /// Applies to resource, relation, and subject fields.
@@ -537,7 +537,7 @@ impl Default for ValidationConfig {
             max_value_bytes: default_max_value_bytes(),
             max_operations_per_write: default_max_operations_per_write(),
             max_batch_payload_bytes: default_max_batch_payload_bytes(),
-            max_namespace_name_bytes: default_max_namespace_name_bytes(),
+            max_organization_name_bytes: default_max_organization_name_bytes(),
             max_relationship_string_bytes: default_max_relationship_string_bytes(),
         }
     }
@@ -556,7 +556,8 @@ impl ValidationConfig {
         #[builder(default = default_max_value_bytes())] max_value_bytes: usize,
         #[builder(default = default_max_operations_per_write())] max_operations_per_write: usize,
         #[builder(default = default_max_batch_payload_bytes())] max_batch_payload_bytes: usize,
-        #[builder(default = default_max_namespace_name_bytes())] max_namespace_name_bytes: usize,
+        #[builder(default = default_max_organization_name_bytes())]
+        max_organization_name_bytes: usize,
         #[builder(default = default_max_relationship_string_bytes())]
         max_relationship_string_bytes: usize,
     ) -> Result<Self, ConfigError> {
@@ -565,7 +566,7 @@ impl ValidationConfig {
             max_value_bytes,
             max_operations_per_write,
             max_batch_payload_bytes,
-            max_namespace_name_bytes,
+            max_organization_name_bytes,
             max_relationship_string_bytes,
         };
         config.validate()?;
@@ -602,9 +603,9 @@ impl ValidationConfig {
                 message: "max_batch_payload_bytes must be >= 1".to_string(),
             });
         }
-        if self.max_namespace_name_bytes == 0 {
+        if self.max_organization_name_bytes == 0 {
             return Err(ConfigError::Validation {
-                message: "max_namespace_name_bytes must be >= 1".to_string(),
+                message: "max_organization_name_bytes must be >= 1".to_string(),
             });
         }
         if self.max_relationship_string_bytes == 0 {

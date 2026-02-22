@@ -36,14 +36,14 @@ InferaDB Ledger uses server-assigned sequences for write operations. Clients gen
 
 ```rust
 pub struct IdempotencyKey {
-    pub namespace_id: i64,
+    pub organization_slug: i64,
     pub vault_id: i64,
     pub client_id: String,
     pub idempotency_key: [u8; 16], // UUID v4
 }
 ```
 
-The 4-tuple provides isolation: the same UUID from different clients or namespaces maps to different cache entries.
+The 4-tuple provides isolation: the same UUID from different clients or organizations maps to different cache entries.
 
 ### Payload Integrity
 
@@ -87,7 +87,7 @@ Raft log replay does not repopulate the cache — doing so would require persist
 
 ```
 Per entry:
-  IdempotencyKey:  ~56 bytes (namespace_id + vault_id + client_id String + UUID)
+  IdempotencyKey:  ~56 bytes (organization_slug + vault_id + client_id String + UUID)
   CachedResult:    ~64 bytes (request_hash + WriteSuccess fields)
   Moka overhead:   ~28 bytes (LRU pointers, hash table entry, TinyLFU sketch)
   Total:           ~148 bytes

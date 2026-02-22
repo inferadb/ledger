@@ -125,12 +125,12 @@ When to add shards:
 | Symptom            | Metric                       | Action          |
 | ------------------ | ---------------------------- | --------------- |
 | CPU saturation     | All cores at 100%            | Add shard       |
-| Namespace growth   | Many namespaces on one shard | Rebalance       |
+| Organization growth   | Many organizations on one shard | Rebalance       |
 | Geographic latency | Cross-region writes slow     | Regional shards |
 
 ### Vault Sharding
 
-Within a namespace, use multiple vaults to parallelize:
+Within an organization, use multiple vaults to parallelize:
 
 ```
 Throughput = vaults × per_vault_throughput
@@ -223,21 +223,21 @@ Plan capacity additions when runway < 90 days.
 
 - 3 nodes
 - 4 cores, 8 GB RAM, 100 GB SSD each
-- 1-2 namespaces, 1-2 vaults
+- 1-2 organizations, 1-2 vaults
 - Expected: 1,000-5,000 writes/sec
 
 ### Medium (Growing)
 
 - 5 nodes, 2 shards
 - 8 cores, 16 GB RAM, 500 GB NVMe each
-- 10-50 namespaces, 10-100 vaults
+- 10-50 organizations, 10-100 vaults
 - Expected: 10,000-50,000 writes/sec
 
 ### Large (Enterprise)
 
 - 7+ nodes per shard, 4+ shards
 - 16 cores, 32 GB RAM, 1 TB NVMe each
-- 100+ namespaces, 1000+ vaults
+- 100+ organizations, 1000+ vaults
 - Expected: 100,000+ writes/sec
 
 ## Cost Estimation

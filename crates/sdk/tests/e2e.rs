@@ -12,7 +12,7 @@
 //! - **Write/Read Cycle**: Basic CRUD operations through consensus
 //! - **Replication**: Write to leader, read from followers
 //! - **Streaming**: WatchBlocks stream setup
-//! - **Admin**: Namespace/vault lifecycle
+//! - **Admin**: Organization/vault lifecycle
 //! - **Health**: Health check endpoints
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
@@ -97,12 +97,12 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
     LedgerClient::new(config).await.expect("client creation")
 }
 
-/// Creates a test namespace and vault, returning (namespace_id, vault_id).
-async fn setup_test_namespace_vault(client: &LedgerClient) -> (i64, i64) {
+/// Creates a test organization and vault, returning (organization_slug, vault_id).
+async fn setup_test_org_vault(client: &LedgerClient) -> (u64, i64) {
     let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
-    let ns_id = client.create_namespace(&ns_name).await.expect("create namespace");
-    let vault_info = client.create_vault(ns_id).await.expect("create vault");
-    (ns_id, vault_info.vault_id)
+    let org = client.create_organization(&ns_name).await.expect("create organization");
+    let vault_info = client.create_vault(org.organization_slug).await.expect("create vault");
+    (org.organization_slug, vault_info.vault_id)
 }
 
 /// Finds the leader endpoint via `GetClusterInfo`.
@@ -161,7 +161,7 @@ async fn test_write_read_cycle() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "e2e-write-read").await;
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
 
     // Write an entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice Data".to_vec())];
@@ -184,7 +184,7 @@ async fn test_multiple_writes_reads() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "e2e-multi-rw").await;
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
 
     // Write multiple entities
     for i in 0..5 {
@@ -209,7 +209,7 @@ async fn test_batch_read() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "e2e-batch-read").await;
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
 
     // Write several entities
     for i in 0..3 {
@@ -256,7 +256,7 @@ async fn test_write_replication_to_followers() {
     let leader_ep = find_leader_endpoint(&endpoints).await;
     let leader_client = create_single_endpoint_client(&leader_ep, "repl-leader").await;
 
-    let (ns_id, vault_id) = setup_test_namespace_vault(&leader_client).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&leader_client).await;
 
     // Write through the leader
     let ops = vec![Operation::set_entity("repl:key", b"replicated-data".to_vec())];
@@ -302,7 +302,7 @@ async fn test_three_node_write_replication() {
     let leader_ep = find_leader_endpoint(&endpoints).await;
     let client = create_single_endpoint_client(&leader_ep, "repl-3node").await;
 
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
 
     // Write through the leader
     let ops = vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec())];
@@ -337,7 +337,7 @@ async fn test_multiple_client_sessions() {
     let endpoints = require_cluster!();
 
     let client1 = create_sdk_client(&endpoints, "session-1").await;
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client1).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&client1).await;
 
     // First session writes
     let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec())];
@@ -372,7 +372,7 @@ async fn test_watch_blocks_stream_setup() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "stream-client").await;
-    let (ns_id, vault_id) = setup_test_namespace_vault(&client).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&client).await;
 
     // Start watching blocks from height 1 (genesis)
     let stream_result = client.watch_blocks(ns_id, vault_id, 1).await;
@@ -389,9 +389,9 @@ async fn test_watch_blocks_stream_setup() {
 async fn test_data_persistence_across_sessions() {
     let endpoints = require_cluster!();
 
-    // Setup: create namespace/vault
+    // Setup: create organization/vault
     let setup_client = create_sdk_client(&endpoints, "setup-client").await;
-    let (ns_id, vault_id) = setup_test_namespace_vault(&setup_client).await;
+    let (ns_id, vault_id) = setup_test_org_vault(&setup_client).await;
 
     // First client session — write data
     {
@@ -433,31 +433,32 @@ async fn test_data_persistence_across_sessions() {
 // E2E Tests: Admin Operations
 // ============================================================================
 
-/// Tests admin operations (namespace/vault lifecycle).
+/// Tests admin operations (organization/vault lifecycle).
 #[tokio::test]
 async fn test_admin_operations() {
     let endpoints = require_cluster!();
 
     let client = create_sdk_client(&endpoints, "admin-client").await;
 
-    // Create a namespace
+    // Create an organization
     let ns_name = format!("test-admin-{}", uuid::Uuid::new_v4());
-    let ns_id = client.create_namespace(&ns_name).await.expect("create namespace");
-    assert!(ns_id > 0, "should get valid namespace ID");
+    let org = client.create_organization(&ns_name).await.expect("create organization");
+    let org_slug = org.organization_slug;
+    assert!(org_slug > 0, "should get valid organization slug");
 
-    // Get the namespace
-    let ns_info = client.get_namespace(ns_id).await.expect("get namespace");
-    assert_eq!(ns_info.name, ns_name);
+    // Get the organization
+    let org_info = client.get_organization(org_slug).await.expect("get organization");
+    assert_eq!(org_info.name, ns_name);
 
     // Create a vault
-    let vault_info = client.create_vault(ns_id).await.expect("create vault");
+    let vault_info = client.create_vault(org_slug).await.expect("create vault");
     assert!(vault_info.vault_id > 0, "should get valid vault ID");
 
-    // List namespaces
-    let namespaces = client.list_namespaces().await.expect("list namespaces");
+    // List organizations
+    let organizations = client.list_organizations().await.expect("list organizations");
     assert!(
-        namespaces.iter().any(|ns| ns.namespace_id == ns_id),
-        "created namespace should be in list"
+        organizations.iter().any(|org| org.organization_slug == org_slug),
+        "created organization should be in list"
     );
 }
 

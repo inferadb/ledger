@@ -10,7 +10,7 @@
 //! Tests verify via gRPC APIs:
 //! - `HealthService::Check` for node/cluster health
 //! - `AdminService::GetClusterInfo` for membership and leadership
-//! - `AdminService` mutations for namespace/vault creation
+//! - `AdminService` mutations for organization/vault creation
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -52,7 +52,7 @@ async fn test_auto_recovery_job_starts() {
         create_health_client_from_url(cluster.any_endpoint()).await.expect("connect to health");
 
     let response = health_client
-        .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
         .await
         .expect("health check");
 
@@ -68,7 +68,7 @@ async fn test_auto_recovery_job_starts() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let response = health_client
-        .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
         .await
         .expect("second health check");
 
@@ -91,22 +91,23 @@ async fn test_vault_health_tracking() {
 
     let ns_name = format!("test-health-{}", uuid::Uuid::new_v4());
 
-    // Create namespace
+    // Create organization
     let ns_response = admin_client
-        .create_namespace(proto::CreateNamespaceRequest {
+        .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
             shard_id: None,
             quota: None,
         })
         .await
-        .expect("create namespace");
+        .expect("create organization");
 
-    let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
+    let organization_id =
+        ns_response.into_inner().organization_slug.map(|n| n.slug as i64).unwrap();
 
     // Create vault
     let vault_response = admin_client
         .create_vault(proto::CreateVaultRequest {
-            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -125,7 +126,7 @@ async fn test_vault_health_tracking() {
         create_health_client_from_url(&leader_ep).await.expect("connect to health");
 
     let response = health_client
-        .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
         .await
         .expect("health check after vault creation");
 
@@ -153,7 +154,7 @@ async fn test_learner_refresh_job_starts() {
             create_health_client_from_url(endpoint).await.expect("connect to health");
 
         let response = health_client
-            .check(proto::HealthCheckRequest { namespace_id: None, vault_id: None })
+            .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
             .await
             .expect("health check");
 
@@ -189,48 +190,47 @@ async fn test_voter_detection() {
     }
 }
 
-/// Tests that namespace data is replicated to all nodes (learner cache initialization).
+/// Tests that organization data is replicated to all nodes (learner cache initialization).
 #[tokio::test]
 async fn test_learner_cache_initialization() {
     let cluster = require_cluster!();
 
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
-    // Create a namespace via the leader
+    // Create a organization via the leader
     let mut admin_client =
         create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
 
     let ns_name = format!("test-cache-{}", uuid::Uuid::new_v4());
 
     let ns_response = admin_client
-        .create_namespace(proto::CreateNamespaceRequest {
+        .create_organization(proto::CreateOrganizationRequest {
             name: ns_name.clone(),
             shard_id: None,
             quota: None,
         })
         .await
-        .expect("create namespace");
+        .expect("create organization");
 
-    let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
+    let organization_id =
+        ns_response.into_inner().organization_slug.map(|n| n.slug as i64).unwrap();
 
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Verify namespace is readable from every endpoint
+    // Verify organization is readable from every endpoint
     for endpoint in cluster.endpoints() {
         let mut client = create_admin_client_from_url(endpoint).await.expect("connect to admin");
 
         let response = client
-            .get_namespace(proto::GetNamespaceRequest {
-                lookup: Some(proto::get_namespace_request::Lookup::NamespaceId(
-                    proto::NamespaceId { id: namespace_id },
-                )),
+            .get_organization(proto::GetOrganizationRequest {
+                organization_slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
             })
             .await
-            .unwrap_or_else(|e| panic!("get_namespace from {} failed: {}", endpoint, e));
+            .unwrap_or_else(|e| panic!("get_organization from {} failed: {}", endpoint, e));
 
         let ns = response.into_inner();
-        assert_eq!(ns.name, ns_name, "namespace name should match on {}", endpoint);
+        assert_eq!(ns.name, ns_name, "organization name should match on {}", endpoint);
     }
 }
 
@@ -253,19 +253,20 @@ async fn test_concurrent_background_jobs() {
     let ns_name = format!("test-concurrent-{}", uuid::Uuid::new_v4());
 
     let ns_response = admin_client
-        .create_namespace(proto::CreateNamespaceRequest {
+        .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
             shard_id: None,
             quota: None,
         })
         .await
-        .expect("create namespace");
+        .expect("create organization");
 
-    let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
+    let organization_id =
+        ns_response.into_inner().organization_slug.map(|n| n.slug as i64).unwrap();
 
     let _vault_response = admin_client
         .create_vault(proto::CreateVaultRequest {
-            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,

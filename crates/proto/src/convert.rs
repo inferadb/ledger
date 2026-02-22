@@ -26,8 +26,8 @@
 //!
 //! # Note
 //!
-//! The `NamespaceStatus` conversion lives in the `raft` crate because it
-//! depends on `inferadb_ledger_state::system::NamespaceStatus`.
+//! The `OrganizationStatus` conversion lives in the `raft` crate because it
+//! depends on `inferadb_ledger_state::system::OrganizationStatus`.
 
 use inferadb_ledger_types::{
     BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId,
@@ -441,7 +441,9 @@ pub fn vault_entry_to_proto_block(
     // Build block header
     let header = proto::BlockHeader {
         height: entry.vault_height,
-        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id.value() }),
+        organization_slug: Some(proto::OrganizationSlug {
+            slug: entry.organization_id.value() as u64,
+        }),
         vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
@@ -753,7 +755,7 @@ mod tests {
         use chrono::Utc;
 
         let entry = inferadb_ledger_types::VaultEntry {
-            namespace_id: inferadb_ledger_types::NamespaceId::new(1),
+            organization_id: inferadb_ledger_types::OrganizationId::new(1),
             vault_id: inferadb_ledger_types::VaultId::new(2),
             vault_height: 10,
             previous_vault_hash: Hash::from([0xABu8; 32]),
@@ -777,7 +779,7 @@ mod tests {
 
         let header = block.header.expect("Block should have header");
         assert_eq!(header.height, 10);
-        assert_eq!(header.namespace_id.unwrap().id, 1);
+        assert_eq!(header.organization_slug.unwrap().slug, 1);
         assert_eq!(header.vault_id.unwrap().id, 2);
         assert_eq!(header.term, 5);
         assert_eq!(header.committed_index, 99);
@@ -802,7 +804,7 @@ mod tests {
         };
 
         let entry = inferadb_ledger_types::VaultEntry {
-            namespace_id: inferadb_ledger_types::NamespaceId::new(5),
+            organization_id: inferadb_ledger_types::OrganizationId::new(5),
             vault_id: inferadb_ledger_types::VaultId::new(10),
             vault_height: 1,
             previous_vault_hash: Hash::default(),

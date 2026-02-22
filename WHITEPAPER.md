@@ -111,7 +111,7 @@ Ledger consists of four primary layers:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**gRPC Services** expose the public API. ReadService handles queries; WriteService processes mutations; AdminService manages namespaces and vaults; HealthService provides liveness and readiness checks.
+**gRPC Services** expose the public API. ReadService handles queries; WriteService processes mutations; AdminService manages organizations and vaults; HealthService provides liveness and readiness checks.
 
 **Consensus Layer** implements Raft using the OpenRaft library (v0.9+) [9]. All writes are proposed to the leader, replicated to followers, and committed only after majority acknowledgment. A batching layer aggregates multiple client requests into single Raft proposals, amortizing consensus overhead.
 
@@ -123,9 +123,9 @@ Ledger consists of four primary layers:
 
 Ledger isolates tenants through a three-level hierarchy:
 
-- **Namespace**: Top-level isolation boundary. Each namespace has independent storage. Cross-namespace operations are prohibited.
-- **Vault**: Container for related authorization data within a namespace. Each vault maintains its own blockchain with independent state roots.
-- **Shard**: Operational grouping for consensus. A shard contains one or more namespaces and maps to a Raft group.
+- **Organization**: Top-level isolation boundary. Each organization has independent storage. Cross-organization operations are prohibited.
+- **Vault**: Container for related authorization data within an organization. Each vault maintains its own blockchain with independent state roots.
+- **Shard**: Operational grouping for consensus. A shard contains one or more organizations and maps to a Raft group.
 
 This isolation model enables:
 
@@ -402,7 +402,7 @@ For environments requiring Byzantine fault tolerance, consider Tendermint-based 
 
 ### Single-Leader Write Bottleneck
 
-All writes flow through the Raft leader. This provides strong consistency but limits write scalability. Horizontal scaling requires sharding at the namespace level.
+All writes flow through the Raft leader. This provides strong consistency but limits write scalability. Horizontal scaling requires sharding at the organization level.
 
 Read scaling is more flexible: any node can serve eventually consistent reads, and linearizable reads only require a leadership check.
 

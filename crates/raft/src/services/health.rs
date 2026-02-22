@@ -20,6 +20,7 @@ use tonic::{Request, Response, Status};
 use crate::{
     dependency_health::DependencyHealthChecker,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    services::slug_resolver::SlugResolver,
     types::LedgerTypeConfig,
 };
 
@@ -84,18 +85,21 @@ impl HealthService for HealthServiceImpl {
         // If a vault_id is specified, check vault health
         if let Some(vault_id_proto) = req.vault_id {
             let vault_id = inferadb_ledger_types::VaultId::new(vault_id_proto.id);
-            // Get namespace_id from request, default to 0 if not provided
-            let namespace_id =
-                inferadb_ledger_types::NamespaceId::new(req.namespace_id.map_or(0, |n| n.id));
+            // Get organization_id from request, default to 0 if not provided
+            let organization_id = match req.organization_slug.as_ref() {
+                Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                    .resolve(inferadb_ledger_types::OrganizationSlug::new(n.slug))?,
+                _ => inferadb_ledger_types::OrganizationId::new(0),
+            };
 
             let mut details = std::collections::HashMap::new();
 
             // Get vault height
-            let height = self.applied_state.vault_height(namespace_id, vault_id);
+            let height = self.applied_state.vault_height(organization_id, vault_id);
             details.insert("block_height".to_string(), height.to_string());
 
             // Get vault health status
-            let health_status = self.applied_state.vault_health(namespace_id, vault_id);
+            let health_status = self.applied_state.vault_health(organization_id, vault_id);
             let (status, message) = match &health_status {
                 VaultHealthStatus::Healthy => {
                     details.insert("health_status".to_string(), "healthy".to_string());
@@ -117,7 +121,7 @@ impl HealthService for HealthServiceImpl {
             };
 
             // Get vault metadata (last write timestamp)
-            if let Some(vault_meta) = self.applied_state.get_vault(namespace_id, vault_id) {
+            if let Some(vault_meta) = self.applied_state.get_vault(organization_id, vault_id) {
                 if vault_meta.last_write_timestamp > 0 {
                     details.insert(
                         "last_write_timestamp".to_string(),

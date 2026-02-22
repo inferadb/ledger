@@ -52,8 +52,8 @@ Error codes are transmitted as strings in gRPC error detail metadata
 | 3002 | `AppHashMismatch`       | No        | Cryptographic hash verification failed            | Trigger integrity check. Indicates data corruption or hash computation bug.     |
 | 3003 | `AppVaultDiverged`      | No        | Vault state diverged from commitment              | Automatic recovery in progress. Wait for vault health to return to Healthy.     |
 | 3004 | `AppVaultUnavailable`   | Yes       | Vault temporarily unavailable                     | Retry after short delay. Vault may be recovering or migrating.                  |
-| 3100 | `AppNamespaceNotFound`  | No        | Namespace does not exist                          | Verify via `AdminService::get_namespace` or create it.                          |
-| 3101 | `AppVaultNotFound`      | No        | Vault does not exist in namespace                 | Verify via `AdminService::get_vault` or create it.                              |
+| 3100 | `AppOrganizationNotFound`  | No        | Organization does not exist                          | Verify via `AdminService::get_organization` or create it.                          |
+| 3101 | `AppVaultNotFound`      | No        | Vault does not exist in organization                 | Verify via `AdminService::get_vault` or create it.                              |
 | 3102 | `AppEntityNotFound`     | No        | Entity key not found                              | Expected for first reads. Create with `SetEntity` operation.                    |
 | 3103 | `AppPreconditionFailed` | No        | Conditional write CAS conflict                    | Re-read current state and retry with updated condition.                         |
 | 3104 | `AppAlreadyCommitted`   | No        | Duplicate transaction (idempotent success)        | Not an error. Original write succeeded. Treat as success.                       |

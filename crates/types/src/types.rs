@@ -1,7 +1,7 @@
 //! Core type definitions for InferaDB Ledger.
 //!
-//! Defines identifier types (NamespaceId, VaultId, etc.), block and transaction
-//! structures, operations, and conditions.
+//! Defines identifier types (OrganizationId, OrganizationSlug, VaultId, etc.),
+//! block and transaction structures, operations, and conditions.
 
 use std::fmt;
 
@@ -80,22 +80,78 @@ macro_rules! define_id {
 }
 
 define_id!(
-    /// Unique identifier for a namespace (organization-level isolation).
+    /// Internal sequential identifier for an organization (storage-layer only).
     ///
     /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`VaultId`], [`UserId`], or [`ShardId`].
+    /// with [`VaultId`], [`UserId`], or [`ShardId`]. Never exposed in APIs —
+    /// use [`OrganizationSlug`] for external identification.
     ///
     /// # Display
     ///
-    /// Formats with `ns:` prefix: `ns:42`.
-    NamespaceId, i64, "ns"
+    /// Formats with `org:` prefix: `org:42`.
+    OrganizationId, i64, "org"
 );
 
+/// Snowflake-generated external identifier for an organization.
+///
+/// Wraps a `u64` Snowflake ID that is the sole external identifier for
+/// organizations in gRPC APIs and the SDK. The display format is the raw
+/// number without prefix for API clarity.
+///
+/// # Display
+///
+/// Displays as the raw number: `1234567890`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OrganizationSlug(u64);
+
+impl OrganizationSlug {
+    /// Creates a new slug from a raw Snowflake ID value.
+    #[inline]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw Snowflake ID value.
+    #[inline]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for OrganizationSlug {
+    #[inline]
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<OrganizationSlug> for u64 {
+    #[inline]
+    fn from(slug: OrganizationSlug) -> Self {
+        slug.0
+    }
+}
+
+impl fmt::Display for OrganizationSlug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for OrganizationSlug {
+    type Err = <u64 as std::str::FromStr>::Err;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.parse::<u64>().map(Self)
+    }
+}
+
 define_id!(
-    /// Unique identifier for a vault within a namespace.
+    /// Unique identifier for a vault within an organization.
     ///
     /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`NamespaceId`], [`UserId`], or [`ShardId`].
+    /// with [`OrganizationId`], [`UserId`], or [`ShardId`].
     ///
     /// # Display
     ///
@@ -104,10 +160,10 @@ define_id!(
 );
 
 define_id!(
-    /// Unique identifier for a user in the `_system` namespace.
+    /// Unique identifier for a user in the `_system` organization.
     ///
     /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`NamespaceId`], [`VaultId`], or [`ShardId`].
+    /// with [`OrganizationId`], [`VaultId`], or [`ShardId`].
     ///
     /// # Display
     ///
@@ -119,7 +175,7 @@ define_id!(
     /// Unique identifier for a Raft shard group.
     ///
     /// Wraps a `u32` with compile-time type safety to prevent mixing
-    /// with [`NamespaceId`], [`VaultId`], or [`UserId`].
+    /// with [`OrganizationId`], [`VaultId`], or [`UserId`].
     ///
     /// # Display
     ///
@@ -143,16 +199,16 @@ pub type ClientId = String;
 /// Block header containing cryptographic chain metadata.
 ///
 /// Block headers are hashed with a fixed 148-byte encoding:
-/// height (8) + namespace_id (8) + vault_id (8) + previous_hash (32) + tx_merkle_root (32)
+/// height (8) + organization_id (8) + vault_id (8) + previous_hash (32) + tx_merkle_root (32)
 /// + state_root (32) + timestamp_secs (8) + timestamp_nanos (4) + term (8) + committed_index (8)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct BlockHeader {
     /// Block height (0 for genesis).
     pub height: u64,
-    /// Namespace owning this vault.
+    /// Organization owning this vault.
     #[builder(into)]
-    pub namespace_id: NamespaceId,
-    /// Vault identifier within the namespace.
+    pub organization_id: OrganizationId,
+    /// Vault identifier within the organization.
     #[builder(into)]
     pub vault_id: VaultId,
     /// Hash of the previous block (ZERO_HASH for genesis).
@@ -175,17 +231,17 @@ pub struct BlockHeader {
 /// independent chain for cryptographic isolation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultBlock {
-    /// Block header with chain metadata (includes namespace_id, vault_id).
+    /// Block header with chain metadata (includes organization_id, vault_id).
     pub header: BlockHeader,
     /// Transactions in this block.
     pub transactions: Vec<Transaction>,
 }
 
 impl VaultBlock {
-    /// Returns the namespace that owns this vault block.
+    /// Returns the organization that owns this vault block.
     #[inline]
-    pub fn namespace_id(&self) -> NamespaceId {
-        self.header.namespace_id
+    pub fn organization_id(&self) -> OrganizationId {
+        self.header.organization_id
     }
 
     /// Returns the vault identifier for this block.
@@ -228,8 +284,8 @@ pub struct ShardBlock {
 /// Per-vault entry within a ShardBlock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultEntry {
-    /// Namespace owning this vault.
-    pub namespace_id: NamespaceId,
+    /// Organization owning this vault.
+    pub organization_id: OrganizationId,
     /// Vault identifier.
     pub vault_id: VaultId,
     /// Per-vault height (independent of shard height).
@@ -286,7 +342,7 @@ impl ShardBlock {
 
         BlockHeader {
             height: self.shard_height,
-            namespace_id: NamespaceId::new(0), // Shard-level aggregate, not vault-specific
+            organization_id: OrganizationId::new(0), // Shard-level aggregate, not vault-specific
             vault_id: VaultId::new(self.shard_id.value() as i64),
             previous_hash: self.previous_shard_hash,
             tx_merkle_root,
@@ -300,20 +356,20 @@ impl ShardBlock {
     /// Extracts a standalone VaultBlock for client verification.
     ///
     /// Clients verify per-vault chains and never see ShardBlock directly.
-    /// Requires both namespace_id and vault_id since multiple namespaces can
-    /// share a shard.
+    /// Requires both organization_id and vault_id since multiple organizations
+    /// can share a shard.
     pub fn extract_vault_block(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
     ) -> Option<VaultBlock> {
         self.vault_entries
             .iter()
-            .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)
+            .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)
             .map(|e| VaultBlock {
                 header: BlockHeader {
                     height: e.vault_height,
-                    namespace_id: e.namespace_id,
+                    organization_id: e.organization_id,
                     vault_id: e.vault_id,
                     previous_hash: e.previous_vault_hash,
                     tx_merkle_root: e.tx_merkle_root,
@@ -597,7 +653,7 @@ pub struct WriteResult {
 ///
 /// We use u64 for efficient storage and comparison. The mapping from
 /// human-readable node names (e.g., "node-1") to numeric IDs is maintained
-/// in the `_system` namespace.
+/// in the `_system` organization.
 pub type LedgerNodeId = u64;
 
 // ============================================================================
@@ -645,19 +701,19 @@ impl Default for BlockRetentionPolicy {
 // Resource Accounting
 // ============================================================================
 
-/// Snapshot of per-namespace resource consumption.
+/// Snapshot of per-organization resource consumption.
 ///
 /// Used by the quota checker for enforcement and by operators for
 /// capacity planning. All values are point-in-time snapshots from
 /// Raft-replicated state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NamespaceUsage {
-    /// Cumulative estimated storage bytes for this namespace.
+pub struct OrganizationUsage {
+    /// Cumulative estimated storage bytes for this organization.
     ///
     /// Updated on every committed write. Approximate — does not track
     /// exact on-disk overhead.
     pub storage_bytes: u64,
-    /// Number of active (non-deleted) vaults in this namespace.
+    /// Number of active (non-deleted) vaults in this organization.
     pub vault_count: u32,
 }
 
@@ -690,7 +746,7 @@ mod tests {
         let timestamp = Utc::now();
         let header = BlockHeader::builder()
             .height(100)
-            .namespace_id(1)
+            .organization_id(1)
             .vault_id(2)
             .previous_hash(ZERO_HASH)
             .tx_merkle_root(ZERO_HASH)
@@ -701,7 +757,7 @@ mod tests {
             .build();
 
         assert_eq!(header.height, 100);
-        assert_eq!(header.namespace_id, NamespaceId::new(1));
+        assert_eq!(header.organization_id, OrganizationId::new(1));
         assert_eq!(header.vault_id, VaultId::new(2));
         assert_eq!(header.previous_hash, ZERO_HASH);
         assert_eq!(header.tx_merkle_root, ZERO_HASH);
@@ -715,7 +771,7 @@ mod tests {
     fn test_block_header_builder_genesis_block() {
         let header = BlockHeader::builder()
             .height(0) // Genesis
-            .namespace_id(1)
+            .organization_id(1)
             .vault_id(1)
             .previous_hash(ZERO_HASH) // ZERO_HASH for genesis
             .tx_merkle_root(ZERO_HASH)
@@ -869,8 +925,8 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_namespace_id_new_and_value() {
-        let id = NamespaceId::new(42);
+    fn test_organization_id_new_and_value() {
+        let id = OrganizationId::new(42);
         assert_eq!(id.value(), 42);
     }
 
@@ -893,8 +949,8 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_id_display() {
-        assert_eq!(format!("{}", NamespaceId::new(123)), "ns:123");
+    fn test_organization_id_display() {
+        assert_eq!(format!("{}", OrganizationId::new(123)), "org:123");
     }
 
     #[test]
@@ -913,8 +969,8 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_id_from_i64() {
-        let id: NamespaceId = 42_i64.into();
+    fn test_organization_id_from_i64() {
+        let id: OrganizationId = 42_i64.into();
         assert_eq!(id.value(), 42);
     }
 
@@ -940,13 +996,13 @@ mod tests {
 
     #[test]
     fn test_id_equality() {
-        assert_eq!(NamespaceId::new(1), NamespaceId::new(1));
-        assert_ne!(NamespaceId::new(1), NamespaceId::new(2));
+        assert_eq!(OrganizationId::new(1), OrganizationId::new(1));
+        assert_ne!(OrganizationId::new(1), OrganizationId::new(2));
     }
 
     #[test]
     fn test_id_ordering() {
-        assert!(NamespaceId::new(1) < NamespaceId::new(2));
+        assert!(OrganizationId::new(1) < OrganizationId::new(2));
         assert!(VaultId::new(10) > VaultId::new(5));
         assert!(ShardId::new(0) < ShardId::new(1));
     }
@@ -955,25 +1011,25 @@ mod tests {
     fn test_id_hash_map_key() {
         use std::collections::HashMap;
         let mut map = HashMap::new();
-        map.insert(NamespaceId::new(1), "org-a");
-        map.insert(NamespaceId::new(2), "org-b");
-        assert_eq!(map.get(&NamespaceId::new(1)), Some(&"org-a"));
-        assert_eq!(map.get(&NamespaceId::new(3)), None);
+        map.insert(OrganizationId::new(1), "org-a");
+        map.insert(OrganizationId::new(2), "org-b");
+        assert_eq!(map.get(&OrganizationId::new(1)), Some(&"org-a"));
+        assert_eq!(map.get(&OrganizationId::new(3)), None);
     }
 
     #[test]
     fn test_id_copy_semantics() {
-        let id = NamespaceId::new(42);
+        let id = OrganizationId::new(42);
         let id2 = id; // Copy
         assert_eq!(id, id2); // Original still accessible
     }
 
     #[test]
     fn test_id_serde_roundtrip() {
-        let id = NamespaceId::new(42);
+        let id = OrganizationId::new(42);
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, "42"); // transparent serialization
-        let deserialized: NamespaceId = serde_json::from_str(&json).unwrap();
+        let deserialized: OrganizationId = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, id);
     }
 
@@ -998,24 +1054,24 @@ mod tests {
     #[test]
     fn test_id_negative_values() {
         // IDs can be negative (leader-assigned sequential)
-        let id = NamespaceId::new(-1);
+        let id = OrganizationId::new(-1);
         assert_eq!(id.value(), -1);
-        assert_eq!(format!("{id}"), "ns:-1");
+        assert_eq!(format!("{id}"), "org:-1");
     }
 
     #[test]
     fn test_id_zero_value() {
-        // Zero has special meaning (system namespace)
-        let id = NamespaceId::new(0);
+        // Zero has special meaning (system organization)
+        let id = OrganizationId::new(0);
         assert_eq!(id.value(), 0);
-        assert_eq!(format!("{id}"), "ns:0");
+        assert_eq!(format!("{id}"), "org:0");
     }
 
     #[test]
     fn test_block_header_builder_with_newtype_ids() {
         let header = BlockHeader::builder()
             .height(1)
-            .namespace_id(NamespaceId::new(10))
+            .organization_id(OrganizationId::new(10))
             .vault_id(VaultId::new(20))
             .previous_hash(ZERO_HASH)
             .tx_merkle_root(ZERO_HASH)
@@ -1025,27 +1081,27 @@ mod tests {
             .committed_index(0)
             .build();
 
-        assert_eq!(header.namespace_id, NamespaceId::new(10));
+        assert_eq!(header.organization_id, OrganizationId::new(10));
         assert_eq!(header.vault_id, VaultId::new(20));
     }
 
     #[test]
-    fn test_namespace_usage_default_values() {
-        let usage = NamespaceUsage { storage_bytes: 0, vault_count: 0 };
+    fn test_organization_usage_default_values() {
+        let usage = OrganizationUsage { storage_bytes: 0, vault_count: 0 };
         assert_eq!(usage.storage_bytes, 0);
         assert_eq!(usage.vault_count, 0);
     }
 
     #[test]
-    fn test_namespace_usage_with_data() {
-        let usage = NamespaceUsage { storage_bytes: 1_048_576, vault_count: 5 };
+    fn test_organization_usage_with_data() {
+        let usage = OrganizationUsage { storage_bytes: 1_048_576, vault_count: 5 };
         assert_eq!(usage.storage_bytes, 1_048_576);
         assert_eq!(usage.vault_count, 5);
     }
 
     #[test]
-    fn test_namespace_usage_copy_semantics() {
-        let a = NamespaceUsage { storage_bytes: 100, vault_count: 3 };
+    fn test_organization_usage_copy_semantics() {
+        let a = OrganizationUsage { storage_bytes: 100, vault_count: 3 };
         let b = a; // Copy
         assert_eq!(a, b); // Both accessible — Copy trait
     }

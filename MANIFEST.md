@@ -39,7 +39,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports core types, errors, hashing utilities, and codec
 - **Key Types/Functions**:
-  - Public modules: `audit`, `codec`, `config`, `error`, `hash`, `merkle`, `types`, `validation`
+  - Public modules: `audit`, `codec`, `config`, `error`, `hash`, `merkle`, `snowflake`, `types`, `validation`
+  - Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `ShardId`, `UserId`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, etc.
 - **Insights**: Clean public API surface, excellent organization
 
 #### `audit.rs` (394 lines)
@@ -48,7 +49,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `AuditEvent`: Timestamped audit record with actor, action, resource, outcome
   - `AuditAction`: 17 variants covering CRUD, admin ops (CreateVault, DeleteEntity, UpdateShardConfig, etc.)
-  - `AuditResource`: Target resource (Namespace, Vault, Entity, Relationship, Shard, Node, Config)
+  - `AuditResource`: Target resource (Organization, Vault, Entity, Relationship, Shard, Node, Config)
   - `AuditOutcome`: Success vs. Failure with optional error message
 - **Insights**: Comprehensive coverage of auditable operations, ready for regulatory compliance
 
@@ -72,7 +73,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `config/raft.rs` (285 lines) — `RaftConfig`, `BatchConfig`
   - `config/resilience.rs` (611 lines) — `RateLimitConfig`, `ShutdownConfig`, `HealthCheckConfig`, `ValidationConfig`
   - `config/observability.rs` (375 lines) — `HotKeyConfig`, `AuditConfig`, `MetricsCardinalityConfig`
-  - `config/runtime.rs` (333 lines) — `RuntimeConfig`, `ConfigChange`, `NonReconfigurableField`, `NamespaceQuota`
+  - `config/runtime.rs` (333 lines) — `RuntimeConfig`, `ConfigChange`, `NonReconfigurableField`, `OrganizationQuota`
 - **Key Types/Functions**:
   - 19 config structs across submodules (was monolithic, now organized by subsystem)
   - All use `#[bon::bon]` fallible builders with validation
@@ -111,18 +112,33 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `MerkleProof::verify()`: Verify proof against root
 - **Insights**: Power-of-2 leaf count limitation documented (rs_merkle constraint). Adequate for block-level Merkle trees.
 
-#### `types.rs` (1061 lines)
+#### `types.rs` (1108 lines)
 
 - **Purpose**: Core domain types (blocks, transactions, operations, entities, relationships)
 - **Key Types/Functions**:
   - `define_id!` macro: Generates newtypes with derives, Display (prefixed), FromStr, serde
-  - `NamespaceId`, `VaultId`, `UserId`, `ShardId`: Newtype IDs (replaced type aliases)
+  - `OrganizationId(i64)`: Internal storage key (display `"org:42"`), generated via `define_id!`
+  - `OrganizationSlug(u64)`: External Snowflake identifier (display raw number), hand-implemented (not `define_id!` — `u64` not `i64`, no prefix)
+  - `VaultId`, `UserId`, `ShardId`: Newtype IDs (replaced type aliases)
   - `BlockHeader`: version, height, prev_hash, timestamp, tx_merkle_root, state_root
-  - `Transaction`: namespace, vault, operations (fallible builder with validation)
+  - `Transaction`: organization, vault, operations (fallible builder with validation)
   - `Operation`: 5 variants (CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity)
   - `Entity`: key, value, ttl, version
   - `Relationship`: resource, relation, subject (authorization tuple)
-- **Insights**: Fallible Transaction builder validates constraints (max 100 ops, max 1MB size). Newtype IDs prevent accidental mixing (e.g., NamespaceId vs VaultId).
+- **Insights**: Dual-ID architecture: `OrganizationId(i64)` for B+ tree key density (internal only), `OrganizationSlug(u64)` for external Snowflake IDs (API-facing). Fallible Transaction builder validates constraints (max 100 ops, max 1MB size).
+
+#### `snowflake.rs` (273 lines)
+
+- **Purpose**: Snowflake-style globally unique ID generation for node IDs and organization slugs
+- **Key Types/Functions**:
+  - `generate() -> Result<u64, SnowflakeError>`: Core ID generation (42-bit timestamp + 22-bit sequence)
+  - `generate_organization_slug() -> Result<OrganizationSlug, SnowflakeError>`: Convenience wrapper
+  - `extract_timestamp(id: u64) -> u64`: Extract millisecond timestamp from ID
+  - `extract_sequence(id: u64) -> u64`: Extract sequence number from ID
+  - `SnowflakeError`: snafu error with `SystemClock` variant
+  - Custom epoch: 2024-01-01 00:00:00 UTC (~139 years range)
+  - Thread-safe via `parking_lot::Mutex` global state
+- **Insights**: Extracted from `server/src/node_id.rs` (Task 3) so all crates can generate IDs without depending on `server`. No worker/datacenter bits — organization slug generation happens on Raft leader only (single writer). 4.2M IDs/ms capacity. 11 unit tests.
 
 #### `validation.rs` (562 lines)
 
@@ -285,7 +301,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `Table` trait: defines KeyType, ValueType, table_id
   - `Entities`, `Relationships`, `RelationshipsBySubject`: Table implementations
   - `BucketCommitments`, `BlockArchive`: State and archive tables
-- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment.
+  - `OrganizationMeta`: Organization metadata (keyed by internal `i64`)
+  - `OrganizationSlugIndex` (table ID 15): Slug→internal ID mapping (`u64` → `i64`)
+- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 16 tables total.
 
 #### `types.rs`
 
@@ -370,11 +388,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `keys.rs` (165 lines)
 
-- **Purpose**: Key encoding for storage layer (namespace, vault, bucket, local key)
+- **Purpose**: Key encoding for storage layer (organization, vault, bucket, local key)
 - **Key Types/Functions**:
-  - `entity_key(namespace_id, vault_id, bucket_id, key) -> Vec<u8>`: Encode entity key
-  - `relationship_key(namespace_id, vault_id, bucket_id, resource, relation, subject) -> Vec<u8>`
-  - `parse_entity_key(&[u8]) -> (NamespaceId, VaultId, u8, Vec<u8>)`: Decode
+  - `entity_key(organization_id, vault_id, bucket_id, key) -> Vec<u8>`: Encode entity key
+  - `relationship_key(organization_id, vault_id, bucket_id, resource, relation, subject) -> Vec<u8>`
+  - `parse_entity_key(&[u8]) -> (OrganizationId, VaultId, u8, Vec<u8>)`: Decode
 - **Insights**: Fixed-size prefix (8-byte vault_id + 1-byte bucket_id) enables range scans. Big-endian for lexicographic ordering.
 
 #### `indexes.rs` (379 lines)
@@ -411,10 +429,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: ShardManager coordinates multiple vaults within a shard
 - **Key Types/Functions**:
   - `ShardManager::new(engine, shard_id) -> Self`
-  - `create_vault(namespace_id, vault_name) -> Result<VaultId>`
-  - `get_vault(namespace_id, vault_id) -> Result<Option<Vault>>`
-  - `list_vaults(namespace_id) -> Result<Vec<Vault>>`
-- **Insights**: Shard = collection of namespaces sharing a Raft group. ShardManager is coordination layer above StateLayer.
+  - `create_vault(organization_id, vault_name) -> Result<VaultId>`
+  - `get_vault(organization_id, vault_id) -> Result<Option<Vault>>`
+  - `list_vaults(organization_id) -> Result<Vec<Vault>>`
+- **Insights**: Shard = collection of organizations sharing a Raft group. ShardManager is coordination layer above StateLayer.
 
 #### `snapshot.rs` (787 lines)
 
@@ -450,10 +468,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `system/mod.rs` (28 lines)
 
-- **Purpose**: `_system` namespace for cluster metadata, sagas, service discovery
+- **Purpose**: `_system` organization for cluster metadata, sagas, service discovery
 - **Key Types/Functions**:
   - Submodules: `cluster`, `keys`, `saga`, `service`, `types`
-- **Insights**: System namespace stores metadata (cluster config, node registry, distributed transactions). Total system/ directory: 1,895 lines.
+- **Insights**: System organization stores metadata (cluster config, node registry, distributed transactions). Total system/ directory: 1,895 lines.
 
 #### `system/cluster.rs` (370 lines)
 
@@ -461,7 +479,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `ClusterMetadata`: Cluster-wide configuration
   - `NodeMetadata`: Per-node metadata (address, capacity, status)
-  - `ShardAssignment`: Namespace → shard mapping
+  - `ShardAssignment`: Organization → shard mapping
 - **Insights**: Supports dynamic shard assignment. Enables horizontal scaling.
 
 #### `system/saga.rs` (589 lines)
@@ -473,22 +491,27 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `SagaExecutor`: Orchestrates execution, handles failures
 - **Insights**: Saga pattern for cross-shard transactions. Compensating actions ensure eventual consistency.
 
-#### `system/service.rs` (452 lines)
+#### `system/service.rs` (538 lines)
 
-- **Purpose**: Service discovery (node registry, health checks)
+- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup
 - **Key Types/Functions**:
-  - `ServiceRegistry`: Node registration, heartbeats
-  - `register_node()`, `unregister_node()`, `get_healthy_nodes()`
-- **Insights**: Enables dynamic cluster membership. Health checks detect failed nodes.
+  - `create_organization()`, `delete_organization()`, `list_organizations()`
+  - `get_organization_by_slug(slug: OrganizationSlug)`: Slug-based lookup (replaces name-based)
+  - `update_organization_status()`, `assign_organization_to_shard()`
+- **Insights**: Slug index always created alongside organization registration. Name-based lookup removed (organization names are not unique).
 
-#### `system/keys.rs` (233 lines)
+#### `system/keys.rs` (237 lines)
 
-- **Purpose**: Key encoding for system namespace entries
-- **Insights**: Dedicated key scheme for system metadata separate from user data keys.
+- **Purpose**: Key encoding for system organization entries
+- **Key Types/Functions**:
+  - `ORG_PREFIX` (`"org:"`), `ORG_SEQ_KEY` (`"_meta:seq:organization"`): Key constants
+  - `organization_key(OrganizationId)`, `organization_slug_key(OrganizationSlug)`: Key constructors
+  - `parse_organization_key()`: Key parser
+- **Insights**: Dedicated key scheme for system metadata. Slug index key format: `"_idx:org:slug:{slug}"`. Name-based index removed (organization names are not unique).
 
-#### `system/types.rs` (223 lines)
+#### `system/types.rs` (221 lines)
 
-- **Purpose**: Type definitions for system namespace (cluster membership, saga state, service records)
+- **Purpose**: Type definitions for system organization (cluster membership, saga state, service records)
 - **Insights**: Decoupled from user-facing types to maintain clean separation.
 
 ---
@@ -561,15 +584,15 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: openraft LogStore and StateMachine implementation, log storage, snapshot building
 - **Structure**:
   - `log_storage/mod.rs` (4061 lines) — Metadata constants, `ShardChainState`, re-exports, test suite
-  - `log_storage/types.rs` (276 lines) — `AppliedState`, `CombinedSnapshot`, `NamespaceMeta`, `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`
-  - `log_storage/accessor.rs` (165 lines) — `AppliedStateAccessor` (15 pub query methods for reading applied state)
+  - `log_storage/types.rs` (293 lines) — `AppliedState`, `CombinedSnapshot`, `OrganizationMeta`, `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps (`slug_index`, `id_to_slug`).
+  - `log_storage/accessor.rs` (201 lines) — `AppliedStateAccessor` (17 pub query methods including `resolve_slug_to_id` and `resolve_id_to_slug`)
   - `log_storage/store.rs` (250 lines) — `RaftLogStore` struct definition, creation/config/accessor methods
   - `log_storage/operations.rs` (737 lines) — `apply_request()` state machine dispatch logic
   - `log_storage/raft_impl.rs` (646 lines) — `RaftLogReader`, `RaftSnapshotBuilder`, `RaftStorage` trait impls, error conversion helpers
 - **Key Types/Functions**:
   - `RaftLogStore`: Implements openraft's `RaftStorage` trait (combined log + state machine)
-  - `AppliedState`: State machine with vault heights, namespaces, sequences
-  - `apply_request()`: Dispatches to operation handlers for entities, relationships, vaults, namespaces
+  - `AppliedState`: State machine with vault heights, organizations, sequences
+  - `apply_request()`: Dispatches to operation handlers for entities, relationships, vaults, organizations
   - `AppliedStateAccessor`: Shared read accessor (passed to services without direct Raft storage access)
 - **Insights**: Successfully split from monolithic file into directory module. Fields use `pub(super)` for cross-submodule access within the same effective boundary.
 
@@ -589,9 +612,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `LedgerTypeConfig`: openraft type config (NodeId, Entry, SnapshotData, etc.)
   - `LedgerNodeId`: Newtype for node ID (Snowflake ID)
-  - `LedgerRequest`: 14 variants for all operations (CreateEntity, ReadEntity, CreateRelationship, etc.)
-  - `LedgerResponse`: Operation results (success/error)
-- **Insights**: Type-safe Raft integration. LedgerRequest is the state machine input type.
+  - `LedgerRequest`: 14 variants for all operations (CreateOrganization with slug, CreateVault, CreateEntity, ReadEntity, CreateRelationship, etc.)
+  - `LedgerResponse`: Operation results (OrganizationCreated, VaultCreated, success/error)
+- **Insights**: Type-safe Raft integration. LedgerRequest is the state machine input type. `CreateOrganization` includes a pre-generated `OrganizationSlug` for atomic slug index insertion.
 
 #### `error.rs` (606 lines)
 
@@ -607,11 +630,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Service Layer (14 files)
 
-#### `services/admin.rs` (2876 lines)
+#### `services/admin.rs` (2906 lines)
 
-- **Purpose**: AdminService gRPC implementation (namespace/vault/shard management, runtime config, backup/restore)
+- **Purpose**: AdminService gRPC implementation (organization/vault/shard management, runtime config, backup/restore)
 - **Key Types/Functions**:
-  - `create_namespace()`, `delete_namespace()`, `list_namespaces()`
+  - `create_organization()`, `delete_organization()`, `list_organizations()`
   - `create_vault()`, `delete_vault()`, `list_vaults()`
   - `update_config()`, `get_config()`: Runtime reconfiguration RPCs
   - `create_backup()`, `list_backups()`, `restore_backup()`: Backup/restore RPCs
@@ -653,7 +676,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `check_rate_limit()`: Rate limit check with rich ErrorDetails
   - `validation_status()`: Wraps validation errors with gRPC status
-  - `extract_namespace_from_request()`: Common metadata extraction
+  - `extract_organization_from_request()`: Common metadata extraction
 - **Insights**: Phase 2 Task 1 extracted shared code from write/multi-shard/admin services. Reduces duplication.
 
 #### `services/metadata.rs` (219 lines)
@@ -672,7 +695,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `services/forward_client.rs`: Leader forwarding
 - `services/multi_shard_read.rs`: Multi-shard read coordination
 - `services/multi_shard_write.rs`: Multi-shard write coordination (2PC + saga)
-- `services/shard_resolver.rs`: Namespace→shard routing
+- `services/slug_resolver.rs` (280 lines): Organization slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Methods: `extract_slug`, `resolve`, `resolve_slug` (reverse), `extract_and_resolve`, `extract_and_resolve_optional`. 14 unit tests.
+- `services/shard_resolver.rs`: Organization→shard routing
 - `services/error_details.rs`: ErrorDetails proto builder
 
 ### Features (40+ files)
@@ -697,7 +721,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `deadline.rs`: Request deadline propagation
 - `dependency_health.rs`: Disk/Raft/peer health checks
 - `audit.rs`: File-based audit logging (JSON Lines)
-- `quota.rs`: Per-namespace resource quotas
+- `quota.rs`: Per-organization resource quotas
 
 #### Background Jobs
 
@@ -721,7 +745,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `proof.rs`: Merkle proof generation
 - `shard_router.rs`: Dynamic shard routing
 - `saga_orchestrator.rs`: Distributed transaction orchestration
-- `vip_cache.rs`: VIP page cache
+- `vip_cache.rs` (524 lines): VIP organization cache with static + dynamic discovery, `u64` organization slugs
 - `cardinality.rs`: HyperLogLog for metrics
 - `file_lock.rs`: Data directory locking
 - `peer_tracker.rs`: Peer connection state
@@ -743,14 +767,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `tracing`, `builders`, `server`, `idempotency`, `mock`
 - **Insights**: Comprehensive SDK. All features needed for production use.
 
-#### `client.rs` (6516 lines)
+#### `client.rs` (6688 lines)
 
 - **Purpose**: LedgerClient with 36 public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
   - `LedgerClient::new(config) -> Result<Self>`: Create client
   - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation)
   - Relationship ops: `check_permission()`, `create_relationship()`, `delete_relationship()`
-  - Admin ops: `create_namespace()`, `create_vault()`, `list_vaults()`
+  - Admin ops: `create_organization()`, `create_vault()`, `list_vaults()`
   - All methods use `with_retry_cancellable()` for retry + cancellation
   - `with_metrics()` wrapper for user-perceived latency
 - **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency.
@@ -938,14 +962,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Background refresh (configurable interval)
 - **Insights**: Multiple discovery mechanisms (DNS for cloud, file for on-prem). Background refresh for dynamic membership.
 
-#### `node_id.rs` (448 lines)
+#### `node_id.rs` (213 lines)
 
-- **Purpose**: Snowflake ID generator with persistence
+- **Purpose**: Node ID persistence (generation logic delegated to `types::snowflake`)
 - **Key Types/Functions**:
-  - `NodeIdGenerator::new(data_dir) -> Result<Self>`
-  - `generate() -> u64`: Generate unique ID (timestamp + node_id + sequence)
-  - Persistence: node_id stored in `{data_dir}/node_id.json`
-- **Insights**: Snowflake IDs are time-ordered and unique. Persistence ensures stable node ID across restarts.
+  - `load_or_generate_node_id(data_dir) -> Result<u64>`: Load from disk or generate via `types::snowflake::generate()`
+  - `write_node_id(data_dir, id) -> Result<()>`: Persist to `{data_dir}/node_id.json`
+  - `NodeIdError`: snafu error with IO and `Generate` (wrapping `SnowflakeError`) variants
+- **Insights**: Core Snowflake generation extracted to `types::snowflake` (Task 3). This file retains only filesystem persistence logic. Persistence ensures stable node ID across restarts.
 
 #### `shutdown.rs` (106 lines)
 
@@ -976,7 +1000,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `tests/design_compliance.rs` (984 lines): Validates implementation against DESIGN.md spec
   - `tests/chaos_consistency.rs` (960 lines): Network partitions, node crashes, Byzantine scenarios
   - `tests/network_simulation.rs` (785 lines): Turmoil-based network failure simulation
-  - `tests/isolation.rs` (635 lines): Namespace and vault isolation guarantees
+  - `tests/isolation.rs` (635 lines): Organization and vault isolation guarantees
   - `tests/watch_blocks_realtime.rs` (584 lines): Block streaming via gRPC
   - `tests/leader_failover.rs` (473 lines): Leader failure and re-election
   - `tests/ttl_gc.rs` (468 lines): Time-to-live garbage collection
@@ -1047,12 +1071,12 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - 7 unit tests validating each crash point and arm/disarm lifecycle
 - **Insights**: Deterministic crash injection (not random) — each `CrashPoint` triggers at a precise operation count. The dual-slot commit protocol diagram in the module docs maps crash points to on-disk states. 17 crash tests in store crate exercise all 5 crash points.
 
-#### `strategies.rs` (357 lines)
+#### `strategies.rs` (371 lines)
 
-- **Purpose**: 23 proptest strategy generators for all domain types
+- **Purpose**: 24 proptest strategy generators for all domain types
 - **Key Types/Functions** (all `pub fn arb_*() -> impl Strategy<Value = T>`):
   - Primitives: `arb_key()`, `arb_value()`, `arb_small_value()`, `arb_hash()`, `arb_tx_id()`, `arb_timestamp()`
-  - IDs: `arb_namespace_id()`, `arb_vault_id()`, `arb_shard_id()`
+  - IDs: `arb_organization_id()`, `arb_organization_slug()`, `arb_vault_id()`, `arb_shard_id()`
   - Relationship components: `arb_resource()`, `arb_relation()`, `arb_subject()`
   - Domain types: `arb_entity()`, `arb_relationship()`, `arb_set_condition()`, `arb_operation()`, `arb_operation_sequence()`
   - Blocks: `arb_transaction()`, `arb_block_header()`, `arb_vault_block()`, `arb_vault_entry()`, `arb_shard_block()`, `arb_chain_commitment()`
@@ -1115,8 +1139,8 @@ The codebase follows excellent security practices:
 - **No `.unwrap()`**: All error handling via snafu `.context()`. No panics in production code.
 - **Audit logging**: SOC2/HIPAA audit logging framework with `AuditEvent`/`AuditLogger`. Tracks all mutations.
 - **TLS support**: Client and server support TLS with optional mTLS (client certificates).
-- **Rate limiting**: 3-tier token bucket rate limiter (client/namespace/backpressure) prevents abuse.
-- **Quota enforcement**: Per-namespace resource quotas (vault count, storage size, request rate) prevent resource exhaustion.
+- **Rate limiting**: 3-tier token bucket rate limiter (client/organization/backpressure) prevents abuse.
+- **Quota enforcement**: Per-organization resource quotas (vault count, storage size, request rate) prevent resource exhaustion.
 
 ### 5. Observability
 
@@ -1124,7 +1148,7 @@ The codebase has comprehensive observability:
 
 - **OpenTelemetry tracing**: W3C Trace Context propagation across services. OTLP exporter for traces/metrics. Configurable sampling ratio.
 - **Prometheus metrics**: 100+ metrics covering SLI/SLO, resource saturation, batch queues, rate limiting, hot keys, circuit breakers, etc. Custom histogram buckets for SLI.
-- **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, namespace_id, vault_id, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
+- **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, organization_slug, vault_id, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
 - **Wide events**: Structured logging with tracing crate. Context propagation via spans.
 - **SDK metrics**: Client-side metrics (request latency, retries, circuit state, connection pool) via `SdkMetrics` trait. Noop default for zero overhead.
 - **Audit logging**: File-based audit logger (JSON Lines) with fsync for durability. Prometheus metrics for audit events.
@@ -1146,7 +1170,7 @@ The codebase includes 40+ production-ready features:
 - **Time travel**: Historical versioning with inverted height keys for efficient latest-version queries.
 - **Tiered storage**: Hot/warm/cold tiers with S3/GCS/Azure backends. Age-based or access-based promotion/demotion.
 - **Multi-shard**: Horizontal scaling via multiple Raft groups. Cross-shard queries and transactions via saga pattern.
-- **Resource quotas**: Per-namespace limits (vault count, storage size, request rate). 3-tier resolution (namespace → tier → global).
+- **Resource quotas**: Per-organization limits (vault count, storage size, request rate). 3-tier resolution (organization → tier → global).
 - **B+ tree compaction**: Merge underfull leaves, reclaim dead space. Background job with configurable interval.
 - **And 25+ more features**...
 
@@ -1158,11 +1182,20 @@ The codebase has excellent documentation:
 - **Invariant docs**: `docs/specs/invariants.md` documents critical system invariants.
 - **Module docs**: All crates have module-level documentation with examples.
 - **rustdoc examples**: Many public functions have ` ```no_run ` examples (cargo test skips execution, cargo doc validates syntax).
-- **Operations docs**: `docs/operations/` has 18 .md files covering alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, logging, metrics reference, multi-region, namespace metrics, production deployment tutorial, security, shard management, SLO, troubleshooting, vault repair, and a README.
+- **Operations docs**: `docs/operations/` has 18 .md files covering alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, logging, metrics reference, multi-region, organization metrics, production deployment tutorial, security, shard management, SLO, troubleshooting, vault repair, and a README.
 - **Client docs**: `docs/client/` has 7 guides (admin, API, discovery, errors, health, idempotency, SDK).
 - **Error codes**: `docs/errors.md` documents all 29 error codes with descriptions, causes, and suggested actions.
 
-### 8. Code Quality Achievements
+### 8. Dual-ID Architecture
+
+Organizations use two identifiers:
+
+- **`OrganizationId(i64)`** — Internal sequential ID for B+ tree key density and storage performance. Generated via `_meta:seq:organization` counter. Never exposed in APIs.
+- **`OrganizationSlug(u64)`** — External Snowflake ID (42-bit timestamp + 22-bit sequence). The sole identifier in gRPC APIs and SDK. Generated via `types::snowflake::generate_organization_slug()`.
+
+Translation happens at the gRPC service boundary via `SlugResolver`, backed by `AppliedState`'s bidirectional `slug_index` / `id_to_slug` maps. All internal subsystems (rate limiter, quota checker, storage, state machine) operate on `OrganizationId`. Responses use reverse lookup to embed slugs.
+
+### 9. Code Quality Achievements
 
 Two previously identified large-file concerns have been resolved:
 

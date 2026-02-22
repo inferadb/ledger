@@ -26,9 +26,9 @@ pub enum RecoveryError {
 
     /// Failed to look up block index for vault height.
     #[snafu(display(
-        "Index lookup failed for namespace {namespace_id}, vault {vault_id}, height {height}: {source}"
+        "Index lookup failed for organization {organization_id}, vault {vault_id}, height {height}: {source}"
     ))]
-    IndexLookup { namespace_id: i64, vault_id: i64, height: u64, source: BlockArchiveError },
+    IndexLookup { organization_id: i64, vault_id: i64, height: u64, source: BlockArchiveError },
 
     /// Failed to read block from archive.
     #[snafu(display("Block read failed at shard height {shard_height}: {source}"))]
@@ -127,7 +127,7 @@ pub enum OrphanCleanupError {
 /// | `BlockArchive`      | `INTERNAL`            | No        | Block archive failures                    |
 /// | `Snapshot`          | `FAILED_PRECONDITION` | No        | Snapshot in progress or unavailable       |
 /// | `InvalidArgument`   | `INVALID_ARGUMENT`    | No        | Malformed request or validation failure   |
-/// | `ResourceNotFound`  | `NOT_FOUND`           | No        | Namespace/vault/entity not found          |
+/// | `ResourceNotFound`  | `NOT_FOUND`           | No        | Organization/vault/entity not found          |
 /// | `PreconditionFailed`| `FAILED_PRECONDITION` | No        | State precondition violated               |
 /// | `RateLimited`       | `RESOURCE_EXHAUSTED`  | Yes       | Includes `retry-after-ms` metadata        |
 /// | `Timeout`           | `DEADLINE_EXCEEDED`   | Yes       | Raft proposal or operation timeout        |
@@ -443,12 +443,12 @@ mod tests {
     #[test]
     fn test_resource_not_found_maps_correctly() {
         let err = ServiceError::ResourceNotFound {
-            resource_type: "Namespace".to_string(),
+            resource_type: "Organization".to_string(),
             identifier: "123".to_string(),
         };
         let status: tonic::Status = err.into();
         assert_eq!(status.code(), tonic::Code::NotFound);
-        assert!(status.message().contains("Namespace"));
+        assert!(status.message().contains("Organization"));
         assert!(status.message().contains("123"));
     }
 
@@ -463,12 +463,12 @@ mod tests {
     #[test]
     fn test_rate_limited_maps_to_resource_exhausted() {
         let err = ServiceError::RateLimited {
-            message: "namespace rate limit exceeded".to_string(),
+            message: "organization rate limit exceeded".to_string(),
             retry_after_ms: 500,
         };
         let status: tonic::Status = err.into();
         assert_eq!(status.code(), tonic::Code::ResourceExhausted);
-        assert!(status.message().contains("namespace rate limit exceeded"));
+        assert!(status.message().contains("organization rate limit exceeded"));
     }
 
     #[test]

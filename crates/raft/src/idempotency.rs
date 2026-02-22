@@ -2,7 +2,7 @@
 //!
 //! This module implements a bounded, TTL-based cache that stores the results
 //! of recently committed transactions. When a client retries a request with
-//! the same `(namespace_id, vault_id, client_id, idempotency_key)` tuple, we return the
+//! the same `(organization_id, vault_id, client_id, idempotency_key)` tuple, we return the
 //! cached result instead of reprocessing.
 //!
 //! Per ADR server-assigned-sequences:
@@ -27,12 +27,12 @@ const ENTRY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Composite key for idempotency cache.
 ///
-/// Per ADR: Cache key is `(namespace_id, vault_id, client_id, idempotency_key)`.
+/// Per ADR: Cache key is `(organization_id, vault_id, client_id, idempotency_key)`.
 /// The idempotency_key is a 16-byte UUID provided by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey {
-    /// Namespace ID.
-    pub namespace_id: i64,
+    /// Organization ID.
+    pub organization_id: i64,
     /// Vault ID (0 if not specified).
     pub vault_id: i64,
     /// Client identifier.
@@ -44,12 +44,12 @@ pub struct IdempotencyKey {
 impl IdempotencyKey {
     /// Creates a new idempotency key.
     pub fn new(
-        namespace_id: i64,
+        organization_id: i64,
         vault_id: i64,
         client_id: String,
         idempotency_key: [u8; 16],
     ) -> Self {
-        Self { namespace_id, vault_id, client_id, idempotency_key }
+        Self { organization_id, vault_id, client_id, idempotency_key }
     }
 
     /// Creates a new idempotency key from a byte slice.
@@ -57,7 +57,7 @@ impl IdempotencyKey {
     /// Returns `None` if the slice is not exactly 16 bytes.
     #[allow(dead_code)]
     pub fn from_bytes(
-        namespace_id: i64,
+        organization_id: i64,
         vault_id: i64,
         client_id: String,
         idempotency_key_bytes: &[u8],
@@ -67,7 +67,7 @@ impl IdempotencyKey {
         }
         let mut key = [0u8; 16];
         key.copy_from_slice(idempotency_key_bytes);
-        Some(Self::new(namespace_id, vault_id, client_id, key))
+        Some(Self::new(organization_id, vault_id, client_id, key))
     }
 }
 
@@ -99,7 +99,7 @@ pub struct CachedResult {
 
 /// Thread-safe idempotency cache with bounded size and TTL eviction.
 ///
-/// The cache maps `(namespace_id, vault_id, client_id, idempotency_key) -> CachedResult`.
+/// The cache maps `(organization_id, vault_id, client_id, idempotency_key) -> CachedResult`.
 ///
 /// Behavior:
 /// - New key: Process write, cache result
@@ -130,14 +130,14 @@ impl IdempotencyCache {
     /// - `KeyReused` if the key exists but the payload hash differs
     pub fn check(
         &self,
-        namespace_id: i64,
+        organization_id: i64,
         vault_id: i64,
         client_id: &str,
         idempotency_key: [u8; 16],
         request_hash: u64,
     ) -> IdempotencyCheckResult {
         let key =
-            IdempotencyKey::new(namespace_id, vault_id, client_id.to_string(), idempotency_key);
+            IdempotencyKey::new(organization_id, vault_id, client_id.to_string(), idempotency_key);
         match self.cache.get(&key) {
             Some(entry) => {
                 if entry.request_hash == request_hash {
@@ -155,14 +155,14 @@ impl IdempotencyCache {
     /// Capacity management and TTL eviction are handled automatically by moka.
     pub fn insert(
         &self,
-        namespace_id: i64,
+        organization_id: i64,
         vault_id: i64,
         client_id: String,
         idempotency_key: [u8; 16],
         request_hash: u64,
         result: WriteSuccess,
     ) {
-        let key = IdempotencyKey::new(namespace_id, vault_id, client_id, idempotency_key);
+        let key = IdempotencyKey::new(organization_id, vault_id, client_id, idempotency_key);
         self.cache.insert(key, CachedResult { request_hash, result });
     }
 
@@ -174,7 +174,7 @@ impl IdempotencyCache {
     /// - `KeyReused` if the key exists but the payload hash differs
     pub fn check_and_insert(
         &self,
-        namespace_id: i64,
+        organization_id: i64,
         vault_id: i64,
         client_id: &str,
         idempotency_key: [u8; 16],
@@ -183,12 +183,12 @@ impl IdempotencyCache {
     ) -> IdempotencyCheckResult {
         // First check for existing entry
         let check_result =
-            self.check(namespace_id, vault_id, client_id, idempotency_key, request_hash);
+            self.check(organization_id, vault_id, client_id, idempotency_key, request_hash);
 
         if matches!(check_result, IdempotencyCheckResult::NewRequest) {
             // Not in cache, insert the new result
             self.insert(
-                namespace_id,
+                organization_id,
                 vault_id,
                 client_id.to_string(),
                 idempotency_key,
@@ -369,22 +369,22 @@ mod tests {
         ));
     }
 
-    /// Test that different namespaces are tracked independently.
+    /// Test that different organizations are tracked independently.
     #[test]
-    fn test_different_namespace_not_duplicate() {
+    fn test_different_organization_not_duplicate() {
         let cache = IdempotencyCache::new();
         let result = make_result(100, 1);
         let idem_key = make_key(1);
         let request_hash = 12345u64;
 
-        // Insert for namespace 1
+        // Insert for organization 1
         cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
 
-        // Same client, same vault, same key, but different namespace should be new request
+        // Same client, same vault, same key, but different organization should be new request
         let check = cache.check(2, 1, "client-1", idem_key, request_hash);
         assert!(
             matches!(check, IdempotencyCheckResult::NewRequest),
-            "different namespace should be new request"
+            "different organization should be new request"
         );
     }
 
@@ -470,7 +470,7 @@ mod tests {
     /// Stress test: 50 concurrent identical requests verify exactly-once execution.
     ///
     /// Simulates a thundering herd where 50 threads simultaneously submit the
-    /// same (namespace, vault, client, idempotency_key). Due to the TOCTOU gap
+    /// same (organization, vault, client, idempotency_key). Due to the TOCTOU gap
     /// in check_and_insert, multiple threads may race to insert. The test
     /// verifies that all threads see a consistent result (either NewRequest or
     /// Duplicate) and that the cached result is never corrupted.

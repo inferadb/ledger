@@ -1,19 +1,19 @@
-//! Cross-namespace orphan cleanup job.
+//! Cross-organization orphan cleanup job.
 //!
 //! When users are deleted from `_system`, membership records
-//! in org namespaces become orphaned. This background job periodically scans
+//! in org organizations become orphaned. This background job periodically scans
 //! for and removes these orphaned records.
 //!
 //! ## Behavior
 //!
 //! - Runs hourly on leader (followers skip)
-//! - Scans all org namespaces for memberships referencing deleted users
+//! - Scans all org organizations for memberships referencing deleted users
 //! - Removes orphaned membership records and their indexes
 //! - Actor recorded as `system:orphan_cleanup` for audit trail
 //!
 //! ## Why Eventual Cleanup?
 //!
-//! Cross-namespace atomic deletes would require distributed transactions.
+//! Cross-organization atomic deletes would require distributed transactions.
 //! Eventual cleanup is simpler, and orphaned memberships are harmless in
 //! the interim (user can't authenticate, so membership grants nothing).
 
@@ -21,7 +21,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{NamespaceId, Operation, Transaction, VaultId};
+use inferadb_ledger_types::{Operation, OrganizationId, Transaction, VaultId};
 use openraft::Raft;
 use snafu::GenerateImplicitData;
 use tokio::time::interval;
@@ -36,16 +36,16 @@ use crate::{
 /// Default interval between cleanup cycles (1 hour).
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// Maximum memberships to process per namespace per cycle.
+/// Maximum memberships to process per organization per cycle.
 const MAX_BATCH_SIZE: usize = 1000;
 
 /// Actor identifier for cleanup operations.
 const CLEANUP_ACTOR: &str = "system:orphan_cleanup";
 
-/// System namespace ID.
-const SYSTEM_NAMESPACE_ID: NamespaceId = NamespaceId::new(0);
+/// System organization ID.
+const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
 
-/// Orphan cleanup job for cross-namespace consistency.
+/// Orphan cleanup job for cross-organization consistency.
 ///
 /// Runs as a background task, periodically scanning for and removing
 /// membership records that reference deleted users.
@@ -58,7 +58,7 @@ pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
     node_id: LedgerNodeId,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
-    /// Accessor for applied state (namespace registry).
+    /// Accessor for applied state (organization registry).
     applied_state: AppliedStateAccessor,
     /// Cleanup interval.
     #[builder(default = CLEANUP_INTERVAL)]
@@ -72,7 +72,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Returns all deleted user IDs from _system namespace.
+    /// Returns all deleted user IDs from _system organization.
     ///
     /// Returns user IDs where either:
     /// - User has deleted_at set
@@ -115,12 +115,12 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             .collect()
     }
 
-    /// Finds orphaned memberships in a namespace.
+    /// Finds orphaned memberships in an organization.
     ///
     /// Returns (key, user_id) pairs for memberships referencing deleted users.
     fn find_orphaned_memberships(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         deleted_users: &HashSet<i64>,
     ) -> Vec<(String, i64)> {
         if deleted_users.is_empty() {
@@ -128,10 +128,10 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         }
 
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
-        // Note: Namespace entities live in vault_id = 0 for the namespace
-        // We need to list entities in the namespace, not vault 0 of _system
-        // Actually, namespace-level entities (members, teams) are stored with the namespace
-        // For this implementation, we assume entities are in vault_id = 0 per namespace
+        // Note: Organization entities live in vault_id = 0 for the organization
+        // We need to list entities in the organization, not vault 0 of _system
+        // Actually, organization-level entities (members, teams) are stored with the organization
+        // For this implementation, we assume entities are in vault_id = 0 per organization
 
         let entities = match self.state.list_entities(
             VaultId::new(0),
@@ -141,7 +141,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         ) {
             Ok(e) => e,
             Err(e) => {
-                warn!(namespace_id = namespace_id.value(), error = %e, "Failed to list memberships");
+                warn!(organization_id = organization_id.value(), error = %e, "Failed to list memberships");
                 return Vec::new();
             },
         };
@@ -160,10 +160,10 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             .collect()
     }
 
-    /// Removes orphaned memberships from a namespace.
+    /// Removes orphaned memberships from an organization.
     async fn remove_orphaned_memberships(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         orphaned: Vec<(String, i64)>,
     ) -> Result<usize, OrphanCleanupError> {
         if orphaned.is_empty() {
@@ -196,8 +196,8 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         };
 
         let request = LedgerRequest::Write {
-            namespace_id,
-            vault_id: VaultId::new(0), // Namespace-level entities
+            organization_id,
+            vault_id: VaultId::new(0), // Organization-level entities
             transactions: vec![transaction],
         };
 
@@ -206,7 +206,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             backtrace: snafu::Backtrace::generate(),
         })?;
 
-        info!(namespace_id = namespace_id.value(), count, "Removed orphaned memberships");
+        info!(organization_id = organization_id.value(), count, "Removed orphaned memberships");
 
         Ok(count)
     }
@@ -230,32 +230,32 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
 
         debug!(count = deleted_users.len(), "Found deleted users");
 
-        // Step 2: For each org namespace, find and remove orphaned memberships
-        let namespaces = self.applied_state.list_namespaces();
+        // Step 2: For each org organization, find and remove orphaned memberships
+        let organizations = self.applied_state.list_organizations();
         let mut total_removed = 0;
 
-        for ns in namespaces {
-            // Skip _system namespace (namespace_id = 0)
-            if ns.namespace_id == SYSTEM_NAMESPACE_ID {
+        for ns in organizations {
+            // Skip _system organization (organization_id = 0)
+            if ns.organization_id == SYSTEM_ORGANIZATION_ID {
                 continue;
             }
 
-            let orphaned = self.find_orphaned_memberships(ns.namespace_id, &deleted_users);
+            let orphaned = self.find_orphaned_memberships(ns.organization_id, &deleted_users);
             if orphaned.is_empty() {
                 continue;
             }
 
             debug!(
-                namespace_id = ns.namespace_id.value(),
+                organization_id = ns.organization_id.value(),
                 count = orphaned.len(),
                 "Found orphaned memberships"
             );
 
-            match self.remove_orphaned_memberships(ns.namespace_id, orphaned).await {
+            match self.remove_orphaned_memberships(ns.organization_id, orphaned).await {
                 Ok(count) => total_removed += count,
                 Err(e) => {
                     warn!(
-                        namespace_id = ns.namespace_id.value(),
+                        organization_id = ns.organization_id.value(),
                         error = %e,
                         "Failed to remove orphaned memberships"
                     );

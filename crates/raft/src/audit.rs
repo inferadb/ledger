@@ -208,7 +208,7 @@ mod tests {
 
     use inferadb_ledger_types::{
         audit::{AuditAction, AuditOutcome, AuditResource},
-        types::{NamespaceId, VaultId},
+        types::{OrganizationId, VaultId},
     };
 
     use super::*;
@@ -219,7 +219,7 @@ mod tests {
             event_id: "test-event-001".to_string(),
             principal: "client:test-app".to_string(),
             action,
-            resource: AuditResource::vault(NamespaceId::new(1), VaultId::new(2)),
+            resource: AuditResource::vault(OrganizationId::new(1), VaultId::new(2)),
             outcome: AuditOutcome::Success,
             node_id: Some(1),
             trace_id: Some("trace-123".to_string()),
@@ -266,7 +266,7 @@ mod tests {
         let logger = FileAuditLogger::new(config.clone()).expect("create logger");
 
         logger.log(&test_event(AuditAction::Write)).expect("first");
-        logger.log(&test_event(AuditAction::CreateNamespace)).expect("second");
+        logger.log(&test_event(AuditAction::CreateOrganization)).expect("second");
         logger.log(&test_event(AuditAction::DeleteVault)).expect("third");
 
         let content = fs::read_to_string(&config.path).unwrap();
@@ -362,7 +362,7 @@ mod tests {
         {
             let logger = FileAuditLogger::new(config.clone()).expect("reopen logger");
             assert!(logger.bytes_written() > 0, "should track existing file size");
-            logger.log(&test_event(AuditAction::CreateNamespace)).expect("second");
+            logger.log(&test_event(AuditAction::CreateOrganization)).expect("second");
         }
 
         let content = fs::read_to_string(&config.path).unwrap();
@@ -380,11 +380,11 @@ mod tests {
             timestamp: "2025-01-15T10:30:00Z".to_string(),
             event_id: "full-event-id".to_string(),
             principal: "admin-user".to_string(),
-            action: AuditAction::DeleteNamespace,
-            resource: AuditResource::namespace(NamespaceId::new(42)).with_detail("prod-ns"),
+            action: AuditAction::DeleteOrganization,
+            resource: AuditResource::organization(OrganizationId::new(42)).with_detail("prod-ns"),
             outcome: AuditOutcome::Failed {
                 code: "NOT_FOUND".to_string(),
-                detail: "namespace does not exist".to_string(),
+                detail: "organization does not exist".to_string(),
             },
             node_id: Some(3),
             trace_id: Some("trace-456".to_string()),
@@ -398,8 +398,8 @@ mod tests {
 
         assert_eq!(parsed["event_id"], "full-event-id");
         assert_eq!(parsed["principal"], "admin-user");
-        assert_eq!(parsed["action"], "delete_namespace");
-        assert_eq!(parsed["resource"]["namespace_id"], 42);
+        assert_eq!(parsed["action"], "delete_organization");
+        assert_eq!(parsed["resource"]["organization_id"], 42);
         assert_eq!(parsed["resource"]["detail"], "prod-ns");
         assert_eq!(parsed["outcome"]["failed"]["code"], "NOT_FOUND");
         assert_eq!(parsed["node_id"], 3);
@@ -435,7 +435,7 @@ mod tests {
             event_id: "denied-event".to_string(),
             principal: "bad-client".to_string(),
             action: AuditAction::Write,
-            resource: AuditResource::vault(NamespaceId::new(1), VaultId::new(1)),
+            resource: AuditResource::vault(OrganizationId::new(1), VaultId::new(1)),
             outcome: AuditOutcome::Denied { reason: "rate_limited".to_string() },
             node_id: None,
             trace_id: None,

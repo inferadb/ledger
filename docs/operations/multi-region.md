@@ -6,12 +6,12 @@ Guidance for deploying Ledger across multiple geographic regions.
 
 ### Option 1: Regional Shards (Recommended)
 
-Each region operates an independent Ledger cluster. Namespaces are assigned to regional shards based on data locality requirements.
+Each region operates an independent Ledger cluster. Organizations are assigned to regional shards based on data locality requirements.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │                          Global Control                             │
-│              (Namespace → Region routing table)                     │
+│              (Organization → Region routing table)                     │
 └───────────────────────────┬────────────────────────────────────────┘
                             │
         ┌───────────────────┼───────────────────┐
@@ -25,7 +25,7 @@ Each region operates an independent Ledger cluster. Namespaces are assigned to r
 │  │ Raft    │  │   │  │ Raft    │  │   │  │ Raft    │  │
 │  └─────────┘  │   │  └─────────┘  │   │  └─────────┘  │
 │               │   │               │   │               │
-│  Namespaces:  │   │  Namespaces:  │   │  Namespaces:  │
+│  Organizations:  │   │  Organizations:  │   │  Organizations:  │
 │  - us_corp_a  │   │  - eu_corp_b  │   │  - ap_corp_c  │
 │  - us_corp_d  │   │  - eu_corp_e  │   │  - ap_corp_f  │
 └───────────────┘   └───────────────┘   └───────────────┘
@@ -40,8 +40,8 @@ Each region operates an independent Ledger cluster. Namespaces are assigned to r
 
 **Cons:**
 
-- No cross-region namespace access
-- Requires namespace-to-region planning
+- No cross-region organization access
+- Requires organization-to-region planning
 
 ### Option 2: Stretched Cluster (Not Recommended)
 
@@ -49,7 +49,7 @@ Single Raft cluster spanning multiple regions.
 
 **Pros:**
 
-- Single namespace accessible from any region
+- Single organization accessible from any region
 
 **Cons:**
 
@@ -71,7 +71,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: ledger
-  namespace: ledger-us-east
+  organization: ledger-us-east
 spec:
   replicas: 3
   template:
@@ -85,13 +85,13 @@ spec:
               value: "ledger-headless.ledger-us-east.svc.cluster.local"
 ```
 
-### 2. Configure Namespace Routing
+### 2. Configure Organization Routing
 
-Control maintains the namespace-to-shard mapping:
+Control maintains the organization-to-shard mapping:
 
 ```sql
 -- Example routing table (managed by Control)
-namespace_id | name      | shard_id | region
+organization_slug | name      | shard_id | region
 -------------+-----------+----------+---------
 1            | acme_us   | 1        | us-east
 2            | acme_eu   | 2        | eu-west
@@ -100,12 +100,12 @@ namespace_id | name      | shard_id | region
 
 ### 3. Engine Routing
 
-Engine routes requests based on namespace:
+Engine routes requests based on organization:
 
 ```rust
 // Pseudo-code for Engine routing
-async fn route_request(&self, namespace_id: NamespaceId) -> LedgerClient {
-    let routing = self.control.get_namespace_routing(namespace_id).await?;
+async fn route_request(&self, organization_slug: OrganizationSlug) -> LedgerClient {
+    let routing = self.control.get_organization_routing(organization_slug).await?;
     self.ledger_clients.get(&routing.region)
 }
 ```
@@ -114,7 +114,7 @@ async fn route_request(&self, namespace_id: NamespaceId) -> LedgerClient {
 
 ### Data Residency
 
-Assign namespaces to regions based on compliance requirements:
+Assign organizations to regions based on compliance requirements:
 
 | Requirement       | Strategy                                    |
 | ----------------- | ------------------------------------------- |
@@ -248,14 +248,14 @@ scrape_configs:
 
 ## Migration Between Regions
 
-Moving a namespace to a different region:
+Moving an organization to a different region:
 
-### 1. Create Namespace in Target Region
+### 1. Create Organization in Target Region
 
 ```bash
 grpcurl -plaintext target-region-ledger:50051 \
   -d '{"name": "migrating_ns"}' \
-  ledger.v1.AdminService/CreateNamespace
+  ledger.v1.AdminService/CreateOrganization
 ```
 
 ### 2. Export Data from Source
@@ -263,8 +263,8 @@ grpcurl -plaintext target-region-ledger:50051 \
 ```bash
 # Export all entities and relationships
 grpcurl -plaintext source-region-ledger:50051 \
-  -d '{"namespace_id": {"id": "OLD_NS"}}' \
-  ledger.v1.ReadService/ExportNamespace > export.json
+  -d '{"organization_slug": {"id": "OLD_NS"}}' \
+  ledger.v1.ReadService/ExportOrganization > export.json
 ```
 
 ### 3. Import to Target
@@ -273,7 +273,7 @@ grpcurl -plaintext source-region-ledger:50051 \
 # Import to new region
 grpcurl -plaintext target-region-ledger:50051 \
   -d @export.json \
-  ledger.v1.WriteService/ImportNamespace
+  ledger.v1.WriteService/ImportOrganization
 ```
 
 ### 4. Update Routing
@@ -285,13 +285,13 @@ Update Control's routing table to point to new region.
 ```bash
 # Verify data integrity
 grpcurl -plaintext target-region-ledger:50051 \
-  -d '{"namespace_id": {"id": "NEW_NS"}}' \
+  -d '{"organization_slug": {"id": "NEW_NS"}}' \
   ledger.v1.AdminService/CheckIntegrity
 
 # Delete from source (after verification period)
 grpcurl -plaintext source-region-ledger:50051 \
-  -d '{"namespace_id": {"id": "OLD_NS"}}' \
-  ledger.v1.AdminService/DeleteNamespace
+  -d '{"organization_slug": {"id": "OLD_NS"}}' \
+  ledger.v1.AdminService/DeleteOrganization
 ```
 
 ## Cost Considerations

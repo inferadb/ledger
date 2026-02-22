@@ -2,7 +2,7 @@
 //!
 //! Page tokens are opaque to clients and include:
 //! - HMAC validation to prevent tampering
-//! - Context validation (namespace_id, vault_id) to prevent cross-context reuse
+//! - Context validation (organization_id, vault_id) to prevent cross-context reuse
 //! - Query hash to detect filter changes mid-pagination
 //! - Height tracking for consistent pagination across pages
 
@@ -29,8 +29,8 @@ const HMAC_LENGTH: usize = 16;
 pub struct PageToken {
     /// Token format version (for future changes).
     pub version: u8,
-    /// Request context: namespace ID.
-    pub namespace_id: i64,
+    /// Request context: organization ID.
+    pub organization_id: i64,
     /// Request context: vault ID.
     pub vault_id: i64,
     /// Resume position: last key returned.
@@ -149,17 +149,17 @@ impl PageTokenCodec {
     /// Validates that a token matches the current request context.
     ///
     /// Returns an error if:
-    /// - namespace_id doesn't match
+    /// - organization_id doesn't match
     /// - vault_id doesn't match
     /// - query_hash doesn't match (filters changed)
     pub fn validate_context(
         &self,
         token: &PageToken,
-        namespace_id: i64,
+        organization_id: i64,
         vault_id: i64,
         query_hash: [u8; 8],
     ) -> Result<(), PageTokenError> {
-        if token.namespace_id != namespace_id || token.vault_id != vault_id {
+        if token.organization_id != organization_id || token.vault_id != vault_id {
             return Err(PageTokenError::ContextMismatch);
         }
 
@@ -188,7 +188,7 @@ pub enum PageTokenError {
     InvalidHmac,
     /// Token version is not supported.
     UnsupportedVersion(u8),
-    /// Token namespace/vault doesn't match request.
+    /// Token organization/vault doesn't match request.
     ContextMismatch,
     /// Query parameters changed since pagination started.
     QueryChanged,
@@ -223,7 +223,7 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            namespace_id: 42,
+            organization_id: 42,
             vault_id: 100,
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
@@ -234,7 +234,7 @@ mod tests {
         let decoded = codec.decode(&encoded).expect("decode should succeed");
 
         assert_eq!(decoded.version, token.version);
-        assert_eq!(decoded.namespace_id, token.namespace_id);
+        assert_eq!(decoded.organization_id, token.organization_id);
         assert_eq!(decoded.vault_id, token.vault_id);
         assert_eq!(decoded.last_key, token.last_key);
         assert_eq!(decoded.at_height, token.at_height);
@@ -247,7 +247,7 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            namespace_id: 42,
+            organization_id: 42,
             vault_id: 100,
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
@@ -283,7 +283,7 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            namespace_id: 42,
+            organization_id: 42,
             vault_id: 100,
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
@@ -304,7 +304,7 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            namespace_id: 42,
+            organization_id: 42,
             vault_id: 100,
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
@@ -314,7 +314,7 @@ mod tests {
         // Matching context should succeed
         assert!(codec.validate_context(&token, 42, 100, query_hash).is_ok());
 
-        // Wrong namespace should fail
+        // Wrong organization should fail
         assert_eq!(
             codec.validate_context(&token, 999, 100, query_hash),
             Err(PageTokenError::ContextMismatch)

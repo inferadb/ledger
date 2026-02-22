@@ -113,10 +113,10 @@ pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
     histogram!(BATCH_SIZE).record(batch_size as f64);
 }
 
-/// Records a rate limit exceeded event for a single namespace.
+/// Records a rate limit exceeded event for a single organization.
 #[inline]
-pub fn record_rate_limit_exceeded(namespace_id: i64) {
-    counter!(RATE_LIMIT_EXCEEDED, "namespace_id" => namespace_id.to_string()).increment(1);
+pub fn record_rate_limit_exceeded(organization_id: i64) {
+    counter!(RATE_LIMIT_EXCEEDED, "organization_id" => organization_id.to_string()).increment(1);
 }
 
 /// Records a rate limit rejection with level and reason labels.
@@ -384,10 +384,10 @@ pub fn record_timeout_commit() {
 
 /// Records a successful vault recovery.
 #[inline]
-pub fn record_recovery_success(namespace_id: i64, vault_id: i64) {
+pub fn record_recovery_success(organization_id: i64, vault_id: i64) {
     counter!(
         RECOVERY_SUCCESS_TOTAL,
-        "namespace_id" => namespace_id.to_string(),
+        "organization_id" => organization_id.to_string(),
         "vault_id" => vault_id.to_string()
     )
     .increment(1);
@@ -395,10 +395,10 @@ pub fn record_recovery_success(namespace_id: i64, vault_id: i64) {
 
 /// Records a failed vault recovery attempt.
 #[inline]
-pub fn record_recovery_failure(namespace_id: i64, vault_id: i64, reason: &str) {
+pub fn record_recovery_failure(organization_id: i64, vault_id: i64, reason: &str) {
     counter!(
         RECOVERY_FAILURE_TOTAL,
-        "namespace_id" => namespace_id.to_string(),
+        "organization_id" => organization_id.to_string(),
         "vault_id" => vault_id.to_string(),
         "reason" => reason.to_string()
     )
@@ -407,10 +407,10 @@ pub fn record_recovery_failure(namespace_id: i64, vault_id: i64, reason: &str) {
 
 /// Records a determinism bug detection (critical alert).
 #[inline]
-pub fn record_determinism_bug(namespace_id: i64, vault_id: i64) {
+pub fn record_determinism_bug(organization_id: i64, vault_id: i64) {
     counter!(
         DETERMINISM_BUG_TOTAL,
-        "namespace_id" => namespace_id.to_string(),
+        "organization_id" => organization_id.to_string(),
         "vault_id" => vault_id.to_string()
     )
     .increment(1);
@@ -418,10 +418,10 @@ pub fn record_determinism_bug(namespace_id: i64, vault_id: i64) {
 
 /// Records a divergence recovery attempt with outcome.
 #[inline]
-pub fn record_recovery_attempt(namespace_id: i64, vault_id: i64, attempt: u8, outcome: &str) {
+pub fn record_recovery_attempt(organization_id: i64, vault_id: i64, attempt: u8, outcome: &str) {
     counter!(
         RECOVERY_ATTEMPTS_TOTAL,
-        "namespace_id" => namespace_id.to_string(),
+        "organization_id" => organization_id.to_string(),
         "vault_id" => vault_id.to_string(),
         "attempt" => attempt.to_string(),
         "outcome" => outcome.to_string()
@@ -433,7 +433,7 @@ pub fn record_recovery_attempt(namespace_id: i64, vault_id: i64, attempt: u8, ou
 ///
 /// State values: 0 = healthy, 1 = diverged, 2 = recovering.
 #[inline]
-pub fn set_vault_health(namespace_id: i64, vault_id: i64, state: &str) {
+pub fn set_vault_health(organization_id: i64, vault_id: i64, state: &str) {
     let value = match state {
         "healthy" => 0.0,
         "diverged" => 1.0,
@@ -442,7 +442,7 @@ pub fn set_vault_health(namespace_id: i64, vault_id: i64, state: &str) {
     };
     gauge!(
         VAULT_HEALTH,
-        "namespace_id" => namespace_id.to_string(),
+        "organization_id" => organization_id.to_string(),
         "vault_id" => vault_id.to_string(),
         "state" => state.to_string()
     )
@@ -796,47 +796,48 @@ pub fn record_integrity_scan_duration(duration_secs: f64) {
     histogram!(INTEGRITY_SCAN_DURATION).record(duration_secs);
 }
 
-// ─── Namespace Resource Accounting Metrics ───────────────────
+// ─── Organization Resource Accounting Metrics ────────────────
 
-/// Per-namespace cumulative storage bytes (gauge).
-const NAMESPACE_STORAGE_BYTES: &str = "ledger_namespace_storage_bytes";
+/// Per-organization cumulative storage bytes (gauge).
+const ORGANIZATION_STORAGE_BYTES: &str = "ledger_organization_storage_bytes";
 
-/// Per-namespace operation counter.
-const NAMESPACE_OPERATIONS_TOTAL: &str = "ledger_namespace_operations_total";
+/// Per-organization operation counter.
+const ORGANIZATION_OPERATIONS_TOTAL: &str = "ledger_organization_operations_total";
 
-/// Per-namespace operation latency histogram.
-const NAMESPACE_LATENCY_SECONDS: &str = "ledger_namespace_latency_seconds";
+/// Per-organization operation latency histogram.
+const ORGANIZATION_LATENCY_SECONDS: &str = "ledger_organization_latency_seconds";
 
-/// Sets the current cumulative storage bytes for a namespace.
+/// Sets the current cumulative storage bytes for an organization.
 ///
-/// Cardinality is bounded by the number of namespaces, which is
+/// Cardinality is bounded by the number of organizations, which is
 /// operator-controlled (typically < 100 in production).
 #[inline]
-pub fn set_namespace_storage_bytes(namespace_id: i64, bytes: u64) {
-    gauge!(NAMESPACE_STORAGE_BYTES, "namespace_id" => namespace_id.to_string()).set(bytes as f64);
+pub fn set_organization_storage_bytes(organization_id: i64, bytes: u64) {
+    gauge!(ORGANIZATION_STORAGE_BYTES, "organization_id" => organization_id.to_string())
+        .set(bytes as f64);
 }
 
-/// Records a namespace-level operation (read, write, or admin).
+/// Records an organization-level operation (read, write, or admin).
 ///
-/// Increments `ledger_namespace_operations_total{namespace_id, operation}`.
+/// Increments `ledger_organization_operations_total{organization_id, operation}`.
 #[inline]
-pub fn record_namespace_operation(namespace_id: i64, operation: &str) {
+pub fn record_organization_operation(organization_id: i64, operation: &str) {
     counter!(
-        NAMESPACE_OPERATIONS_TOTAL,
-        "namespace_id" => namespace_id.to_string(),
+        ORGANIZATION_OPERATIONS_TOTAL,
+        "organization_id" => organization_id.to_string(),
         "operation" => operation.to_string()
     )
     .increment(1);
 }
 
-/// Records per-namespace operation latency.
+/// Records per-organization operation latency.
 ///
-/// Records into `ledger_namespace_latency_seconds{namespace_id, operation}`.
+/// Records into `ledger_organization_latency_seconds{organization_id, operation}`.
 #[inline]
-pub fn record_namespace_latency(namespace_id: i64, operation: &str, latency_secs: f64) {
+pub fn record_organization_latency(organization_id: i64, operation: &str, latency_secs: f64) {
     histogram!(
-        NAMESPACE_LATENCY_SECONDS,
-        "namespace_id" => namespace_id.to_string(),
+        ORGANIZATION_LATENCY_SECONDS,
+        "organization_id" => organization_id.to_string(),
         "operation" => operation.to_string()
     )
     .record(latency_secs);

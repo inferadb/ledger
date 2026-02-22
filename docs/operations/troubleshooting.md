@@ -32,7 +32,7 @@ Look for:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
@@ -69,7 +69,7 @@ curl -s localhost:9090/metrics | grep inferadb_ledger_raft_proposals_pending
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "client_id": {"id": "my-client"}}' \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "my-client"}}' \
   localhost:50051 ledger.v1.ReadService/GetClientState
 ```
 
@@ -99,19 +99,19 @@ curl -s localhost:9090/metrics | grep ledger_batch_flush_latency_seconds
 
 ### Read Operations Failing
 
-#### Symptom: `NOT_FOUND` for namespace or vault
+#### Symptom: `NOT_FOUND` for organization or vault
 
 **Cause**: Resource doesn't exist or wrong ID
 
 **Solution**:
 
 ```bash
-# List all namespaces
-grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListNamespaces
+# List all organizations
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations
 
-# List vaults in namespace
+# List vaults in organization
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/ListVaults
 ```
 
@@ -124,7 +124,7 @@ grpcurl -plaintext \
 ```bash
 # Get current tip
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
@@ -173,7 +173,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetNodeInfo
 ```bash
 # Check vault health
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 
 # Check metrics

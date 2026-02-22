@@ -180,7 +180,7 @@
     {
       "id": 6,
       "definition": {
-        "title": "Top 10 Namespaces by Error Count",
+        "title": "Top 10 Organizations by Error Count",
         "title_size": "16",
         "title_align": "left",
         "type": "toplist",
@@ -193,7 +193,7 @@
                 "data_source": "logs",
                 "search": { "query": "service:inferadb-ledger @outcome:error" },
                 "indexes": ["*"],
-                "group_by": [{ "facet": "@namespace_id", "limit": 10, "sort": { "aggregation": "count", "order": "desc" } }],
+                "group_by": [{ "facet": "@organization_slug", "limit": 10, "sort": { "aggregation": "count", "order": "desc" } }],
                 "compute": { "aggregation": "count" }
               }
             ],
@@ -349,7 +349,7 @@
     {
       "id": 11,
       "definition": {
-        "title": "VIP Namespace Traffic",
+        "title": "VIP Organization Traffic",
         "title_size": "16",
         "title_align": "left",
         "show_legend": true,
@@ -436,8 +436,8 @@
       "default": "*"
     },
     {
-      "name": "namespace",
-      "prefix": "@namespace_id",
+      "name": "organization",
+      "prefix": "@organization_slug",
       "available_values": [],
       "default": "*"
     },

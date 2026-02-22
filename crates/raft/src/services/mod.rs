@@ -11,7 +11,7 @@
 //!
 //! ## Request Forwarding
 //!
-//! When a namespace is on a remote shard, the `ForwardClient` can be used to
+//! When a organization is on a remote shard, the `ForwardClient` can be used to
 //! proxy requests to the correct node via gRPC.
 
 mod admin;
@@ -26,6 +26,7 @@ mod multi_shard_write;
 mod raft;
 mod read;
 pub mod shard_resolver;
+pub mod slug_resolver;
 mod write;
 
 pub use admin::AdminServiceImpl;
@@ -37,4 +38,5 @@ pub use multi_shard_write::MultiShardWriteService;
 pub use raft::{MultiShardRaftService, RaftServiceImpl};
 pub use read::ReadServiceImpl;
 pub use shard_resolver::{MultiShardResolver, ShardResolver};
+pub use slug_resolver::SlugResolver;
 pub use write::WriteServiceImpl;

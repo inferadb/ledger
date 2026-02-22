@@ -59,7 +59,7 @@ pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
 ///
 /// Encoding layout:
 /// - height: 8 bytes (u64 BE)
-/// - namespace_id: 8 bytes (i64 BE)
+/// - organization_id: 8 bytes (i64 BE)
 /// - vault_id: 8 bytes (i64 BE)
 /// - previous_hash: 32 bytes
 /// - tx_merkle_root: 32 bytes
@@ -80,8 +80,8 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
     buf[offset..offset + 8].copy_from_slice(&header.height.to_be_bytes());
     offset += 8;
 
-    // namespace_id: i64 BE
-    buf[offset..offset + 8].copy_from_slice(&header.namespace_id.value().to_be_bytes());
+    // organization_id: i64 BE
+    buf[offset..offset + 8].copy_from_slice(&header.organization_id.value().to_be_bytes());
     offset += 8;
 
     // vault_id: i64 BE
@@ -310,7 +310,7 @@ pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
 ///
 /// This hash is used to identify a vault entry across all Raft nodes.
 /// It uses only deterministic fields that are identical on all nodes:
-/// - namespace_id
+/// - organization_id
 /// - vault_id
 /// - vault_height
 /// - previous_vault_hash
@@ -321,8 +321,8 @@ pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
 pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
     let mut hasher = Sha256::new();
 
-    // namespace_id: i64 as LE
-    hasher.update(entry.namespace_id.value().to_le_bytes());
+    // organization_id: i64 as LE
+    hasher.update(entry.organization_id.value().to_le_bytes());
 
     // vault_id: i64 as LE
     hasher.update(entry.vault_id.value().to_le_bytes());
@@ -397,7 +397,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::types::{NamespaceId, VaultId};
+    use crate::types::{OrganizationId, VaultId};
 
     #[test]
     fn test_empty_hash_is_sha256_of_empty() {
@@ -489,7 +489,7 @@ mod tests {
     fn test_block_hash_deterministic() {
         let header = BlockHeader {
             height: 100,
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(2),
             previous_hash: ZERO_HASH,
             tx_merkle_root: sha256(b"tx_root"),
@@ -619,7 +619,7 @@ mod tests {
     fn test_chain_commitment_single_block() {
         let header = BlockHeader {
             height: 1,
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             previous_hash: ZERO_HASH,
             tx_merkle_root: [1u8; 32],
@@ -648,7 +648,7 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=3)
             .map(|i| BlockHeader {
                 height: i,
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],
@@ -682,7 +682,7 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=5)
             .map(|i| BlockHeader {
                 height: i,
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],

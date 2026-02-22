@@ -15,7 +15,7 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
-    NamespaceId, SetCondition, VaultId,
+    OrganizationId, SetCondition, VaultId,
     audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
     config::ValidationConfig,
 };
@@ -34,6 +34,7 @@ use crate::{
     metrics,
     proof::{self, ProofError},
     rate_limit::RateLimiter,
+    services::slug_resolver::SlugResolver,
     trace_context,
     types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
@@ -63,7 +64,7 @@ pub struct WriteServiceImpl {
     /// Block archive for proof generation (optional).
     #[builder(default)]
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
-    /// Per-namespace rate limiter.
+    /// Per-organization rate limiter.
     #[builder(default)]
     rate_limiter: Option<Arc<RateLimiter>>,
     /// Accessor for applied state (client sequences for gap detection).
@@ -101,7 +102,7 @@ pub struct WriteServiceImpl {
     /// If a gRPC deadline is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
     proposal_timeout: Duration,
-    /// Per-namespace resource quota checker.
+    /// Per-organization resource quota checker.
     #[builder(default)]
     quota_checker: Option<crate::quota::QuotaChecker>,
 }
@@ -191,7 +192,7 @@ impl WriteServiceImpl {
         (service, run_future)
     }
 
-    /// Adds per-namespace rate limiting to an existing service.
+    /// Adds per-organization rate limiting to an existing service.
     #[must_use]
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
@@ -236,7 +237,7 @@ impl WriteServiceImpl {
         self
     }
 
-    /// Sets the per-namespace resource quota checker.
+    /// Sets the per-organization resource quota checker.
     #[must_use]
     pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
         self.quota_checker = Some(checker);
@@ -277,9 +278,13 @@ impl WriteServiceImpl {
         )
     }
 
-    /// Checks all rate limit tiers (backpressure, namespace, client).
-    fn check_rate_limit(&self, client_id: &str, namespace_id: NamespaceId) -> Result<(), Status> {
-        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, namespace_id)
+    /// Checks all rate limit tiers (backpressure, organization, client).
+    fn check_rate_limit(
+        &self,
+        client_id: &str,
+        organization_id: OrganizationId,
+    ) -> Result<(), Status> {
+        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization_id)
     }
 
     /// Records key accesses from operations for hot key detection.
@@ -396,7 +401,7 @@ impl WriteServiceImpl {
     /// Errors are logged with context for debugging.
     fn generate_write_proof(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         vault_height: u64,
     ) -> (
@@ -408,8 +413,12 @@ impl WriteServiceImpl {
             return (None, None);
         };
 
+        // Resolve internal ID to slug for response construction
+        let slug = self.applied_state.as_ref().and_then(|s| s.resolve_id_to_slug(organization_id));
+
         // Use the proof module's SNAFU-based implementation
-        match proof::generate_write_proof(archive, namespace_id, vault_id, vault_height, 0) {
+        match proof::generate_write_proof(archive, organization_id, slug, vault_id, vault_height, 0)
+        {
             Ok(write_proof) => (Some(write_proof.block_header), Some(write_proof.tx_proof)),
             Err(e) => {
                 // Log with appropriate severity based on error type
@@ -433,7 +442,7 @@ impl WriteServiceImpl {
     /// the actual sequence will be assigned by the Raft state machine at apply time.
     fn operations_to_request(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: Option<VaultId>,
         operations: &[inferadb_ledger_proto::proto::Operation],
         client_id: &str,
@@ -465,7 +474,7 @@ impl WriteServiceImpl {
         };
 
         Ok(LedgerRequest::Write {
-            namespace_id,
+            organization_id,
             vault_id: vault_id.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
         })
@@ -508,13 +517,17 @@ impl WriteService for WriteServiceImpl {
         // Extract client ID and idempotency key
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
 
-        // Extract namespace and vault IDs (needed for idempotency key)
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        // Extract organization and vault IDs (needed for idempotency key)
+        let organization_id = if let Some(ref state) = self.applied_state {
+            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization_slug)?
+        } else {
+            OrganizationId::new(
+                req.organization_slug
+                    .as_ref()
+                    .map(|n| n.slug as i64)
+                    .ok_or_else(|| Status::invalid_argument("Missing organization_slug"))?,
+            )
+        };
 
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
@@ -532,7 +545,8 @@ impl WriteService for WriteServiceImpl {
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        ctx.set_target(org_slug, vault_id.value());
 
         // Populate write operation fields
         let operation_types = Self::extract_operation_types(&req.operations);
@@ -542,7 +556,7 @@ impl WriteService for WriteServiceImpl {
         // Check idempotency cache for duplicate
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id.value(),
+            organization_id.value(),
             vault_id.value(),
             &client_id,
             idempotency_key,
@@ -601,13 +615,13 @@ impl WriteService for WriteServiceImpl {
             },
         }
 
-        // Check rate limits (backpressure, namespace, client)
-        if let Err(status) = self.check_rate_limit(&client_id, namespace_id) {
+        // Check rate limits (backpressure, organization, client)
+        if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
             self.emit_audit_event(&self.build_audit_event(
                 AuditAction::Write,
                 &client_id,
-                AuditResource::vault(namespace_id, vault_id),
+                AuditResource::vault(organization_id, vault_id),
                 AuditOutcome::Denied { reason: "rate_limited".to_string() },
                 Some(&trace_ctx.trace_id),
                 Some(req.operations.len()),
@@ -619,7 +633,7 @@ impl WriteService for WriteServiceImpl {
         let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
         super::helpers::check_storage_quota(
             self.quota_checker.as_ref(),
-            namespace_id,
+            organization_id,
             estimated_bytes,
         )
         .map_err(|status| {
@@ -632,8 +646,12 @@ impl WriteService for WriteServiceImpl {
         // Server-assigned sequences: no gap check needed
 
         // Convert to internal request
-        let ledger_request =
-            self.operations_to_request(namespace_id, Some(vault_id), &req.operations, &client_id)?;
+        let ledger_request = self.operations_to_request(
+            organization_id,
+            Some(vault_id),
+            &req.operations,
+            &client_id,
+        )?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -726,7 +744,7 @@ impl WriteService for WriteServiceImpl {
             LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proof {
-                    self.generate_write_proof(namespace_id, vault_id, block_height)
+                    self.generate_write_proof(organization_id, vault_id, block_height)
                 } else {
                     (None, None)
                 };
@@ -741,7 +759,7 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency.insert(
-                    namespace_id.value(),
+                    organization_id.value(),
                     vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
@@ -762,12 +780,12 @@ impl WriteService for WriteServiceImpl {
 
                 let elapsed = ctx.elapsed_secs();
                 metrics::record_write(true, elapsed);
-                metrics::record_namespace_latency(namespace_id.value(), "write", elapsed);
+                metrics::record_organization_latency(organization_id.value(), "write", elapsed);
 
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::Write,
                     &client_id,
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Success,
                     Some(&trace_ctx.trace_id),
                     Some(req.operations.len()),
@@ -790,7 +808,7 @@ impl WriteService for WriteServiceImpl {
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::Write,
                     &client_id,
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Failed {
                         code: "Unspecified".to_string(),
                         detail: message.clone(),
@@ -837,7 +855,7 @@ impl WriteService for WriteServiceImpl {
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::Write,
                     &client_id,
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Failed {
                         code: "PreconditionFailed".to_string(),
                         detail: format!("key: {key}"),
@@ -911,13 +929,17 @@ impl WriteService for WriteServiceImpl {
         // Extract client ID and idempotency key
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
 
-        // Extract namespace and vault IDs (needed for idempotency key)
-        let namespace_id = NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        // Extract organization and vault IDs (needed for idempotency key)
+        let organization_id = if let Some(ref state) = self.applied_state {
+            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization_slug)?
+        } else {
+            OrganizationId::new(
+                req.organization_slug
+                    .as_ref()
+                    .map(|n| n.slug as i64)
+                    .ok_or_else(|| Status::invalid_argument("Missing organization_slug"))?,
+            )
+        };
 
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
@@ -929,7 +951,8 @@ impl WriteService for WriteServiceImpl {
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        ctx.set_target(org_slug, vault_id.value());
 
         // Flatten all operations from all groups
         let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
@@ -952,7 +975,7 @@ impl WriteService for WriteServiceImpl {
         // Check idempotency cache for duplicate
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id.value(),
+            organization_id.value(),
             vault_id.value(),
             &client_id,
             idempotency_key,
@@ -1015,13 +1038,13 @@ impl WriteService for WriteServiceImpl {
             },
         }
 
-        // Check rate limits (backpressure, namespace, client)
-        if let Err(status) = self.check_rate_limit(&client_id, namespace_id) {
+        // Check rate limits (backpressure, organization, client)
+        if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
             self.emit_audit_event(&self.build_audit_event(
                 AuditAction::BatchWrite,
                 &client_id,
-                AuditResource::vault(namespace_id, vault_id),
+                AuditResource::vault(organization_id, vault_id),
                 AuditOutcome::Denied { reason: "rate_limited".to_string() },
                 Some(&trace_ctx.trace_id),
                 Some(batch_size),
@@ -1033,7 +1056,7 @@ impl WriteService for WriteServiceImpl {
         let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
         super::helpers::check_storage_quota(
             self.quota_checker.as_ref(),
-            namespace_id,
+            organization_id,
             estimated_bytes,
         )
         .map_err(|status| {
@@ -1046,8 +1069,12 @@ impl WriteService for WriteServiceImpl {
         // Server-assigned sequences: no gap check needed
 
         // Convert to internal request
-        let ledger_request =
-            self.operations_to_request(namespace_id, Some(vault_id), &all_operations, &client_id)?;
+        let ledger_request = self.operations_to_request(
+            organization_id,
+            Some(vault_id),
+            &all_operations,
+            &client_id,
+        )?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -1096,7 +1123,7 @@ impl WriteService for WriteServiceImpl {
             LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
                 // Generate proof and block header if requested
                 let (block_header, tx_proof) = if req.include_tx_proofs {
-                    self.generate_write_proof(namespace_id, vault_id, block_height)
+                    self.generate_write_proof(organization_id, vault_id, block_height)
                 } else {
                     (None, None)
                 };
@@ -1111,7 +1138,7 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency.insert(
-                    namespace_id.value(),
+                    organization_id.value(),
                     vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
@@ -1132,12 +1159,12 @@ impl WriteService for WriteServiceImpl {
 
                 let elapsed = ctx.elapsed_secs();
                 metrics::record_batch_write(true, batch_size, elapsed);
-                metrics::record_namespace_latency(namespace_id.value(), "write", elapsed);
+                metrics::record_organization_latency(organization_id.value(), "write", elapsed);
 
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::BatchWrite,
                     &client_id,
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Success,
                     Some(&trace_ctx.trace_id),
                     Some(batch_size),
@@ -1168,7 +1195,7 @@ impl WriteService for WriteServiceImpl {
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::BatchWrite,
                     &client_id,
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Failed {
                         code: "Unspecified".to_string(),
                         detail: message.clone(),
@@ -1217,7 +1244,7 @@ impl WriteService for WriteServiceImpl {
                 self.emit_audit_event(&self.build_audit_event(
                     AuditAction::BatchWrite,
                     &client_id,
-                    AuditResource::vault(namespace_id, vault_id),
+                    AuditResource::vault(organization_id, vault_id),
                     AuditOutcome::Failed {
                         code: "PreconditionFailed".to_string(),
                         detail: format!("key: {key}"),

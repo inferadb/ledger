@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn test_rate_limited_display() {
         let err = SdkError::RateLimited {
-            message: "namespace quota".to_owned(),
+            message: "organization quota".to_owned(),
             retry_after: std::time::Duration::from_millis(2500),
             request_id: None,
             trace_id: None,
@@ -1086,7 +1086,7 @@ mod tests {
     #[test]
     fn test_decode_error_details_with_retry_and_context() {
         let mut context = std::collections::HashMap::new();
-        context.insert("namespace_id".to_owned(), "42".to_owned());
+        context.insert("organization_id".to_owned(), "42".to_owned());
         context.insert("level".to_owned(), "backpressure".to_owned());
 
         let mut status = status_with_error_details(
@@ -1108,7 +1108,7 @@ mod tests {
         assert_eq!(details.error_code, "3204");
         assert!(details.is_retryable);
         assert_eq!(details.retry_after_ms, Some(500));
-        assert_eq!(details.context.get("namespace_id").unwrap(), "42");
+        assert_eq!(details.context.get("organization_id").unwrap(), "42");
         assert_eq!(details.context.get("level").unwrap(), "backpressure");
         assert_eq!(details.suggested_action.as_deref(), Some("Reduce request rate"));
     }

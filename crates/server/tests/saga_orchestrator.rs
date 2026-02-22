@@ -1,7 +1,7 @@
 //! Integration tests for the saga orchestrator.
 //!
 //! Tests that:
-//! - CreateOrg saga completes successfully creating user, namespace, and membership
+//! - CreateOrg saga completes successfully creating user, organization, and membership
 //! - DeleteUser saga completes successfully removing user and memberships
 //! - Saga orchestrator only runs on leader
 //! - Failed sagas are retried with backoff
@@ -14,42 +14,47 @@ mod common;
 use std::time::Duration;
 
 use common::{TestCluster, create_admin_client, create_read_client, create_write_client};
-use inferadb_ledger_types::{NamespaceId, UserId};
+use inferadb_ledger_types::{OrganizationId, UserId};
 use serial_test::serial;
 
 // ============================================================================
 // Test Helpers
 // ============================================================================
 
-/// Creates a namespace and return its ID.
-async fn create_namespace(
+/// Creates a organization and return its ID.
+async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
+        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             shard_id: None,
             quota: None,
         })
         .await?;
 
-    let namespace_id =
-        response.into_inner().namespace_id.map(|n| n.id).ok_or("No namespace_id in response")?;
+    let organization_id = response
+        .into_inner()
+        .organization_slug
+        .map(|n| n.slug as i64)
+        .ok_or("No organization_id in response")?;
 
-    Ok(namespace_id)
+    Ok(organization_id)
 }
 
-/// Creates a vault in a namespace and return its ID.
+/// Creates a vault in a organization and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization_id as u64,
+            }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -61,7 +66,7 @@ async fn create_vault(
     Ok(vault_id)
 }
 
-/// Writes an entity to _system namespace.
+/// Writes an entity to _system organization.
 async fn write_system_entity(
     addr: std::net::SocketAddr,
     key: &str,
@@ -71,7 +76,7 @@ async fn write_system_entity(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 0 }), // _system
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 0 }), /* _system */
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 0 }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -99,17 +104,19 @@ async fn write_system_entity(
     }
 }
 
-/// Reads an entity from a namespace.
+/// Reads an entity from a organization.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
@@ -164,7 +171,7 @@ async fn test_saga_orchestrator_leader_only() {
 
 /// Tests that a CreateOrg saga stored in _system will be picked up and executed.
 ///
-/// This tests the full saga lifecycle: pending -> user_created -> namespace_created -> completed
+/// This tests the full saga lifecycle: pending -> user_created -> organization_created -> completed
 #[serial]
 #[tokio::test]
 async fn test_create_org_saga_execution() {
@@ -185,7 +192,7 @@ async fn test_create_org_saga_execution() {
     let saga = CreateOrgSaga::new(saga_id.clone(), input);
     let wrapped = Saga::CreateOrg(saga);
 
-    // Write saga to _system namespace
+    // Write saga to _system organization
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
@@ -240,16 +247,16 @@ async fn test_delete_user_saga_state_transitions() {
         .await
         .expect("create user");
 
-    // Create namespace for the user's membership
+    // Create organization for the user's membership
     let ns_id =
-        create_namespace(leader.addr, "delete-user-test-ns").await.expect("create namespace");
+        create_organization(leader.addr, "delete-user-test-ns").await.expect("create organization");
     let _vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Create a DeleteUser saga
     let saga_id = "test-delete-user-1".to_string();
     let input = DeleteUserInput {
         user_id: UserId::new(user_id),
-        namespace_ids: vec![NamespaceId::new(ns_id)],
+        organization_ids: vec![OrganizationId::new(ns_id)],
     };
     let saga = DeleteUserSaga::new(saga_id.clone(), input);
     let wrapped = Saga::DeleteUser(saga);
@@ -303,7 +310,7 @@ async fn test_completed_saga_not_reexecuted() {
     let mut saga = CreateOrgSaga::new(saga_id.clone(), input);
     saga.state = CreateOrgSagaState::Completed {
         user_id: UserId::new(999),
-        namespace_id: NamespaceId::new(888),
+        organization_id: OrganizationId::new(888),
     };
 
     let wrapped = Saga::CreateOrg(saga);
@@ -327,9 +334,9 @@ async fn test_completed_saga_not_reexecuted() {
 
     match result {
         Saga::CreateOrg(s) => match s.state {
-            CreateOrgSagaState::Completed { user_id, namespace_id } => {
+            CreateOrgSagaState::Completed { user_id, organization_id } => {
                 assert_eq!(user_id, UserId::new(999));
-                assert_eq!(namespace_id, NamespaceId::new(888));
+                assert_eq!(organization_id, OrganizationId::new(888));
             },
             other => panic!("Completed saga should not be re-executed, got: {:?}", other),
         },

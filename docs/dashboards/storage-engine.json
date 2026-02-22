@@ -32,10 +32,10 @@
         "sort": 1
       },
       {
-        "name": "namespace_id",
+        "name": "organization_slug",
         "type": "query",
         "datasource": { "uid": "${datasource}" },
-        "query": "label_values(ledger_namespace_storage_bytes, namespace_id)",
+        "query": "label_values(ledger_organization_storage_bytes, organization_slug)",
         "includeAll": true,
         "multi": true,
         "current": { "text": "All", "value": "$__all" },
@@ -297,7 +297,7 @@
       ]
     },
     {
-      "title": "Namespace Storage Usage",
+      "title": "Organization Storage Usage",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
       "datasource": { "uid": "${datasource}" },
@@ -309,8 +309,8 @@
       },
       "targets": [
         {
-          "expr": "ledger_namespace_storage_bytes{namespace_id=~\"$namespace_id\"}",
-          "legendFormat": "ns:{{namespace_id}}"
+          "expr": "ledger_organization_storage_bytes{organization_slug=~\"$organization_slug\"}",
+          "legendFormat": "ns:{{organization_slug}}"
         }
       ]
     },

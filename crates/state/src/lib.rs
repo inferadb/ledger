@@ -7,7 +7,7 @@
 //! - Entity and relationship CRUD with conditional writes
 //! - Snapshot creation and restoration
 //! - Dual indexes for relationship queries (object-centric and subject-centric)
-//! - System namespace types and cluster membership
+//! - System organization types for organization routing and cluster membership
 //! - Time-travel index for historical queries
 //! - Block archive for committed block storage
 
@@ -24,10 +24,10 @@ mod relationship;
 mod shard;
 mod snapshot;
 mod state;
-/// System namespace (`_system`) for global cluster data.
+/// System organization (`_system`) for global cluster data.
 ///
-/// Contains types for user accounts, namespace routing, cluster membership,
-/// and cross-namespace sagas. See [`system::SystemNamespaceService`] for the
+/// Contains types for user accounts, organization routing, cluster membership,
+/// and cross-organization sagas. See [`system::SystemOrganizationService`] for the
 /// primary service interface.
 pub mod system;
 mod tiered_storage;

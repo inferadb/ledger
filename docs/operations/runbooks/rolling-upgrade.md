@@ -211,12 +211,12 @@ Membership should be identical.
 ```bash
 # Write test
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "client_id": {"id": "upgrade-test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:upgrade", "value": "dGVzdA=="}}]}' \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "upgrade-test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:upgrade", "value": "dGVzdA=="}}]}' \
   localhost:50051 ledger.v1.WriteService/Write
 
 # Read test
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "key": "test:upgrade"}' \
+  -d '{"organization_slug": {"id": "1"}, "key": "test:upgrade"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 

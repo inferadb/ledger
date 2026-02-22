@@ -58,7 +58,7 @@ pub struct HasOps(());
 /// This prevents submitting empty writes at compile time.
 pub struct WriteBuilder<'a, S = NoOps> {
     client: &'a LedgerClient,
-    namespace_id: i64,
+    organization_slug: u64,
     vault_id: Option<i64>,
     operations: Vec<Operation>,
     /// Condition to apply to the *next* `.set()` call.
@@ -68,11 +68,15 @@ pub struct WriteBuilder<'a, S = NoOps> {
 }
 
 impl<'a> WriteBuilder<'a, NoOps> {
-    /// Creates a new write builder targeting a namespace and optional vault.
-    pub(crate) fn new(client: &'a LedgerClient, namespace_id: i64, vault_id: Option<i64>) -> Self {
+    /// Creates a new write builder targeting a organization and optional vault.
+    pub(crate) fn new(
+        client: &'a LedgerClient,
+        organization_slug: u64,
+        vault_id: Option<i64>,
+    ) -> Self {
         Self {
             client,
-            namespace_id,
+            organization_slug,
             vault_id,
             operations: Vec::new(),
             pending_condition: None,
@@ -87,7 +91,7 @@ impl<'a, S> WriteBuilder<'a, S> {
     fn into_has_ops(self) -> WriteBuilder<'a, HasOps> {
         WriteBuilder {
             client: self.client,
-            namespace_id: self.namespace_id,
+            organization_slug: self.organization_slug,
             vault_id: self.vault_id,
             operations: self.operations,
             pending_condition: self.pending_condition,
@@ -218,10 +222,10 @@ impl<'a> WriteBuilder<'a, HasOps> {
         match self.cancellation {
             Some(token) => {
                 self.client
-                    .write_with_token(self.namespace_id, self.vault_id, self.operations, token)
+                    .write_with_token(self.organization_slug, self.vault_id, self.operations, token)
                     .await
             },
-            None => self.client.write(self.namespace_id, self.vault_id, self.operations).await,
+            None => self.client.write(self.organization_slug, self.vault_id, self.operations).await,
         }
     }
 }
@@ -411,10 +415,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_builder_preserves_namespace_and_vault() {
+    async fn write_builder_preserves_organization_and_vault() {
         let client = test_client().await;
         let builder = client.write_builder(42, Some(99)).set("key", b"val".to_vec());
-        assert_eq!(builder.namespace_id, 42);
+        assert_eq!(builder.organization_slug, 42);
         assert_eq!(builder.vault_id, Some(99));
     }
 

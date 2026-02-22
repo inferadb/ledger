@@ -1,13 +1,13 @@
 //! Input validation for gRPC request fields.
 //!
-//! Provides configurable validation for entity keys, values, namespace names,
+//! Provides configurable validation for entity keys, values, organization names,
 //! relationship strings, and batch sizes. Used at both the gRPC service boundary
 //! (server-side) and in SDK operation constructors (client-side).
 //!
 //! ## Character Whitelists
 //!
 //! - Entity keys: `[a-zA-Z0-9:/_.-]` — safe for storage paths and log output.
-//! - Namespace names: `[a-z0-9-]{1,63}` — DNS-safe labels for routing.
+//! - Organization names: `[a-z0-9-]{1,63}` — DNS-safe labels for routing.
 //! - Relationship strings: `[a-zA-Z0-9:/_.-#]` — same as keys plus `#` for subject fragments (e.g.,
 //!   `user:456#member`).
 
@@ -96,47 +96,47 @@ pub fn validate_value(value: &[u8], config: &ValidationConfig) -> Result<(), Val
     Ok(())
 }
 
-/// Validates a namespace name against configured limits and DNS-safe whitelist.
+/// Validates an organization name against configured limits and DNS-safe whitelist.
 ///
-/// Namespace names must:
+/// Organization names must:
 /// - Be non-empty
-/// - Not exceed `config.max_namespace_name_bytes` in UTF-8 byte length
+/// - Not exceed `config.max_organization_name_bytes` in UTF-8 byte length
 /// - Contain only `[a-z0-9-]`
 /// - Not start or end with a hyphen
 ///
 /// # Errors
 ///
-/// Returns [`ValidationError`] if the name is empty, exceeds `max_namespace_name_bytes`,
+/// Returns [`ValidationError`] if the name is empty, exceeds `max_organization_name_bytes`,
 /// starts or ends with a hyphen, or contains characters outside `[a-z0-9-]`.
-pub fn validate_namespace_name(
+pub fn validate_organization_name(
     name: &str,
     config: &ValidationConfig,
 ) -> Result<(), ValidationError> {
     if name.is_empty() {
         return Err(ValidationError {
-            field: "namespace_name".to_string(),
+            field: "organization_name".to_string(),
             constraint: "must not be empty".to_string(),
         });
     }
-    if name.len() > config.max_namespace_name_bytes {
+    if name.len() > config.max_organization_name_bytes {
         return Err(ValidationError {
-            field: "namespace_name".to_string(),
+            field: "organization_name".to_string(),
             constraint: format!(
                 "length {} bytes exceeds maximum {} bytes",
                 name.len(),
-                config.max_namespace_name_bytes
+                config.max_organization_name_bytes
             ),
         });
     }
     if name.starts_with('-') || name.ends_with('-') {
         return Err(ValidationError {
-            field: "namespace_name".to_string(),
+            field: "organization_name".to_string(),
             constraint: "must not start or end with a hyphen".to_string(),
         });
     }
-    if let Some(pos) = name.find(|c: char| !is_namespace_char(c)) {
+    if let Some(pos) = name.find(|c: char| !is_organization_char(c)) {
         return Err(ValidationError {
-            field: "namespace_name".to_string(),
+            field: "organization_name".to_string(),
             constraint: format!(
                 "contains invalid character {:?} at byte offset {}; allowed: [a-z0-9-]",
                 name[pos..].chars().next().unwrap_or('\0'),
@@ -248,8 +248,8 @@ fn is_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '_' | '.' | '-')
 }
 
-/// Checks if a character is allowed in namespace names.
-fn is_namespace_char(c: char) -> bool {
+/// Checks if a character is allowed in organization names.
+fn is_organization_char(c: char) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
 }
 
@@ -379,97 +379,97 @@ mod tests {
     }
 
     // =========================================================================
-    // validate_namespace_name tests
+    // validate_organization_name tests
     // =========================================================================
 
     #[test]
-    fn test_validate_namespace_name_valid_simple() {
+    fn test_validate_organization_name_valid_simple() {
         let config = default_config();
-        assert!(validate_namespace_name("my-namespace", &config).is_ok());
+        assert!(validate_organization_name("my-organization", &config).is_ok());
     }
 
     #[test]
-    fn test_validate_namespace_name_valid_digits() {
+    fn test_validate_organization_name_valid_digits() {
         let config = default_config();
-        assert!(validate_namespace_name("ns-123", &config).is_ok());
+        assert!(validate_organization_name("ns-123", &config).is_ok());
     }
 
     #[test]
-    fn test_validate_namespace_name_empty() {
+    fn test_validate_organization_name_empty() {
         let config = default_config();
-        let err = validate_namespace_name("", &config).unwrap_err();
-        assert_eq!(err.field, "namespace_name");
+        let err = validate_organization_name("", &config).unwrap_err();
+        assert_eq!(err.field, "organization_name");
         assert!(err.constraint.contains("empty"));
     }
 
     #[test]
-    fn test_validate_namespace_name_uppercase() {
+    fn test_validate_organization_name_uppercase() {
         let config = default_config();
-        let err = validate_namespace_name("MyNamespace", &config).unwrap_err();
+        let err = validate_organization_name("MyOrganization", &config).unwrap_err();
         assert!(err.constraint.contains("invalid character"));
     }
 
     #[test]
-    fn test_validate_namespace_name_starts_with_hyphen() {
+    fn test_validate_organization_name_starts_with_hyphen() {
         let config = default_config();
-        let err = validate_namespace_name("-ns", &config).unwrap_err();
+        let err = validate_organization_name("-ns", &config).unwrap_err();
         assert!(err.constraint.contains("hyphen"));
     }
 
     #[test]
-    fn test_validate_namespace_name_ends_with_hyphen() {
+    fn test_validate_organization_name_ends_with_hyphen() {
         let config = default_config();
-        let err = validate_namespace_name("ns-", &config).unwrap_err();
+        let err = validate_organization_name("ns-", &config).unwrap_err();
         assert!(err.constraint.contains("hyphen"));
     }
 
     #[test]
-    fn test_validate_namespace_name_exactly_at_limit() {
+    fn test_validate_organization_name_exactly_at_limit() {
         let config =
-            ValidationConfig { max_namespace_name_bytes: 10, ..ValidationConfig::default() };
-        assert!(validate_namespace_name("a234567890", &config).is_ok());
+            ValidationConfig { max_organization_name_bytes: 10, ..ValidationConfig::default() };
+        assert!(validate_organization_name("a234567890", &config).is_ok());
     }
 
     #[test]
-    fn test_validate_namespace_name_one_byte_over_limit() {
+    fn test_validate_organization_name_one_byte_over_limit() {
         let config =
-            ValidationConfig { max_namespace_name_bytes: 10, ..ValidationConfig::default() };
-        let err = validate_namespace_name("a2345678901", &config).unwrap_err();
+            ValidationConfig { max_organization_name_bytes: 10, ..ValidationConfig::default() };
+        let err = validate_organization_name("a2345678901", &config).unwrap_err();
         assert!(err.constraint.contains("exceeds maximum"));
     }
 
     #[test]
-    fn test_validate_namespace_name_underscore_rejected() {
+    fn test_validate_organization_name_underscore_rejected() {
         let config = default_config();
-        let err = validate_namespace_name("my_namespace", &config).unwrap_err();
+        let err = validate_organization_name("my_organization", &config).unwrap_err();
         assert!(err.constraint.contains("invalid character"));
     }
 
     #[test]
-    fn test_validate_namespace_name_dot_rejected() {
+    fn test_validate_organization_name_dot_rejected() {
         let config = default_config();
-        let err = validate_namespace_name("my.namespace", &config).unwrap_err();
+        let err = validate_organization_name("my.organization", &config).unwrap_err();
         assert!(err.constraint.contains("invalid character"));
     }
 
     #[test]
-    fn test_validate_namespace_name_unicode_rejected() {
+    fn test_validate_organization_name_unicode_rejected() {
         let config = default_config();
-        let err = validate_namespace_name("n\u{00e9}space", &config).unwrap_err();
+        let err = validate_organization_name("n\u{00e9}space", &config).unwrap_err();
         assert!(err.constraint.contains("invalid character"));
     }
 
     #[test]
-    fn test_validate_namespace_name_control_char_rejected() {
+    fn test_validate_organization_name_control_char_rejected() {
         let config = default_config();
-        let err = validate_namespace_name("ns\x00name", &config).unwrap_err();
+        let err = validate_organization_name("ns\x00name", &config).unwrap_err();
         assert!(err.constraint.contains("invalid character"));
     }
 
     #[test]
-    fn test_validate_namespace_name_single_char() {
+    fn test_validate_organization_name_single_char() {
         let config = default_config();
-        assert!(validate_namespace_name("a", &config).is_ok());
+        assert!(validate_organization_name("a", &config).is_ok());
     }
 
     // =========================================================================

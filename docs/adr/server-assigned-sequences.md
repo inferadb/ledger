@@ -19,7 +19,7 @@ This is a fundamental design flaw—not a bug fix. Network timing is inherently 
 
 ```protobuf
 message WriteRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   optional VaultId vault_id = 2;
   ClientId client_id = 3;
   uint64 sequence = 4;           // Client-assigned, problematic
@@ -49,7 +49,7 @@ The SDK could serialize concurrent writes, but this:
 
 ```protobuf
 message WriteRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   optional VaultId vault_id = 2;
   ClientId client_id = 3;
   bytes idempotency_key = 4;     // 16-byte UUID (replaces sequence)

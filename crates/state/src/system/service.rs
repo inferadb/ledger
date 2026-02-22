@@ -1,31 +1,33 @@
-//! Service layer for `_system` namespace operations.
+//! Service layer for `_system` organization operations.
 //!
-//! Provides high-level operations on the _system namespace:
+//! Provides high-level operations on the _system organization:
 //! - Node registration and discovery
-//! - Namespace routing table management
+//! - Organization routing table management
 //! - Sequence counter management for ID generation
 //!
-//! The _system namespace uses namespace_id = 0 and vault_id = 0.
+//! The _system organization uses organization_id = 0 and vault_id = 0.
 
 use std::sync::Arc;
 
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{NamespaceId, NodeId, Operation, ShardId, VaultId, decode, encode};
+use inferadb_ledger_types::{
+    NodeId, Operation, OrganizationId, OrganizationSlug, ShardId, VaultId, decode, encode,
+};
 use snafu::{ResultExt, Snafu};
 
 use super::{
     keys::SystemKeys,
-    types::{NamespaceRegistry, NamespaceStatus, NodeInfo},
+    types::{NodeInfo, OrganizationRegistry, OrganizationStatus},
 };
 use crate::state::{StateError, StateLayer};
 
-/// The reserved namespace ID for _system.
-pub const SYSTEM_NAMESPACE_ID: NamespaceId = NamespaceId::new(0);
+/// The reserved organization ID for _system.
+pub const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
 
 /// The reserved vault ID for _system entities.
 pub const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 
-/// Errors from system namespace operations.
+/// Errors from system organization operations.
 #[derive(Debug, Snafu)]
 pub enum SystemError {
     /// Underlying state layer operation failed.
@@ -58,19 +60,19 @@ pub enum SystemError {
     },
 }
 
-/// Result type for system namespace operations.
+/// Result type for system organization operations.
 pub type Result<T> = std::result::Result<T, SystemError>;
 
-/// Service for reading from and writing to the `_system` namespace.
+/// Service for reading from and writing to the `_system` organization.
 ///
-/// All _system data is stored in namespace_id=0, vault_id=0.
+/// All _system data is stored in organization_id=0, vault_id=0.
 /// StateLayer is internally thread-safe via inferadb-ledger-store's MVCC.
-pub struct SystemNamespaceService<B: StorageBackend> {
+pub struct SystemOrganizationService<B: StorageBackend> {
     state: Arc<StateLayer<B>>,
 }
 
-impl<B: StorageBackend> SystemNamespaceService<B> {
-    /// Creates a new system namespace service.
+impl<B: StorageBackend> SystemOrganizationService<B> {
+    /// Creates a new system organization service.
     pub fn new(state: Arc<StateLayer<B>>) -> Self {
         Self { state }
     }
@@ -115,14 +117,14 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         Ok(current)
     }
 
-    /// Returns the next namespace ID.
+    /// Returns the next organization ID.
     ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] if the sequence counter read or write fails.
-    pub fn next_namespace_id(&self) -> Result<NamespaceId> {
+    pub fn next_organization_id(&self) -> Result<OrganizationId> {
         // Start at 1 because 0 is reserved for _system
-        self.next_sequence(SystemKeys::NAMESPACE_SEQ_KEY, 1).map(NamespaceId::new)
+        self.next_sequence(SystemKeys::ORG_SEQ_KEY, 1).map(OrganizationId::new)
     }
 
     /// Returns the next vault ID.
@@ -211,28 +213,34 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
     }
 
     // =========================================================================
-    // Namespace Registry Operations
+    // Organization Registry Operations
     // =========================================================================
 
-    /// Registers a new namespace.
+    /// Registers a new organization.
+    ///
+    /// Stores the organization registry entry and its slug index entry.
     ///
     /// # Errors
     ///
     /// Returns [`SystemError::Codec`] if serialization fails, or
     /// [`SystemError::State`] if the write operation fails.
-    pub fn register_namespace(&self, registry: &NamespaceRegistry) -> Result<()> {
-        let key = SystemKeys::namespace_key(registry.namespace_id);
+    pub fn register_organization(
+        &self,
+        registry: &OrganizationRegistry,
+        slug: OrganizationSlug,
+    ) -> Result<()> {
+        let key = SystemKeys::organization_key(registry.organization_id);
         let value = encode(registry).context(CodecSnafu)?;
 
-        // Also create the name index
-        let name_index_key = SystemKeys::namespace_name_index_key(&registry.name);
-        let name_index_value = registry.namespace_id.value().to_string().into_bytes();
+        // Also create the slug index
+        let slug_index_key = SystemKeys::organization_slug_key(slug);
+        let slug_index_value = registry.organization_id.value().to_string().into_bytes();
 
         let ops = vec![
             Operation::SetEntity { key, value, condition: None, expires_at: None },
             Operation::SetEntity {
-                key: name_index_key,
-                value: name_index_value,
+                key: slug_index_key,
+                value: slug_index_value,
                 condition: None,
                 expires_at: None,
             },
@@ -243,87 +251,97 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         Ok(())
     }
 
-    /// Returns a namespace by ID.
+    /// Returns an organization by ID.
     ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] if the read fails, or
     /// [`SystemError::Codec`] if deserialization fails.
-    pub fn get_namespace(&self, namespace_id: NamespaceId) -> Result<Option<NamespaceRegistry>> {
-        let key = SystemKeys::namespace_key(namespace_id);
+    pub fn get_organization(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Option<OrganizationRegistry>> {
+        let key = SystemKeys::organization_key(organization_id);
 
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
         match entity_opt {
             Some(entity) => {
-                let registry: NamespaceRegistry = decode(&entity.value).context(CodecSnafu)?;
+                let registry: OrganizationRegistry = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(registry))
             },
             None => Ok(None),
         }
     }
 
-    /// Returns a namespace by name.
+    /// Returns an organization by slug.
+    ///
+    /// Looks up the slug index to find the internal organization ID, then
+    /// retrieves the full registry entry.
     ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] if the index or registry read fails, or
     /// [`SystemError::Codec`] if deserialization fails.
-    pub fn get_namespace_by_name(&self, name: &str) -> Result<Option<NamespaceRegistry>> {
-        let index_key = SystemKeys::namespace_name_index_key(name);
+    pub fn get_organization_by_slug(
+        &self,
+        slug: OrganizationSlug,
+    ) -> Result<Option<OrganizationRegistry>> {
+        let index_key = SystemKeys::organization_slug_key(slug);
 
-        // First, look up the namespace ID from the index
+        // Look up the organization ID from the slug index
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, index_key.as_bytes()).context(StateSnafu)?;
-        let namespace_id = match entity_opt {
+        let organization_id = match entity_opt {
             Some(entity) => {
                 let id_str = String::from_utf8_lossy(&entity.value);
-                id_str.parse::<NamespaceId>().ok()
+                id_str.parse::<OrganizationId>().ok()
             },
             None => None,
         };
 
-        match namespace_id {
-            Some(id) => self.get_namespace(id),
+        match organization_id {
+            Some(id) => self.get_organization(id),
             None => Ok(None),
         }
     }
 
-    /// Lists all namespaces.
+    /// Lists all organizations.
     ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] if the underlying list operation fails.
-    pub fn list_namespaces(&self) -> Result<Vec<NamespaceRegistry>> {
+    pub fn list_organizations(&self) -> Result<Vec<OrganizationRegistry>> {
         let entities = self
             .state
-            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::NAMESPACE_PREFIX), None, 10000)
+            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::ORG_PREFIX), None, 10000)
             .context(StateSnafu)?;
 
-        let mut namespaces = Vec::new();
+        let mut organizations = Vec::new();
         for entity in entities {
-            if let Ok(registry) = decode::<NamespaceRegistry>(&entity.value) {
-                namespaces.push(registry);
+            if let Ok(registry) = decode::<OrganizationRegistry>(&entity.value) {
+                organizations.push(registry);
             }
         }
 
-        Ok(namespaces)
+        Ok(organizations)
     }
 
-    /// Updates namespace status.
+    /// Updates organization status.
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the namespace does not exist, or
+    /// Returns [`SystemError::NotFound`] if the organization does not exist, or
     /// [`SystemError::Codec`] / [`SystemError::State`] if the update fails.
-    pub fn update_namespace_status(
+    pub fn update_organization_status(
         &self,
-        namespace_id: NamespaceId,
-        status: NamespaceStatus,
+        organization_id: OrganizationId,
+        slug: OrganizationSlug,
+        status: OrganizationStatus,
     ) -> Result<()> {
         // Get existing registry
-        let mut registry = self.get_namespace(namespace_id)?.ok_or_else(|| {
-            SystemError::NotFound { entity: format!("namespace:{}", namespace_id) }
+        let mut registry = self.get_organization(organization_id)?.ok_or_else(|| {
+            SystemError::NotFound { entity: format!("organization:{}", organization_id) }
         })?;
 
         // Update status
@@ -331,44 +349,48 @@ impl<B: StorageBackend> SystemNamespaceService<B> {
         registry.config_version += 1;
 
         // Save
-        self.register_namespace(&registry)
+        self.register_organization(&registry, slug)
     }
 
     // =========================================================================
     // Shard Routing
     // =========================================================================
 
-    /// Returns the shard ID for a namespace.
+    /// Returns the shard ID for an organization.
     ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] or [`SystemError::Codec`] if the
-    /// namespace lookup fails.
-    pub fn get_shard_for_namespace(&self, namespace_id: NamespaceId) -> Result<Option<ShardId>> {
-        self.get_namespace(namespace_id).map(|opt| opt.map(|r| r.shard_id))
+    /// organization lookup fails.
+    pub fn get_shard_for_organization(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<Option<ShardId>> {
+        self.get_organization(organization_id).map(|opt| opt.map(|r| r.shard_id))
     }
 
-    /// Assigns a namespace to a shard.
+    /// Assigns an organization to a shard.
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the namespace does not exist, or
+    /// Returns [`SystemError::NotFound`] if the organization does not exist, or
     /// [`SystemError::Codec`] / [`SystemError::State`] if the update fails.
-    pub fn assign_namespace_to_shard(
+    pub fn assign_organization_to_shard(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
+        slug: OrganizationSlug,
         shard_id: ShardId,
         member_nodes: Vec<NodeId>,
     ) -> Result<()> {
-        let mut registry = self.get_namespace(namespace_id)?.ok_or_else(|| {
-            SystemError::NotFound { entity: format!("namespace:{}", namespace_id) }
+        let mut registry = self.get_organization(organization_id)?.ok_or_else(|| {
+            SystemError::NotFound { entity: format!("organization:{}", organization_id) }
         })?;
 
         registry.shard_id = shard_id;
         registry.member_nodes = member_nodes;
         registry.config_version += 1;
 
-        self.register_namespace(&registry)
+        self.register_organization(&registry, slug)
     }
 }
 
@@ -382,23 +404,23 @@ mod tests {
     use super::{super::types::NodeRole, *};
     use crate::engine::InMemoryStorageEngine;
 
-    fn create_test_service() -> SystemNamespaceService<inferadb_ledger_store::InMemoryBackend> {
+    fn create_test_service() -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().unwrap();
         let state = Arc::new(StateLayer::new(engine.db()));
-        SystemNamespaceService::new(state)
+        SystemOrganizationService::new(state)
     }
 
     #[test]
-    fn test_next_namespace_id() {
+    fn test_next_organization_id() {
         let svc = create_test_service();
 
-        let id1 = svc.next_namespace_id().unwrap();
-        let id2 = svc.next_namespace_id().unwrap();
-        let id3 = svc.next_namespace_id().unwrap();
+        let id1 = svc.next_organization_id().unwrap();
+        let id2 = svc.next_organization_id().unwrap();
+        let id3 = svc.next_organization_id().unwrap();
 
-        assert_eq!(id1, NamespaceId::new(1)); // Starts at 1, 0 is reserved
-        assert_eq!(id2, NamespaceId::new(2));
-        assert_eq!(id3, NamespaceId::new(3));
+        assert_eq!(id1, OrganizationId::new(1)); // Starts at 1, 0 is reserved
+        assert_eq!(id2, OrganizationId::new(2));
+        assert_eq!(id3, OrganizationId::new(3));
     }
 
     #[test]
@@ -442,76 +464,75 @@ mod tests {
     }
 
     #[test]
-    fn test_register_and_get_namespace() {
+    fn test_register_and_get_organization() {
         let svc = create_test_service();
 
-        let registry = NamespaceRegistry {
-            namespace_id: NamespaceId::new(1),
+        let registry = OrganizationRegistry {
+            organization_id: OrganizationId::new(1),
             name: "acme-corp".to_string(),
             shard_id: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
-            status: NamespaceStatus::Active,
+            status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),
         };
 
-        svc.register_namespace(&registry).unwrap();
+        let slug = OrganizationSlug::new(9999);
+        svc.register_organization(&registry, slug).unwrap();
 
         // Get by ID
-        let retrieved = svc.get_namespace(NamespaceId::new(1)).unwrap();
+        let retrieved = svc.get_organization(OrganizationId::new(1)).unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "acme-corp");
 
-        // Get by name
-        let by_name = svc.get_namespace_by_name("acme-corp").unwrap();
-        assert!(by_name.is_some());
-        assert_eq!(by_name.unwrap().namespace_id, NamespaceId::new(1));
-
-        // Case-insensitive name lookup
-        let by_name_upper = svc.get_namespace_by_name("ACME-CORP").unwrap();
-        assert!(by_name_upper.is_some());
+        // Get by slug
+        let by_slug = svc.get_organization_by_slug(slug).unwrap();
+        assert!(by_slug.is_some());
+        assert_eq!(by_slug.unwrap().organization_id, OrganizationId::new(1));
     }
 
     #[test]
-    fn test_list_namespaces() {
+    fn test_list_organizations() {
         let svc = create_test_service();
 
         for i in 1..=3 {
-            let registry = NamespaceRegistry {
-                namespace_id: NamespaceId::new(i),
-                name: format!("ns-{}", i),
+            let registry = OrganizationRegistry {
+                organization_id: OrganizationId::new(i),
+                name: format!("org-{}", i),
                 shard_id: ShardId::new(1),
                 member_nodes: vec![],
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 config_version: 1,
                 created_at: Utc::now(),
             };
-            svc.register_namespace(&registry).unwrap();
+            svc.register_organization(&registry, OrganizationSlug::new(1000 + i as u64)).unwrap();
         }
 
-        let namespaces = svc.list_namespaces().unwrap();
-        assert_eq!(namespaces.len(), 3);
+        let organizations = svc.list_organizations().unwrap();
+        assert_eq!(organizations.len(), 3);
     }
 
     #[test]
-    fn test_update_namespace_status() {
+    fn test_update_organization_status() {
         let svc = create_test_service();
 
-        let registry = NamespaceRegistry {
-            namespace_id: NamespaceId::new(1),
-            name: "test-ns".to_string(),
+        let slug = OrganizationSlug::new(5555);
+        let registry = OrganizationRegistry {
+            organization_id: OrganizationId::new(1),
+            name: "test-org".to_string(),
             shard_id: ShardId::new(1),
             member_nodes: vec![],
-            status: NamespaceStatus::Active,
+            status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),
         };
-        svc.register_namespace(&registry).unwrap();
+        svc.register_organization(&registry, slug).unwrap();
 
-        svc.update_namespace_status(NamespaceId::new(1), NamespaceStatus::Suspended).unwrap();
+        svc.update_organization_status(OrganizationId::new(1), slug, OrganizationStatus::Suspended)
+            .unwrap();
 
-        let updated = svc.get_namespace(NamespaceId::new(1)).unwrap().unwrap();
-        assert_eq!(updated.status, NamespaceStatus::Suspended);
+        let updated = svc.get_organization(OrganizationId::new(1)).unwrap().unwrap();
+        assert_eq!(updated.status, OrganizationStatus::Suspended);
         assert_eq!(updated.config_version, 2); // Incremented
     }
 }

@@ -34,7 +34,7 @@ async fn test_ordered_replication() {
                 id: "ordered-test".to_string(),
             }),
             idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
             vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
             operations: vec![inferadb_ledger_proto::proto::Operation {
                 op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
@@ -88,7 +88,7 @@ async fn test_follower_state_consistency() {
     let batch_request = inferadb_ledger_proto::proto::BatchWriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         operations: (0..10)
             .map(|i| inferadb_ledger_proto::proto::BatchWriteOperation {
@@ -144,7 +144,7 @@ async fn test_replication_after_delay() {
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
@@ -168,7 +168,7 @@ async fn test_replication_after_delay() {
     let request2 = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 1 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(

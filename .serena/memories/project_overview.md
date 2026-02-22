@@ -21,8 +21,8 @@ Ledger is InferaDB's storage layer — a blockchain database for cryptographical
 - `inferadb-ledger-test-utils`: Shared test utilities
 
 ## Key Concepts
-- **Namespace**: Per-organization storage unit
+- **Organization**: Top-level tenant isolation boundary
 - **Vault**: Relationship store with own cryptographic chain
 - **Entity**: Key-value data with TTL/versioning
 - **Relationship**: Authorization tuple (resource, relation, subject)
-- **Shard**: Multiple namespaces sharing a Raft group
+- **Shard**: Multiple organizations sharing a Raft group

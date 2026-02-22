@@ -56,9 +56,9 @@ The database uses 15 tables (see `crates/store/src/tables.rs`):
 | Entities        | `{vault_id:8BE}{bucket_id:1}{key}`      | Key-value entities         |
 | ObjIndex        | `{vault_id:8BE}{resource}#{relation}`   | Resource→subject lookup    |
 | SubjIndex       | `{vault_id:8BE}{subject}#{relation}`    | Subject→resource lookup    |
-| VaultMeta       | `{namespace_id:8BE}{vault_id:8BE}`      | Vault metadata             |
+| VaultMeta       | `{organization_slug:8BE}{vault_id:8BE}`      | Vault metadata             |
 | Blocks          | `{shard_height:8BE}`                    | Block storage              |
-| VaultBlockIndex | `{namespace_id:8BE}{vault_id:8BE}{h:8}` | Vault height→block mapping |
+| VaultBlockIndex | `{organization_slug:8BE}{vault_id:8BE}{h:8}` | Vault height→block mapping |
 | RaftLog         | `{log_id:8BE}`                          | Raft log entries           |
 | RaftState       | `{key}`                                 | Raft persistent state      |
 

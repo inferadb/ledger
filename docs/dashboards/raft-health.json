@@ -321,7 +321,7 @@
       "targets": [
         {
           "expr": "ledger_vault_health",
-          "legendFormat": "ns:{{namespace_id}} vault:{{vault_id}}",
+          "legendFormat": "ns:{{organization_slug}} vault:{{vault_id}}",
           "format": "table",
           "instant": true
         }
@@ -331,7 +331,7 @@
           "id": "organize",
           "options": {
             "excludeByName": { "Time": true, "__name__": true, "state": true },
-            "renameByName": { "namespace_id": "Namespace", "vault_id": "Vault", "Value": "Status" }
+            "renameByName": { "organization_slug": "Organization", "vault_id": "Vault", "Value": "Status" }
           }
         }
       ]

@@ -3,7 +3,7 @@
 //! This module provides the main server that exposes all gRPC services:
 //! - ReadService: Query operations
 //! - WriteService: Transaction submission
-//! - AdminService: Namespace and vault management
+//! - AdminService: Organization and vault management
 //! - HealthService: Health checks
 //! - SystemDiscoveryService: Peer discovery
 
@@ -71,9 +71,9 @@ pub struct LedgerServer {
     /// Request timeout in seconds.
     #[builder(default = 30)]
     timeout_secs: u64,
-    /// Per-namespace rate limiter (optional).
+    /// Per-organization rate limiter (optional).
     #[builder(default)]
-    namespace_rate_limiter: Option<Arc<RateLimiter>>,
+    organization_rate_limiter: Option<Arc<RateLimiter>>,
     /// Hot key detector for identifying frequently accessed keys (optional).
     #[builder(default)]
     hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
@@ -173,8 +173,8 @@ impl LedgerServer {
         };
         // Add applied state for sequence gap detection
         let write_service = write_service.with_applied_state(self.applied_state.clone());
-        // Add per-namespace rate limiting if configured
-        let write_service = match &self.namespace_rate_limiter {
+        // Add per-organization rate limiting if configured
+        let write_service = match &self.organization_rate_limiter {
             Some(limiter) => write_service.with_rate_limiter(limiter.clone()),
             None => write_service,
         };
@@ -198,7 +198,7 @@ impl LedgerServer {
         let admin_service = if let Some(handle) = self.runtime_config {
             admin_service.with_runtime_config(
                 handle,
-                self.namespace_rate_limiter.clone(),
+                self.organization_rate_limiter.clone(),
                 self.hot_key_detector.clone(),
             )
         } else {

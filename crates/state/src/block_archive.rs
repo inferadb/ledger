@@ -9,7 +9,7 @@
 //!
 //! In compacted mode, transaction bodies are removed while preserving:
 //! - Block headers (height, previous_hash, tx_merkle_root, state_root)
-//! - Vault metadata (namespace_id, vault_id, vault_height)
+//! - Vault metadata (organization_id, vault_id, vault_height)
 //! - Cryptographic commitments (all hashes preserved for verification)
 //!
 //! This allows verification via:
@@ -26,7 +26,7 @@ use std::{
 };
 
 use inferadb_ledger_store::{Database, StorageBackend, tables};
-use inferadb_ledger_types::{NamespaceId, ShardBlock, VaultId, decode, encode};
+use inferadb_ledger_types::{OrganizationId, ShardBlock, VaultId, decode, encode};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
@@ -113,7 +113,7 @@ struct SegmentWriter {
 /// Block archive for a shard.
 ///
 /// Uses inferadb-ledger-store for the primary block storage (tables::Blocks) and maintains
-/// a vault_block_index for looking up shard heights by vault/namespace/height.
+/// a vault_block_index for looking up shard heights by vault/organization/height.
 #[allow(clippy::result_large_err)]
 pub struct BlockArchive<B: StorageBackend> {
     /// Database handle.
@@ -171,7 +171,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
         for entry in &block.vault_entries {
             let index_key = encode_vault_block_index_key(
-                entry.namespace_id,
+                entry.organization_id,
                 entry.vault_id,
                 entry.vault_height,
             );
@@ -254,13 +254,13 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
     pub fn find_shard_height(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         vault_height: u64,
     ) -> Result<Option<u64>> {
         let txn = self.db.read().context(StoreSnafu)?;
 
-        let key = encode_vault_block_index_key(namespace_id, vault_id, vault_height);
+        let key = encode_vault_block_index_key(organization_id, vault_id, vault_height);
 
         match txn.get::<tables::VaultBlockIndex>(&key.to_vec()).context(StoreSnafu)? {
             Some(data) => {
@@ -392,7 +392,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     ///
     /// After compaction, transaction bodies are removed but:
     /// - Block headers are preserved (state_root, tx_merkle_root, previous_hash)
-    /// - Vault metadata is preserved (namespace_id, vault_id, vault_height)
+    /// - Vault metadata is preserved (organization_id, vault_id, vault_height)
     /// - Chain verification remains possible via ChainCommitment
     ///
     /// # Arguments
@@ -519,14 +519,14 @@ impl<B: StorageBackend> BlockArchive<B> {
 
 /// Encodes vault block index key.
 ///
-/// Format: {namespace_id:8BE}{vault_id:8BE}{vault_height:8BE}
+/// Format: {organization_id:8BE}{vault_id:8BE}{vault_height:8BE}
 fn encode_vault_block_index_key(
-    namespace_id: NamespaceId,
+    organization_id: OrganizationId,
     vault_id: VaultId,
     vault_height: u64,
 ) -> [u8; 24] {
     let mut key = [0u8; 24];
-    key[0..8].copy_from_slice(&namespace_id.value().to_be_bytes());
+    key[0..8].copy_from_slice(&organization_id.value().to_be_bytes());
     key[8..16].copy_from_slice(&vault_id.value().to_be_bytes());
     key[16..24].copy_from_slice(&vault_height.to_be_bytes());
     key
@@ -547,7 +547,7 @@ mod tests {
             shard_height,
             previous_shard_hash: [0u8; 32],
             vault_entries: vec![VaultEntry {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 vault_height: shard_height, // Simplify: vault_height == shard_height
                 previous_vault_hash: [0u8; 32],
@@ -585,14 +585,14 @@ mod tests {
 
         // Should find the shard height from vault coordinates
         let shard_height = archive
-            .find_shard_height(NamespaceId::new(1), VaultId::new(1), 100)
+            .find_shard_height(OrganizationId::new(1), VaultId::new(1), 100)
             .expect("find")
             .expect("should exist");
         assert_eq!(shard_height, 100);
 
         // Non-existent vault block
         let not_found =
-            archive.find_shard_height(NamespaceId::new(1), VaultId::new(1), 999).expect("find");
+            archive.find_shard_height(OrganizationId::new(1), VaultId::new(1), 999).expect("find");
         assert!(not_found.is_none());
     }
 
@@ -655,7 +655,7 @@ mod tests {
 
         let mut block = create_test_block(100);
         block.vault_entries.push(VaultEntry {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(2), // Different vault
             vault_height: 50,
             previous_vault_hash: [0u8; 32],
@@ -668,8 +668,9 @@ mod tests {
 
         // Both vaults should point to same shard height
         let h1 =
-            archive.find_shard_height(NamespaceId::new(1), VaultId::new(1), 100).expect("find");
-        let h2 = archive.find_shard_height(NamespaceId::new(1), VaultId::new(2), 50).expect("find");
+            archive.find_shard_height(OrganizationId::new(1), VaultId::new(1), 100).expect("find");
+        let h2 =
+            archive.find_shard_height(OrganizationId::new(1), VaultId::new(2), 50).expect("find");
 
         assert_eq!(h1, Some(100));
         assert_eq!(h2, Some(100));
@@ -703,7 +704,7 @@ mod tests {
             shard_height,
             previous_shard_hash: [shard_height as u8; 32],
             vault_entries: vec![VaultEntry {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 vault_height: shard_height,
                 previous_vault_hash: [(shard_height.saturating_sub(1)) as u8; 32],
@@ -869,7 +870,7 @@ mod tests {
 
         // Index should still work
         let shard_height = archive
-            .find_shard_height(NamespaceId::new(1), VaultId::new(1), 100)
+            .find_shard_height(OrganizationId::new(1), VaultId::new(1), 100)
             .expect("find")
             .expect("should exist");
         assert_eq!(shard_height, 100);

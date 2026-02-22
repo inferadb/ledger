@@ -19,7 +19,7 @@ service SystemDiscoveryService {
 SystemDiscoveryService enables nodes to discover each other and coordinate cluster operations. It provides:
 
 - Peer discovery for new nodes joining
-- System state including node registry and namespace routing
+- System state including node registry and organization routing
 - Cache invalidation via version tracking
 
 ## GetPeers
@@ -99,7 +99,7 @@ grpcurl -plaintext \
 
 ## GetSystemState
 
-Returns full system state including nodes and namespace routing.
+Returns full system state including nodes and organization routing.
 
 ```bash
 grpcurl -plaintext localhost:50051 ledger.v1.SystemDiscoveryService/GetSystemState
@@ -122,7 +122,7 @@ grpcurl -plaintext \
 | ------------ | ------------------- | ---------------------------- |
 | `version`    | uint64              | Current system state version |
 | `nodes`      | NodeInfo[]          | All cluster nodes            |
-| `namespaces` | NamespaceRegistry[] | Namespace → shard routing    |
+| `organizations` | OrganizationRegistry[] | Organization → shard routing    |
 
 **NodeInfo fields:**
 
@@ -142,15 +142,15 @@ grpcurl -plaintext \
 | `NODE_ROLE_VOTER`   | Full voting member (max 5 per cluster) |
 | `NODE_ROLE_LEARNER` | Replicates data but doesn't vote       |
 
-**NamespaceRegistry fields:**
+**OrganizationRegistry fields:**
 
 | Field            | Type            | Description            |
 | ---------------- | --------------- | ---------------------- |
-| `namespace_id`   | NamespaceId     | Namespace identifier   |
+| `organization_slug`   | OrganizationSlug     | Organization identifier   |
 | `name`           | string          | Human-readable name    |
 | `shard_id`       | ShardId         | Hosting Raft group     |
 | `members`        | NodeId[]        | Nodes in the shard     |
-| `status`         | NamespaceStatus | Lifecycle state        |
+| `status`         | OrganizationStatus | Lifecycle state        |
 | `config_version` | uint64          | For cache invalidation |
 | `created_at`     | Timestamp       | Creation time          |
 

@@ -1,8 +1,8 @@
-//! Key patterns for the `_system` namespace.
+//! Key patterns for the `_system` organization.
 
-use inferadb_ledger_types::{NamespaceId, NodeId, UserId};
+use inferadb_ledger_types::{NodeId, OrganizationId, OrganizationSlug, UserId};
 
-/// Key pattern generators for `_system` namespace entities.
+/// Key pattern generators for `_system` organization entities.
 ///
 /// All keys follow the convention `{entity_type}:{id}` for primary keys
 /// and `_idx:{index_name}:{value}` for secondary indexes.
@@ -69,28 +69,26 @@ impl SystemKeys {
     }
 
     // ========================================================================
-    // Namespace Keys
+    // Organization Keys
     // ========================================================================
 
-    /// Primary key for a namespace registry entry.
+    /// Primary key for an organization registry entry.
     ///
-    /// Pattern: `ns:{namespace_id}`
-    pub fn namespace_key(namespace_id: NamespaceId) -> String {
-        format!("ns:{}", namespace_id.value())
+    /// Pattern: `org:{organization_id}`
+    pub fn organization_key(organization_id: OrganizationId) -> String {
+        format!("org:{}", organization_id.value())
     }
 
-    /// Parses a namespace ID from a namespace key.
-    pub fn parse_namespace_key(key: &str) -> Option<NamespaceId> {
-        key.strip_prefix("ns:").and_then(|id| id.parse().ok())
+    /// Parses an organization ID from an organization key.
+    pub fn parse_organization_key(key: &str) -> Option<OrganizationId> {
+        key.strip_prefix("org:").and_then(|id| id.parse().ok())
     }
 
-    /// Index key for namespace name lookup.
+    /// Index key for organization slug lookup.
     ///
-    /// Pattern: `_idx:ns:name:{name}` → namespace_id
-    ///
-    /// Names are normalized to lowercase for consistent lookups.
-    pub fn namespace_name_index_key(name: &str) -> String {
-        format!("_idx:ns:name:{}", name.to_lowercase())
+    /// Pattern: `_idx:org:slug:{slug}` → organization_id
+    pub fn organization_slug_key(slug: OrganizationSlug) -> String {
+        format!("_idx:org:slug:{}", slug.value())
     }
 
     // ========================================================================
@@ -113,10 +111,10 @@ impl SystemKeys {
     // Sequence Counter Keys
     // ========================================================================
 
-    /// Key for the namespace ID sequence counter.
+    /// Key for the organization ID sequence counter.
     ///
-    /// Pattern: `_meta:seq:namespace` → next NamespaceId (starts at 1, 0 = _system)
-    pub const NAMESPACE_SEQ_KEY: &'static str = "_meta:seq:namespace";
+    /// Pattern: `_meta:seq:organization` → next OrganizationId (starts at 1, 0 = _system)
+    pub const ORG_SEQ_KEY: &'static str = "_meta:seq:organization";
 
     /// Key for the vault ID sequence counter.
     ///
@@ -159,8 +157,8 @@ impl SystemKeys {
     /// Prefix for all user email keys.
     pub const USER_EMAIL_PREFIX: &'static str = "user_email:";
 
-    /// Prefix for all namespace keys.
-    pub const NAMESPACE_PREFIX: &'static str = "ns:";
+    /// Prefix for all organization keys.
+    pub const ORG_PREFIX: &'static str = "org:";
 
     /// Prefix for all node keys.
     pub const NODE_PREFIX: &'static str = "node:";
@@ -197,9 +195,17 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_key() {
-        assert_eq!(SystemKeys::namespace_key(NamespaceId::new(42)), "ns:42");
-        assert_eq!(SystemKeys::parse_namespace_key("ns:42"), Some(NamespaceId::new(42)));
+    fn test_organization_key() {
+        assert_eq!(SystemKeys::organization_key(OrganizationId::new(42)), "org:42");
+        assert_eq!(SystemKeys::parse_organization_key("org:42"), Some(OrganizationId::new(42)));
+    }
+
+    #[test]
+    fn test_organization_slug_key() {
+        assert_eq!(
+            SystemKeys::organization_slug_key(OrganizationSlug::new(12345)),
+            "_idx:org:slug:12345"
+        );
     }
 
     #[test]
@@ -210,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_sequence_keys() {
-        assert_eq!(SystemKeys::NAMESPACE_SEQ_KEY, "_meta:seq:namespace");
+        assert_eq!(SystemKeys::ORG_SEQ_KEY, "_meta:seq:organization");
         assert_eq!(SystemKeys::USER_SEQ_KEY, "_meta:seq:user");
     }
 
@@ -223,8 +229,8 @@ mod tests {
     fn test_prefixes() {
         assert!(SystemKeys::user_key(UserId::new(1)).starts_with(SystemKeys::USER_PREFIX));
         assert!(
-            SystemKeys::namespace_key(NamespaceId::new(1))
-                .starts_with(SystemKeys::NAMESPACE_PREFIX)
+            SystemKeys::organization_key(OrganizationId::new(1))
+                .starts_with(SystemKeys::ORG_PREFIX)
         );
         assert!(SystemKeys::node_key(&"n".to_string()).starts_with(SystemKeys::NODE_PREFIX));
     }

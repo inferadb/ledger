@@ -242,7 +242,7 @@
     {
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
       "id": 7,
-      "title": "Top Clients & Namespaces",
+      "title": "Top Clients & Organizations",
       "type": "row"
     },
     {
@@ -336,12 +336,12 @@
       "targets": [
         {
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "topk(10, sum by (namespace_id) (count_over_time({job=\"inferadb-ledger\"} | json | outcome=\"error\" [$__range])))",
+          "expr": "topk(10, sum by (organization_slug) (count_over_time({job=\"inferadb-ledger\"} | json | outcome=\"error\" [$__range])))",
           "legendFormat": "",
           "refId": "A"
         }
       ],
-      "title": "Top 10 Namespaces by Error Count",
+      "title": "Top 10 Organizations by Error Count",
       "transformations": [
         { "id": "reduce", "options": { "includeTimeField": false, "mode": "reduceFields", "reducers": ["lastNotNull"] } },
         { "id": "sortBy", "options": { "fields": {}, "sort": [{ "desc": true, "field": "Last *" }] } },
@@ -696,14 +696,14 @@
         "allValue": ".*",
         "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
         "datasource": { "type": "loki", "uid": "${datasource}" },
-        "definition": "label_values({job=\"inferadb-ledger\"}, namespace_id)",
+        "definition": "label_values({job=\"inferadb-ledger\"}, organization_slug)",
         "hide": 0,
         "includeAll": true,
-        "label": "Namespace",
+        "label": "Organization",
         "multi": true,
-        "name": "namespace",
+        "name": "organization",
         "options": [],
-        "query": "label_values({job=\"inferadb-ledger\"}, namespace_id)",
+        "query": "label_values({job=\"inferadb-ledger\"}, organization_slug)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,

@@ -13,7 +13,7 @@ Commits to header only (not transaction bodies), enabling header-only verificati
 ```
 block_hash = SHA-256(
     height              || # u64, big-endian (8 bytes)
-    namespace_id        || # i64, big-endian (8 bytes)
+    organization_slug        || # i64, big-endian (8 bytes)
     vault_id            || # i64, big-endian (8 bytes)
     previous_hash       || # 32 bytes (zero-hash for genesis)
     tx_merkle_root      || # 32 bytes

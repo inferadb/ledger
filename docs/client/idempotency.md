@@ -95,7 +95,7 @@ Client state is tracked at two levels:
 
 | Write Scope         | GetClientState Call                          | Use Case                         |
 | ------------------- | -------------------------------------------- | -------------------------------- |
-| Namespace entities  | `GetClientState(ns_id, client_id)`           | Control writing users, sessions  |
+| Organization entities  | `GetClientState(ns_id, client_id)`           | Control writing users, sessions  |
 | Vault relationships | `GetClientState(ns_id, vault_id, client_id)` | App writing authorization tuples |
 
 A single client can have separate sequence streams for each scope.

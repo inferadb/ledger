@@ -22,7 +22,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check
 
 # Check specific vault health
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.HealthService/Check
 ```
 
@@ -30,10 +30,10 @@ grpcurl -plaintext \
 
 | Field          | Type        | Description                          |
 | -------------- | ----------- | ------------------------------------ |
-| `namespace_id` | NamespaceId | (Optional) Namespace for vault check |
+| `organization_slug` | OrganizationSlug | (Optional) Organization for vault check |
 | `vault_id`     | VaultId     | (Optional) Specific vault to check   |
 
-If both `namespace_id` and `vault_id` are omitted, returns overall node health.
+If both `organization_slug` and `vault_id` are omitted, returns overall node health.
 
 **Response:**
 

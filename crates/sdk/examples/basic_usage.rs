@@ -4,7 +4,7 @@
 //!
 //! This example shows:
 //! - Client configuration and connection
-//! - Creating a namespace and vault
+//! - Creating a organization and vault
 //! - Writing entities with automatic idempotency
 //! - Reading values with different consistency levels
 //! - Error handling patterns
@@ -41,12 +41,13 @@ async fn main() -> Result<()> {
     println!("Client connected with ID: {}", client.client_id());
 
     // -------------------------------------------------------------------------
-    // 2. Create a namespace and vault for our data
+    // 2. Create a organization and vault for our data
     // -------------------------------------------------------------------------
-    let namespace_id = client.create_namespace("example_namespace").await?;
-    println!("Created namespace: {namespace_id}");
+    let org = client.create_organization("example_organization").await?;
+    let organization_slug = org.organization_slug;
+    println!("Created organization with slug: {organization_slug}");
 
-    let vault_info = client.create_vault(namespace_id).await?;
+    let vault_info = client.create_vault(organization_slug).await?;
     let vault_id = vault_info.vault_id;
     println!("Created vault: {vault_id}");
 
@@ -62,7 +63,7 @@ async fn main() -> Result<()> {
 
     let write_result = client
         .write(
-            namespace_id,
+            organization_slug,
             Some(vault_id),
             vec![Operation::set_entity(
                 user_key,
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 4. Read the value back with eventual consistency (fast)
     // -------------------------------------------------------------------------
-    let value = client.read(namespace_id, Some(vault_id), user_key).await?;
+    let value = client.read(organization_slug, Some(vault_id), user_key).await?;
 
     match value {
         Some(bytes) => {
@@ -92,7 +93,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 5. Read with linearizable consistency (strong, reads from leader)
     // -------------------------------------------------------------------------
-    let value = client.read_consistent(namespace_id, Some(vault_id), user_key).await?;
+    let value = client.read_consistent(organization_slug, Some(vault_id), user_key).await?;
 
     match value {
         Some(bytes) => {
@@ -112,14 +113,14 @@ async fn main() -> Result<()> {
         Operation::create_relationship("doc:readme", "editor", "user:bob"),
     ];
 
-    let result = client.write(namespace_id, Some(vault_id), operations).await?;
+    let result = client.write(organization_slug, Some(vault_id), operations).await?;
     println!("Multi-entity write at block {}, tx: {}", result.block_height, result.tx_id);
 
     // -------------------------------------------------------------------------
     // 7. Batch read multiple keys
     // -------------------------------------------------------------------------
     let keys = vec!["user:alice", "user:bob", "user:charlie", "user:nonexistent"];
-    let results = client.batch_read(namespace_id, Some(vault_id), keys).await?;
+    let results = client.batch_read(organization_slug, Some(vault_id), keys).await?;
 
     println!("Batch read results:");
     for (key, value) in results {

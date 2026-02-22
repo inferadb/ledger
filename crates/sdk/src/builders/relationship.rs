@@ -46,7 +46,7 @@ use crate::{
 /// for that field. Chain filters, then call `.execute()`.
 pub struct RelationshipQueryBuilder<'a> {
     client: &'a LedgerClient,
-    namespace_id: i64,
+    organization_slug: u64,
     vault_id: i64,
     resource: Option<String>,
     relation: Option<String>,
@@ -59,10 +59,10 @@ pub struct RelationshipQueryBuilder<'a> {
 
 impl<'a> RelationshipQueryBuilder<'a> {
     /// Creates a new relationship query builder.
-    pub(crate) fn new(client: &'a LedgerClient, namespace_id: i64, vault_id: i64) -> Self {
+    pub(crate) fn new(client: &'a LedgerClient, organization_slug: u64, vault_id: i64) -> Self {
         Self {
             client,
-            namespace_id,
+            organization_slug,
             vault_id,
             resource: None,
             relation: None,
@@ -140,7 +140,7 @@ impl<'a> RelationshipQueryBuilder<'a> {
             page_token: self.page_token,
             consistency: self.consistency,
         };
-        self.client.list_relationships(self.namespace_id, self.vault_id, opts).await
+        self.client.list_relationships(self.organization_slug, self.vault_id, opts).await
     }
 }
 
@@ -153,7 +153,7 @@ mod tests {
     async fn relationship_query_default_state() {
         let client = test_client().await;
         let builder = client.relationship_query(1, 2);
-        assert_eq!(builder.namespace_id, 1);
+        assert_eq!(builder.organization_slug, 1);
         assert_eq!(builder.vault_id, 2);
         assert!(builder.resource.is_none());
         assert!(builder.relation.is_none());

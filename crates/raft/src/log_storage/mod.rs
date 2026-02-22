@@ -65,9 +65,9 @@ pub struct ShardChainState {
 mod tests {
     use std::collections::HashMap;
 
-    use inferadb_ledger_state::system::NamespaceStatus;
+    use inferadb_ledger_state::system::OrganizationStatus;
     use inferadb_ledger_store::{FileBackend, tables};
-    use inferadb_ledger_types::{NamespaceId, ShardId, VaultId};
+    use inferadb_ledger_types::{OrganizationId, ShardId, VaultId};
     use openraft::{
         CommittedLeaderId, Entry, EntryPayload, LogId, RaftStorage, Vote, storage::RaftLogReader,
     };
@@ -118,8 +118,8 @@ mod tests {
     async fn test_sequence_counters() {
         let mut counters = SequenceCounters::new();
 
-        assert_eq!(counters.next_namespace(), NamespaceId::new(1));
-        assert_eq!(counters.next_namespace(), NamespaceId::new(2));
+        assert_eq!(counters.next_organization(), OrganizationId::new(1));
+        assert_eq!(counters.next_organization(), OrganizationId::new(2));
         assert_eq!(counters.next_vault(), VaultId::new(1));
         assert_eq!(counters.next_vault(), VaultId::new(2));
         assert_eq!(counters.next_user(), 1);
@@ -131,15 +131,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_create_namespace() {
+    async fn test_apply_create_organization() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        let request = LedgerRequest::CreateNamespace {
+        let request = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: None,
             quota: None,
         };
@@ -147,8 +148,8 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => {
-                assert_eq!(namespace_id, NamespaceId::new(1));
+            LedgerResponse::OrganizationCreated { organization_id, .. } => {
+                assert_eq!(organization_id, OrganizationId::new(1));
             },
             _ => panic!("unexpected response"),
         }
@@ -156,300 +157,321 @@ mod tests {
 
     #[test]
     fn test_select_least_loaded_shard_empty() {
-        let namespaces = HashMap::new();
-        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
+        let organizations = HashMap::new();
+        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
     }
 
     #[test]
     fn test_select_least_loaded_shard_single_shard() {
-        let mut namespaces = HashMap::new();
-        namespaces.insert(
-            NamespaceId::new(1),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(1),
+        let mut organizations = HashMap::new();
+        organizations.insert(
+            OrganizationId::new(1),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(2),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(2),
+        organizations.insert(
+            OrganizationId::new(2),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(2),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
         // Only shard 0 exists, so it should be selected
-        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
+        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
     }
 
     #[test]
     fn test_select_least_loaded_shard_equal_load_prefers_lower_id() {
-        let mut namespaces = HashMap::new();
-        // Shard 0: 2 namespaces
-        namespaces.insert(
-            NamespaceId::new(1),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(1),
+        let mut organizations = HashMap::new();
+        // Shard 0: 2 organizations
+        organizations.insert(
+            OrganizationId::new(1),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(2),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(2),
+        organizations.insert(
+            OrganizationId::new(2),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(2),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        // Shard 1: 2 namespaces (equal load)
-        namespaces.insert(
-            NamespaceId::new(3),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(3),
+        // Shard 1: 2 organizations (equal load)
+        organizations.insert(
+            OrganizationId::new(3),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(3),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns3".to_string(),
                 shard_id: ShardId::new(1),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(4),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(4),
+        organizations.insert(
+            OrganizationId::new(4),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(4),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns4".to_string(),
                 shard_id: ShardId::new(1),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
         // Tie-breaker: lower shard_id wins
-        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
+        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
     }
 
     #[test]
     fn test_select_least_loaded_shard_unequal_load() {
-        let mut namespaces = HashMap::new();
-        // Shard 0: 3 namespaces
-        namespaces.insert(
-            NamespaceId::new(1),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(1),
+        let mut organizations = HashMap::new();
+        // Shard 0: 3 organizations
+        organizations.insert(
+            OrganizationId::new(1),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(2),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(2),
+        organizations.insert(
+            OrganizationId::new(2),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(2),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(3),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(3),
+        organizations.insert(
+            OrganizationId::new(3),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(3),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns3".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        // Shard 1: 1 namespace (lighter)
-        namespaces.insert(
-            NamespaceId::new(4),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(4),
+        // Shard 1: 1 organization (lighter)
+        organizations.insert(
+            OrganizationId::new(4),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(4),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns4".to_string(),
                 shard_id: ShardId::new(1),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        // Shard 1 has fewer namespaces
-        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(1));
+        // Shard 1 has fewer organizations
+        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(1));
     }
 
     #[test]
     fn test_select_least_loaded_shard_ignores_deleted() {
-        let mut namespaces = HashMap::new();
+        let mut organizations = HashMap::new();
         // Shard 0: 1 active, 2 deleted
-        namespaces.insert(
-            NamespaceId::new(1),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(1),
+        organizations.insert(
+            OrganizationId::new(1),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(2),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(2),
+        organizations.insert(
+            OrganizationId::new(2),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(2),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Deleted,
+                status: OrganizationStatus::Deleted,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(3),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(3),
+        organizations.insert(
+            OrganizationId::new(3),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(3),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns3".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Deleted,
+                status: OrganizationStatus::Deleted,
                 pending_shard_id: None,
                 quota: None,
             },
         );
         // Shard 1: 2 active
-        namespaces.insert(
-            NamespaceId::new(4),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(4),
+        organizations.insert(
+            OrganizationId::new(4),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(4),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns4".to_string(),
                 shard_id: ShardId::new(1),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        namespaces.insert(
-            NamespaceId::new(5),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(5),
+        organizations.insert(
+            OrganizationId::new(5),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(5),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns5".to_string(),
                 shard_id: ShardId::new(1),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        // Shard 0 has only 1 active namespace (deleted don't count)
-        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(0));
+        // Shard 0 has only 1 active organization (deleted don't count)
+        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
     }
 
     #[test]
     fn test_select_least_loaded_shard_many_shards() {
-        let mut namespaces = HashMap::new();
-        // Shard 0: 5 namespaces
+        let mut organizations = HashMap::new();
+        // Shard 0: 5 organizations
         for i in 1..=5i64 {
-            namespaces.insert(
-                NamespaceId::new(i),
-                NamespaceMeta {
-                    namespace_id: NamespaceId::new(i),
+            organizations.insert(
+                OrganizationId::new(i),
+                OrganizationMeta {
+                    organization_id: OrganizationId::new(i),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("ns{}", i),
                     shard_id: ShardId::new(0),
-                    status: NamespaceStatus::Active,
+                    status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
                 },
             );
         }
-        // Shard 1: 3 namespaces
+        // Shard 1: 3 organizations
         for i in 6..=8i64 {
-            namespaces.insert(
-                NamespaceId::new(i),
-                NamespaceMeta {
-                    namespace_id: NamespaceId::new(i),
+            organizations.insert(
+                OrganizationId::new(i),
+                OrganizationMeta {
+                    organization_id: OrganizationId::new(i),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("ns{}", i),
                     shard_id: ShardId::new(1),
-                    status: NamespaceStatus::Active,
+                    status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
                 },
             );
         }
-        // Shard 2: 2 namespaces (minimum)
+        // Shard 2: 2 organizations (minimum)
         for i in 9..=10i64 {
-            namespaces.insert(
-                NamespaceId::new(i),
-                NamespaceMeta {
-                    namespace_id: NamespaceId::new(i),
+            organizations.insert(
+                OrganizationId::new(i),
+                OrganizationMeta {
+                    organization_id: OrganizationId::new(i),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("ns{}", i),
                     shard_id: ShardId::new(2),
-                    status: NamespaceStatus::Active,
+                    status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
                 },
             );
         }
-        // Shard 2 has the fewest namespaces
-        assert_eq!(select_least_loaded_shard(&namespaces), ShardId::new(2));
+        // Shard 2 has the fewest organizations
+        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(2));
     }
 
     #[tokio::test]
-    async fn test_apply_create_namespace_load_balanced() {
+    async fn test_apply_create_organization_load_balanced() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Pre-populate with namespaces on different shards
-        // Shard 0: 3 namespaces
+        // Pre-populate with organizations on different shards
+        // Shard 0: 3 organizations
         for i in 1..=3i64 {
-            state.namespaces.insert(
-                NamespaceId::new(i),
-                NamespaceMeta {
-                    namespace_id: NamespaceId::new(i),
+            state.organizations.insert(
+                OrganizationId::new(i),
+                OrganizationMeta {
+                    organization_id: OrganizationId::new(i),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("existing-ns-{}", i),
                     shard_id: ShardId::new(0),
-                    status: NamespaceStatus::Active,
+                    status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
                 },
             );
         }
-        // Shard 1: 1 namespace
-        state.namespaces.insert(
-            NamespaceId::new(4),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(4),
+        // Shard 1: 1 organization
+        state.organizations.insert(
+            OrganizationId::new(4),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(4),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "existing-ns-4".to_string(),
                 shard_id: ShardId::new(1),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        state.sequences.namespace = NamespaceId::new(5); // Next ID is 5
+        state.sequences.organization = OrganizationId::new(5); // Next ID is 5
 
         drop(state);
 
         let mut state = store.applied_state.write();
-        let request = LedgerRequest::CreateNamespace {
+        let request = LedgerRequest::CreateOrganization {
             name: "new-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: None,
             quota: None,
         };
@@ -457,9 +479,9 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                assert_eq!(namespace_id, NamespaceId::new(5));
-                // Should be assigned to shard 1 (fewer namespaces)
+            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+                assert_eq!(organization_id, OrganizationId::new(5));
+                // Should be assigned to shard 1 (fewer organizations)
                 assert_eq!(shard_id, ShardId::new(1), "Should assign to least-loaded shard");
             },
             _ => panic!("unexpected response"),
@@ -467,30 +489,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_create_namespace_explicit_shard_overrides() {
+    async fn test_apply_create_organization_explicit_shard_overrides() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Pre-populate: shard 0 has fewer namespaces
-        state.namespaces.insert(
-            NamespaceId::new(1),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(1),
+        // Pre-populate: shard 0 has fewer organizations
+        state.organizations.insert(
+            OrganizationId::new(1),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "existing".to_string(),
                 shard_id: ShardId::new(0),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        state.sequences.namespace = NamespaceId::new(2);
+        state.sequences.organization = OrganizationId::new(2);
 
         // Request explicit shard 5 (even though it would be "heavy" if it existed)
-        let request = LedgerRequest::CreateNamespace {
+        let request = LedgerRequest::CreateOrganization {
             name: "new-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(5)),
             quota: None,
         };
@@ -498,8 +522,8 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                assert_eq!(namespace_id, NamespaceId::new(2));
+            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+                assert_eq!(organization_id, OrganizationId::new(2));
                 // Explicit shard_id should override load balancing
                 assert_eq!(
                     shard_id,
@@ -520,7 +544,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         let request = LedgerRequest::CreateVault {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
@@ -531,7 +555,7 @@ mod tests {
             LedgerResponse::VaultCreated { vault_id } => {
                 assert_eq!(vault_id, VaultId::new(1));
                 assert_eq!(
-                    state.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
+                    state.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
                     Some(&0)
                 );
             },
@@ -549,12 +573,12 @@ mod tests {
 
         // Mark vault as diverged
         state.vault_health.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         let request = LedgerRequest::Write {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![],
         };
@@ -579,13 +603,13 @@ mod tests {
 
         // Start with a diverged vault
         state.vault_health.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         // Update to healthy
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: true,
             expected_root: None,
@@ -606,7 +630,7 @@ mod tests {
 
         // Verify vault is now healthy
         assert_eq!(
-            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(&VaultHealthStatus::Healthy)
         );
     }
@@ -622,11 +646,11 @@ mod tests {
         // Start healthy
         state
             .vault_health
-            .insert((NamespaceId::new(1), VaultId::new(1)), VaultHealthStatus::Healthy);
+            .insert((OrganizationId::new(1), VaultId::new(1)), VaultHealthStatus::Healthy);
 
         // Update to diverged
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: false,
             expected_root: Some([0xAA; 32]),
@@ -646,7 +670,7 @@ mod tests {
         }
 
         // Verify vault is now diverged with correct values
-        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
+        match state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))) {
             Some(VaultHealthStatus::Diverged { expected, computed, at_height }) => {
                 assert_eq!(*expected, [0xAA; 32]);
                 assert_eq!(*computed, [0xBB; 32]);
@@ -666,13 +690,13 @@ mod tests {
 
         // Start with a diverged vault
         state.vault_health.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         // Update to recovering
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: false,
             expected_root: None,
@@ -692,7 +716,7 @@ mod tests {
         }
 
         // Verify vault is now recovering
-        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
+        match state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))) {
             Some(VaultHealthStatus::Recovering { attempt, .. }) => {
                 assert_eq!(*attempt, 1);
             },
@@ -701,7 +725,7 @@ mod tests {
 
         // Test recovery attempt 2 (circuit breaker)
         let request = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: false,
             expected_root: None,
@@ -720,7 +744,7 @@ mod tests {
             _ => panic!("expected VaultHealthUpdated response"),
         }
 
-        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
+        match state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))) {
             Some(VaultHealthStatus::Recovering { attempt, .. }) => {
                 assert_eq!(*attempt, 2);
             },
@@ -732,33 +756,34 @@ mod tests {
     // Deletion Cascade Tests
     // ========================================================================
     //
-    // These tests verify the namespace deletion behavior with blocking vaults.
-    // Namespaces with active vaults cannot be deleted until all vaults are
+    // These tests verify the organization deletion behavior with blocking vaults.
+    // Organizations with active vaults cannot be deleted until all vaults are
     // deleted first. The response includes blocking vault IDs.
 
     #[tokio::test]
-    async fn test_delete_namespace_blocked_by_active_vaults() {
+    async fn test_delete_organization_blocked_by_active_vaults() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
@@ -769,7 +794,7 @@ mod tests {
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
@@ -779,47 +804,51 @@ mod tests {
             _ => panic!("expected VaultCreated"),
         };
 
-        // Try to delete namespace - should transition to Deleting with blocking vault IDs
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Try to delete organization - should transition to Deleting with blocking vault IDs
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::NamespaceDeleting { namespace_id: ns_id, blocking_vault_ids } => {
-                assert_eq!(ns_id, namespace_id);
+            LedgerResponse::OrganizationDeleting { organization_id: ns_id, blocking_vault_ids } => {
+                assert_eq!(ns_id, organization_id);
                 assert_eq!(blocking_vault_ids.len(), 2);
                 assert!(blocking_vault_ids.contains(&vault1_id));
                 assert!(blocking_vault_ids.contains(&vault2_id));
             },
-            _ => panic!("expected NamespaceDeleting"),
+            _ => panic!("expected OrganizationDeleting"),
         }
 
-        // Verify namespace is now in Deleting state
-        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
+        // Verify organization is now in Deleting state
+        assert_eq!(
+            state.organizations.get(&organization_id).unwrap().status,
+            OrganizationStatus::Deleting
+        );
     }
 
     #[tokio::test]
-    async fn test_delete_namespace_succeeds_after_vaults_deleted() {
+    async fn test_delete_organization_succeeds_after_vaults_deleted() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Create vault
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault".to_string()),
             retention_policy: None,
         };
@@ -830,72 +859,77 @@ mod tests {
         };
 
         // Delete vault first
-        let delete_vault = LedgerRequest::DeleteVault { namespace_id, vault_id };
+        let delete_vault = LedgerRequest::DeleteVault { organization_id, vault_id };
         let (response, _) = store.apply_request(&delete_vault, &mut state);
         match response {
             LedgerResponse::VaultDeleted { success } => assert!(success),
             _ => panic!("expected VaultDeleted"),
         }
 
-        // Now delete namespace - should succeed
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Now delete organization - should succeed
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
                 assert!(success);
                 assert!(blocking_vault_ids.is_empty());
             },
-            _ => panic!("expected NamespaceDeleted"),
+            _ => panic!("expected OrganizationDeleted"),
         }
 
-        // Verify namespace is marked as deleted
-        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleted);
+        // Verify organization is marked as deleted
+        assert_eq!(
+            state.organizations.get(&organization_id).unwrap().status,
+            OrganizationStatus::Deleted
+        );
     }
 
     #[tokio::test]
-    async fn test_delete_namespace_empty_succeeds() {
+    async fn test_delete_organization_empty_succeeds() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace with no vaults
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization with no vaults
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "empty-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        // Delete namespace immediately - should succeed (no vaults)
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Delete organization immediately - should succeed (no vaults)
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
                 assert!(success);
                 assert!(blocking_vault_ids.is_empty());
             },
-            _ => panic!("expected NamespaceDeleted"),
+            _ => panic!("expected OrganizationDeleted"),
         }
     }
 
     #[tokio::test]
-    async fn test_delete_namespace_not_found() {
+    async fn test_delete_organization_not_found() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Try to delete non-existent namespace
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id: NamespaceId::new(999) };
+        // Try to delete non-existent organization
+        let delete_ns =
+            LedgerRequest::DeleteOrganization { organization_id: OrganizationId::new(999) };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
@@ -908,28 +942,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_namespace_ignores_deleted_vaults() {
+    async fn test_delete_organization_ignores_deleted_vaults() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
@@ -940,7 +975,7 @@ mod tests {
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
@@ -951,112 +986,117 @@ mod tests {
         };
 
         // Delete vault1
-        let delete_vault = LedgerRequest::DeleteVault { namespace_id, vault_id: vault1_id };
+        let delete_vault = LedgerRequest::DeleteVault { organization_id, vault_id: vault1_id };
         let (response, _) = store.apply_request(&delete_vault, &mut state);
         match response {
             LedgerResponse::VaultDeleted { success } => assert!(success),
             _ => panic!("expected VaultDeleted"),
         }
 
-        // Try to delete namespace - should transition to Deleting, but only vault2 should be in
+        // Try to delete organization - should transition to Deleting, but only vault2 should be in
         // blocking list
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::NamespaceDeleting { namespace_id: ns_id, blocking_vault_ids } => {
-                assert_eq!(ns_id, namespace_id);
+            LedgerResponse::OrganizationDeleting { organization_id: ns_id, blocking_vault_ids } => {
+                assert_eq!(ns_id, organization_id);
                 assert_eq!(blocking_vault_ids.len(), 1);
                 assert!(blocking_vault_ids.contains(&vault2_id));
                 // vault1 was deleted, so it should NOT be in blocking list
                 assert!(!blocking_vault_ids.contains(&vault1_id));
             },
-            _ => panic!("expected NamespaceDeleting"),
+            _ => panic!("expected OrganizationDeleting"),
         }
 
-        // Verify namespace is now in Deleting state
-        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
+        // Verify organization is now in Deleting state
+        assert_eq!(
+            state.organizations.get(&organization_id).unwrap().status,
+            OrganizationStatus::Deleting
+        );
     }
 
     // ========================================================================
-    // Namespace Migration Tests
+    // Organization Migration Tests
     // ========================================================================
     //
-    // These tests verify namespace migration behavior via SystemRequest::UpdateNamespaceRouting.
-    // Migration changes the shard_id for a namespace, updating routing without data movement.
+    // These tests verify organization migration behavior via
+    // SystemRequest::UpdateOrganizationRouting. Migration changes the shard_id for a
+    // organization, updating routing without data movement.
 
     #[tokio::test]
-    async fn test_migrate_namespace_success() {
+    async fn test_migrate_organization_success() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace on shard 0
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization on shard 0
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
                 assert_eq!(shard_id, ShardId::new(0));
-                namespace_id
+                organization_id
             },
-            _ => panic!("expected NamespaceCreated"),
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Verify initial state
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
         assert_eq!(meta.shard_id, ShardId::new(0));
-        assert_eq!(meta.status, NamespaceStatus::Active);
+        assert_eq!(meta.status, OrganizationStatus::Active);
 
         // Migrate to shard 1
-        let migrate = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id,
+        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id,
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::NamespaceMigrated {
-                namespace_id: ns_id,
+            LedgerResponse::OrganizationMigrated {
+                organization_id: ns_id,
                 old_shard_id,
                 new_shard_id,
             } => {
-                assert_eq!(ns_id, namespace_id);
+                assert_eq!(ns_id, organization_id);
                 assert_eq!(old_shard_id, ShardId::new(0));
                 assert_eq!(new_shard_id, ShardId::new(1));
             },
-            _ => panic!("expected NamespaceMigrated, got {:?}", response),
+            _ => panic!("expected OrganizationMigrated, got {:?}", response),
         }
 
         // Verify updated state
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
         assert_eq!(meta.shard_id, ShardId::new(1), "shard_id should be updated");
-        assert_eq!(meta.status, NamespaceStatus::Active, "status should remain unchanged");
+        assert_eq!(meta.status, OrganizationStatus::Active, "status should remain unchanged");
     }
 
     #[tokio::test]
-    async fn test_migrate_namespace_not_found() {
+    async fn test_migrate_organization_not_found() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Try to migrate non-existent namespace
-        let migrate = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id: NamespaceId::new(999),
+        // Try to migrate non-existent organization
+        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id: OrganizationId::new(999),
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
-                assert!(message.contains("999"), "error should mention namespace ID");
+                assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should indicate not found");
             },
             _ => panic!("expected Error response, got {:?}", response),
@@ -1064,75 +1104,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_migrate_namespace_deleted() {
+    async fn test_migrate_organization_deleted() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and delete namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and delete organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "deleted-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        // Delete the namespace
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Delete the organization
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
         match response {
-            LedgerResponse::NamespaceDeleted { success, .. } => assert!(success),
-            _ => panic!("expected NamespaceDeleted"),
+            LedgerResponse::OrganizationDeleted { success, .. } => assert!(success),
+            _ => panic!("expected OrganizationDeleted"),
         }
 
-        // Verify namespace is deleted
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.status, NamespaceStatus::Deleted);
+        // Verify organization is deleted
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
+        assert_eq!(meta.status, OrganizationStatus::Deleted);
 
-        // Try to migrate deleted namespace
-        let migrate = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id,
+        // Try to migrate deleted organization
+        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id,
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
-                assert!(message.contains("deleted"), "error should mention deleted namespace");
+                assert!(message.contains("deleted"), "error should mention deleted organization");
             },
             _ => panic!("expected Error response, got {:?}", response),
         }
     }
 
     #[tokio::test]
-    async fn test_migrate_namespace_negative_shard_id() {
+    async fn test_migrate_organization_negative_shard_id() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Try to migrate to invalid negative shard_id
-        let migrate = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id,
+        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id,
             shard_id: -1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
@@ -1145,217 +1187,221 @@ mod tests {
         }
 
         // Verify shard_id remains unchanged
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
         assert_eq!(meta.shard_id, ShardId::new(0), "shard_id should remain unchanged after error");
     }
 
     #[tokio::test]
-    async fn test_migrate_namespace_idempotent_same_shard() {
+    async fn test_migrate_organization_idempotent_same_shard() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace on shard 0
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization on shard 0
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
                 assert_eq!(shard_id, ShardId::new(0));
-                namespace_id
+                organization_id
             },
-            _ => panic!("expected NamespaceCreated"),
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Migrate to same shard (idempotent case)
-        let migrate = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id,
+        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id,
             shard_id: 0,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::NamespaceMigrated {
-                namespace_id: ns_id,
+            LedgerResponse::OrganizationMigrated {
+                organization_id: ns_id,
                 old_shard_id,
                 new_shard_id,
             } => {
-                assert_eq!(ns_id, namespace_id);
+                assert_eq!(ns_id, organization_id);
                 assert_eq!(old_shard_id, ShardId::new(0));
                 assert_eq!(new_shard_id, ShardId::new(0), "should be idempotent - same shard");
             },
-            _ => panic!("expected NamespaceMigrated (idempotent), got {:?}", response),
+            _ => panic!("expected OrganizationMigrated (idempotent), got {:?}", response),
         }
 
         // Verify state remains consistent
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
         assert_eq!(meta.shard_id, ShardId::new(0));
-        assert_eq!(meta.status, NamespaceStatus::Active);
+        assert_eq!(meta.status, OrganizationStatus::Active);
     }
 
     #[tokio::test]
-    async fn test_migrate_namespace_multiple_times() {
+    async fn test_migrate_organization_multiple_times() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "migrating-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Migration 1: shard 0 -> shard 1
-        let migrate1 = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id,
+        let migrate1 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id,
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate1, &mut state);
         match response {
-            LedgerResponse::NamespaceMigrated { old_shard_id, new_shard_id, .. } => {
+            LedgerResponse::OrganizationMigrated { old_shard_id, new_shard_id, .. } => {
                 assert_eq!(old_shard_id, ShardId::new(0));
                 assert_eq!(new_shard_id, ShardId::new(1));
             },
-            _ => panic!("expected NamespaceMigrated"),
+            _ => panic!("expected OrganizationMigrated"),
         }
 
         // Migration 2: shard 1 -> shard 2
-        let migrate2 = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id,
+        let migrate2 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id,
             shard_id: 2,
         });
         let (response, _) = store.apply_request(&migrate2, &mut state);
         match response {
-            LedgerResponse::NamespaceMigrated { old_shard_id, new_shard_id, .. } => {
+            LedgerResponse::OrganizationMigrated { old_shard_id, new_shard_id, .. } => {
                 assert_eq!(old_shard_id, ShardId::new(1));
                 assert_eq!(new_shard_id, ShardId::new(2));
             },
-            _ => panic!("expected NamespaceMigrated"),
+            _ => panic!("expected OrganizationMigrated"),
         }
 
         // Migration 3: shard 2 -> shard 0 (back to original)
-        let migrate3 = LedgerRequest::System(SystemRequest::UpdateNamespaceRouting {
-            namespace_id,
+        let migrate3 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+            organization_id,
             shard_id: 0,
         });
         let (response, _) = store.apply_request(&migrate3, &mut state);
         match response {
-            LedgerResponse::NamespaceMigrated { old_shard_id, new_shard_id, .. } => {
+            LedgerResponse::OrganizationMigrated { old_shard_id, new_shard_id, .. } => {
                 assert_eq!(old_shard_id, ShardId::new(2));
                 assert_eq!(new_shard_id, ShardId::new(0));
             },
-            _ => panic!("expected NamespaceMigrated"),
+            _ => panic!("expected OrganizationMigrated"),
         }
 
         // Verify final state
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
         assert_eq!(meta.shard_id, ShardId::new(0));
     }
 
     // ========================================================================
-    // Namespace Suspension Tests
+    // Organization Suspension Tests
     // ========================================================================
     //
-    // These tests verify namespace suspension behavior for billing/policy holds.
-    // Suspended namespaces reject writes but allow reads.
+    // These tests verify organization suspension behavior for billing/policy holds.
+    // Suspended organizations reject writes but allow reads.
 
     #[tokio::test]
-    async fn test_suspend_namespace_success() {
+    async fn test_suspend_organization_success() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Verify initial state
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.status, NamespaceStatus::Active);
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
+        assert_eq!(meta.status, OrganizationStatus::Active);
 
-        // Suspend the namespace
-        let suspend = LedgerRequest::SuspendNamespace {
-            namespace_id,
+        // Suspend the organization
+        let suspend = LedgerRequest::SuspendOrganization {
+            organization_id,
             reason: Some("Payment overdue".to_string()),
         };
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
-            LedgerResponse::NamespaceSuspended { namespace_id: ns_id } => {
-                assert_eq!(ns_id, namespace_id);
+            LedgerResponse::OrganizationSuspended { organization_id: ns_id } => {
+                assert_eq!(ns_id, organization_id);
             },
-            _ => panic!("expected NamespaceSuspended, got {:?}", response),
+            _ => panic!("expected OrganizationSuspended, got {:?}", response),
         }
 
         // Verify suspended state
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.status, NamespaceStatus::Suspended);
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
+        assert_eq!(meta.status, OrganizationStatus::Suspended);
     }
 
     #[tokio::test]
-    async fn test_resume_namespace_success() {
+    async fn test_resume_organization_success() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and suspend namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and suspend organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
-            LedgerResponse::NamespaceSuspended { .. } => {},
-            _ => panic!("expected NamespaceSuspended"),
+            LedgerResponse::OrganizationSuspended { .. } => {},
+            _ => panic!("expected OrganizationSuspended"),
         }
 
-        // Resume the namespace
-        let resume = LedgerRequest::ResumeNamespace { namespace_id };
+        // Resume the organization
+        let resume = LedgerRequest::ResumeOrganization { organization_id };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
-            LedgerResponse::NamespaceResumed { namespace_id: ns_id } => {
-                assert_eq!(ns_id, namespace_id);
+            LedgerResponse::OrganizationResumed { organization_id: ns_id } => {
+                assert_eq!(ns_id, organization_id);
             },
-            _ => panic!("expected NamespaceResumed, got {:?}", response),
+            _ => panic!("expected OrganizationResumed, got {:?}", response),
         }
 
         // Verify resumed state
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.status, NamespaceStatus::Active);
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
+        assert_eq!(meta.status, OrganizationStatus::Active);
     }
 
     // ========================================================================
@@ -1370,34 +1416,35 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace on shard 0
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization on shard 0
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration to shard 1
         let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
+            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
-            LedgerResponse::MigrationStarted { namespace_id: ns_id, target_shard_id } => {
-                assert_eq!(ns_id, namespace_id);
+            LedgerResponse::MigrationStarted { organization_id: ns_id, target_shard_id } => {
+                assert_eq!(ns_id, organization_id);
                 assert_eq!(target_shard_id, ShardId::new(1));
             },
             _ => panic!("expected MigrationStarted"),
         }
 
-        // Verify namespace is in Migrating state with pending shard
-        let ns = state.namespaces.get(&namespace_id).unwrap();
-        assert_eq!(ns.status, NamespaceStatus::Migrating);
+        // Verify organization is in Migrating state with pending shard
+        let ns = state.organizations.get(&organization_id).unwrap();
+        assert_eq!(ns.status, OrganizationStatus::Migrating);
         assert_eq!(ns.shard_id, ShardId::new(0)); // Still on old shard
         assert_eq!(ns.pending_shard_id, Some(ShardId::new(1))); // Target shard stored
     }
@@ -1411,7 +1458,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         let start_migration = LedgerRequest::StartMigration {
-            namespace_id: NamespaceId::new(999),
+            organization_id: OrganizationId::new(999),
             target_shard_id: ShardId::new(1),
         };
         let (response, _) = store.apply_request(&start_migration, &mut state);
@@ -1432,27 +1479,28 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration
         let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
+            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
         let (response, _) = store.apply_request(&start_migration, &mut state);
         assert!(matches!(response, LedgerResponse::MigrationStarted { .. }));
 
         // Try to start another migration - should fail
         let start_migration2 =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(2) };
+            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(2) };
         let (response, _) = store.apply_request(&start_migration2, &mut state);
 
         match response {
@@ -1464,31 +1512,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_migration_suspended_namespace() {
+    async fn test_start_migration_suspended_organization() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and suspend namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and suspend organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         store.apply_request(&suspend, &mut state);
 
         // Try to start migration - should fail
         let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
+            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
@@ -1507,43 +1556,44 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace on shard 0
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization on shard 0
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration to shard 1
         let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
+            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
         store.apply_request(&start_migration, &mut state);
 
         // Complete migration
-        let complete_migration = LedgerRequest::CompleteMigration { namespace_id };
+        let complete_migration = LedgerRequest::CompleteMigration { organization_id };
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
             LedgerResponse::MigrationCompleted {
-                namespace_id: ns_id,
+                organization_id: ns_id,
                 old_shard_id,
                 new_shard_id,
             } => {
-                assert_eq!(ns_id, namespace_id);
+                assert_eq!(ns_id, organization_id);
                 assert_eq!(old_shard_id, ShardId::new(0));
                 assert_eq!(new_shard_id, ShardId::new(1));
             },
             _ => panic!("expected MigrationCompleted"),
         }
 
-        // Verify namespace is back to Active on new shard
-        let ns = state.namespaces.get(&namespace_id).unwrap();
-        assert_eq!(ns.status, NamespaceStatus::Active);
+        // Verify organization is back to Active on new shard
+        let ns = state.organizations.get(&organization_id).unwrap();
+        assert_eq!(ns.status, OrganizationStatus::Active);
         assert_eq!(ns.shard_id, ShardId::new(1));
         assert_eq!(ns.pending_shard_id, None);
     }
@@ -1556,20 +1606,21 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace (Active state)
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization (Active state)
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Try to complete migration without starting - should fail
-        let complete_migration = LedgerRequest::CompleteMigration { namespace_id };
+        let complete_migration = LedgerRequest::CompleteMigration { organization_id };
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
@@ -1581,27 +1632,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_migrating_namespace_blocks_writes() {
+    async fn test_migrating_organization_blocks_writes() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace and vault
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization and vault
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault".to_string()),
             retention_policy: None,
         };
@@ -1613,11 +1665,11 @@ mod tests {
 
         // Start migration
         let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
+            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
         store.apply_request(&start_migration, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Write { namespace_id, vault_id, transactions: vec![] };
+        let write = LedgerRequest::Write { organization_id, vault_id, transactions: vec![] };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
@@ -1629,33 +1681,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_migrating_namespace_blocks_create_vault() {
+    async fn test_migrating_organization_blocks_create_vault() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration
         let start_migration =
-            LedgerRequest::StartMigration { namespace_id, target_shard_id: ShardId::new(1) };
+            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
         store.apply_request(&start_migration, &mut state);
 
         // Try to create vault - should be blocked
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault".to_string()),
             retention_policy: None,
         };
@@ -1674,28 +1727,29 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    async fn test_deleting_namespace_auto_transitions_on_last_vault_delete() {
+    async fn test_deleting_organization_auto_transitions_on_last_vault_delete() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
@@ -1706,7 +1760,7 @@ mod tests {
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
@@ -1716,47 +1770,57 @@ mod tests {
             _ => panic!("expected VaultCreated"),
         };
 
-        // Mark namespace for deletion (transitions to Deleting)
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Mark organization for deletion (transitions to Deleting)
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
-        assert!(matches!(response, LedgerResponse::NamespaceDeleting { .. }));
-        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
+        assert!(matches!(response, LedgerResponse::OrganizationDeleting { .. }));
+        assert_eq!(
+            state.organizations.get(&organization_id).unwrap().status,
+            OrganizationStatus::Deleting
+        );
 
-        // Delete first vault - namespace should still be Deleting
-        let delete_vault1 = LedgerRequest::DeleteVault { namespace_id, vault_id: vault1_id };
+        // Delete first vault - organization should still be Deleting
+        let delete_vault1 = LedgerRequest::DeleteVault { organization_id, vault_id: vault1_id };
         let (response, _) = store.apply_request(&delete_vault1, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
-        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleting);
+        assert_eq!(
+            state.organizations.get(&organization_id).unwrap().status,
+            OrganizationStatus::Deleting
+        );
 
-        // Delete second (last) vault - namespace should auto-transition to Deleted
-        let delete_vault2 = LedgerRequest::DeleteVault { namespace_id, vault_id: vault2_id };
+        // Delete second (last) vault - organization should auto-transition to Deleted
+        let delete_vault2 = LedgerRequest::DeleteVault { organization_id, vault_id: vault2_id };
         let (response, _) = store.apply_request(&delete_vault2, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
-        assert_eq!(state.namespaces.get(&namespace_id).unwrap().status, NamespaceStatus::Deleted);
+        assert_eq!(
+            state.organizations.get(&organization_id).unwrap().status,
+            OrganizationStatus::Deleted
+        );
     }
 
     #[tokio::test]
-    async fn test_deleting_namespace_blocks_writes() {
+    async fn test_deleting_organization_blocks_writes() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace and vault
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization and vault
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("vault".to_string()),
             retention_policy: None,
         };
@@ -1766,12 +1830,12 @@ mod tests {
             _ => panic!("expected VaultCreated"),
         };
 
-        // Mark namespace for deletion
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Mark organization for deletion
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         store.apply_request(&delete_ns, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Write { namespace_id, vault_id, transactions: vec![] };
+        let write = LedgerRequest::Write { organization_id, vault_id, transactions: vec![] };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
@@ -1783,39 +1847,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_deleting_namespace_blocks_create_vault() {
+    async fn test_deleting_organization_blocks_create_vault() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace with a vault
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization with a vault
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("existing-vault".to_string()),
             retention_policy: None,
         };
         store.apply_request(&create_vault, &mut state);
 
-        // Mark namespace for deletion
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Mark organization for deletion
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         store.apply_request(&delete_ns, &mut state);
 
         // Try to create another vault - should be blocked
         let create_vault2 = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("new-vault".to_string()),
             retention_policy: None,
         };
@@ -1830,28 +1895,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_suspend_namespace_write_rejected() {
+    async fn test_suspend_organization_write_rejected() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and suspend namespace with a vault
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and suspend organization with a vault
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
         // Create vault before suspending
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
@@ -1861,56 +1927,57 @@ mod tests {
             _ => panic!("expected VaultCreated"),
         };
 
-        // Suspend the namespace
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        // Suspend the organization
+        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
-            LedgerResponse::NamespaceSuspended { .. } => {},
-            _ => panic!("expected NamespaceSuspended"),
+            LedgerResponse::OrganizationSuspended { .. } => {},
+            _ => panic!("expected OrganizationSuspended"),
         }
 
-        // Try to write to suspended namespace - should fail
-        let write = LedgerRequest::Write { namespace_id, vault_id, transactions: vec![] };
+        // Try to write to suspended organization - should fail
+        let write = LedgerRequest::Write { organization_id, vault_id, transactions: vec![] };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
                 assert!(message.contains("suspended"), "error should mention suspended");
             },
-            _ => panic!("expected Error for write to suspended namespace, got {:?}", response),
+            _ => panic!("expected Error for write to suspended organization, got {:?}", response),
         }
     }
 
     #[tokio::test]
-    async fn test_suspend_namespace_create_vault_rejected() {
+    async fn test_suspend_organization_create_vault_rejected() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and suspend namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and suspend organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
-            LedgerResponse::NamespaceSuspended { .. } => {},
-            _ => panic!("expected NamespaceSuspended"),
+            LedgerResponse::OrganizationSuspended { .. } => {},
+            _ => panic!("expected OrganizationSuspended"),
         }
 
-        // Try to create vault in suspended namespace - should fail
+        // Try to create vault in suspended organization - should fail
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id,
+            organization_id,
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
@@ -1921,7 +1988,10 @@ mod tests {
                 assert!(message.contains("suspended"), "error should mention suspended");
             },
             _ => {
-                panic!("expected Error for create vault in suspended namespace, got {:?}", response)
+                panic!(
+                    "expected Error for create vault in suspended organization, got {:?}",
+                    response
+                )
             },
         }
     }
@@ -1934,27 +2004,28 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and suspend namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and suspend organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
-            LedgerResponse::NamespaceSuspended { .. } => {},
-            _ => panic!("expected NamespaceSuspended"),
+            LedgerResponse::OrganizationSuspended { .. } => {},
+            _ => panic!("expected OrganizationSuspended"),
         }
 
         // Try to suspend again - should fail
-        let suspend2 = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        let suspend2 = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend2, &mut state);
 
         match response {
@@ -1965,167 +2036,178 @@ mod tests {
                 );
             },
             _ => panic!(
-                "expected Error for suspending already suspended namespace, got {:?}",
+                "expected Error for suspending already suspended organization, got {:?}",
                 response
             ),
         }
     }
 
     #[tokio::test]
-    async fn test_resume_active_namespace_fails() {
+    async fn test_resume_active_organization_fails() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace (active by default)
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization (active by default)
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        // Try to resume active namespace - should fail
-        let resume = LedgerRequest::ResumeNamespace { namespace_id };
+        // Try to resume active organization - should fail
+        let resume = LedgerRequest::ResumeOrganization { organization_id };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
                 assert!(message.contains("not suspended"), "error should mention not suspended");
             },
-            _ => panic!("expected Error for resuming active namespace, got {:?}", response),
+            _ => panic!("expected Error for resuming active organization, got {:?}", response),
         }
     }
 
     #[tokio::test]
-    async fn test_suspend_deleted_namespace_fails() {
+    async fn test_suspend_deleted_organization_fails() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and delete namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and delete organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
         match response {
-            LedgerResponse::NamespaceDeleted { success, .. } => assert!(success),
-            _ => panic!("expected NamespaceDeleted"),
+            LedgerResponse::OrganizationDeleted { success, .. } => assert!(success),
+            _ => panic!("expected OrganizationDeleted"),
         }
 
-        // Try to suspend deleted namespace - should fail
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        // Try to suspend deleted organization - should fail
+        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
-                assert!(message.contains("deleted"), "error should mention deleted namespace");
+                assert!(message.contains("deleted"), "error should mention deleted organization");
             },
-            _ => panic!("expected Error for suspending deleted namespace, got {:?}", response),
+            _ => panic!("expected Error for suspending deleted organization, got {:?}", response),
         }
     }
 
     #[tokio::test]
-    async fn test_suspend_namespace_not_found() {
+    async fn test_suspend_organization_not_found() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Try to suspend non-existent namespace
-        let suspend =
-            LedgerRequest::SuspendNamespace { namespace_id: NamespaceId::new(999), reason: None };
+        // Try to suspend non-existent organization
+        let suspend = LedgerRequest::SuspendOrganization {
+            organization_id: OrganizationId::new(999),
+            reason: None,
+        };
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
-                assert!(message.contains("999"), "error should mention namespace ID");
+                assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should mention not found");
             },
-            _ => panic!("expected Error for suspending non-existent namespace, got {:?}", response),
+            _ => panic!(
+                "expected Error for suspending non-existent organization, got {:?}",
+                response
+            ),
         }
     }
 
     #[tokio::test]
-    async fn test_resume_namespace_not_found() {
+    async fn test_resume_organization_not_found() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Try to resume non-existent namespace
-        let resume = LedgerRequest::ResumeNamespace { namespace_id: NamespaceId::new(999) };
+        // Try to resume non-existent organization
+        let resume =
+            LedgerRequest::ResumeOrganization { organization_id: OrganizationId::new(999) };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
             LedgerResponse::Error { message } => {
-                assert!(message.contains("999"), "error should mention namespace ID");
+                assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should mention not found");
             },
-            _ => panic!("expected Error for resuming non-existent namespace, got {:?}", response),
+            _ => {
+                panic!("expected Error for resuming non-existent organization, got {:?}", response)
+            },
         }
     }
 
     #[tokio::test]
-    async fn test_delete_suspended_namespace_succeeds() {
+    async fn test_delete_suspended_organization_succeeds() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create and suspend namespace (no vaults)
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create and suspend organization (no vaults)
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
-        let namespace_id = match response {
-            LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-            _ => panic!("expected NamespaceCreated"),
+        let organization_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendNamespace { namespace_id, reason: None };
+        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
-            LedgerResponse::NamespaceSuspended { .. } => {},
-            _ => panic!("expected NamespaceSuspended"),
+            LedgerResponse::OrganizationSuspended { .. } => {},
+            _ => panic!("expected OrganizationSuspended"),
         }
 
-        // Delete suspended namespace - should succeed
-        let delete_ns = LedgerRequest::DeleteNamespace { namespace_id };
+        // Delete suspended organization - should succeed
+        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::NamespaceDeleted { success, .. } => {
-                assert!(success, "deletion should succeed for suspended namespace");
+            LedgerResponse::OrganizationDeleted { success, .. } => {
+                assert!(success, "deletion should succeed for suspended organization");
             },
-            _ => panic!("expected NamespaceDeleted, got {:?}", response),
+            _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
 
         // Verify deleted state
-        let meta = state.namespaces.get(&namespace_id).expect("namespace should exist");
-        assert_eq!(meta.status, NamespaceStatus::Deleted);
+        let meta = state.organizations.get(&organization_id).expect("organization should exist");
+        assert_eq!(meta.status, OrganizationStatus::Deleted);
     }
 
     // These tests verify that the state machine is deterministic - a critical
@@ -2156,43 +2238,45 @@ mod tests {
 
         // Same sequence of requests to apply
         let requests = vec![
-            LedgerRequest::CreateNamespace {
+            LedgerRequest::CreateOrganization {
                 name: "acme-corp".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
-            LedgerRequest::CreateNamespace {
+            LedgerRequest::CreateOrganization {
                 name: "startup-inc".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
             LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("production".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("staging".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(2),
+                organization_id: OrganizationId::new(2),
                 name: Some("main".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
             },
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
             },
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(2),
+                organization_id: OrganizationId::new(2),
                 vault_id: VaultId::new(3),
                 transactions: vec![],
             },
@@ -2263,14 +2347,14 @@ mod tests {
         let mut state_a = store_a.applied_state.write();
         let mut state_b = store_b.applied_state.write();
 
-        // Namespace IDs
-        let ns_id_a1 = state_a.sequences.next_namespace();
-        let ns_id_a2 = state_a.sequences.next_namespace();
-        let ns_id_b1 = state_b.sequences.next_namespace();
-        let ns_id_b2 = state_b.sequences.next_namespace();
+        // Organization IDs
+        let ns_id_a1 = state_a.sequences.next_organization();
+        let ns_id_a2 = state_a.sequences.next_organization();
+        let ns_id_b1 = state_b.sequences.next_organization();
+        let ns_id_b2 = state_b.sequences.next_organization();
 
-        assert_eq!(ns_id_a1, ns_id_b1, "First namespace ID must match");
-        assert_eq!(ns_id_a2, ns_id_b2, "Second namespace ID must match");
+        assert_eq!(ns_id_a1, ns_id_b1, "First organization ID must match");
+        assert_eq!(ns_id_a2, ns_id_b2, "Second organization ID must match");
 
         // Vault IDs
         let vault_id_a1 = state_a.sequences.next_vault();
@@ -2293,7 +2377,7 @@ mod tests {
 
     /// Verifies block hashes are deterministic.
     ///
-    /// The same (namespace, vault, height) must always produce the same block hash.
+    /// The same (organization, vault, height) must always produce the same block hash.
     #[tokio::test]
     async fn test_deterministic_block_hash() {
         let dir_a = tempdir().expect("create temp dir a");
@@ -2305,13 +2389,13 @@ mod tests {
             .expect("open store b");
 
         // Same inputs must produce same hash
-        let hash_a = store_a.compute_block_hash(NamespaceId::new(1), VaultId::new(2), 3);
-        let hash_b = store_b.compute_block_hash(NamespaceId::new(1), VaultId::new(2), 3);
+        let hash_a = store_a.compute_block_hash(OrganizationId::new(1), VaultId::new(2), 3);
+        let hash_b = store_b.compute_block_hash(OrganizationId::new(1), VaultId::new(2), 3);
 
         assert_eq!(hash_a, hash_b, "Block hashes must be deterministic");
 
         // Different inputs must produce different hashes
-        let hash_c = store_a.compute_block_hash(NamespaceId::new(1), VaultId::new(2), 4);
+        let hash_c = store_a.compute_block_hash(OrganizationId::new(1), VaultId::new(2), 4);
         assert_ne!(hash_a, hash_c, "Different inputs should produce different hashes");
     }
 
@@ -2333,7 +2417,7 @@ mod tests {
 
         // Create vault on both nodes
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             name: Some("test".to_string()),
             retention_policy: None,
         };
@@ -2343,7 +2427,7 @@ mod tests {
         // Apply multiple writes
         for _ in 0..5 {
             let write = LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
             };
@@ -2353,12 +2437,12 @@ mod tests {
 
         // Heights must match
         assert_eq!(
-            state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
-            state_b.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state_a.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
+            state_b.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
             "Vault heights must be identical after same operations"
         );
         assert_eq!(
-            state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state_a.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(&5),
             "Height should be 5 after 5 writes"
         );
@@ -2381,16 +2465,21 @@ mod tests {
         let mut state_a = store_a.applied_state.write();
         let mut state_b = store_b.applied_state.write();
 
-        // Create namespace and vaults
+        // Create organization and vaults
         let requests: Vec<LedgerRequest> = vec![
-            LedgerRequest::CreateNamespace { name: "ns1".to_string(), shard_id: None, quota: None },
+            LedgerRequest::CreateOrganization {
+                name: "ns1".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                shard_id: None,
+                quota: None,
+            },
             LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("vault-a".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("vault-b".to_string()),
                 retention_policy: None,
             },
@@ -2404,27 +2493,27 @@ mod tests {
         // Interleaved writes to different vaults
         let interleaved: Vec<LedgerRequest> = vec![
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
             },
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(2),
                 transactions: vec![],
             },
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
             },
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(2),
                 transactions: vec![],
             },
             LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
             },
@@ -2444,8 +2533,8 @@ mod tests {
         assert_eq!(results_a, results_b, "Interleaved operation results must match");
 
         // Vault 1: 3 writes, Vault 2: 2 writes
-        assert_eq!(state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))), Some(&3));
-        assert_eq!(state_a.vault_heights.get(&(NamespaceId::new(1), VaultId::new(2))), Some(&2));
+        assert_eq!(state_a.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))), Some(&3));
+        assert_eq!(state_a.vault_heights.get(&(OrganizationId::new(1), VaultId::new(2))), Some(&2));
         assert_eq!(state_a.vault_heights, state_b.vault_heights);
     }
 
@@ -2458,13 +2547,13 @@ mod tests {
         let mut state_b = AppliedState { sequences: SequenceCounters::new(), ..Default::default() };
 
         // Apply same mutations
-        state_a.sequences.next_namespace();
+        state_a.sequences.next_organization();
         state_a.sequences.next_vault();
-        state_a.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
+        state_a.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 42);
 
-        state_b.sequences.next_namespace();
+        state_b.sequences.next_organization();
         state_b.sequences.next_vault();
-        state_b.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
+        state_b.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 42);
 
         // Serialize both
         let bytes_a = postcard::to_allocvec(&state_a).expect("serialize a");
@@ -2488,9 +2577,13 @@ mod tests {
         let counters = SequenceCounters::new();
 
         // Verify initial values:
-        // - namespace 0 is reserved for _system
+        // - organization 0 is reserved for _system
         // - IDs start at 1
-        assert_eq!(counters.namespace, NamespaceId::new(1), "Namespace counter should start at 1");
+        assert_eq!(
+            counters.organization,
+            OrganizationId::new(1),
+            "Organization counter should start at 1"
+        );
         assert_eq!(counters.vault, VaultId::new(1), "Vault counter should start at 1");
         assert_eq!(counters.user, 1, "User counter should start at 1");
         assert_eq!(counters.user_email, 1, "User email counter should start at 1");
@@ -2515,10 +2608,11 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Setup: create namespace and vault
+        // Setup: create organization and vault
         store.apply_request(
-            &LedgerRequest::CreateNamespace {
+            &LedgerRequest::CreateOrganization {
                 name: "test".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
@@ -2526,7 +2620,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("vault1".to_string()),
                 retention_policy: None,
             },
@@ -2549,7 +2643,7 @@ mod tests {
         };
 
         let request = LedgerRequest::Write {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![tx],
         };
@@ -2566,7 +2660,7 @@ mod tests {
 
         // Verify VaultEntry was created
         let entry = vault_entry.expect("VaultEntry should be created");
-        assert_eq!(entry.namespace_id, NamespaceId::new(1));
+        assert_eq!(entry.organization_id, OrganizationId::new(1));
         assert_eq!(entry.vault_id, VaultId::new(1));
         assert_eq!(entry.vault_height, 1);
         assert_eq!(entry.transactions.len(), 1);
@@ -2604,39 +2698,44 @@ mod tests {
             vault_heights: HashMap::new(),
             vault_health: HashMap::new(),
             previous_vault_hashes: HashMap::new(),
-            namespaces: HashMap::new(),
+            organizations: HashMap::new(),
             vaults: HashMap::new(),
             shard_height: 42,
             previous_shard_hash: [0xAB; 32],
             client_sequences: HashMap::new(),
-            namespace_storage_bytes: HashMap::new(),
+            organization_storage_bytes: HashMap::new(),
+            slug_index: HashMap::new(),
+            id_to_slug: HashMap::new(),
         };
 
         // Add some data
-        original.sequences.next_namespace();
+        original.sequences.next_organization();
         original.sequences.next_vault();
-        original.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 100);
-        original.vault_heights.insert((NamespaceId::new(1), VaultId::new(2)), 50);
+        original.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 100);
+        original.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 50);
         original.vault_health.insert(
-            (NamespaceId::new(2), VaultId::new(1)),
+            (OrganizationId::new(2), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
-        original.previous_vault_hashes.insert((NamespaceId::new(1), VaultId::new(1)), [0xCD; 32]);
-        original.namespaces.insert(
-            NamespaceId::new(1),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(1),
+        original
+            .previous_vault_hashes
+            .insert((OrganizationId::new(1), VaultId::new(1)), [0xCD; 32]);
+        original.organizations.insert(
+            OrganizationId::new(1),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: ShardId::new(0),
                 name: "test-ns".to_string(),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
         original.vaults.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultMeta {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 name: Some("test-vault".to_string()),
                 deleted: false,
@@ -2659,11 +2758,12 @@ mod tests {
             restored.previous_shard_hash, [0xAB; 32],
             "previous_shard_hash must be preserved"
         );
-        // Verify namespace and vault counts (HashMaps don't implement PartialEq for complex types)
-        assert_eq!(restored.namespaces.len(), 1);
+        // Verify organization and vault counts (HashMaps don't implement PartialEq for complex
+        // types)
+        assert_eq!(restored.organizations.len(), 1);
         assert_eq!(restored.vaults.len(), 1);
-        assert!(restored.namespaces.contains_key(&NamespaceId::new(1)));
-        assert!(restored.vaults.contains_key(&(NamespaceId::new(1), VaultId::new(1))));
+        assert!(restored.organizations.contains_key(&OrganizationId::new(1)));
+        assert!(restored.vaults.contains_key(&(OrganizationId::new(1), VaultId::new(1))));
     }
 
     /// Test that AppliedStateAccessor provides correct data.
@@ -2678,16 +2778,17 @@ mod tests {
         // Setup some state
         {
             let mut state = store.applied_state.write();
-            state.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
-            state.vault_heights.insert((NamespaceId::new(1), VaultId::new(2)), 100);
+            state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 42);
+            state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 100);
             state.shard_height = 99;
-            state.namespaces.insert(
-                NamespaceId::new(1),
-                NamespaceMeta {
-                    namespace_id: NamespaceId::new(1),
+            state.organizations.insert(
+                OrganizationId::new(1),
+                OrganizationMeta {
+                    organization_id: OrganizationId::new(1),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     shard_id: ShardId::new(0),
                     name: "test".to_string(),
-                    status: NamespaceStatus::Active,
+                    status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
                 },
@@ -2695,17 +2796,17 @@ mod tests {
         }
 
         // Test accessor methods
-        assert_eq!(accessor.vault_height(NamespaceId::new(1), VaultId::new(1)), 42);
-        assert_eq!(accessor.vault_height(NamespaceId::new(1), VaultId::new(2)), 100);
-        assert_eq!(accessor.vault_height(NamespaceId::new(1), VaultId::new(99)), 0); // Non-existent returns 0
+        assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(1)), 42);
+        assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(2)), 100);
+        assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(99)), 0); // Non-existent returns 0
         assert_eq!(accessor.shard_height(), 99);
 
         let all_heights = accessor.all_vault_heights();
         assert_eq!(all_heights.len(), 2);
-        assert_eq!(all_heights.get(&(NamespaceId::new(1), VaultId::new(1))), Some(&42));
+        assert_eq!(all_heights.get(&(OrganizationId::new(1), VaultId::new(1))), Some(&42));
 
-        assert!(accessor.get_namespace(NamespaceId::new(1)).is_some());
-        assert!(accessor.get_namespace(NamespaceId::new(99)).is_none());
+        assert!(accessor.get_organization(OrganizationId::new(1)).is_some());
+        assert!(accessor.get_organization(OrganizationId::new(99)).is_none());
     }
 
     // ========================================================================
@@ -2733,46 +2834,50 @@ mod tests {
             vault_heights: HashMap::new(),
             vault_health: HashMap::new(),
             previous_vault_hashes: HashMap::new(),
-            namespaces: HashMap::new(),
+            organizations: HashMap::new(),
             vaults: HashMap::new(),
             shard_height: 55,
             previous_shard_hash: [0xBE; 32],
             client_sequences: HashMap::new(),
-            namespace_storage_bytes: HashMap::new(),
+            organization_storage_bytes: HashMap::new(),
+            slug_index: HashMap::new(),
+            id_to_slug: HashMap::new(),
         };
 
         // Add state data
-        applied_state.sequences.next_namespace();
-        applied_state.sequences.next_namespace();
+        applied_state.sequences.next_organization();
+        applied_state.sequences.next_organization();
         applied_state.sequences.next_vault();
-        applied_state.vault_heights.insert((NamespaceId::new(1), VaultId::new(1)), 42);
-        applied_state.vault_heights.insert((NamespaceId::new(1), VaultId::new(2)), 100);
-        applied_state.namespaces.insert(
-            NamespaceId::new(1),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(1),
+        applied_state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 42);
+        applied_state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 100);
+        applied_state.organizations.insert(
+            OrganizationId::new(1),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: ShardId::new(0),
                 name: "production".to_string(),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
-        applied_state.namespaces.insert(
-            NamespaceId::new(2),
-            NamespaceMeta {
-                namespace_id: NamespaceId::new(2),
+        applied_state.organizations.insert(
+            OrganizationId::new(2),
+            OrganizationMeta {
+                organization_id: OrganizationId::new(2),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: ShardId::new(0),
                 name: "staging".to_string(),
-                status: NamespaceStatus::Active,
+                status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
             },
         );
         applied_state.vaults.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultMeta {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 name: Some("main-vault".to_string()),
                 deleted: false,
@@ -2810,15 +2915,21 @@ mod tests {
 
         // Check sequence counters
         assert_eq!(
-            restored.sequences.namespace,
-            NamespaceId::new(3),
-            "namespace counter should be restored"
+            restored.sequences.organization,
+            OrganizationId::new(3),
+            "organization counter should be restored"
         );
         assert_eq!(restored.sequences.vault, VaultId::new(2), "vault counter should be restored");
 
         // Check vault heights
-        assert_eq!(restored.vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))), Some(&42));
-        assert_eq!(restored.vault_heights.get(&(NamespaceId::new(1), VaultId::new(2))), Some(&100));
+        assert_eq!(
+            restored.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
+            Some(&42)
+        );
+        assert_eq!(
+            restored.vault_heights.get(&(OrganizationId::new(1), VaultId::new(2))),
+            Some(&100)
+        );
 
         // Check shard tracking
         assert_eq!(restored.shard_height, 55, "shard_height should be restored");
@@ -2827,16 +2938,19 @@ mod tests {
             "previous_shard_hash should be restored"
         );
 
-        // Check namespace registry
-        assert_eq!(restored.namespaces.len(), 2);
-        let ns1 = restored.namespaces.get(&NamespaceId::new(1)).expect("namespace 1 should exist");
+        // Check organization registry
+        assert_eq!(restored.organizations.len(), 2);
+        let ns1 = restored
+            .organizations
+            .get(&OrganizationId::new(1))
+            .expect("organization 1 should exist");
         assert_eq!(ns1.name, "production");
 
         // Check vault registry
         assert_eq!(restored.vaults.len(), 1);
         let v1 = restored
             .vaults
-            .get(&(NamespaceId::new(1), VaultId::new(1)))
+            .get(&(OrganizationId::new(1), VaultId::new(1)))
             .expect("vault (1,1) should exist");
         assert_eq!(v1.name, Some("main-vault".to_string()));
 
@@ -2858,7 +2972,7 @@ mod tests {
                 last_applied: Some(make_log_id(2, 50)),
                 membership: StoredMembership::default(),
                 sequences: SequenceCounters {
-                    namespace: NamespaceId::new(5),
+                    organization: OrganizationId::new(5),
                     vault: VaultId::new(10),
                     user: 3,
                     user_email: 7,
@@ -2866,17 +2980,19 @@ mod tests {
                 },
                 vault_heights: {
                     let mut h = HashMap::new();
-                    h.insert((NamespaceId::new(1), VaultId::new(1)), 25);
+                    h.insert((OrganizationId::new(1), VaultId::new(1)), 25);
                     h
                 },
                 vault_health: HashMap::new(),
                 previous_vault_hashes: HashMap::new(),
-                namespaces: HashMap::new(),
+                organizations: HashMap::new(),
                 vaults: HashMap::new(),
                 shard_height: 30,
                 previous_shard_hash: [0xAA; 32],
                 client_sequences: HashMap::new(),
-                namespace_storage_bytes: HashMap::new(),
+                organization_storage_bytes: HashMap::new(),
+                slug_index: HashMap::new(),
+                id_to_slug: HashMap::new(),
             },
             vault_entities: HashMap::new(),
         };
@@ -2902,19 +3018,25 @@ mod tests {
 
         // Verify state
         assert_eq!(store.current_shard_height(), 30);
-        assert_eq!(store.applied_state.read().sequences.namespace, NamespaceId::new(5));
+        assert_eq!(store.applied_state.read().sequences.organization, OrganizationId::new(5));
         assert_eq!(store.applied_state.read().sequences.vault, VaultId::new(10));
         assert_eq!(store.applied_state.read().sequences.user_email, 7);
         assert_eq!(store.applied_state.read().sequences.email_verify, 12);
         assert_eq!(
-            store.applied_state.read().vault_heights.get(&(NamespaceId::new(1), VaultId::new(1))),
+            store
+                .applied_state
+                .read()
+                .vault_heights
+                .get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(&25)
         );
     }
 
     #[tokio::test]
     async fn test_block_announcements_sender_stored() {
-        use inferadb_ledger_proto::proto::{BlockAnnouncement, Hash, NamespaceId, VaultId};
+        use inferadb_ledger_proto::proto::{
+            BlockAnnouncement, Hash, OrganizationSlug as ProtoOrganizationSlug, VaultId,
+        };
 
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
@@ -2934,7 +3056,7 @@ mod tests {
 
         // Verify we can send through the stored sender
         let announcement = BlockAnnouncement {
-            namespace_id: Some(NamespaceId { id: 1 }),
+            organization_slug: Some(ProtoOrganizationSlug { slug: 1 }),
             vault_id: Some(VaultId { id: 2 }),
             height: 3,
             block_hash: Some(Hash { value: vec![0u8; 32] }),
@@ -2946,7 +3068,7 @@ mod tests {
 
         // Verify receiver gets the announcement
         let received = receiver.recv().await.expect("receive");
-        assert_eq!(received.namespace_id, announcement.namespace_id);
+        assert_eq!(received.organization_slug, announcement.organization_slug);
         assert_eq!(received.vault_id, announcement.vault_id);
         assert_eq!(received.height, announcement.height);
     }
@@ -2963,8 +3085,9 @@ mod tests {
         let entries: Vec<Entry<LedgerTypeConfig>> = (1..=100u64)
             .map(|i| Entry {
                 log_id: make_log_id(1, i),
-                payload: EntryPayload::Normal(LedgerRequest::CreateNamespace {
+                payload: EntryPayload::Normal(LedgerRequest::CreateOrganization {
                     name: format!("ns-{}", i),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     shard_id: None,
                     quota: None,
                 }),
@@ -3003,7 +3126,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use inferadb_ledger_proto::proto::{
-            BlockAnnouncement, NamespaceId as ProtoNamespaceId, VaultId as ProtoVaultId,
+            BlockAnnouncement, OrganizationSlug as ProtoOrganizationSlug, VaultId as ProtoVaultId,
         };
         use openraft::RaftStorage;
 
@@ -3016,24 +3139,25 @@ mod tests {
             .expect("open store")
             .with_block_announcements(sender);
 
-        // First, create namespace and vault using apply_request (sets up state)
+        // First, create organization and vault using apply_request (sets up state)
         {
             let mut state = store.applied_state.write();
 
-            let create_ns = LedgerRequest::CreateNamespace {
+            let create_ns = LedgerRequest::CreateOrganization {
                 name: "test-ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(42),
                 shard_id: Some(ShardId::new(0)),
                 quota: None,
             };
             let (response, _) = store.apply_request(&create_ns, &mut state);
-            let namespace_id = match response {
-                LedgerResponse::NamespaceCreated { namespace_id, .. } => namespace_id,
-                _ => panic!("expected NamespaceCreated"),
+            let organization_id = match response {
+                LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+                _ => panic!("expected OrganizationCreated"),
             };
-            assert_eq!(namespace_id, NamespaceId::new(1));
+            assert_eq!(organization_id, OrganizationId::new(1));
 
             let create_vault = LedgerRequest::CreateVault {
-                namespace_id,
+                organization_id,
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
             };
@@ -3048,7 +3172,7 @@ mod tests {
         // Now call apply_to_state_machine with a Write entry
         // This should broadcast a BlockAnnouncement
         let write_request = LedgerRequest::Write {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![], // Empty transactions still create a block
         };
@@ -3083,7 +3207,7 @@ mod tests {
         );
 
         // Verify announcement contents
-        assert_eq!(received.namespace_id, Some(ProtoNamespaceId { id: 1 }));
+        assert_eq!(received.organization_slug, Some(ProtoOrganizationSlug { slug: 42 }));
         assert_eq!(received.vault_id, Some(ProtoVaultId { id: 1 }));
         assert_eq!(received.height, 1);
         assert!(received.block_hash.is_some(), "block_hash should be set");
@@ -3103,19 +3227,20 @@ mod tests {
         // Store without broadcast sender
         let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        // Create namespace and vault
+        // Create organization and vault
         {
             let mut state = store.applied_state.write();
 
-            let create_ns = LedgerRequest::CreateNamespace {
+            let create_ns = LedgerRequest::CreateOrganization {
                 name: "test-ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: Some(ShardId::new(0)),
                 quota: None,
             };
             store.apply_request(&create_ns, &mut state);
 
             let create_vault = LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
             };
@@ -3124,7 +3249,7 @@ mod tests {
 
         // Apply write - should not panic even without sender
         let write_request = LedgerRequest::Write {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![],
         };
@@ -3159,15 +3284,15 @@ mod tests {
         // 1. Start healthy
         state
             .vault_health
-            .insert((NamespaceId::new(1), VaultId::new(1)), VaultHealthStatus::Healthy);
+            .insert((OrganizationId::new(1), VaultId::new(1)), VaultHealthStatus::Healthy);
         assert_eq!(
-            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(&VaultHealthStatus::Healthy)
         );
 
         // 2. Transition to Diverged (detected by auto-recovery scanner)
         let diverge = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: false,
             expected_root: Some([0xAA; 32]),
@@ -3179,14 +3304,14 @@ mod tests {
         let (response, _) = store.apply_request(&diverge, &mut state);
         assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
         assert!(matches!(
-            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(VaultHealthStatus::Diverged { at_height: 100, .. })
         ));
 
         // 3. Transition to Recovering attempt 1
         let now = chrono::Utc::now().timestamp();
         let recover1 = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: false,
             expected_root: None,
@@ -3198,7 +3323,7 @@ mod tests {
         let (response, _) = store.apply_request(&recover1, &mut state);
         assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
         assert!(matches!(
-            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(VaultHealthStatus::Recovering { attempt: 1, .. })
         ));
 
@@ -3207,7 +3332,7 @@ mod tests {
 
         // 4. Recovery succeeds → Healthy
         let healthy = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: true,
             expected_root: None,
@@ -3219,7 +3344,7 @@ mod tests {
         let (response, _) = store.apply_request(&healthy, &mut state);
         assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
         assert_eq!(
-            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(&VaultHealthStatus::Healthy)
         );
     }
@@ -3234,7 +3359,7 @@ mod tests {
 
         // Start diverged
         state.vault_health.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged {
                 expected: [0xAA; 32],
                 computed: [0xBB; 32],
@@ -3247,7 +3372,7 @@ mod tests {
         // Simulate escalating recovery attempts (1, 2, 3)
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
             let recover = LedgerRequest::UpdateVaultHealth {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 healthy: false,
                 expected_root: None,
@@ -3259,7 +3384,7 @@ mod tests {
             let (response, _) = store.apply_request(&recover, &mut state);
             assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
 
-            match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
+            match state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))) {
                 Some(VaultHealthStatus::Recovering { attempt: a, .. }) => {
                     assert_eq!(*a, attempt);
                 },
@@ -3278,7 +3403,7 @@ mod tests {
 
         // Start diverged
         state.vault_health.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged {
                 expected: [0xAA; 32],
                 computed: [0xBB; 32],
@@ -3290,7 +3415,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
             let recover = LedgerRequest::UpdateVaultHealth {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 healthy: false,
                 expected_root: None,
@@ -3303,7 +3428,7 @@ mod tests {
         }
 
         // Verify vault is at max recovery attempt
-        match state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))) {
+        match state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))) {
             Some(VaultHealthStatus::Recovering { attempt, .. }) => {
                 assert_eq!(*attempt, MAX_RECOVERY_ATTEMPTS);
             },
@@ -3324,15 +3449,16 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace so writes don't fail for missing namespace
-        let create_ns = LedgerRequest::CreateNamespace {
+        // Create organization so writes don't fail for missing organization
+        let create_ns = LedgerRequest::CreateOrganization {
             name: "test".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
             shard_id: Some(ShardId::new(0)),
             quota: None,
         };
         store.apply_request(&create_ns, &mut state);
         let create_vault = LedgerRequest::CreateVault {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
@@ -3340,11 +3466,11 @@ mod tests {
 
         // Diverged blocks writes
         state.vault_health.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1; 32], computed: [2; 32], at_height: 1 },
         );
         let write = LedgerRequest::Write {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![],
         };
@@ -3353,7 +3479,7 @@ mod tests {
 
         // Recovering does NOT block writes (recovery is background replay)
         state.vault_health.insert(
-            (NamespaceId::new(1), VaultId::new(1)),
+            (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Recovering {
                 started_at: chrono::Utc::now().timestamp(),
                 attempt: 1,
@@ -3378,7 +3504,7 @@ mod tests {
 
         // Mark healthy twice
         let healthy = LedgerRequest::UpdateVaultHealth {
-            namespace_id: NamespaceId::new(1),
+            organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             healthy: true,
             expected_root: None,
@@ -3392,12 +3518,12 @@ mod tests {
         assert!(matches!(r1, LedgerResponse::VaultHealthUpdated { success: true }));
         assert!(matches!(r2, LedgerResponse::VaultHealthUpdated { success: true }));
         assert_eq!(
-            state.vault_health.get(&(NamespaceId::new(1), VaultId::new(1))),
+            state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
             Some(&VaultHealthStatus::Healthy)
         );
     }
 
-    // ─── Namespace Resource Accounting Tests ───────────────────────────────────
+    // ─── Organization Resource Accounting Tests ───────────────────────────────────
 
     #[test]
     fn test_estimate_delta_set_entity() {
@@ -3544,17 +3670,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_namespace_storage_bytes_accumulate() {
+    async fn test_organization_storage_bytes_accumulate() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Setup namespace + vault
+        // Setup organization + vault
         store.apply_request(
-            &LedgerRequest::CreateNamespace {
+            &LedgerRequest::CreateOrganization {
                 name: "test-ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
@@ -3562,7 +3689,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3570,7 +3697,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            state.organization_storage_bytes.get(&OrganizationId::new(1)).copied().unwrap_or(0),
             0,
             "Storage starts at zero"
         );
@@ -3591,14 +3718,14 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx1],
             },
             &mut state,
         );
         assert_eq!(
-            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            state.organization_storage_bytes.get(&OrganizationId::new(1)).copied().unwrap_or(0),
             10,
             "First write adds 4+6=10 bytes"
         );
@@ -3619,21 +3746,21 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx2],
             },
             &mut state,
         );
         assert_eq!(
-            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            state.organization_storage_bytes.get(&OrganizationId::new(1)).copied().unwrap_or(0),
             24,
             "Second write accumulates: 10+14=24 bytes"
         );
     }
 
     #[tokio::test]
-    async fn test_namespace_storage_bytes_decrease_on_delete() {
+    async fn test_organization_storage_bytes_decrease_on_delete() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
@@ -3642,12 +3769,17 @@ mod tests {
 
         // Setup
         store.apply_request(
-            &LedgerRequest::CreateNamespace { name: "ns".to_string(), shard_id: None, quota: None },
+            &LedgerRequest::CreateOrganization {
+                name: "ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                shard_id: None,
+                quota: None,
+            },
             &mut state,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3670,13 +3802,13 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx_set],
             },
             &mut state,
         );
-        assert_eq!(state.namespace_storage_bytes[&NamespaceId::new(1)], 10);
+        assert_eq!(state.organization_storage_bytes[&OrganizationId::new(1)], 10);
 
         // Delete: key="abcde" (5) → -5 (conservative: doesn't know value size)
         let tx_del = inferadb_ledger_types::Transaction {
@@ -3691,21 +3823,21 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx_del],
             },
             &mut state,
         );
         assert_eq!(
-            state.namespace_storage_bytes[&NamespaceId::new(1)],
+            state.organization_storage_bytes[&OrganizationId::new(1)],
             5,
             "Delete subtracts key bytes only: 10-5=5"
         );
     }
 
     #[tokio::test]
-    async fn test_namespace_storage_bytes_floor_at_zero() {
+    async fn test_organization_storage_bytes_floor_at_zero() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
@@ -3713,12 +3845,17 @@ mod tests {
         let mut state = store.applied_state.write();
 
         store.apply_request(
-            &LedgerRequest::CreateNamespace { name: "ns".to_string(), shard_id: None, quota: None },
+            &LedgerRequest::CreateOrganization {
+                name: "ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                shard_id: None,
+                quota: None,
+            },
             &mut state,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3738,39 +3875,41 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx],
             },
             &mut state,
         );
         assert_eq!(
-            state.namespace_storage_bytes.get(&NamespaceId::new(1)).copied().unwrap_or(0),
+            state.organization_storage_bytes.get(&OrganizationId::new(1)).copied().unwrap_or(0),
             0,
             "Storage bytes must never go negative — saturating_sub floors at 0"
         );
     }
 
     #[tokio::test]
-    async fn test_namespace_storage_bytes_independent_namespaces() {
+    async fn test_organization_storage_bytes_independent_organizations() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create two namespaces, each with a vault
+        // Create two organizations, each with a vault
         store.apply_request(
-            &LedgerRequest::CreateNamespace {
+            &LedgerRequest::CreateOrganization {
                 name: "ns-alpha".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
             &mut state,
         );
         store.apply_request(
-            &LedgerRequest::CreateNamespace {
+            &LedgerRequest::CreateOrganization {
                 name: "ns-beta".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
@@ -3778,7 +3917,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3786,14 +3925,14 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(2),
+                organization_id: OrganizationId::new(2),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
             &mut state,
         );
 
-        // Write to namespace 1: "aa" + "bb" = 4 bytes
+        // Write to organization 1: "aa" + "bb" = 4 bytes
         let tx1 = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
             client_id: "c".to_string(),
@@ -3809,14 +3948,14 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx1],
             },
             &mut state,
         );
 
-        // Write to namespace 2: "cccccc" + "dddddddd" = 14 bytes
+        // Write to organization 2: "cccccc" + "dddddddd" = 14 bytes
         let tx2 = inferadb_ledger_types::Transaction {
             id: [2u8; 16],
             client_id: "c".to_string(),
@@ -3832,52 +3971,53 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(2),
+                organization_id: OrganizationId::new(2),
                 vault_id: VaultId::new(2),
                 transactions: vec![tx2],
             },
             &mut state,
         );
 
-        assert_eq!(state.namespace_storage_bytes[&NamespaceId::new(1)], 4);
-        assert_eq!(state.namespace_storage_bytes[&NamespaceId::new(2)], 14);
+        assert_eq!(state.organization_storage_bytes[&OrganizationId::new(1)], 4);
+        assert_eq!(state.organization_storage_bytes[&OrganizationId::new(2)], 14);
     }
 
     #[tokio::test]
-    async fn test_namespace_storage_accessor() {
+    async fn test_organization_storage_accessor() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
         // Before any writes, accessor returns 0
-        assert_eq!(store.accessor().namespace_storage_bytes(NamespaceId::new(1)), 0);
+        assert_eq!(store.accessor().organization_storage_bytes(OrganizationId::new(1)), 0);
 
         // Write some data
         let mut state = store.applied_state.write();
-        state.namespace_storage_bytes.insert(NamespaceId::new(1), 42);
+        state.organization_storage_bytes.insert(OrganizationId::new(1), 42);
         drop(state);
 
-        assert_eq!(store.accessor().namespace_storage_bytes(NamespaceId::new(1)), 42);
+        assert_eq!(store.accessor().organization_storage_bytes(OrganizationId::new(1)), 42);
         assert_eq!(
-            store.accessor().namespace_storage_bytes(NamespaceId::new(999)),
+            store.accessor().organization_storage_bytes(OrganizationId::new(999)),
             0,
-            "Unknown namespace returns 0"
+            "Unknown organization returns 0"
         );
     }
 
     #[tokio::test]
-    async fn test_namespace_usage_combines_storage_and_vaults() {
+    async fn test_organization_usage_combines_storage_and_vaults() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create namespace with two vaults
+        // Create organization with two vaults
         store.apply_request(
-            &LedgerRequest::CreateNamespace {
+            &LedgerRequest::CreateOrganization {
                 name: "usage-ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
@@ -3885,7 +4025,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3893,7 +4033,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
@@ -3916,7 +4056,7 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx],
             },
@@ -3924,18 +4064,18 @@ mod tests {
         );
         drop(state);
 
-        let usage = store.accessor().namespace_usage(NamespaceId::new(1));
+        let usage = store.accessor().organization_usage(OrganizationId::new(1));
         assert_eq!(usage.storage_bytes, 8, "key(3) + value(5) = 8 bytes");
         assert_eq!(usage.vault_count, 2, "Two active vaults");
 
-        // Unknown namespace returns zeroes
-        let empty = store.accessor().namespace_usage(NamespaceId::new(999));
+        // Unknown organization returns zeroes
+        let empty = store.accessor().organization_usage(OrganizationId::new(999));
         assert_eq!(empty.storage_bytes, 0);
         assert_eq!(empty.vault_count, 0);
     }
 
     #[tokio::test]
-    async fn test_namespace_usage_excludes_deleted_vaults() {
+    async fn test_organization_usage_excludes_deleted_vaults() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
@@ -3943,8 +4083,9 @@ mod tests {
         let mut state = store.applied_state.write();
 
         store.apply_request(
-            &LedgerRequest::CreateNamespace {
+            &LedgerRequest::CreateOrganization {
                 name: "del-ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: None,
                 quota: None,
             },
@@ -3952,7 +4093,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
@@ -3960,7 +4101,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
@@ -3968,13 +4109,13 @@ mod tests {
         );
 
         drop(state);
-        assert_eq!(store.accessor().namespace_usage(NamespaceId::new(1)).vault_count, 2);
+        assert_eq!(store.accessor().organization_usage(OrganizationId::new(1)).vault_count, 2);
 
         // Delete one vault
         let mut state = store.applied_state.write();
         store.apply_request(
             &LedgerRequest::DeleteVault {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
             },
             &mut state,
@@ -3982,14 +4123,14 @@ mod tests {
         drop(state);
 
         assert_eq!(
-            store.accessor().namespace_usage(NamespaceId::new(1)).vault_count,
+            store.accessor().organization_usage(OrganizationId::new(1)).vault_count,
             1,
             "Deleted vaults excluded from count"
         );
     }
 
     #[tokio::test]
-    async fn test_namespace_storage_bytes_concurrent_reads() {
+    async fn test_organization_storage_bytes_concurrent_reads() {
         use std::sync::Arc;
 
         let dir = tempdir().expect("create temp dir");
@@ -4001,8 +4142,9 @@ mod tests {
         {
             let mut state = store.applied_state.write();
             store.apply_request(
-                &LedgerRequest::CreateNamespace {
+                &LedgerRequest::CreateOrganization {
                     name: "conc-ns".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     shard_id: None,
                     quota: None,
                 },
@@ -4010,7 +4152,7 @@ mod tests {
             );
             store.apply_request(
                 &LedgerRequest::CreateVault {
-                    namespace_id: NamespaceId::new(1),
+                    organization_id: OrganizationId::new(1),
                     name: Some("v1".to_string()),
                     retention_policy: None,
                 },
@@ -4032,7 +4174,7 @@ mod tests {
             };
             store.apply_request(
                 &LedgerRequest::Write {
-                    namespace_id: NamespaceId::new(1),
+                    organization_id: OrganizationId::new(1),
                     vault_id: VaultId::new(1),
                     transactions: vec![tx],
                 },
@@ -4045,7 +4187,7 @@ mod tests {
         for _ in 0..50 {
             let store_clone = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
-                let usage = store_clone.accessor().namespace_usage(NamespaceId::new(1));
+                let usage = store_clone.accessor().organization_usage(OrganizationId::new(1));
                 assert_eq!(usage.storage_bytes, 11);
                 assert_eq!(usage.vault_count, 1);
                 usage

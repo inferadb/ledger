@@ -240,20 +240,20 @@ Control log volume while retaining critical events. Errors and slow requests are
 | ---------------------------------------------------------------- | ---- | -------- | ------------------------------- |
 | `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__ERROR_RATE`            | f64  | `1.0`    | Sample rate for errors (0.0-1.0) |
 | `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__SLOW_RATE`             | f64  | `1.0`    | Sample rate for slow requests   |
-| `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__VIP_RATE`              | f64  | `0.5`    | Sample rate for VIP namespaces  |
+| `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__VIP_RATE`              | f64  | `0.5`    | Sample rate for VIP organizations  |
 | `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__WRITE_RATE`            | f64  | `0.1`    | Sample rate for normal writes   |
 | `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__READ_RATE`             | f64  | `0.01`   | Sample rate for normal reads    |
 | `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__SLOW_THRESHOLD_READ_MS`  | f64  | `10.0`   | Slow threshold for reads (ms)   |
 | `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__SLOW_THRESHOLD_WRITE_MS` | f64  | `100.0`  | Slow threshold for writes (ms)  |
 | `INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__SLOW_THRESHOLD_ADMIN_MS` | f64  | `1000.0` | Slow threshold for admin (ms)   |
 
-### VIP Namespaces
+### VIP Organizations
 
-VIP namespaces receive elevated sampling rates (50% vs 10%/1% default).
+VIP organizations receive elevated sampling rates (50% vs 10%/1% default).
 
 | Variable                                               | Type      | Default | Description                              |
 | ------------------------------------------------------ | --------- | ------- | ---------------------------------------- |
-| `INFERADB__LEDGER__WIDE_EVENTS__VIP_NAMESPACES`        | Vec<i64>  | `[]`    | Static VIP namespace IDs                 |
+| `INFERADB__LEDGER__WIDE_EVENTS__VIP_ORGANIZATIONS`        | Vec<i64>  | `[]`    | Static VIP organization IDs                 |
 | `INFERADB__LEDGER__WIDE_EVENTS__VIP__DISCOVERY_ENABLED` | bool      | `true`  | Enable dynamic VIP discovery from `_system` |
 | `INFERADB__LEDGER__WIDE_EVENTS__VIP__CACHE_TTL_SECS`   | u64       | `60`    | VIP cache refresh interval               |
 | `INFERADB__LEDGER__WIDE_EVENTS__VIP__TAG_NAME`         | str       | `"vip"` | Metadata tag name for VIP status         |
@@ -279,7 +279,7 @@ Export wide events as OTLP traces for visualization in Jaeger, Tempo, or Honeyco
 # Production: JSON logging with default sampling
 INFERADB__LEDGER__LOG_FORMAT=json
 INFERADB__LEDGER__WIDE_EVENTS__ENABLED=true
-INFERADB__LEDGER__WIDE_EVENTS__VIP_NAMESPACES=1001,1002
+INFERADB__LEDGER__WIDE_EVENTS__VIP_ORGANIZATIONS=1001,1002
 
 # With OTLP export to Jaeger
 INFERADB__LEDGER__WIDE_EVENTS__OTEL__ENABLED=true

@@ -43,7 +43,7 @@ Foundational types used by all other crates.
 - `hash.rs` - SHA-256 and seahash implementations
 - `merkle.rs` - Merkle tree and proof types
 - `error.rs` - Error types with snafu
-- `identifiers.rs` - NamespaceId, VaultId, NodeId, etc.
+- `identifiers.rs` - OrganizationSlug, VaultId, NodeId, etc.
 
 **Design principle:** No I/O, no external dependencies beyond crypto.
 

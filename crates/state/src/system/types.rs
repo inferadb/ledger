@@ -1,9 +1,9 @@
-//! Data model types for the `_system` namespace.
+//! Data model types for the `_system` organization.
 
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
-use inferadb_ledger_types::{NamespaceId, NodeId, ShardId, UserId};
+use inferadb_ledger_types::{NodeId, OrganizationId, ShardId, UserId};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -91,44 +91,44 @@ pub struct EmailVerificationToken {
 }
 
 // ============================================================================
-// Namespace Routing
+// Organization Routing
 // ============================================================================
 
-/// Namespace routing table entry.
+/// Organization routing table entry.
 ///
-/// Maps a namespace to its shard group for request routing.
+/// Maps an organization to its shard group for request routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceRegistry {
-    /// Namespace identifier.
-    pub namespace_id: NamespaceId,
-    /// Human-readable namespace name.
+pub struct OrganizationRegistry {
+    /// Organization identifier.
+    pub organization_id: OrganizationId,
+    /// Human-readable organization name.
     pub name: String,
-    /// Shard group hosting this namespace.
+    /// Shard group hosting this organization.
     pub shard_id: ShardId,
     /// Nodes in the shard group.
     pub member_nodes: Vec<NodeId>,
-    /// Current namespace status.
-    pub status: NamespaceStatus,
+    /// Current organization status.
+    pub status: OrganizationStatus,
     /// Configuration version for cache invalidation.
     pub config_version: u64,
-    /// When this namespace was created.
+    /// When this organization was created.
     pub created_at: DateTime<Utc>,
 }
 
-/// Namespace lifecycle status.
+/// Organization lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NamespaceStatus {
-    /// Namespace is active and accepting requests.
+pub enum OrganizationStatus {
+    /// Organization is active and accepting requests.
     #[default]
     Active,
-    /// Namespace is being migrated to another shard.
+    /// Organization is being migrated to another shard.
     Migrating,
-    /// Namespace is suspended (billing, policy, etc.).
+    /// Organization is suspended (billing, policy, etc.).
     Suspended,
-    /// Namespace is being deleted.
+    /// Organization is being deleted.
     Deleting,
-    /// Namespace has been deleted (tombstone).
+    /// Organization has been deleted (tombstone).
     Deleted,
 }
 
@@ -175,8 +175,8 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_status_default() {
-        assert_eq!(NamespaceStatus::default(), NamespaceStatus::Active);
+    fn test_organization_status_default() {
+        assert_eq!(OrganizationStatus::default(), OrganizationStatus::Active);
     }
 
     #[test]
@@ -202,20 +202,20 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_registry_serialization() {
-        let registry = NamespaceRegistry {
-            namespace_id: NamespaceId::new(1),
+    fn test_organization_registry_serialization() {
+        let registry = OrganizationRegistry {
+            organization_id: OrganizationId::new(1),
             name: "acme-corp".to_string(),
             shard_id: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
-            status: NamespaceStatus::Active,
+            status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),
         };
 
         let bytes = postcard::to_allocvec(&registry).unwrap();
-        let deserialized: NamespaceRegistry = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(registry.namespace_id, deserialized.namespace_id);
+        let deserialized: OrganizationRegistry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(registry.organization_id, deserialized.organization_id);
         assert_eq!(registry.name, deserialized.name);
     }
 }

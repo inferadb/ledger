@@ -31,6 +31,6 @@
 - Document all public types and functions
 
 ## Naming
-- Types: PascalCase (NamespaceId, VaultBlock)
+- Types: PascalCase (OrganizationId, VaultBlock)
 - Functions: snake_case (bucket_id, sha256_concat)
 - Constants: SCREAMING_SNAKE_CASE (EMPTY_HASH)

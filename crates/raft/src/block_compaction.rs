@@ -85,14 +85,14 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
         let mut total_compacted = 0u64;
         let mut had_error = false;
 
-        for ((namespace_id, vault_id), meta) in vaults {
+        for ((organization_id, vault_id), meta) in vaults {
             // Skip vaults not in COMPACTED mode
             if meta.retention_policy.mode != BlockRetentionMode::Compacted {
                 continue;
             }
 
             // Get current vault height
-            let current_height = match vault_heights.get(&(namespace_id, vault_id)) {
+            let current_height = match vault_heights.get(&(organization_id, vault_id)) {
                 Some(h) => *h,
                 None => continue,
             };
@@ -115,7 +115,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                 Err(e) => {
                     warn!(
                         trace_id = %trace_ctx.trace_id,
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         vault_id = vault_id.value(),
                         error = %e,
                         "Failed to get compaction watermark"
@@ -132,7 +132,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                     if count > 0 {
                         info!(
                             trace_id = %trace_ctx.trace_id,
-                            namespace_id = namespace_id.value(),
+                            organization_id = organization_id.value(),
                             vault_id = vault_id.value(),
                             compact_before,
                             count,
@@ -144,7 +144,7 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
                 Err(e) => {
                     warn!(
                         trace_id = %trace_ctx.trace_id,
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         vault_id = vault_id.value(),
                         compact_before,
                         error = %e,

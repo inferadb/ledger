@@ -223,11 +223,11 @@ After shutdown:
 ### Single Read
 
 ```rust
-// Read from namespace (entity)
-let value = client.read(namespace_id, None, "user:123").await?;
+// Read from organization (entity)
+let value = client.read(organization_slug, None, "user:123").await?;
 
 // Read from vault (relationship context)
-let value = client.read(namespace_id, Some(vault_id), "key").await?;
+let value = client.read(organization_slug, Some(vault_id), "key").await?;
 ```
 
 ### Consistent Read
@@ -235,7 +235,7 @@ let value = client.read(namespace_id, Some(vault_id), "key").await?;
 For linearizable reads (always from leader):
 
 ```rust
-let value = client.read_consistent(namespace_id, None, "user:123").await?;
+let value = client.read_consistent(organization_slug, None, "user:123").await?;
 ```
 
 ### Batch Read
@@ -244,7 +244,7 @@ Read multiple keys efficiently:
 
 ```rust
 let keys = vec!["user:1".into(), "user:2".into(), "user:3".into()];
-let results = client.batch_read(namespace_id, None, keys).await?;
+let results = client.batch_read(organization_slug, None, keys).await?;
 
 for (key, value) in results {
     match value {
@@ -262,7 +262,7 @@ Read with cryptographic proof:
 use inferadb_ledger_sdk::VerifyOpts;
 
 let verified = client.verified_read(
-    namespace_id,
+    organization_slug,
     vault_id,
     "user:123",
     VerifyOpts::default(),
@@ -286,7 +286,7 @@ let opts = ListEntitiesOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_entities(namespace_id, opts).await?;
+let page = client.list_entities(organization_slug, opts).await?;
 for entity in page.items {
     println!("{}: {} bytes", entity.key, entity.value.len());
 }
@@ -297,7 +297,7 @@ if let Some(token) = page.next_token {
         .prefix("user:")
         .page_token(token)
         .build();
-    let next_page = client.list_entities(namespace_id, next_opts).await?;
+    let next_page = client.list_entities(organization_slug, next_opts).await?;
 }
 ```
 
@@ -312,7 +312,7 @@ let opts = ListRelationshipsOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_relationships(namespace_id, vault_id, opts).await?;
+let page = client.list_relationships(organization_slug, vault_id, opts).await?;
 for rel in page.items {
     println!("{} is {} of {}", rel.subject, rel.relation, rel.resource);
 }
@@ -329,7 +329,7 @@ let opts = ListResourcesOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_resources(namespace_id, vault_id, opts).await?;
+let page = client.list_resources(organization_slug, vault_id, opts).await?;
 ```
 
 ## Write Operations
@@ -386,7 +386,7 @@ let ops = vec![
     Operation::create_relationship("doc:1", "owner", "user:123"),
 ];
 
-let result = client.write(namespace_id, Some(vault_id), ops).await?;
+let result = client.write(organization_slug, Some(vault_id), ops).await?;
 println!("Transaction ID: {}", result.tx_id);
 println!("Block height: {}", result.block_height);
 ```
@@ -408,7 +408,7 @@ let ops = vec![
     Operation::create_relationship("org:acme", "member", "user:123"),
 ];
 
-let result = client.batch_write(namespace_id, Some(vault_id), ops).await?;
+let result = client.batch_write(organization_slug, Some(vault_id), ops).await?;
 ```
 
 If any conditional operation fails, the entire batch is rejected atomically.
@@ -422,7 +422,7 @@ Subscribe to new blocks in real-time:
 ```rust
 use futures::StreamExt;
 
-let mut stream = client.watch_blocks(namespace_id, vault_id, start_height).await?;
+let mut stream = client.watch_blocks(organization_slug, vault_id, start_height).await?;
 
 while let Some(result) = stream.next().await {
     match result {
@@ -450,9 +450,9 @@ The SDK handles stream reconnection automatically:
 
 ```rust
 // Get current tip, then subscribe from next block
-let vault_info = client.get_vault(namespace_id, vault_id).await?;
+let vault_info = client.get_vault(organization_slug, vault_id).await?;
 let stream = client.watch_blocks(
-    namespace_id,
+    organization_slug,
     vault_id,
     vault_info.height + 1,
 ).await?;
@@ -460,34 +460,34 @@ let stream = client.watch_blocks(
 
 ## Admin Operations
 
-### Namespace Management
+### Organization Management
 
 ```rust
-// Create namespace
-let ns = client.create_namespace("my_app").await?;
-println!("Namespace ID: {}", ns.id);
+// Create organization
+let ns = client.create_organization("my_app").await?;
+println!("Organization ID: {}", ns.id);
 
-// Get namespace info
-let info = client.get_namespace(ns.id).await?;
+// Get organization info
+let info = client.get_organization(ns.id).await?;
 println!("Status: {:?}", info.status);
 
-// List namespaces
-let namespaces = client.list_namespaces(None).await?;
+// List organizations
+let organizations = client.list_organizations(None).await?;
 ```
 
 ### Vault Management
 
 ```rust
 // Create vault
-let vault = client.create_vault(namespace_id).await?;
+let vault = client.create_vault(organization_slug).await?;
 println!("Vault ID: {}", vault.id);
 
 // Get vault info
-let info = client.get_vault(namespace_id, vault.id).await?;
+let info = client.get_vault(organization_slug, vault.id).await?;
 println!("Height: {}, State root: {:?}", info.height, info.state_root);
 
 // List vaults
-let vaults = client.list_vaults(namespace_id, None).await?;
+let vaults = client.list_vaults(organization_slug, None).await?;
 ```
 
 ### Health Checks
@@ -505,7 +505,7 @@ println!("Status: {:?}", result.status);
 println!("Leader: {}", result.is_leader);
 
 // Vault-specific health
-let vault_health = client.health_check_vault(namespace_id, vault_id).await?;
+let vault_health = client.health_check_vault(organization_slug, vault_id).await?;
 ```
 
 ## Error Handling
@@ -624,10 +624,10 @@ For advanced use cases:
 ```rust
 // Get current sequence state
 let tracker = client.sequences();
-let seq = tracker.get(namespace_id, vault_id).await;
+let seq = tracker.get(organization_slug, vault_id).await;
 
 // Recover from server if state is lost
-let state = client.get_client_state(namespace_id, vault_id).await?;
+let state = client.get_client_state(organization_slug, vault_id).await?;
 println!("Last committed: {}", state.last_committed_sequence);
 ```
 

@@ -6,22 +6,23 @@ pub struct Hash {
     #[prost(bytes = "vec", tag = "1")]
     pub value: ::prost::alloc::vec::Vec<u8>,
 }
-/// Unique namespace identifier (one per organization)
-/// Sequential int64 assigned by Ledger leader from "\_meta:seq:namespace"
-/// Special case: namespace_id = 0 is reserved for \_system
+/// External organization identifier (Snowflake-generated slug)
+/// This is the only identifier exposed to API consumers.
+/// Internal sequential OrganizationId(i64) is used for storage but never appears in the API.
+/// Special case: organization_slug = 0 is reserved for \_system
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct NamespaceId {
-    #[prost(int64, tag = "1")]
-    pub id: i64,
+pub struct OrganizationSlug {
+    #[prost(uint64, tag = "1")]
+    pub slug: u64,
 }
-/// Unique vault identifier (relationship store within a namespace)
+/// Unique vault identifier (relationship store within an organization)
 /// Sequential int64 assigned by Ledger leader from "\_meta:seq:vault"
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VaultId {
     #[prost(int64, tag = "1")]
     pub id: i64,
 }
-/// Unique shard identifier (Raft group hosting multiple namespaces)
+/// Unique shard identifier (Raft group hosting multiple organizations)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ShardId {
     #[prost(uint32, tag = "1")]
@@ -33,16 +34,16 @@ pub struct NodeId {
     #[prost(string, tag = "1")]
     pub id: ::prost::alloc::string::String,
 }
-/// Unique user identifier (global, stored in \_system namespace)
+/// Unique user identifier (global, stored in \_system organization)
 /// Sequential int64 assigned by Ledger leader (see ID Generation Strategy in DESIGN.md)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UserId {
     #[prost(int64, tag = "1")]
     pub id: i64,
 }
-/// User record (stored in \_system namespace as Entity with key "user:{id}")
+/// User record (stored in \_system organization as Entity with key "user:{id}")
 /// Users can have multiple email addresses via separate UserEmail entities.
-/// Namespace access is derived from membership records (member:{id} in each org namespace).
+/// Organization access is derived from membership records (member:{id} in each org).
 /// ID assigned by Ledger leader from sequence counter "\_meta:seq:user"
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct User {
@@ -62,7 +63,7 @@ pub struct User {
     #[prost(message, optional, tag = "6")]
     pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
 }
-/// User email address (stored in \_system namespace as Entity with key "user_email:{id}")
+/// User email address (stored in \_system organization as Entity with key "user_email:{id}")
 /// Each user can have multiple emails; primary is tracked by UserEmail.primary field.
 /// Constraint: Primary email cannot be deleted (must reassign primary first).
 /// Global email uniqueness is enforced via index: "\_idx:email:{email}" → email_id
@@ -90,7 +91,7 @@ pub struct UserEmail {
     #[prost(message, optional, tag = "7")]
     pub verified_at: ::core::option::Option<::prost_types::Timestamp>,
 }
-/// Email verification token (stored in \_system namespace with TTL)
+/// Email verification token (stored in \_system organization with TTL)
 /// Key: "email_verify:{id}", Index: "\_idx:email_verify:token:{token}" → token_id
 /// Tokens expire after 24 hours via Ledger's TTL mechanism.
 /// ID assigned by Ledger leader from sequence counter "\_meta:seq:email_verify"
@@ -132,10 +133,10 @@ pub struct TxId {
 pub struct BlockHeader {
     #[prost(uint64, tag = "1")]
     pub height: u64,
-    /// Owning namespace (organization)
+    /// Owning organization
     #[prost(message, optional, tag = "2")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Vault within namespace
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Vault within organization
     #[prost(message, optional, tag = "3")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(message, optional, tag = "4")]
@@ -167,10 +168,10 @@ pub struct Block {
 /// Lightweight block notification for streaming (excludes transaction bodies)
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BlockAnnouncement {
-    /// Owning namespace
+    /// Owning organization
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Vault within namespace
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Vault within organization
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(uint64, tag = "3")]
@@ -408,8 +409,8 @@ pub struct StateProof {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ReadRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Omit for namespace-level entity reads
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Omit for organization-level entity reads
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(string, tag = "3")]
@@ -426,11 +427,11 @@ pub struct ReadResponse {
     pub block_height: u64,
 }
 /// Batch read request: read multiple keys in a single RPC for higher throughput.
-/// All reads share the same namespace, vault, and consistency level.
+/// All reads share the same organization, vault, and consistency level.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BatchReadRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// Keys to read (max 1000)
@@ -470,8 +471,8 @@ pub struct BatchReadResult {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VerifiedReadRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Omit for namespace-level entity reads
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Omit for organization-level entity reads
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(string, tag = "3")]
@@ -509,8 +510,8 @@ pub struct VerifiedReadResponse {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HistoricalReadRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Omit for namespace-level entity reads
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Omit for organization-level entity reads
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(string, tag = "3")]
@@ -548,7 +549,7 @@ pub struct HistoricalReadResponse {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WatchBlocksRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// First block height to stream. Must be >= 1 (0 is rejected with INVALID_ARGUMENT).
@@ -577,7 +578,7 @@ pub struct WatchBlocksRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetBlockRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(uint64, tag = "3")]
@@ -593,7 +594,7 @@ pub struct GetBlockResponse {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetBlockRangeRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// First block to return (inclusive)
@@ -615,7 +616,7 @@ pub struct GetBlockRangeResponse {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetTipRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
 }
@@ -631,8 +632,8 @@ pub struct GetTipResponse {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetClientStateRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Omit for namespace-level entity writes
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Omit for organization-level entity writes
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(message, optional, tag = "3")]
@@ -646,7 +647,7 @@ pub struct GetClientStateResponse {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListRelationshipsRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// Filter by resource (exact match)
@@ -685,7 +686,7 @@ pub struct ListRelationshipsResponse {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListResourcesRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// Type prefix (e.g., "document" matches "document:\*")
@@ -718,7 +719,7 @@ pub struct ListResourcesResponse {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListEntitiesRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     /// e.g., "user:", "\_idx:email:", "session:"
     #[prost(string, tag = "2")]
     pub key_prefix: ::prost::alloc::string::String,
@@ -737,7 +738,7 @@ pub struct ListEntitiesRequest {
     /// Default: EVENTUAL (any replica)
     #[prost(enumeration = "ReadConsistency", tag = "7")]
     pub consistency: i32,
-    /// Omit for namespace-level entities (vault_id=0)
+    /// Omit for organization-level entities (vault_id=0)
     #[prost(message, optional, tag = "8")]
     pub vault_id: ::core::option::Option<VaultId>,
 }
@@ -756,8 +757,8 @@ pub struct ListEntitiesResponse {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WriteRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Required for relationships; omit for namespace-level entities
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Required for relationships; omit for organization-level entities
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(message, optional, tag = "3")]
@@ -856,7 +857,7 @@ pub struct ErrorDetails {
     /// rate-limited or backpressure errors.
     #[prost(int32, optional, tag = "3")]
     pub retry_after_ms: ::core::option::Option<i32>,
-    /// Structured key-value context (e.g., {"namespace_id": "42", "field": "key"}).
+    /// Structured key-value context (e.g., {"organization_slug": "42", "field": "key"}).
     #[prost(map = "string, string", tag = "4")]
     pub context: ::std::collections::HashMap<
         ::prost::alloc::string::String,
@@ -886,7 +887,7 @@ pub struct ErrorDetails {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BatchWriteRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     /// All writes must target same scope
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
@@ -906,7 +907,7 @@ pub struct BatchWriteRequest {
 /// Logical grouping of operations within a BatchWriteRequest.
 /// Purpose: Allows expressing ordered operation groups within an atomic batch.
 /// Processing: Groups are processed in array order (operations\[0\], then operations\[1\], etc.)
-/// All groups share the batch's namespace_id, vault_id, client_id, and idempotency_key.
+/// All groups share the batch's organization_slug, vault_id, client_id, and idempotency_key.
 /// Atomicity: The ENTIRE batch is atomic—if any operation fails, no changes are applied.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BatchWriteOperation {
@@ -952,12 +953,10 @@ pub struct BatchWriteSuccess {
     #[prost(uint64, tag = "5")]
     pub assigned_sequence: u64,
 }
-/// Create a new namespace. NamespaceId is leader-assigned from \_meta:seq:namespace.
-/// The namespace is assigned to the shard with lowest load, or to the specified shard.
-/// Per-namespace resource quota limits.
-/// Applied to new namespaces; defaults from server config if not specified.
+/// Per-organization resource quota limits.
+/// Applied to new organizations; defaults from server config if not specified.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct NamespaceQuota {
+pub struct OrganizationQuota {
     /// Maximum cumulative storage bytes
     #[prost(uint64, tag = "1")]
     pub max_storage_bytes: u64,
@@ -971,8 +970,11 @@ pub struct NamespaceQuota {
     #[prost(uint32, tag = "4")]
     pub max_read_ops_per_sec: u32,
 }
+/// Create a new organization. An OrganizationSlug (Snowflake ID) is generated
+/// by the leader and returned. The organization is assigned to the shard with
+/// lowest load, or to the specified shard.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CreateNamespaceRequest {
+pub struct CreateOrganizationRequest {
     /// Human-readable name (e.g., "acme_corp")
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
@@ -981,59 +983,49 @@ pub struct CreateNamespaceRequest {
     pub shard_id: ::core::option::Option<ShardId>,
     /// Resource quota (server default if not specified)
     #[prost(message, optional, tag = "3")]
-    pub quota: ::core::option::Option<NamespaceQuota>,
+    pub quota: ::core::option::Option<OrganizationQuota>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CreateNamespaceResponse {
+pub struct CreateOrganizationResponse {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     /// Assigned shard
     #[prost(message, optional, tag = "2")]
     pub shard_id: ::core::option::Option<ShardId>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeleteNamespaceRequest {
+pub struct DeleteOrganizationRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DeleteNamespaceResponse {
+pub struct DeleteOrganizationResponse {
     #[prost(message, optional, tag = "1")]
     pub deleted_at: ::core::option::Option<::prost_types::Timestamp>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetNamespaceRequest {
-    /// Lookup by ID or name (exactly one must be set)
-    #[prost(oneof = "get_namespace_request::Lookup", tags = "1, 2")]
-    pub lookup: ::core::option::Option<get_namespace_request::Lookup>,
+/// Get organization info by slug only.
+/// Organization names are not unique, so name-based lookup is not supported.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetOrganizationRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
 }
-/// Nested message and enum types in `GetNamespaceRequest`.
-pub mod get_namespace_request {
-    /// Lookup by ID or name (exactly one must be set)
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
-    pub enum Lookup {
-        #[prost(message, tag = "1")]
-        NamespaceId(super::NamespaceId),
-        #[prost(string, tag = "2")]
-        Name(::prost::alloc::string::String),
-    }
-}
-/// Namespace registry info (routing metadata from \_system)
+/// Organization info (routing metadata from \_system)
 /// Note: leader_hint is computed dynamically from Raft state via GetSystemState
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetNamespaceResponse {
+pub struct GetOrganizationResponse {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// Which shard hosts this namespace
+    /// Which shard hosts this organization
     #[prost(message, optional, tag = "3")]
     pub shard_id: ::core::option::Option<ShardId>,
     /// Nodes in the shard
     #[prost(message, repeated, tag = "4")]
     pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
     /// Lifecycle state
-    #[prost(enumeration = "NamespaceStatus", tag = "5")]
+    #[prost(enumeration = "OrganizationStatus", tag = "5")]
     pub status: i32,
     /// For cache invalidation
     #[prost(uint64, tag = "6")]
@@ -1042,7 +1034,7 @@ pub struct GetNamespaceResponse {
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListNamespacesRequest {
+pub struct ListOrganizationsRequest {
     #[prost(bytes = "vec", optional, tag = "1")]
     pub page_token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     /// Default: 100, Max: 1000
@@ -1050,9 +1042,9 @@ pub struct ListNamespacesRequest {
     pub page_size: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListNamespacesResponse {
+pub struct ListOrganizationsResponse {
     #[prost(message, repeated, tag = "1")]
-    pub namespaces: ::prost::alloc::vec::Vec<GetNamespaceResponse>,
+    pub organizations: ::prost::alloc::vec::Vec<GetOrganizationResponse>,
     /// Absent if no more pages
     #[prost(bytes = "vec", optional, tag = "2")]
     pub next_page_token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
@@ -1062,7 +1054,7 @@ pub struct ListNamespacesResponse {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateVaultRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(uint32, tag = "2")]
     pub replication_factor: u32,
     #[prost(message, repeated, tag = "3")]
@@ -1090,7 +1082,7 @@ pub struct CreateVaultResponse {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteVaultRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
 }
@@ -1102,14 +1094,14 @@ pub struct DeleteVaultResponse {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetVaultRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetVaultResponse {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     #[prost(uint64, tag = "3")]
@@ -1136,7 +1128,7 @@ pub struct ListVaultsResponse {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateSnapshotRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
 }
@@ -1152,7 +1144,7 @@ pub struct CreateSnapshotResponse {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CheckIntegrityRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// Replay from genesis vs quick check
@@ -1180,7 +1172,7 @@ pub struct IntegrityIssue {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RecoverVaultRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// Force recovery even if vault is healthy (for testing/maintenance).
@@ -1210,7 +1202,7 @@ pub struct RecoverVaultResponse {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SimulateDivergenceRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
     /// Expected state root (fake value for simulation).
@@ -1234,12 +1226,12 @@ pub struct SimulateDivergenceResponse {
     pub health_status: i32,
 }
 /// Force a garbage collection cycle for expired entities.
-/// If namespace_id and vault_id are specified, only that vault is scanned.
+/// If organization_slug and vault_id are specified, only that vault is scanned.
 /// If omitted, all vaults are scanned (cluster-wide GC).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ForceGcRequest {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
 }
@@ -1484,9 +1476,9 @@ pub struct ClusterMember {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HealthCheckRequest {
-    /// Namespace for vault health check
+    /// Organization for vault health check
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
     /// If empty, check node health
     #[prost(message, optional, tag = "2")]
     pub vault_id: ::core::option::Option<VaultId>,
@@ -1554,9 +1546,9 @@ pub struct GetSystemStateResponse {
     pub version: u64,
     #[prost(message, repeated, tag = "2")]
     pub nodes: ::prost::alloc::vec::Vec<NodeInfo>,
-    /// Routing table: namespace → shard
+    /// Routing table: organization → shard
     #[prost(message, repeated, tag = "3")]
-    pub namespaces: ::prost::alloc::vec::Vec<NamespaceRegistry>,
+    pub organizations: ::prost::alloc::vec::Vec<OrganizationRegistry>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NodeInfo {
@@ -1579,23 +1571,23 @@ pub struct NodeInfo {
     #[prost(message, optional, tag = "6")]
     pub joined_at: ::core::option::Option<::prost_types::Timestamp>,
 }
-/// Routing entry: namespace → shard assignment
+/// Routing entry: organization → shard assignment
 /// Note: leader_hint is computed dynamically from Raft state, not stored here
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct NamespaceRegistry {
+pub struct OrganizationRegistry {
     #[prost(message, optional, tag = "1")]
-    pub namespace_id: ::core::option::Option<NamespaceId>,
-    /// Human-readable namespace name
+    pub organization_slug: ::core::option::Option<OrganizationSlug>,
+    /// Human-readable organization name
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// Which Raft group hosts this namespace
+    /// Which Raft group hosts this organization
     #[prost(message, optional, tag = "3")]
     pub shard_id: ::core::option::Option<ShardId>,
     /// Nodes in the shard
     #[prost(message, repeated, tag = "4")]
     pub members: ::prost::alloc::vec::Vec<NodeId>,
     /// Lifecycle state
-    #[prost(enumeration = "NamespaceStatus", tag = "5")]
+    #[prost(enumeration = "OrganizationStatus", tag = "5")]
     pub status: i32,
     /// For cache invalidation
     #[prost(uint64, tag = "6")]
@@ -1906,7 +1898,7 @@ impl ReadErrorCode {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum NamespaceStatus {
+pub enum OrganizationStatus {
     Unspecified = 0,
     /// Accepting requests
     Active = 1,
@@ -1919,30 +1911,30 @@ pub enum NamespaceStatus {
     /// Tombstone
     Deleted = 5,
 }
-impl NamespaceStatus {
+impl OrganizationStatus {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Unspecified => "NAMESPACE_STATUS_UNSPECIFIED",
-            Self::Active => "NAMESPACE_STATUS_ACTIVE",
-            Self::Migrating => "NAMESPACE_STATUS_MIGRATING",
-            Self::Suspended => "NAMESPACE_STATUS_SUSPENDED",
-            Self::Deleting => "NAMESPACE_STATUS_DELETING",
-            Self::Deleted => "NAMESPACE_STATUS_DELETED",
+            Self::Unspecified => "ORGANIZATION_STATUS_UNSPECIFIED",
+            Self::Active => "ORGANIZATION_STATUS_ACTIVE",
+            Self::Migrating => "ORGANIZATION_STATUS_MIGRATING",
+            Self::Suspended => "ORGANIZATION_STATUS_SUSPENDED",
+            Self::Deleting => "ORGANIZATION_STATUS_DELETING",
+            Self::Deleted => "ORGANIZATION_STATUS_DELETED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "NAMESPACE_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
-            "NAMESPACE_STATUS_ACTIVE" => Some(Self::Active),
-            "NAMESPACE_STATUS_MIGRATING" => Some(Self::Migrating),
-            "NAMESPACE_STATUS_SUSPENDED" => Some(Self::Suspended),
-            "NAMESPACE_STATUS_DELETING" => Some(Self::Deleting),
-            "NAMESPACE_STATUS_DELETED" => Some(Self::Deleted),
+            "ORGANIZATION_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "ORGANIZATION_STATUS_ACTIVE" => Some(Self::Active),
+            "ORGANIZATION_STATUS_MIGRATING" => Some(Self::Migrating),
+            "ORGANIZATION_STATUS_SUSPENDED" => Some(Self::Suspended),
+            "ORGANIZATION_STATUS_DELETING" => Some(Self::Deleting),
+            "ORGANIZATION_STATUS_DELETED" => Some(Self::Deleted),
             _ => None,
         }
     }
@@ -2286,7 +2278,7 @@ pub mod read_service_client {
         }
         /// Batch read multiple keys in a single RPC call.
         /// Amortizes network overhead across multiple reads for higher throughput.
-        /// All reads use the same namespace/vault scope and consistency level.
+        /// All reads use the same organization/vault scope and consistency level.
         pub async fn batch_read(
             &mut self,
             request: impl tonic::IntoRequest<super::BatchReadRequest>,
@@ -2584,7 +2576,7 @@ pub mod read_service_server {
         ) -> std::result::Result<tonic::Response<super::ReadResponse>, tonic::Status>;
         /// Batch read multiple keys in a single RPC call.
         /// Amortizes network overhead across multiple reads for higher throughput.
-        /// All reads use the same namespace/vault scope and consistency level.
+        /// All reads use the same organization/vault scope and consistency level.
         async fn batch_read(
             &self,
             request: tonic::Request<super::BatchReadRequest>,
@@ -3799,12 +3791,13 @@ pub mod admin_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Create a new namespace. NamespaceId is leader-assigned from \_meta:seq:namespace.
-        pub async fn create_namespace(
+        /// Create a new organization. An OrganizationSlug (Snowflake ID) is generated
+        /// and returned. Internal sequential OrganizationId is never exposed.
+        pub async fn create_organization(
             &mut self,
-            request: impl tonic::IntoRequest<super::CreateNamespaceRequest>,
+            request: impl tonic::IntoRequest<super::CreateOrganizationRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::CreateNamespaceResponse>,
+            tonic::Response<super::CreateOrganizationResponse>,
             tonic::Status,
         > {
             self.inner
@@ -3817,19 +3810,19 @@ pub mod admin_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.AdminService/CreateNamespace",
+                "/ledger.v1.AdminService/CreateOrganization",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.AdminService", "CreateNamespace"));
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "CreateOrganization"));
             self.inner.unary(req, path, codec).await
         }
-        /// Delete a namespace (marks for garbage collection, fails if vaults exist)
-        pub async fn delete_namespace(
+        /// Delete an organization (marks for garbage collection, fails if vaults exist)
+        pub async fn delete_organization(
             &mut self,
-            request: impl tonic::IntoRequest<super::DeleteNamespaceRequest>,
+            request: impl tonic::IntoRequest<super::DeleteOrganizationRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::DeleteNamespaceResponse>,
+            tonic::Response<super::DeleteOrganizationResponse>,
             tonic::Status,
         > {
             self.inner
@@ -3842,19 +3835,20 @@ pub mod admin_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.AdminService/DeleteNamespace",
+                "/ledger.v1.AdminService/DeleteOrganization",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.AdminService", "DeleteNamespace"));
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "DeleteOrganization"));
             self.inner.unary(req, path, codec).await
         }
-        /// Get namespace info including shard assignment
-        pub async fn get_namespace(
+        /// Get organization info including shard assignment.
+        /// Lookup by slug only — organization names are not unique.
+        pub async fn get_organization(
             &mut self,
-            request: impl tonic::IntoRequest<super::GetNamespaceRequest>,
+            request: impl tonic::IntoRequest<super::GetOrganizationRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetNamespaceResponse>,
+            tonic::Response<super::GetOrganizationResponse>,
             tonic::Status,
         > {
             self.inner
@@ -3867,19 +3861,19 @@ pub mod admin_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.AdminService/GetNamespace",
+                "/ledger.v1.AdminService/GetOrganization",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.AdminService", "GetNamespace"));
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "GetOrganization"));
             self.inner.unary(req, path, codec).await
         }
-        /// List all namespaces (paginated)
-        pub async fn list_namespaces(
+        /// List all organizations (paginated)
+        pub async fn list_organizations(
             &mut self,
-            request: impl tonic::IntoRequest<super::ListNamespacesRequest>,
+            request: impl tonic::IntoRequest<super::ListOrganizationsRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::ListNamespacesResponse>,
+            tonic::Response<super::ListOrganizationsResponse>,
             tonic::Status,
         > {
             self.inner
@@ -3892,11 +3886,11 @@ pub mod admin_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.AdminService/ListNamespaces",
+                "/ledger.v1.AdminService/ListOrganizations",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.AdminService", "ListNamespaces"));
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "ListOrganizations"));
             self.inner.unary(req, path, codec).await
         }
         /// Create a new vault
@@ -4381,36 +4375,38 @@ pub mod admin_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with AdminServiceServer.
     #[async_trait]
     pub trait AdminService: std::marker::Send + std::marker::Sync + 'static {
-        /// Create a new namespace. NamespaceId is leader-assigned from \_meta:seq:namespace.
-        async fn create_namespace(
+        /// Create a new organization. An OrganizationSlug (Snowflake ID) is generated
+        /// and returned. Internal sequential OrganizationId is never exposed.
+        async fn create_organization(
             &self,
-            request: tonic::Request<super::CreateNamespaceRequest>,
+            request: tonic::Request<super::CreateOrganizationRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::CreateNamespaceResponse>,
+            tonic::Response<super::CreateOrganizationResponse>,
             tonic::Status,
         >;
-        /// Delete a namespace (marks for garbage collection, fails if vaults exist)
-        async fn delete_namespace(
+        /// Delete an organization (marks for garbage collection, fails if vaults exist)
+        async fn delete_organization(
             &self,
-            request: tonic::Request<super::DeleteNamespaceRequest>,
+            request: tonic::Request<super::DeleteOrganizationRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::DeleteNamespaceResponse>,
+            tonic::Response<super::DeleteOrganizationResponse>,
             tonic::Status,
         >;
-        /// Get namespace info including shard assignment
-        async fn get_namespace(
+        /// Get organization info including shard assignment.
+        /// Lookup by slug only — organization names are not unique.
+        async fn get_organization(
             &self,
-            request: tonic::Request<super::GetNamespaceRequest>,
+            request: tonic::Request<super::GetOrganizationRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetNamespaceResponse>,
+            tonic::Response<super::GetOrganizationResponse>,
             tonic::Status,
         >;
-        /// List all namespaces (paginated)
-        async fn list_namespaces(
+        /// List all organizations (paginated)
+        async fn list_organizations(
             &self,
-            request: tonic::Request<super::ListNamespacesRequest>,
+            request: tonic::Request<super::ListOrganizationsRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::ListNamespacesResponse>,
+            tonic::Response<super::ListOrganizationsResponse>,
             tonic::Status,
         >;
         /// Create a new vault
@@ -4648,25 +4644,26 @@ pub mod admin_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/ledger.v1.AdminService/CreateNamespace" => {
+                "/ledger.v1.AdminService/CreateOrganization" => {
                     #[allow(non_camel_case_types)]
-                    struct CreateNamespaceSvc<T: AdminService>(pub Arc<T>);
+                    struct CreateOrganizationSvc<T: AdminService>(pub Arc<T>);
                     impl<
                         T: AdminService,
-                    > tonic::server::UnaryService<super::CreateNamespaceRequest>
-                    for CreateNamespaceSvc<T> {
-                        type Response = super::CreateNamespaceResponse;
+                    > tonic::server::UnaryService<super::CreateOrganizationRequest>
+                    for CreateOrganizationSvc<T> {
+                        type Response = super::CreateOrganizationResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::CreateNamespaceRequest>,
+                            request: tonic::Request<super::CreateOrganizationRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as AdminService>::create_namespace(&inner, request).await
+                                <T as AdminService>::create_organization(&inner, request)
+                                    .await
                             };
                             Box::pin(fut)
                         }
@@ -4677,7 +4674,7 @@ pub mod admin_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = CreateNamespaceSvc(inner);
+                        let method = CreateOrganizationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -4693,25 +4690,26 @@ pub mod admin_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.AdminService/DeleteNamespace" => {
+                "/ledger.v1.AdminService/DeleteOrganization" => {
                     #[allow(non_camel_case_types)]
-                    struct DeleteNamespaceSvc<T: AdminService>(pub Arc<T>);
+                    struct DeleteOrganizationSvc<T: AdminService>(pub Arc<T>);
                     impl<
                         T: AdminService,
-                    > tonic::server::UnaryService<super::DeleteNamespaceRequest>
-                    for DeleteNamespaceSvc<T> {
-                        type Response = super::DeleteNamespaceResponse;
+                    > tonic::server::UnaryService<super::DeleteOrganizationRequest>
+                    for DeleteOrganizationSvc<T> {
+                        type Response = super::DeleteOrganizationResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::DeleteNamespaceRequest>,
+                            request: tonic::Request<super::DeleteOrganizationRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as AdminService>::delete_namespace(&inner, request).await
+                                <T as AdminService>::delete_organization(&inner, request)
+                                    .await
                             };
                             Box::pin(fut)
                         }
@@ -4722,7 +4720,7 @@ pub mod admin_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = DeleteNamespaceSvc(inner);
+                        let method = DeleteOrganizationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -4738,25 +4736,25 @@ pub mod admin_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.AdminService/GetNamespace" => {
+                "/ledger.v1.AdminService/GetOrganization" => {
                     #[allow(non_camel_case_types)]
-                    struct GetNamespaceSvc<T: AdminService>(pub Arc<T>);
+                    struct GetOrganizationSvc<T: AdminService>(pub Arc<T>);
                     impl<
                         T: AdminService,
-                    > tonic::server::UnaryService<super::GetNamespaceRequest>
-                    for GetNamespaceSvc<T> {
-                        type Response = super::GetNamespaceResponse;
+                    > tonic::server::UnaryService<super::GetOrganizationRequest>
+                    for GetOrganizationSvc<T> {
+                        type Response = super::GetOrganizationResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::GetNamespaceRequest>,
+                            request: tonic::Request<super::GetOrganizationRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as AdminService>::get_namespace(&inner, request).await
+                                <T as AdminService>::get_organization(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -4767,7 +4765,7 @@ pub mod admin_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = GetNamespaceSvc(inner);
+                        let method = GetOrganizationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -4783,25 +4781,26 @@ pub mod admin_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.AdminService/ListNamespaces" => {
+                "/ledger.v1.AdminService/ListOrganizations" => {
                     #[allow(non_camel_case_types)]
-                    struct ListNamespacesSvc<T: AdminService>(pub Arc<T>);
+                    struct ListOrganizationsSvc<T: AdminService>(pub Arc<T>);
                     impl<
                         T: AdminService,
-                    > tonic::server::UnaryService<super::ListNamespacesRequest>
-                    for ListNamespacesSvc<T> {
-                        type Response = super::ListNamespacesResponse;
+                    > tonic::server::UnaryService<super::ListOrganizationsRequest>
+                    for ListOrganizationsSvc<T> {
+                        type Response = super::ListOrganizationsResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::ListNamespacesRequest>,
+                            request: tonic::Request<super::ListOrganizationsRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as AdminService>::list_namespaces(&inner, request).await
+                                <T as AdminService>::list_organizations(&inner, request)
+                                    .await
                             };
                             Box::pin(fut)
                         }
@@ -4812,7 +4811,7 @@ pub mod admin_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = ListNamespacesSvc(inner);
+                        let method = ListOrganizationsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -6123,7 +6122,7 @@ pub mod system_discovery_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Get full system state (nodes + vault registry)
+        /// Get full system state (nodes + organization registry)
         pub async fn get_system_state(
             &mut self,
             request: impl tonic::IntoRequest<super::GetSystemStateRequest>,
@@ -6181,7 +6180,7 @@ pub mod system_discovery_service_server {
             tonic::Response<super::AnnouncePeerResponse>,
             tonic::Status,
         >;
-        /// Get full system state (nodes + vault registry)
+        /// Get full system state (nodes + organization registry)
         async fn get_system_state(
             &self,
             request: tonic::Request<super::GetSystemStateRequest>,

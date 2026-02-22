@@ -21,20 +21,21 @@ message Hash {
   bytes value = 1; // 32 bytes
 }
 
-// Unique namespace identifier (one per organization)
-// Sequential int64 assigned by Ledger leader from "_meta:seq:namespace"
-// Special case: namespace_id = 0 is reserved for _system
-message NamespaceId {
-  int64 id = 1;
+// External organization identifier (Snowflake-generated slug)
+// This is the only identifier exposed to API consumers.
+// Internal sequential OrganizationId(i64) is used for storage but never appears in the API.
+// Special case: organization_slug = 0 is reserved for _system
+message OrganizationSlug {
+  uint64 slug = 1;
 }
 
-// Unique vault identifier (relationship store within a namespace)
+// Unique vault identifier (relationship store within an organization)
 // Sequential int64 assigned by Ledger leader from "_meta:seq:vault"
 message VaultId {
   int64 id = 1;
 }
 
-// Unique shard identifier (Raft group hosting multiple namespaces)
+// Unique shard identifier (Raft group hosting multiple organizations)
 message ShardId {
   uint32 id = 1;
 }
@@ -44,7 +45,7 @@ message NodeId {
   string id = 1;
 }
 
-// Unique user identifier (global, stored in _system namespace)
+// Unique user identifier (global, stored in _system organization)
 // Sequential int64 assigned by Ledger leader (see ID Generation Strategy in DESIGN.md)
 message UserId {
   int64 id = 1;
@@ -60,9 +61,9 @@ enum UserStatus {
   USER_STATUS_DELETED = 5;     // Tombstone for audit
 }
 
-// User record (stored in _system namespace as Entity with key "user:{id}")
+// User record (stored in _system organization as Entity with key "user:{id}")
 // Users can have multiple email addresses via separate UserEmail entities.
-// Namespace access is derived from membership records (member:{id} in each org namespace).
+// Organization access is derived from membership records (member:{id} in each org).
 // ID assigned by Ledger leader from sequence counter "_meta:seq:user"
 message User {
   UserId id = 1;
@@ -73,7 +74,7 @@ message User {
   google.protobuf.Timestamp updated_at = 6;
 }
 
-// User email address (stored in _system namespace as Entity with key "user_email:{id}")
+// User email address (stored in _system organization as Entity with key "user_email:{id}")
 // Each user can have multiple emails; primary is tracked by UserEmail.primary field.
 // Constraint: Primary email cannot be deleted (must reassign primary first).
 // Global email uniqueness is enforced via index: "_idx:email:{email}" → email_id
@@ -88,7 +89,7 @@ message UserEmail {
   google.protobuf.Timestamp verified_at = 7; // When verified (null if unverified)
 }
 
-// Email verification token (stored in _system namespace with TTL)
+// Email verification token (stored in _system organization with TTL)
 // Key: "email_verify:{id}", Index: "_idx:email_verify:token:{token}" → token_id
 // Tokens expire after 24 hours via Ledger's TTL mechanism.
 // ID assigned by Ledger leader from sequence counter "_meta:seq:email_verify"
@@ -117,8 +118,8 @@ message TxId {
 
 message BlockHeader {
   uint64 height = 1;
-  NamespaceId namespace_id = 2; // Owning namespace (organization)
-  VaultId vault_id = 3; // Vault within namespace
+  OrganizationSlug organization_slug = 2; // Owning organization
+  VaultId vault_id = 3; // Vault within organization
   Hash previous_hash = 4;
   Hash tx_merkle_root = 5;
   Hash state_root = 6;
@@ -139,8 +140,8 @@ message Block {
 
 // Lightweight block notification for streaming (excludes transaction bodies)
 message BlockAnnouncement {
-  NamespaceId namespace_id = 1; // Owning namespace
-  VaultId vault_id = 2; // Vault within namespace
+  OrganizationSlug organization_slug = 1; // Owning organization
+  VaultId vault_id = 2; // Vault within organization
   uint64 height = 3;
   Hash block_hash = 4;
   Hash state_root = 5;
@@ -298,7 +299,7 @@ service ReadService {
 
   // Batch read multiple keys in a single RPC call.
   // Amortizes network overhead across multiple reads for higher throughput.
-  // All reads use the same namespace/vault scope and consistency level.
+  // All reads use the same organization/vault scope and consistency level.
   rpc BatchRead(BatchReadRequest) returns (BatchReadResponse);
 
   // Read with merkle proof for client-side verification.
@@ -337,8 +338,8 @@ service ReadService {
 }
 
 message ReadRequest {
-  NamespaceId namespace_id = 1;
-  optional VaultId vault_id = 2; // Omit for namespace-level entity reads
+  OrganizationSlug organization_slug = 1;
+  optional VaultId vault_id = 2; // Omit for organization-level entity reads
   string key = 3;
   ReadConsistency consistency = 4; // Default: EVENTUAL (any replica)
 }
@@ -349,9 +350,9 @@ message ReadResponse {
 }
 
 // Batch read request: read multiple keys in a single RPC for higher throughput.
-// All reads share the same namespace, vault, and consistency level.
+// All reads share the same organization, vault, and consistency level.
 message BatchReadRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   optional VaultId vault_id = 2;
   repeated string keys = 3;           // Keys to read (max 1000)
   ReadConsistency consistency = 4;    // Applied to all reads
@@ -377,8 +378,8 @@ message BatchReadResult {
 // For historical reads WITHOUT proofs (audits, debugging), use HistoricalRead
 // with include_proof=false to avoid proof generation overhead.
 message VerifiedReadRequest {
-  NamespaceId namespace_id = 1;
-  optional VaultId vault_id = 2; // Omit for namespace-level entity reads
+  OrganizationSlug organization_slug = 1;
+  optional VaultId vault_id = 2; // Omit for organization-level entity reads
   string key = 3;
   optional uint64 at_height = 4; // Read at specific height (0 or omit = current)
   bool include_chain_proof = 5; // Also include chain proof to trusted_height
@@ -401,8 +402,8 @@ message VerifiedReadResponse {
 // is optimized for the verification use case. HistoricalRead is for unverified
 // archival queries where proof generation would add unnecessary overhead.
 message HistoricalReadRequest {
-  NamespaceId namespace_id = 1;
-  optional VaultId vault_id = 2; // Omit for namespace-level entity reads
+  OrganizationSlug organization_slug = 1;
+  optional VaultId vault_id = 2; // Omit for organization-level entity reads
   string key = 3;
   uint64 at_height = 4; // Required: block height to read from
   bool include_proof = 5; // Include block_header + merkle_proof (default: false)
@@ -420,7 +421,7 @@ message HistoricalReadResponse {
 }
 
 message WatchBlocksRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   // First block height to stream. Must be >= 1 (0 is rejected with INVALID_ARGUMENT).
   //
@@ -444,7 +445,7 @@ message WatchBlocksRequest {
 }
 
 message GetBlockRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   uint64 height = 3;
 }
@@ -456,7 +457,7 @@ message GetBlockResponse {
 // Fetch multiple blocks for sync/catchup.
 // Use case: Client reconnecting after downtime needs to catch up.
 message GetBlockRangeRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   uint64 start_height = 3; // First block to return (inclusive)
   uint64 end_height = 4; // Last block to return (inclusive), max range: 1000 blocks
@@ -468,7 +469,7 @@ message GetBlockRangeResponse {
 }
 
 message GetTipRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
 }
 
@@ -479,8 +480,8 @@ message GetTipResponse {
 }
 
 message GetClientStateRequest {
-  NamespaceId namespace_id = 1;
-  optional VaultId vault_id = 2; // Omit for namespace-level entity writes
+  OrganizationSlug organization_slug = 1;
+  optional VaultId vault_id = 2; // Omit for organization-level entity writes
   ClientId client_id = 3;
 }
 
@@ -489,7 +490,7 @@ message GetClientStateResponse {
 }
 
 message ListRelationshipsRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   optional string resource = 3; // Filter by resource (exact match)
   optional string relation = 4; // Filter by relation (exact match)
@@ -509,7 +510,7 @@ message ListRelationshipsResponse {
 }
 
 message ListResourcesRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   string resource_type = 3; // Type prefix (e.g., "document" matches "document:*")
   optional uint64 at_height = 4; // Read at specific height (0 or omit = current)
@@ -526,7 +527,7 @@ message ListResourcesResponse {
 }
 
 message ListEntitiesRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   string key_prefix = 2; // e.g., "user:", "_idx:email:", "session:"
   optional uint64 at_height = 3; // Read at specific height (0 or omit = current)
   bool include_expired = 4; // Include entities past expires_at (default: false)
@@ -534,7 +535,7 @@ message ListEntitiesRequest {
   // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
   string page_token = 6;
   ReadConsistency consistency = 7; // Default: EVENTUAL (any replica)
-  optional VaultId vault_id = 8; // Omit for namespace-level entities (vault_id=0)
+  optional VaultId vault_id = 8; // Omit for organization-level entities (vault_id=0)
 }
 
 message ListEntitiesResponse {
@@ -558,8 +559,8 @@ service WriteService {
 // Note: actor is NOT specified by client. Server assigns Transaction.actor
 // from authenticated context (session token, API key, or system identity).
 message WriteRequest {
-  NamespaceId namespace_id = 1;
-  optional VaultId vault_id = 2; // Required for relationships; omit for namespace-level entities
+  OrganizationSlug organization_slug = 1;
+  optional VaultId vault_id = 2; // Required for relationships; omit for organization-level entities
   ClientId client_id = 3;
   bytes idempotency_key = 4; // 16-byte UUID for idempotent retries (server rejects reuse with different payload)
   repeated Operation operations = 5;
@@ -641,7 +642,7 @@ message ErrorDetails {
   // Suggested delay before retrying (milliseconds). Present only for
   // rate-limited or backpressure errors.
   optional int32 retry_after_ms = 3;
-  // Structured key-value context (e.g., {"namespace_id": "42", "field": "key"}).
+  // Structured key-value context (e.g., {"organization_slug": "42", "field": "key"}).
   map<string, string> context = 4;
   // Human-readable recovery guidance (e.g., "Reduce request rate").
   optional string suggested_action = 5;
@@ -663,7 +664,7 @@ message ErrorDetails {
 // - Multi-key transactions requiring atomic commit
 // - Ordered operations where later writes depend on earlier writes' effects
 message BatchWriteRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   optional VaultId vault_id = 2; // All writes must target same scope
   ClientId client_id = 3; // Batch-level idempotency (per-write client_id ignored)
   bytes idempotency_key = 4; // 16-byte UUID for idempotent retries (server rejects reuse with different payload)
@@ -674,7 +675,7 @@ message BatchWriteRequest {
 // Logical grouping of operations within a BatchWriteRequest.
 // Purpose: Allows expressing ordered operation groups within an atomic batch.
 // Processing: Groups are processed in array order (operations[0], then operations[1], etc.)
-//             All groups share the batch's namespace_id, vault_id, client_id, and idempotency_key.
+//             All groups share the batch's organization_slug, vault_id, client_id, and idempotency_key.
 // Atomicity: The ENTIRE batch is atomic—if any operation fails, no changes are applied.
 message BatchWriteOperation {
   repeated Operation operations = 1; // Operations in this group
@@ -704,20 +705,22 @@ message BatchWriteSuccess {
 
 service AdminService {
   // ==========================================================================
-  // Namespace Management
+  // Organization Management
   // ==========================================================================
 
-  // Create a new namespace. NamespaceId is leader-assigned from _meta:seq:namespace.
-  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+  // Create a new organization. An OrganizationSlug (Snowflake ID) is generated
+  // and returned. Internal sequential OrganizationId is never exposed.
+  rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
 
-  // Delete a namespace (marks for garbage collection, fails if vaults exist)
-  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+  // Delete an organization (marks for garbage collection, fails if vaults exist)
+  rpc DeleteOrganization(DeleteOrganizationRequest) returns (DeleteOrganizationResponse);
 
-  // Get namespace info including shard assignment
-  rpc GetNamespace(GetNamespaceRequest) returns (GetNamespaceResponse);
+  // Get organization info including shard assignment.
+  // Lookup by slug only — organization names are not unique.
+  rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
 
-  // List all namespaces (paginated)
-  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+  // List all organizations (paginated)
+  rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse);
 
   // ==========================================================================
   // Vault Management
@@ -808,75 +811,74 @@ service AdminService {
 }
 
 // -----------------------------------------------------------------------------
-// Namespace Messages
+// Organization Messages
 // -----------------------------------------------------------------------------
 
-// Create a new namespace. NamespaceId is leader-assigned from _meta:seq:namespace.
-// The namespace is assigned to the shard with lowest load, or to the specified shard.
-// Per-namespace resource quota limits.
-// Applied to new namespaces; defaults from server config if not specified.
-message NamespaceQuota {
+// Per-organization resource quota limits.
+// Applied to new organizations; defaults from server config if not specified.
+message OrganizationQuota {
   uint64 max_storage_bytes = 1; // Maximum cumulative storage bytes
   uint32 max_vaults = 2; // Maximum number of vaults
   uint32 max_write_ops_per_sec = 3; // Maximum write ops/sec
   uint32 max_read_ops_per_sec = 4; // Maximum read ops/sec
 }
 
-message CreateNamespaceRequest {
+// Create a new organization. An OrganizationSlug (Snowflake ID) is generated
+// by the leader and returned. The organization is assigned to the shard with
+// lowest load, or to the specified shard.
+message CreateOrganizationRequest {
   string name = 1; // Human-readable name (e.g., "acme_corp")
   optional ShardId shard_id = 2; // Target shard (auto-assigned if not specified)
-  optional NamespaceQuota quota = 3; // Resource quota (server default if not specified)
+  optional OrganizationQuota quota = 3; // Resource quota (server default if not specified)
 }
 
-message CreateNamespaceResponse {
-  NamespaceId namespace_id = 1;
+message CreateOrganizationResponse {
+  OrganizationSlug organization_slug = 1;
   ShardId shard_id = 2; // Assigned shard
 }
 
-message DeleteNamespaceRequest {
-  NamespaceId namespace_id = 1;
+message DeleteOrganizationRequest {
+  OrganizationSlug organization_slug = 1;
 }
 
-message DeleteNamespaceResponse {
+message DeleteOrganizationResponse {
   google.protobuf.Timestamp deleted_at = 1;
 }
 
-message GetNamespaceRequest {
-  // Lookup by ID or name (exactly one must be set)
-  oneof lookup {
-    NamespaceId namespace_id = 1;
-    string name = 2;
-  }
+// Get organization info by slug only.
+// Organization names are not unique, so name-based lookup is not supported.
+message GetOrganizationRequest {
+  OrganizationSlug organization_slug = 1;
 }
 
-// Namespace registry info (routing metadata from _system)
+// Organization info (routing metadata from _system)
 // Note: leader_hint is computed dynamically from Raft state via GetSystemState
-message GetNamespaceResponse {
-  NamespaceId namespace_id = 1;
+message GetOrganizationResponse {
+  OrganizationSlug organization_slug = 1;
   string name = 2;
-  ShardId shard_id = 3;             // Which shard hosts this namespace
+  ShardId shard_id = 3;             // Which shard hosts this organization
   repeated NodeId member_nodes = 4; // Nodes in the shard
-  NamespaceStatus status = 5;       // Lifecycle state
+  OrganizationStatus status = 5;    // Lifecycle state
   uint64 config_version = 6;        // For cache invalidation
   google.protobuf.Timestamp created_at = 7;
 }
 
-enum NamespaceStatus {
-  NAMESPACE_STATUS_UNSPECIFIED = 0;
-  NAMESPACE_STATUS_ACTIVE = 1;    // Accepting requests
-  NAMESPACE_STATUS_MIGRATING = 2; // Being migrated to another shard
-  NAMESPACE_STATUS_SUSPENDED = 3; // Billing or policy suspension
-  NAMESPACE_STATUS_DELETING = 4;  // Deletion in progress
-  NAMESPACE_STATUS_DELETED = 5;   // Tombstone
+enum OrganizationStatus {
+  ORGANIZATION_STATUS_UNSPECIFIED = 0;
+  ORGANIZATION_STATUS_ACTIVE = 1;    // Accepting requests
+  ORGANIZATION_STATUS_MIGRATING = 2; // Being migrated to another shard
+  ORGANIZATION_STATUS_SUSPENDED = 3; // Billing or policy suspension
+  ORGANIZATION_STATUS_DELETING = 4;  // Deletion in progress
+  ORGANIZATION_STATUS_DELETED = 5;   // Tombstone
 }
 
-message ListNamespacesRequest {
+message ListOrganizationsRequest {
   optional bytes page_token = 1;
   uint32 page_size = 2; // Default: 100, Max: 1000
 }
 
-message ListNamespacesResponse {
-  repeated GetNamespaceResponse namespaces = 1;
+message ListOrganizationsResponse {
+  repeated GetOrganizationResponse organizations = 1;
   optional bytes next_page_token = 2; // Absent if no more pages
 }
 
@@ -887,7 +889,7 @@ message ListNamespacesResponse {
 // Create a new vault. VaultId is leader-assigned from _meta:seq:vault
 // and returned in CreateVaultResponse.
 message CreateVaultRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   uint32 replication_factor = 2;
   repeated NodeId initial_nodes = 3;
   optional BlockRetentionPolicy retention_policy = 4; // Default: FULL
@@ -918,7 +920,7 @@ message CreateVaultResponse {
 }
 
 message DeleteVaultRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
 }
 
@@ -927,12 +929,12 @@ message DeleteVaultResponse {
 }
 
 message GetVaultRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
 }
 
 message GetVaultResponse {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   uint64 height = 3;
   Hash state_root = 4;
@@ -958,7 +960,7 @@ message ListVaultsResponse {
 }
 
 message CreateSnapshotRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
 }
 
@@ -969,7 +971,7 @@ message CreateSnapshotResponse {
 }
 
 message CheckIntegrityRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   bool full_check = 3; // Replay from genesis vs quick check
 }
@@ -987,7 +989,7 @@ message IntegrityIssue {
 
 // Recover a diverged vault by replaying blocks from archive.
 message RecoverVaultRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   // Force recovery even if vault is healthy (for testing/maintenance).
   // Required for manual intervention after automatic recovery exhausted.
@@ -1008,7 +1010,7 @@ message RecoverVaultResponse {
 // Request to simulate vault divergence for testing.
 // This forces a vault into the Diverged state without actual corruption.
 message SimulateDivergenceRequest {
-  NamespaceId namespace_id = 1;
+  OrganizationSlug organization_slug = 1;
   VaultId vault_id = 2;
   // Expected state root (fake value for simulation).
   Hash expected_state_root = 3;
@@ -1026,10 +1028,10 @@ message SimulateDivergenceResponse {
 }
 
 // Force a garbage collection cycle for expired entities.
-// If namespace_id and vault_id are specified, only that vault is scanned.
+// If organization_slug and vault_id are specified, only that vault is scanned.
 // If omitted, all vaults are scanned (cluster-wide GC).
 message ForceGcRequest {
-  optional NamespaceId namespace_id = 1;
+  optional OrganizationSlug organization_slug = 1;
   optional VaultId vault_id = 2;
 }
 
@@ -1251,7 +1253,7 @@ service HealthService {
 }
 
 message HealthCheckRequest {
-  optional NamespaceId namespace_id = 1; // Namespace for vault health check
+  optional OrganizationSlug organization_slug = 1; // Organization for vault health check
   optional VaultId vault_id = 2; // If empty, check node health
 }
 
@@ -1279,7 +1281,7 @@ service SystemDiscoveryService {
   // Announce a new or updated peer to the cluster
   rpc AnnouncePeer(AnnouncePeerRequest) returns (AnnouncePeerResponse);
 
-  // Get full system state (nodes + vault registry)
+  // Get full system state (nodes + organization registry)
   rpc GetSystemState(GetSystemStateRequest) returns (GetSystemStateResponse);
 }
 
@@ -1317,7 +1319,7 @@ message GetSystemStateRequest {
 message GetSystemStateResponse {
   uint64 version = 1;
   repeated NodeInfo nodes = 2;
-  repeated NamespaceRegistry namespaces = 3; // Routing table: namespace → shard
+  repeated OrganizationRegistry organizations = 3; // Routing table: organization → shard
 }
 
 // Node role in the cluster (Raft membership type)
@@ -1339,14 +1341,14 @@ message NodeInfo {
   google.protobuf.Timestamp joined_at = 6; // For voter election ordering
 }
 
-// Routing entry: namespace → shard assignment
+// Routing entry: organization → shard assignment
 // Note: leader_hint is computed dynamically from Raft state, not stored here
-message NamespaceRegistry {
-  NamespaceId namespace_id = 1;
-  string name = 2;                // Human-readable namespace name
-  ShardId shard_id = 3;           // Which Raft group hosts this namespace
+message OrganizationRegistry {
+  OrganizationSlug organization_slug = 1;
+  string name = 2;                // Human-readable organization name
+  ShardId shard_id = 3;           // Which Raft group hosts this organization
   repeated NodeId members = 4;    // Nodes in the shard
-  NamespaceStatus status = 5;     // Lifecycle state
+  OrganizationStatus status = 5;  // Lifecycle state
   uint64 config_version = 6;      // For cache invalidation
   google.protobuf.Timestamp created_at = 7;
 }

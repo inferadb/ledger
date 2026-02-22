@@ -27,7 +27,7 @@ Verification ensures backups can be restored successfully.
 ```bash
 for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault_id.id'); do
   grpcurl -plaintext \
-    -d "{\"namespace_id\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
     localhost:50051 ledger.v1.AdminService/CreateSnapshot
 done
 ```
@@ -37,7 +37,7 @@ done
 ```bash
 for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault_id.id'); do
   grpcurl -plaintext \
-    -d "{\"namespace_id\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}, \"full_check\": false}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}, \"full_check\": false}" \
     localhost:50051 ledger.v1.AdminService/CheckIntegrity
 done
 ```
@@ -112,8 +112,8 @@ grpcurl -plaintext localhost:50052 ledger.v1.HealthService/Check
 # Verify cluster info
 grpcurl -plaintext localhost:50052 ledger.v1.AdminService/GetClusterInfo
 
-# List namespaces
-grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListNamespaces
+# List organizations
+grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListOrganizations
 
 # List vaults
 grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListVaults
@@ -128,12 +128,12 @@ for vault in $(grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListVau
 
   # Get expected state from production
   PROD_TIP=$(grpcurl -plaintext localhost:50051 \
-    -d "{\"namespace_id\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
     ledger.v1.ReadService/GetTip)
 
   # Get restored state
   RESTORE_TIP=$(grpcurl -plaintext localhost:50052 \
-    -d "{\"namespace_id\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}}" \
     ledger.v1.ReadService/GetTip)
 
   # Compare (height may differ if snapshot is older)
@@ -142,7 +142,7 @@ for vault in $(grpcurl -plaintext localhost:50052 ledger.v1.AdminService/ListVau
 
   # Full integrity check
   grpcurl -plaintext \
-    -d "{\"namespace_id\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}, \"full_check\": true}" \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault_id\": {\"id\": \"$vault\"}, \"full_check\": true}" \
     localhost:50052 ledger.v1.AdminService/CheckIntegrity
 done
 ```
@@ -152,7 +152,7 @@ done
 ```bash
 # Verify writes work on restored instance
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "client_id": {"id": "restore-test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:restore", "value": "dGVzdA=="}}]}' \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "restore-test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:restore", "value": "dGVzdA=="}}]}' \
   localhost:50052 ledger.v1.WriteService/Write
 ```
 
@@ -175,7 +175,7 @@ date: 2026-01-28
 backup_source: s3://ledger-backups/2026-01-27/
 restore_successful: true
 health_check: passed
-namespaces_restored: 5
+organizations_restored: 5
 vaults_restored: 12
 integrity_checks: all_passed
 write_test: passed

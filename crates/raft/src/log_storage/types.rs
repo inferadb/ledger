@@ -1,12 +1,14 @@
 //! Core types for the Raft state machine.
 //!
-//! Defines [`AppliedState`], [`NamespaceMeta`], [`VaultMeta`],
+//! Defines [`AppliedState`], [`OrganizationMeta`], [`VaultMeta`],
 //! [`SequenceCounters`], and snapshot types used by the log store.
 
 use std::collections::HashMap;
 
-use inferadb_ledger_state::system::NamespaceStatus;
-use inferadb_ledger_types::{Hash, NamespaceId, Operation, ShardId, Transaction, VaultId};
+use inferadb_ledger_state::system::OrganizationStatus;
+use inferadb_ledger_types::{
+    Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction, VaultId,
+};
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
 
@@ -26,15 +28,15 @@ pub struct AppliedState {
     /// Sequence counters for ID generation.
     pub sequences: SequenceCounters,
     /// Per-vault heights for deterministic block heights.
-    pub vault_heights: HashMap<(NamespaceId, VaultId), u64>,
+    pub vault_heights: HashMap<(OrganizationId, VaultId), u64>,
     /// Vault health status.
-    pub vault_health: HashMap<(NamespaceId, VaultId), VaultHealthStatus>,
-    /// Namespace registry (replicated via Raft).
-    pub namespaces: HashMap<NamespaceId, NamespaceMeta>,
+    pub vault_health: HashMap<(OrganizationId, VaultId), VaultHealthStatus>,
+    /// Organization registry (replicated via Raft).
+    pub organizations: HashMap<OrganizationId, OrganizationMeta>,
     /// Vault registry (replicated via Raft).
-    pub vaults: HashMap<(NamespaceId, VaultId), VaultMeta>,
+    pub vaults: HashMap<(OrganizationId, VaultId), VaultMeta>,
     /// Previous vault block hashes (for chaining).
-    pub previous_vault_hashes: HashMap<(NamespaceId, VaultId), Hash>,
+    pub previous_vault_hashes: HashMap<(OrganizationId, VaultId), Hash>,
     /// Current shard height for block creation.
     #[serde(default)]
     pub shard_height: u64,
@@ -42,10 +44,10 @@ pub struct AppliedState {
     #[serde(default)]
     pub previous_shard_hash: Hash,
     /// Per-client last committed sequence numbers (for idempotency recovery).
-    /// Key: (namespace_id, vault_id, client_id), Value: last committed sequence.
+    /// Key: (organization_id, vault_id, client_id), Value: last committed sequence.
     #[serde(default)]
-    pub client_sequences: HashMap<(NamespaceId, VaultId, String), u64>,
-    /// Cumulative estimated storage bytes per namespace.
+    pub client_sequences: HashMap<(OrganizationId, VaultId, String), u64>,
+    /// Cumulative estimated storage bytes per organization.
     ///
     /// Updated on every write (increment by key+value sizes) and delete
     /// (decrement by key size). This is an estimate — not exact byte-level
@@ -53,7 +55,13 @@ pub struct AppliedState {
     ///
     /// Replicated via Raft consensus and survives restarts via snapshot.
     #[serde(default)]
-    pub namespace_storage_bytes: HashMap<NamespaceId, u64>,
+    pub organization_storage_bytes: HashMap<OrganizationId, u64>,
+    /// Slug → internal ID mapping for fast resolution.
+    #[serde(default)]
+    pub slug_index: HashMap<OrganizationSlug, OrganizationId>,
+    /// Internal ID → slug reverse mapping for response construction.
+    #[serde(default)]
+    pub id_to_slug: HashMap<OrganizationId, OrganizationSlug>,
 }
 
 /// Combined snapshot containing both metadata and entity state.
@@ -70,31 +78,33 @@ pub struct CombinedSnapshot {
     pub vault_entities: HashMap<VaultId, Vec<inferadb_ledger_types::Entity>>,
 }
 
-/// Metadata for a namespace.
+/// Metadata for an organization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamespaceMeta {
-    /// Namespace ID.
-    pub namespace_id: NamespaceId,
+pub struct OrganizationMeta {
+    /// Organization ID.
+    pub organization_id: OrganizationId,
+    /// External slug for API lookups.
+    pub slug: OrganizationSlug,
     /// Human-readable name.
     pub name: String,
-    /// Shard hosting this namespace (0 for default).
+    /// Shard hosting this organization (0 for default).
     pub shard_id: ShardId,
-    /// Namespace lifecycle status.
+    /// Organization lifecycle status.
     #[serde(default)]
-    pub status: NamespaceStatus,
+    pub status: OrganizationStatus,
     /// Target shard for pending migration (only set when status is Migrating).
     #[serde(default)]
     pub pending_shard_id: Option<ShardId>,
-    /// Per-namespace resource quota (None means use server default).
+    /// Per-organization resource quota (None means use server default).
     #[serde(default)]
-    pub quota: Option<inferadb_ledger_types::config::NamespaceQuota>,
+    pub quota: Option<inferadb_ledger_types::config::OrganizationQuota>,
 }
 
 /// Metadata for a vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultMeta {
-    /// Namespace owning this vault.
-    pub namespace_id: NamespaceId,
+    /// Organization owning this vault.
+    pub organization_id: OrganizationId,
     /// Vault ID.
     pub vault_id: VaultId,
     /// Human-readable name (optional).
@@ -112,8 +122,8 @@ pub struct VaultMeta {
 /// Sequence counters for deterministic ID generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequenceCounters {
-    /// Next namespace ID (starts at 1, 0 = _system).
-    pub namespace: NamespaceId,
+    /// Next organization ID (starts at 1, 0 = _system).
+    pub organization: OrganizationId,
     /// Next vault ID.
     pub vault: VaultId,
     /// Next user ID.
@@ -127,7 +137,7 @@ pub struct SequenceCounters {
 impl Default for SequenceCounters {
     fn default() -> Self {
         Self {
-            namespace: NamespaceId::new(0),
+            organization: OrganizationId::new(0),
             vault: VaultId::new(0),
             user: 0,
             user_email: 0,
@@ -140,7 +150,7 @@ impl SequenceCounters {
     /// Creates new counters with initial values.
     pub fn new() -> Self {
         Self {
-            namespace: NamespaceId::new(1),
+            organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             user: 1,
             user_email: 1,
@@ -148,10 +158,10 @@ impl SequenceCounters {
         }
     }
 
-    /// Returns and increments the next namespace ID.
-    pub fn next_namespace(&mut self) -> NamespaceId {
-        let id = self.namespace;
-        self.namespace = NamespaceId::new(id.value() + 1);
+    /// Returns and increments the next organization ID.
+    pub fn next_organization(&mut self) -> OrganizationId {
+        let id = self.organization;
+        self.organization = OrganizationId::new(id.value() + 1);
         id
     }
 
@@ -184,22 +194,24 @@ impl SequenceCounters {
     }
 }
 
-/// Selects the least-loaded shard for a new namespace.
+/// Selects the least-loaded shard for a new organization.
 ///
-/// Returns the shard with the fewest active (non-deleted) namespaces.
+/// Returns the shard with the fewest active (non-deleted) organizations.
 /// Tie-breaker: lowest shard_id wins.
-/// Fallback: shard 0 if no namespaces exist.
-pub fn select_least_loaded_shard(namespaces: &HashMap<NamespaceId, NamespaceMeta>) -> ShardId {
-    // Count active namespaces per shard
+/// Fallback: shard 0 if no organizations exist.
+pub fn select_least_loaded_shard(
+    organizations: &HashMap<OrganizationId, OrganizationMeta>,
+) -> ShardId {
+    // Count active organizations per shard
     let mut shard_counts: HashMap<ShardId, usize> = HashMap::new();
 
-    for meta in namespaces.values() {
-        if meta.status != NamespaceStatus::Deleted {
+    for meta in organizations.values() {
+        if meta.status != OrganizationStatus::Deleted {
             *shard_counts.entry(meta.shard_id).or_insert(0) += 1;
         }
     }
 
-    // If no namespaces exist, default to shard 0
+    // If no organizations exist, default to shard 0
     if shard_counts.is_empty() {
         return ShardId::new(0);
     }

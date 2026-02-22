@@ -1,10 +1,10 @@
-//! Dynamic VIP namespace discovery and caching.
+//! Dynamic VIP organization discovery and caching.
 //!
-//! VIP namespaces receive elevated sampling rates for wide events logging.
+//! VIP organizations receive elevated sampling rates for wide events logging.
 //! VIP status can be configured:
 //!
-//! 1. **Statically** - via `vip_namespaces` config list (always VIP, override)
-//! 2. **Dynamically** - via metadata tags in `_system` namespace (cached with TTL)
+//! 1. **Statically** - via `vip_organizations` config list (always VIP, override)
+//! 2. **Dynamically** - via metadata tags in `_system` organization (cached with TTL)
 //!
 //! # Architecture
 //!
@@ -13,19 +13,19 @@
 //! │              VipCache                    │
 //! │  ┌─────────────┐  ┌──────────────────┐  │
 //! │  │ static_vips │  │  dynamic_cache   │  │
-//! │  │ HashSet<i64>│  │ RwLock<HashMap>  │  │
+//! │  │ HashSet<u64>│  │ RwLock<HashMap>  │  │
 //! │  └─────────────┘  └──────────────────┘  │
 //! │         │                   │           │
 //! │         └─────────┬─────────┘           │
 //! │                   ▼                     │
-//! │            is_vip(ns_id)                │
+//! │        is_vip(org_slug)                 │
 //! └─────────────────────────────────────────┘
 //! ```
 //!
 //! # VIP Metadata Schema
 //!
-//! VIP tags are stored in the `_system` namespace with:
-//! - Key: `{tag_name}:namespace:{namespace_id}` (e.g., `vip:namespace:42`)
+//! VIP tags are stored in the `_system` organization with:
+//! - Key: `{tag_name}:organization:{organization_id}` (e.g., `vip:organization:42`)
 //! - Value: JSON `{"enabled": true, "reason": "production", "updated_at": "RFC3339"}`
 //!
 //! # Example
@@ -81,7 +81,7 @@ impl VipCacheConfig {
     }
 }
 
-/// Cached entry for a namespace's VIP status.
+/// Cached entry for a organization's VIP status.
 #[derive(Debug, Clone)]
 struct CacheEntry {
     is_vip: bool,
@@ -98,7 +98,7 @@ impl CacheEntry {
     }
 }
 
-/// Thread-safe cache for VIP namespace status.
+/// Thread-safe cache for VIP organization status.
 ///
 /// Combines static VIP configuration with dynamically discovered VIP tags.
 /// Static VIPs always take precedence (override).
@@ -106,26 +106,26 @@ impl CacheEntry {
 pub struct VipCache {
     /// Configuration for cache behavior.
     config: VipCacheConfig,
-    /// Static VIP namespaces (always VIP, config override).
-    static_vips: HashSet<i64>,
+    /// Static VIP organizations (always VIP, config override).
+    static_vips: HashSet<u64>,
     /// Dynamic VIP cache from `_system` metadata.
     /// Only populated when discovery is enabled.
-    dynamic_cache: RwLock<HashMap<i64, CacheEntry>>,
+    dynamic_cache: RwLock<HashMap<u64, CacheEntry>>,
     /// Last time the cache was refreshed.
     last_refresh: RwLock<Option<Instant>>,
 }
 
 impl VipCache {
-    /// Creates a new VIP cache with static VIP namespaces.
-    pub fn new(static_vip_namespaces: Vec<i64>) -> Self {
-        Self::with_config(static_vip_namespaces, VipCacheConfig::default())
+    /// Creates a new VIP cache with static VIP organizations.
+    pub fn new(static_vip_organizations: Vec<u64>) -> Self {
+        Self::with_config(static_vip_organizations, VipCacheConfig::default())
     }
 
     /// Creates a VIP cache with custom configuration.
-    pub fn with_config(static_vip_namespaces: Vec<i64>, config: VipCacheConfig) -> Self {
+    pub fn with_config(static_vip_organizations: Vec<u64>, config: VipCacheConfig) -> Self {
         Self {
             config,
-            static_vips: static_vip_namespaces.into_iter().collect(),
+            static_vips: static_vip_organizations.into_iter().collect(),
             dynamic_cache: RwLock::new(HashMap::new()),
             last_refresh: RwLock::new(None),
         }
@@ -136,23 +136,23 @@ impl VipCache {
         Self::with_config(Vec::new(), VipCacheConfig::disabled())
     }
 
-    /// Checks if a namespace is VIP.
+    /// Checks if a organization is VIP.
     ///
     /// Returns true if:
-    /// 1. Namespace is in the static VIP list (override), OR
-    /// 2. Namespace is in the dynamic cache and marked as VIP
+    /// 1. Organization is in the static VIP list (override), OR
+    /// 2. Organization is in the dynamic cache and marked as VIP
     ///
     /// This is a synchronous operation using cached data.
-    pub fn is_vip(&self, namespace_id: i64) -> bool {
+    pub fn is_vip(&self, organization_id: u64) -> bool {
         // Static VIPs always take precedence
-        if self.static_vips.contains(&namespace_id) {
+        if self.static_vips.contains(&organization_id) {
             return true;
         }
 
         // Check dynamic cache if discovery is enabled
         if self.config.discovery_enabled {
             let cache = self.dynamic_cache.read();
-            if let Some(entry) = cache.get(&namespace_id) {
+            if let Some(entry) = cache.get(&organization_id) {
                 // Return cached value even if stale (background refresh)
                 return entry.is_vip;
             }
@@ -161,19 +161,19 @@ impl VipCache {
         false
     }
 
-    /// Checks if a namespace is VIP and whether the cache entry is stale.
+    /// Checks if a organization is VIP and whether the cache entry is stale.
     ///
     /// Returns `(is_vip, is_stale)` tuple.
-    pub fn is_vip_with_staleness(&self, namespace_id: i64) -> (bool, bool) {
+    pub fn is_vip_with_staleness(&self, organization_id: u64) -> (bool, bool) {
         // Static VIPs are never stale
-        if self.static_vips.contains(&namespace_id) {
+        if self.static_vips.contains(&organization_id) {
             return (true, false);
         }
 
         // Check dynamic cache
         if self.config.discovery_enabled {
             let cache = self.dynamic_cache.read();
-            if let Some(entry) = cache.get(&namespace_id) {
+            if let Some(entry) = cache.get(&organization_id) {
                 let is_stale = entry.is_stale(self.config.cache_ttl);
                 return (entry.is_vip, is_stale);
             }
@@ -183,30 +183,30 @@ impl VipCache {
         (false, true)
     }
 
-    /// Updates the dynamic cache with VIP status for a namespace.
+    /// Updates the dynamic cache with VIP status for a organization.
     ///
     /// This is called when VIP status is discovered from `_system`.
-    pub fn update(&self, namespace_id: i64, is_vip: bool) {
+    pub fn update(&self, organization_id: u64, is_vip: bool) {
         if !self.config.discovery_enabled {
             return;
         }
 
         let mut cache = self.dynamic_cache.write();
-        cache.insert(namespace_id, CacheEntry::new(is_vip));
+        cache.insert(organization_id, CacheEntry::new(is_vip));
     }
 
     /// Bulk update the dynamic cache.
     ///
     /// Replaces the entire dynamic cache with the provided mapping.
-    pub fn bulk_update(&self, vip_status: HashMap<i64, bool>) {
+    pub fn bulk_update(&self, vip_status: HashMap<u64, bool>) {
         if !self.config.discovery_enabled {
             return;
         }
 
         let mut cache = self.dynamic_cache.write();
         cache.clear();
-        for (namespace_id, is_vip) in vip_status {
-            cache.insert(namespace_id, CacheEntry::new(is_vip));
+        for (organization_id, is_vip) in vip_status {
+            cache.insert(organization_id, CacheEntry::new(is_vip));
         }
 
         let mut last_refresh = self.last_refresh.write();
@@ -270,7 +270,7 @@ impl VipCache {
 /// Statistics about the VIP cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VipCacheStats {
-    /// Number of static VIP namespaces.
+    /// Number of static VIP organizations.
     pub static_vips: usize,
     /// Number of entries in the dynamic cache.
     pub dynamic_entries: usize,
@@ -283,7 +283,7 @@ pub struct VipCacheStats {
 /// This is a convenience function to create a cache from the
 /// `WideEventsConfig` configuration.
 pub fn create_vip_cache(
-    vip_namespaces: Vec<i64>,
+    vip_organizations: Vec<u64>,
     discovery_enabled: bool,
     cache_ttl_secs: u64,
     tag_name: String,
@@ -293,7 +293,7 @@ pub fn create_vip_cache(
         cache_ttl: Duration::from_secs(cache_ttl_secs),
         tag_name,
     };
-    Arc::new(VipCache::with_config(vip_namespaces, config))
+    Arc::new(VipCache::with_config(vip_organizations, config))
 }
 
 #[cfg(test)]

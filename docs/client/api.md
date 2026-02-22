@@ -10,8 +10,8 @@ This document covers read and write operations, error handling, and pagination.
 
 ```rust
 struct WriteRequest {
-    namespace_id: NamespaceId,
-    vault_id: Option<VaultId>,  // None for namespace-level entities
+    organization_slug: OrganizationSlug,
+    vault_id: Option<VaultId>,  // None for organization-level entities
     client_id: ClientId,
     sequence: u64,
     operations: Vec<Operation>,
@@ -91,8 +91,8 @@ message SetCondition {
 
 ```rust
 ledger.batch_write(BatchWriteRequest {
-    namespace_id,
-    vault_id: None,  // Entities are namespace-level
+    organization_slug,
+    vault_id: None,  // Entities are organization-level
     client_id: ClientId { id: "my-client".into() },
     sequence: 1,
     operations: vec![
@@ -149,14 +149,14 @@ message SetEntity {
 ```rust
 // Fast read (no proof)
 let entity = client.read(ReadRequest {
-    namespace_id,
+    organization_slug,
     vault_id,
     key: "user:123".into(),
 }).await?;
 
 // Verified read (includes proof)
 let verified = client.verified_read(VerifiedReadRequest {
-    namespace_id,
+    organization_slug,
     vault_id,
     key: "user:123".into(),
     include_chain_proof: false,
@@ -169,7 +169,7 @@ Read multiple keys in a single RPC call for higher throughput:
 
 ```rust
 let results = client.batch_read(BatchReadRequest {
-    namespace_id,
+    organization_slug,
     vault_id: Some(vault_id),
     keys: vec!["user:1".into(), "user:2".into(), "user:3".into()],
     consistency: ReadConsistency::Eventual,
@@ -188,7 +188,7 @@ for result in results.results {
 
 | Field          | Type            | Description                     |
 | -------------- | --------------- | ------------------------------- |
-| `namespace_id` | NamespaceId     | Target namespace                |
+| `organization_slug` | OrganizationSlug     | Target organization                |
 | `vault_id`     | VaultId         | (Optional) Target vault         |
 | `keys`         | string[]        | Keys to read (max 1000)         |
 | `consistency`  | ReadConsistency | Consistency level for all reads |
@@ -217,7 +217,7 @@ Read state as it existed at a specific block height:
 ```rust
 // Historical read (proofs optional)
 let entity = client.historical_read(HistoricalReadRequest {
-    namespace_id,
+    organization_slug,
     vault_id,
     key: "user:123".into(),
     at_height: 1000,
@@ -257,7 +257,7 @@ Default: Reads go to any replica. For strict consistency, read from leader or us
 
 ```rust
 let relationships = client.list_relationships(ListRelationshipsRequest {
-    namespace_id,
+    organization_slug,
     vault_id,
     resource: Some("doc:readme".into()),  // Filter by resource
     relation: Some("viewer".into()),       // Filter by relation
@@ -280,7 +280,7 @@ Index usage:
 
 ```rust
 let entities = client.list_entities(ListEntitiesRequest {
-    namespace_id,
+    organization_slug,
     key_prefix: "user:".into(),
     at_height: None,           // Current state (or specific height)
     include_expired: false,
@@ -299,7 +299,7 @@ Page tokens are opaque to clients—base64-encoded, server-managed cursors.
 ```rust
 struct PageToken {
     version: u8,
-    namespace_id: i64,
+    organization_slug: i64,
     vault_id: i64,
     last_key: Vec<u8>,
     at_height: u64,        // Consistent reads
@@ -315,7 +315,7 @@ struct EncodedToken {
 **Validation on each request**:
 
 1. Decode and verify HMAC
-2. Check namespace/vault match request
+2. Check organization/vault match request
 3. Check query_hash matches current params
 4. Resume from `last_key` at `at_height`
 
@@ -331,9 +331,9 @@ Subscribe to new blocks via gRPC streaming:
 
 ```rust
 // Get current tip, then subscribe from tip+1
-let tip = client.get_tip(GetTipRequest { namespace_id, vault_id }).await?;
+let tip = client.get_tip(GetTipRequest { organization_slug, vault_id }).await?;
 let stream = client.watch_blocks(WatchBlocksRequest {
-    namespace_id,
+    organization_slug,
     vault_id,
     start_height: tip.height + 1,
 }).await?;
@@ -360,7 +360,7 @@ let stream = client.watch_blocks(WatchBlocksRequest {
 | `UNAUTHENTICATED`     | Missing or invalid credentials     | Bad API key, expired session       |
 | `PERMISSION_DENIED`   | Valid auth but insufficient access | Write to read-only vault           |
 | `INVALID_ARGUMENT`    | Malformed request                  | Invalid key format, bad page_token |
-| `NOT_FOUND`           | Resource doesn't exist             | Unknown namespace_id, vault_id     |
+| `NOT_FOUND`           | Resource doesn't exist             | Unknown organization_slug, vault_id     |
 | `UNAVAILABLE`         | Temporary failure                  | Leader election, node down         |
 | `RESOURCE_EXHAUSTED`  | Rate limit or quota                | Too many requests                  |
 | `FAILED_PRECONDITION` | Precondition failed                | Height unavailable (pruned)        |

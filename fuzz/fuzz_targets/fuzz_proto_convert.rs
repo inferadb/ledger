@@ -30,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
             let _ = proto::ReadRequest::decode(payload);
         },
         2 => {
-            let _ = proto::CreateNamespaceRequest::decode(payload);
+            let _ = proto::CreateOrganizationRequest::decode(payload);
         },
         3 => {
             let _ = proto::CreateVaultRequest::decode(payload);

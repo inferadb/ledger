@@ -1708,6 +1708,7 @@ dependencies = [
  "bon",
  "chrono",
  "humantime",
+ "parking_lot",
  "postcard",
  "proptest",
  "rs_merkle",

@@ -1,17 +1,17 @@
 //! Shard resolution for routing requests to the correct Raft instance.
 //!
-//! This module provides abstractions for routing namespace requests to the
+//! This module provides abstractions for routing organization requests to the
 //! appropriate Raft shard in multi-shard deployments.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Request(namespace_id) -> ShardResolver -> Raft instance
+//! Request(organization_id) -> ShardResolver -> Raft instance
 //!                                  |
 //!                    +-------------+-------------+
 //!                    |                           |
 //!             SingleShard                 MultiShard
-//!            (always shard 0)        (lookup by namespace)
+//!            (always shard 0)        (lookup by organization)
 //!                                           |
 //!                              +------------+------------+
 //!                              |                         |
@@ -21,7 +21,7 @@
 //!
 //! ## Request Forwarding
 //!
-//! When a namespace is assigned to a shard on a different node, the resolver
+//! When a organization is assigned to a shard on a different node, the resolver
 //! returns forwarding information that services can use to proxy the request
 //! via gRPC to the correct node.
 
@@ -30,7 +30,7 @@ use std::sync::Arc;
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{NamespaceId, ShardId};
+use inferadb_ledger_types::{OrganizationId, ShardId};
 use openraft::Raft;
 use tokio::sync::broadcast;
 use tonic::Status;
@@ -62,19 +62,19 @@ pub struct ShardContext {
 
 /// Information for forwarding a request to a remote shard.
 ///
-/// When a namespace is on a shard hosted by a different node, this struct
+/// When a organization is on a shard hosted by a different node, this struct
 /// provides the routing information needed to forward the request via gRPC.
 #[derive(Debug, Clone)]
 pub struct RemoteShardInfo {
-    /// The shard hosting the namespace.
+    /// The shard hosting the organization.
     pub shard_id: ShardId,
-    /// The namespace being accessed.
-    pub namespace_id: NamespaceId,
+    /// The organization being accessed.
+    pub organization_id: OrganizationId,
     /// Routing information including node addresses and leader hint.
     pub routing: RoutingInfo,
 }
 
-/// Result of resolving a namespace to its shard.
+/// Result of resolving a organization to its shard.
 ///
 /// Either the shard is local (can be handled directly) or remote
 /// (needs to be forwarded via gRPC).
@@ -99,27 +99,27 @@ impl std::fmt::Debug for ShardContext {
     }
 }
 
-/// Trait for resolving namespaces to shard contexts.
+/// Trait for resolving organizations to shard contexts.
 ///
-/// Implementors provide the mapping from namespace to the resources
-/// needed to handle requests for that namespace.
+/// Implementors provide the mapping from organization to the resources
+/// needed to handle requests for that organization.
 pub trait ShardResolver: Send + Sync {
-    /// Resolves a namespace to its shard context.
+    /// Resolves a organization to its shard context.
     ///
     /// Returns the Raft instance, state layer, and other resources
-    /// for the shard that handles the given namespace.
+    /// for the shard that handles the given organization.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The namespace is not found in routing tables
+    /// - The organization is not found in routing tables
     /// - The shard is on a remote node and forwarding is not supported
-    fn resolve(&self, namespace_id: NamespaceId) -> Result<ShardContext, Status>;
+    fn resolve(&self, organization_id: OrganizationId) -> Result<ShardContext, Status>;
 
-    /// Resolves a namespace, supporting remote shards.
+    /// Resolves a organization, supporting remote shards.
     ///
     /// Unlike `resolve()`, this method can return forwarding information
-    /// when the namespace is on a remote shard, allowing services to
+    /// when the organization is on a remote shard, allowing services to
     /// proxy the request via gRPC.
     ///
     /// # Returns
@@ -129,16 +129,19 @@ pub trait ShardResolver: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error if the namespace is not found in routing tables.
-    fn resolve_with_forward(&self, namespace_id: NamespaceId) -> Result<ResolveResult, Status> {
+    /// Returns an error if the organization is not found in routing tables.
+    fn resolve_with_forward(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<ResolveResult, Status> {
         // Default implementation: just try local resolution
-        self.resolve(namespace_id).map(ResolveResult::Local)
+        self.resolve(organization_id).map(ResolveResult::Local)
     }
 
     /// Returns the system shard context.
     ///
     /// The system shard (shard 0) handles global operations like
-    /// namespace creation and user management.
+    /// organization creation and user management.
     fn system_shard(&self) -> Result<ShardContext, Status>;
 
     /// Checks if this resolver supports request forwarding.
@@ -151,7 +154,7 @@ pub trait ShardResolver: Send + Sync {
 
 /// Single-shard resolver for standalone deployments.
 ///
-/// Always returns the same shard context, as all namespaces
+/// Always returns the same shard context, as all organizations
 /// are handled by a single Raft group.
 pub struct SingleShardResolver {
     raft: Arc<Raft<LedgerTypeConfig>>,
@@ -173,8 +176,8 @@ impl SingleShardResolver {
 }
 
 impl ShardResolver for SingleShardResolver {
-    fn resolve(&self, _namespace_id: NamespaceId) -> Result<ShardContext, Status> {
-        // Single shard handles all namespaces
+    fn resolve(&self, _organization_id: OrganizationId) -> Result<ShardContext, Status> {
+        // Single shard handles all organizations
         // Note: block_announcements is None because single-shard setups manage
         // the channel externally in LedgerServer
         Ok(ShardContext {
@@ -199,8 +202,8 @@ impl ShardResolver for SingleShardResolver {
 
 /// Multi-shard resolver using the MultiRaftManager.
 ///
-/// Routes namespaces to their assigned shards using the ShardRouter.
-/// Supports request forwarding to remote shards when the namespace
+/// Routes organizations to their assigned shards using the ShardRouter.
+/// Supports request forwarding to remote shards when the organization
 /// is not hosted locally.
 pub struct MultiShardResolver {
     manager: Arc<MultiRaftManager>,
@@ -219,25 +222,28 @@ impl MultiShardResolver {
 }
 
 impl ShardResolver for MultiShardResolver {
-    fn resolve(&self, namespace_id: NamespaceId) -> Result<ShardContext, Status> {
-        // System namespace (0) always goes to system shard
-        if namespace_id == NamespaceId::new(0) {
+    fn resolve(&self, organization_id: OrganizationId) -> Result<ShardContext, Status> {
+        // System organization (0) always goes to system shard
+        if organization_id == OrganizationId::new(0) {
             return self.system_shard();
         }
 
-        // Look up the shard for this namespace
-        let shard = self.manager.route_namespace(namespace_id).ok_or_else(|| {
+        // Look up the shard for this organization
+        let shard = self.manager.route_organization(organization_id).ok_or_else(|| {
             // Check if it's a routing issue or the shard is on another node
-            if let Some(shard_id) = self.manager.get_namespace_shard(namespace_id) {
+            if let Some(shard_id) = self.manager.get_organization_shard(organization_id) {
                 // Shard exists but not on this node - use resolve_with_forward instead
                 Status::unavailable(format!(
-                    "Namespace {} is on shard {} which is not available locally. \
+                    "Organization {} is on shard {} which is not available locally. \
                      Use resolve_with_forward() for forwarding support.",
-                    namespace_id, shard_id
+                    organization_id, shard_id
                 ))
             } else {
-                // Namespace not found in routing table
-                Status::not_found(format!("Namespace {} not found in routing table", namespace_id))
+                // Organization not found in routing table
+                Status::not_found(format!(
+                    "Organization {} not found in routing table",
+                    organization_id
+                ))
             }
         })?;
 
@@ -250,14 +256,17 @@ impl ShardResolver for MultiShardResolver {
         })
     }
 
-    fn resolve_with_forward(&self, namespace_id: NamespaceId) -> Result<ResolveResult, Status> {
-        // System namespace (0) always goes to system shard
-        if namespace_id == NamespaceId::new(0) {
+    fn resolve_with_forward(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<ResolveResult, Status> {
+        // System organization (0) always goes to system shard
+        if organization_id == OrganizationId::new(0) {
             return self.system_shard().map(ResolveResult::Local);
         }
 
         // First, try local resolution
-        if let Some(shard) = self.manager.route_namespace(namespace_id) {
+        if let Some(shard) = self.manager.route_organization(organization_id) {
             return Ok(ResolveResult::Local(ShardContext {
                 raft: shard.raft().clone(),
                 state: shard.state().clone(),
@@ -272,12 +281,12 @@ impl ShardResolver for MultiShardResolver {
             self.router().ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
 
         // Get routing info from the ShardRouter
-        let routing = router.get_routing(namespace_id).map_err(|e| match e {
-            crate::shard_router::RoutingError::NamespaceNotFound { .. } => {
-                Status::not_found(format!("Namespace {} not found in routing table", namespace_id))
-            },
-            crate::shard_router::RoutingError::NamespaceUnavailable { status, .. } => {
-                Status::unavailable(format!("Namespace {} is {:?}", namespace_id, status))
+        let routing = router.get_routing(organization_id).map_err(|e| match e {
+            crate::shard_router::RoutingError::OrganizationNotFound { .. } => Status::not_found(
+                format!("Organization {} not found in routing table", organization_id),
+            ),
+            crate::shard_router::RoutingError::OrganizationUnavailable { status, .. } => {
+                Status::unavailable(format!("Organization {} is {:?}", organization_id, status))
             },
             _ => Status::internal(format!("Routing error: {}", e)),
         })?;
@@ -285,7 +294,7 @@ impl ShardResolver for MultiShardResolver {
         // Return forwarding info
         Ok(ResolveResult::Remote(RemoteShardInfo {
             shard_id: routing.shard_id,
-            namespace_id,
+            organization_id,
             routing,
         }))
     }
@@ -337,12 +346,12 @@ mod tests {
 
         let remote_info = RemoteShardInfo {
             shard_id: ShardId::new(1),
-            namespace_id: NamespaceId::new(42),
+            organization_id: OrganizationId::new(42),
             routing: routing.clone(),
         };
 
         assert_eq!(remote_info.shard_id, ShardId::new(1));
-        assert_eq!(remote_info.namespace_id, NamespaceId::new(42));
+        assert_eq!(remote_info.organization_id, OrganizationId::new(42));
         assert_eq!(remote_info.routing.shard_id, ShardId::new(1));
         assert_eq!(remote_info.routing.member_nodes.len(), 2);
         assert_eq!(remote_info.routing.leader_hint, Some("node-1".to_string()));
@@ -365,7 +374,7 @@ mod tests {
 
         let remote = RemoteShardInfo {
             shard_id: ShardId::new(2),
-            namespace_id: NamespaceId::new(100),
+            organization_id: OrganizationId::new(100),
             routing,
         };
 
@@ -375,7 +384,7 @@ mod tests {
             ResolveResult::Local(_) => unreachable!("Expected Remote variant"),
             ResolveResult::Remote(info) => {
                 assert_eq!(info.shard_id, ShardId::new(2));
-                assert_eq!(info.namespace_id, NamespaceId::new(100));
+                assert_eq!(info.organization_id, OrganizationId::new(100));
                 assert_eq!(info.routing.member_nodes.len(), 1);
             },
         }
@@ -395,7 +404,7 @@ mod tests {
             "{:?}",
             RemoteShardInfo {
                 shard_id: ShardId::new(1),
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 routing: RoutingInfo {
                     shard_id: ShardId::new(1),
                     member_nodes: vec![],
@@ -417,7 +426,7 @@ mod tests {
 
         let remote_info = RemoteShardInfo {
             shard_id: ShardId::new(1),
-            namespace_id: NamespaceId::new(42),
+            organization_id: OrganizationId::new(42),
             routing,
         };
 
@@ -425,6 +434,6 @@ mod tests {
         let debug_output = format!("{:?}", result);
         assert!(debug_output.contains("Remote"));
         assert!(debug_output.contains("shard_id"));
-        assert!(debug_output.contains("namespace_id"));
+        assert!(debug_output.contains("organization_id"));
     }
 }

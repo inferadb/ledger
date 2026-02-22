@@ -62,19 +62,19 @@ Expected output:
 
 ## First Operations
 
-### Create a Namespace
+### Create an Organization
 
 ```bash
 grpcurl -plaintext \
   -d '{"name": "my_app"}' \
-  localhost:50051 ledger.v1.AdminService/CreateNamespace
+  localhost:50051 ledger.v1.AdminService/CreateOrganization
 ```
 
 Response:
 
 ```json
 {
-  "namespaceId": { "id": "1" },
+  "organizationId": { "id": "1" },
   "shardId": { "id": 1 }
 }
 ```
@@ -83,7 +83,7 @@ Response:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/CreateVault
 ```
 
@@ -104,7 +104,7 @@ Response:
 ```bash
 grpcurl -plaintext \
   -d '{
-    "namespace_id": {"id": "1"},
+    "organization_slug": {"id": "1"},
     "client_id": {"id": "quickstart"},
     "sequence": "1",
     "operations": [{
@@ -121,7 +121,7 @@ grpcurl -plaintext \
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "key": "user:alice"}' \
+  -d '{"organization_slug": {"id": "1"}, "key": "user:alice"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 
@@ -130,7 +130,7 @@ grpcurl -plaintext \
 ```bash
 grpcurl -plaintext \
   -d '{
-    "namespace_id": {"id": "1"},
+    "organization_slug": {"id": "1"},
     "vault_id": {"id": "1"},
     "client_id": {"id": "quickstart"},
     "sequence": "2",
@@ -151,7 +151,7 @@ grpcurl -plaintext \
 # Who can view doc:readme?
 grpcurl -plaintext \
   -d '{
-    "namespace_id": {"id": "1"},
+    "organization_slug": {"id": "1"},
     "vault_id": {"id": "1"},
     "resource": "doc:readme",
     "relation": "viewer"
@@ -184,9 +184,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = LedgerClient::new(config).await?;
 
-    // Create namespace
-    let ns = client.create_namespace("my_app").await?;
-    println!("Created namespace: {}", ns.id);
+    // Create organization
+    let ns = client.create_organization("my_app").await?;
+    println!("Created organization: {}", ns.id);
 
     // Create vault
     let vault = client.create_vault(ns.id).await?;

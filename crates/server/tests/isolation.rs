@@ -1,16 +1,16 @@
-//! Namespace and vault isolation tests.
+//! Organization and vault isolation tests.
 //!
-//! These tests verify that data in one namespace/vault is properly isolated
-//! from other namespaces/vaults. Key design invariants tested:
+//! These tests verify that data in one organization/vault is properly isolated
+//! from other organizations/vaults. Key design invariants tested:
 //!
 //! - Vault IDs are globally unique (assigned by a global sequence counter)
 //! - Data written to one vault cannot be read from another vault
-//! - Namespaces provide organizational isolation through their vaults
-//! - Multiple vaults within the same namespace are isolated from each other
+//! - Organizations provide organizational isolation through their vaults
+//! - Multiple vaults within the same organization are isolated from each other
 //!
 //! Per DESIGN.md:
-//! - Line 158: "Namespace | Entities, vaults, keys" - isolation boundary
-//! - Line 162: "Namespaces share physical nodes and Raft groups but maintain independent data"
+//! - Line 158: "Organization | Entities, vaults, keys" - isolation boundary
+//! - Line 162: "Organizations share physical nodes and Raft groups but maintain independent data"
 //! - Line 226: VaultId is "Sequential from `_meta:seq:vault`" - globally unique
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
@@ -26,35 +26,40 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Creates a namespace and return its ID.
-async fn create_namespace(
+/// Creates a organization and return its ID.
+async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
+        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             shard_id: None,
             quota: None,
         })
         .await?;
 
-    let namespace_id =
-        response.into_inner().namespace_id.map(|n| n.id).ok_or("No namespace_id in response")?;
+    let organization_id = response
+        .into_inner()
+        .organization_slug
+        .map(|n| n.slug as i64)
+        .ok_or("No organization_id in response")?;
 
-    Ok(namespace_id)
+    Ok(organization_id)
 }
 
-/// Creates a vault in a namespace and return its ID.
+/// Creates a vault in a organization and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization_id as u64,
+            }),
             replication_factor: 0,  // Default, ignored for single-shard setup
             initial_nodes: vec![],  // Auto-assigned
             retention_policy: None, // Default: FULL
@@ -69,7 +74,7 @@ async fn create_vault(
 /// Writes a key-value pair to a vault.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
     value: &[u8],
@@ -78,7 +83,9 @@ async fn write_entity(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -111,14 +118,16 @@ async fn write_entity(
 /// Reads an entity from a vault.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
@@ -138,15 +147,16 @@ async fn read_entity(
 /// data container with its own independent key space.
 #[serial]
 #[tokio::test]
-async fn test_vault_isolation_same_namespace() {
+async fn test_vault_isolation_same_organization() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create a namespace
-    let ns_id = create_namespace(leader.addr, "isolation-test-ns").await.expect("create namespace");
+    // Create a organization
+    let ns_id =
+        create_organization(leader.addr, "isolation-test-ns").await.expect("create organization");
 
-    // Create two vaults in the same namespace
+    // Create two vaults in the same organization
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
 
@@ -186,9 +196,10 @@ async fn test_vault_isolation_key_not_found() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and vaults
-    let ns_id =
-        create_namespace(leader.addr, "isolation-not-found-ns").await.expect("create namespace");
+    // Create organization and vaults
+    let ns_id = create_organization(leader.addr, "isolation-not-found-ns")
+        .await
+        .expect("create organization");
 
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
@@ -214,8 +225,9 @@ async fn test_multi_vault_isolation() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace
-    let ns_id = create_namespace(leader.addr, "multi-vault-ns").await.expect("create namespace");
+    // Create organization
+    let ns_id =
+        create_organization(leader.addr, "multi-vault-ns").await.expect("create organization");
 
     // Create 5 vaults
     let mut vaults = Vec::new();
@@ -255,51 +267,51 @@ async fn test_multi_vault_isolation() {
 }
 
 // ============================================================================
-// Namespace Isolation Tests
+// Organization Isolation Tests
 // ============================================================================
 
-/// Tests that vaults in different namespaces are isolated.
+/// Tests that vaults in different organizations are isolated.
 ///
-/// Even though vault IDs are globally unique, namespaces provide an
+/// Even though vault IDs are globally unique, organizations provide an
 /// organizational boundary. This test verifies the isolation model.
 #[serial]
 #[tokio::test]
-async fn test_namespace_isolation() {
+async fn test_organization_isolation() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create two namespaces
-    let ns_1 = create_namespace(leader.addr, "org-alpha").await.expect("create namespace 1");
-    let ns_2 = create_namespace(leader.addr, "org-beta").await.expect("create namespace 2");
+    // Create two organizations
+    let ns_1 = create_organization(leader.addr, "org-alpha").await.expect("create organization 1");
+    let ns_2 = create_organization(leader.addr, "org-beta").await.expect("create organization 2");
 
-    assert_ne!(ns_1, ns_2, "Namespace IDs should be different");
+    assert_ne!(ns_1, ns_2, "Organization IDs should be different");
 
-    // Create a vault in each namespace
+    // Create a vault in each organization
     let vault_1 = create_vault(leader.addr, ns_1).await.expect("create vault in ns1");
     let vault_2 = create_vault(leader.addr, ns_2).await.expect("create vault in ns2");
 
     // Vault IDs are globally unique
-    assert_ne!(vault_1, vault_2, "Vault IDs are globally unique across namespaces");
+    assert_ne!(vault_1, vault_2, "Vault IDs are globally unique across organizations");
 
-    // Write to vault in namespace 1
+    // Write to vault in organization 1
     write_entity(leader.addr, ns_1, vault_1, "org-secret", b"alpha-data", "alpha-client")
         .await
         .expect("write to ns1 vault");
 
-    // Write to vault in namespace 2
+    // Write to vault in organization 2
     write_entity(leader.addr, ns_2, vault_2, "org-secret", b"beta-data", "beta-client")
         .await
         .expect("write to ns2 vault");
 
-    // Verify namespace 1's data
+    // Verify organization 1's data
     let value_1 = read_entity(leader.addr, ns_1, vault_1, "org-secret")
         .await
         .expect("read from ns1")
         .expect("should have value");
     assert_eq!(value_1, b"alpha-data");
 
-    // Verify namespace 2's data
+    // Verify organization 2's data
     let value_2 = read_entity(leader.addr, ns_2, vault_2, "org-secret")
         .await
         .expect("read from ns2")
@@ -307,11 +319,11 @@ async fn test_namespace_isolation() {
     assert_eq!(value_2, b"beta-data");
 }
 
-/// Tests behavior when accessing a vault with a mismatched namespace_id.
+/// Tests behavior when accessing a vault with a mismatched organization_id.
 ///
 /// DESIGN NOTE: Since vault_ids are globally unique (generated from a global
 /// sequence counter), the vault_id alone is sufficient to identify data.
-/// The namespace_id parameter is currently NOT validated on reads - the system
+/// The organization_id parameter is currently NOT validated on reads - the system
 /// trusts the globally unique vault_id as the authoritative identifier.
 ///
 /// This test documents the current behavior. Actual data isolation is ensured
@@ -324,8 +336,9 @@ async fn test_vault_id_is_authoritative_identifier() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and vault
-    let ns_1 = create_namespace(leader.addr, "vault-auth-ns-1").await.expect("create namespace 1");
+    // Create organization and vault
+    let ns_1 =
+        create_organization(leader.addr, "vault-auth-ns-1").await.expect("create organization 1");
     let vault_1 = create_vault(leader.addr, ns_1).await.expect("create vault in ns1");
 
     // Write data to vault_1
@@ -333,8 +346,9 @@ async fn test_vault_id_is_authoritative_identifier() {
         .await
         .expect("write to vault");
 
-    // Create a second namespace with its own vault
-    let ns_2 = create_namespace(leader.addr, "vault-auth-ns-2").await.expect("create namespace 2");
+    // Create a second organization with its own vault
+    let ns_2 =
+        create_organization(leader.addr, "vault-auth-ns-2").await.expect("create organization 2");
     let vault_2 = create_vault(leader.addr, ns_2).await.expect("create vault in ns2");
 
     // Vault IDs are different (globally unique)
@@ -362,7 +376,7 @@ async fn test_vault_id_is_authoritative_identifier() {
 
     // SECURITY: You CANNOT access vault_1's data using vault_2's ID
     // The vault_id being globally unique means you need the correct vault_id
-    // to access data - namespace_id validation is not the isolation mechanism.
+    // to access data - organization_id validation is not the isolation mechanism.
     let result = read_entity(leader.addr, ns_2, vault_2, "test-key")
         .await
         .expect("read should succeed")
@@ -381,8 +395,9 @@ async fn test_concurrent_vault_writes() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and vaults
-    let ns_id = create_namespace(leader.addr, "concurrent-ns").await.expect("create namespace");
+    // Create organization and vaults
+    let ns_id =
+        create_organization(leader.addr, "concurrent-ns").await.expect("create organization");
 
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
@@ -458,12 +473,12 @@ async fn test_vault_id_global_uniqueness() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create multiple namespaces
-    let ns_1 = create_namespace(leader.addr, "uniqueness-ns-1").await.expect("create ns1");
-    let ns_2 = create_namespace(leader.addr, "uniqueness-ns-2").await.expect("create ns2");
-    let ns_3 = create_namespace(leader.addr, "uniqueness-ns-3").await.expect("create ns3");
+    // Create multiple organizations
+    let ns_1 = create_organization(leader.addr, "uniqueness-ns-1").await.expect("create ns1");
+    let ns_2 = create_organization(leader.addr, "uniqueness-ns-2").await.expect("create ns2");
+    let ns_3 = create_organization(leader.addr, "uniqueness-ns-3").await.expect("create ns3");
 
-    // Collect vault IDs from all namespaces
+    // Collect vault IDs from all organizations
     let mut all_vault_ids = Vec::new();
 
     // Create vaults in ns_1
@@ -489,7 +504,7 @@ async fn test_vault_id_global_uniqueness() {
     assert_eq!(
         unique_count,
         all_vault_ids.len(),
-        "All vault IDs across all namespaces should be unique"
+        "All vault IDs across all organizations should be unique"
     );
 
     // Verify IDs are monotonically increasing
@@ -512,9 +527,10 @@ async fn test_isolation_across_replicas() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and vaults via leader
-    let ns_id =
-        create_namespace(leader.addr, "replica-isolation-ns").await.expect("create namespace");
+    // Create organization and vaults via leader
+    let ns_id = create_organization(leader.addr, "replica-isolation-ns")
+        .await
+        .expect("create organization");
 
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
@@ -560,8 +576,9 @@ async fn test_empty_vault_isolation() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace
-    let ns_id = create_namespace(leader.addr, "empty-vault-ns").await.expect("create namespace");
+    // Create organization
+    let ns_id =
+        create_organization(leader.addr, "empty-vault-ns").await.expect("create organization");
 
     // Create two vaults
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
@@ -587,9 +604,10 @@ async fn test_deletion_isolation() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and vaults
-    let ns_id =
-        create_namespace(leader.addr, "deletion-isolation-ns").await.expect("create namespace");
+    // Create organization and vaults
+    let ns_id = create_organization(leader.addr, "deletion-isolation-ns")
+        .await
+        .expect("create organization");
 
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
@@ -607,7 +625,9 @@ async fn test_deletion_isolation() {
     let mut client = create_write_client(leader.addr).await.expect("client");
     client
         .write(inferadb_ledger_proto::proto::WriteRequest {
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: ns_id }),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: ns_id as u64,
+            }),
             vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_a }),
             client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "client-a".to_string() }),
             idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),

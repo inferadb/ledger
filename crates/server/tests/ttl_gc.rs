@@ -19,35 +19,40 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Creates a namespace and return its ID.
-async fn create_namespace(
+/// Creates a organization and return its ID.
+async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
+        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             shard_id: None,
             quota: None,
         })
         .await?;
 
-    let namespace_id =
-        response.into_inner().namespace_id.map(|n| n.id).ok_or("No namespace_id in response")?;
+    let organization_id = response
+        .into_inner()
+        .organization_slug
+        .map(|n| n.slug as i64)
+        .ok_or("No organization_id in response")?;
 
-    Ok(namespace_id)
+    Ok(organization_id)
 }
 
-/// Creates a vault in a namespace and return its ID.
+/// Creates a vault in a organization and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization_id as u64,
+            }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -62,7 +67,7 @@ async fn create_vault(
 /// Writes an entity with optional TTL.
 async fn write_entity_with_ttl(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
     value: &[u8],
@@ -72,7 +77,9 @@ async fn write_entity_with_ttl(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -105,14 +112,16 @@ async fn write_entity_with_ttl(
 /// Reads an entity from a vault.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
@@ -125,13 +134,14 @@ async fn read_entity(
 /// Force a GC cycle via admin RPC.
 async fn force_gc(
     addr: std::net::SocketAddr,
-    namespace_id: Option<i64>,
+    organization_id: Option<i64>,
     vault_id: Option<i64>,
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ForceGcRequest {
-        namespace_id: namespace_id.map(|id| inferadb_ledger_proto::proto::NamespaceId { id }),
+        organization_slug: organization_id
+            .map(|id| inferadb_ledger_proto::proto::OrganizationSlug { slug: id as u64 }),
         vault_id: vault_id.map(|id| inferadb_ledger_proto::proto::VaultId { id }),
     };
 
@@ -158,8 +168,8 @@ async fn test_force_gc_removes_expired_entities() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and vault
-    let ns_id = create_namespace(leader.addr, "ttl-gc-test").await.expect("create namespace");
+    // Create organization and vault
+    let ns_id = create_organization(leader.addr, "ttl-gc-test").await.expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Get current time
@@ -249,8 +259,9 @@ async fn test_force_gc_empty_vault() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and vault
-    let ns_id = create_namespace(leader.addr, "empty-gc-test").await.expect("create namespace");
+    // Create organization and vault
+    let ns_id =
+        create_organization(leader.addr, "empty-gc-test").await.expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Run GC on empty vault
@@ -269,9 +280,9 @@ async fn test_force_gc_all_vaults() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create namespace and multiple vaults
+    // Create organization and multiple vaults
     let ns_id =
-        create_namespace(leader.addr, "multi-vault-gc-test").await.expect("create namespace");
+        create_organization(leader.addr, "multi-vault-gc-test").await.expect("create organization");
     let vault1 = create_vault(leader.addr, ns_id).await.expect("create vault 1");
     let vault2 = create_vault(leader.addr, ns_id).await.expect("create vault 2");
 
@@ -322,7 +333,8 @@ async fn test_force_gc_multiple_ttl_timings() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id = create_namespace(leader.addr, "multi-ttl-test").await.expect("create namespace");
+    let ns_id =
+        create_organization(leader.addr, "multi-ttl-test").await.expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -375,7 +387,7 @@ async fn test_force_gc_idempotent() {
     let leader = cluster.leader().expect("should have leader");
 
     let ns_id =
-        create_namespace(leader.addr, "idempotent-gc-test").await.expect("create namespace");
+        create_organization(leader.addr, "idempotent-gc-test").await.expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -415,7 +427,8 @@ async fn test_expired_entity_not_returned_by_read() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id = create_namespace(leader.addr, "read-filter-test").await.expect("create namespace");
+    let ns_id =
+        create_organization(leader.addr, "read-filter-test").await.expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();

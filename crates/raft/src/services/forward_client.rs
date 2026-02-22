@@ -1,6 +1,6 @@
 //! gRPC client for forwarding requests to remote shards.
 //!
-//! When a namespace is assigned to a shard on a different node, requests
+//! When a organization is assigned to a shard on a different node, requests
 //! must be forwarded via gRPC. This module provides the client infrastructure
 //! for transparent request forwarding.
 //!

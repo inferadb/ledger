@@ -58,7 +58,7 @@ The custom `RaftLogStore` implementation integrates directly with InferaDB's emb
 2. **Custom snapshot format** — `CombinedSnapshot` packages Raft metadata (`AppliedState`) with vault entity data, using postcard serialization + zstd compression
 3. **Integrated state management** — `StateLayer` for state root computation, per-vault block heights, and bucket-based commitment tracking
 4. **Compile-time table safety** — `RaftLog` and `RaftState` tables share the same type-safe `Table` trait as application tables
-5. **Deterministic ID generation** — `SequenceCounters` within `AppliedState` ensure namespace/vault/user IDs are consistent across Raft replays
+5. **Deterministic ID generation** — `SequenceCounters` within `AppliedState` ensure organization/vault/user IDs are consistent across Raft replays
 
 Using OpenRaft's built-in storage implementations would require: abandoning the embedded B+ tree, maintaining a separate storage format for Raft data, and losing the shared page cache — fundamentally incompatible with the project's architecture.
 

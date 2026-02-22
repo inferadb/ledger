@@ -83,15 +83,15 @@ impl RuntimeConfigHandle {
                     limiter.update_config(
                         rl.client_burst,
                         rl.client_rate,
-                        rl.namespace_burst,
-                        rl.namespace_rate,
+                        rl.organization_burst,
+                        rl.organization_rate,
                         rl.backpressure_threshold,
                     );
                     info!(
                         client_burst = rl.client_burst,
                         client_rate = rl.client_rate,
-                        namespace_burst = rl.namespace_burst,
-                        namespace_rate = rl.namespace_rate,
+                        organization_burst = rl.organization_burst,
+                        organization_rate = rl.organization_rate,
                         backpressure_threshold = rl.backpressure_threshold,
                         "Rate limiter config updated"
                     );
@@ -302,7 +302,9 @@ mod tests {
                     if let Some(ref rl) = config.rate_limit {
                         // All fields must be coherent (not partially updated)
                         assert!(
-                            rl.client_burst > 0 || rl.client_rate > 0.0 || rl.namespace_burst > 0,
+                            rl.client_burst > 0
+                                || rl.client_rate > 0.0
+                                || rl.organization_burst > 0,
                             "Rate limit config must have at least some non-zero fields"
                         );
                     }

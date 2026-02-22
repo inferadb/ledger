@@ -33,12 +33,12 @@ All metrics follow the pattern: `ledger_{subsystem}_{name}_{unit}`
 | `ledger_write_latency_seconds`     | Histogram | `status`       | Write operation latency      |
 | `ledger_batch_writes_total`        | Counter   | `status`       | Total batch write operations |
 | `ledger_batch_size`                | Histogram | -              | Operations per batch         |
-| `ledger_rate_limit_exceeded_total` | Counter   | `namespace_id` | Rate limit violations        |
+| `ledger_rate_limit_exceeded_total` | Counter   | `organization_slug` | Rate limit violations        |
 
 **Labels:**
 
 - `status`: `success` or `error`
-- `namespace_id`: Namespace identifier
+- `organization_slug`: Organization identifier
 
 ## Read Service
 
@@ -154,9 +154,9 @@ rate(ledger_batch_eager_commits_total[5m]) /
 
 | Metric                          | Type    | Labels                               | Description                             |
 | ------------------------------- | ------- | ------------------------------------ | --------------------------------------- |
-| `ledger_recovery_success_total` | Counter | `namespace_id`, `vault_id`           | Successful vault recoveries             |
-| `ledger_recovery_failure_total` | Counter | `namespace_id`, `vault_id`, `reason` | Failed recovery attempts                |
-| `ledger_determinism_bug_total`  | Counter | `namespace_id`, `vault_id`           | **CRITICAL**: Determinism bugs detected |
+| `ledger_recovery_success_total` | Counter | `organization_slug`, `vault_id`           | Successful vault recoveries             |
+| `ledger_recovery_failure_total` | Counter | `organization_slug`, `vault_id`, `reason` | Failed recovery attempts                |
+| `ledger_determinism_bug_total`  | Counter | `organization_slug`, `vault_id`           | **CRITICAL**: Determinism bugs detected |
 
 ### Critical Alert
 
@@ -251,7 +251,7 @@ scrape_configs:
   - job_name: "ledger"
     kubernetes_sd_configs:
       - role: pod
-        namespaces:
+        organizations:
           names:
             - inferadb
     relabel_configs:
@@ -274,7 +274,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: ledger
-  namespace: inferadb
+  organization: inferadb
 spec:
   selector:
     matchLabels:
@@ -283,7 +283,7 @@ spec:
     - port: metrics
       interval: 15s
       path: /metrics
-  namespaceSelector:
+  organizationSelector:
     matchNames:
       - inferadb
 ```

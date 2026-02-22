@@ -4,7 +4,7 @@
 //! operations using the `MultiShardTestCluster` infrastructure.
 //!
 //! These tests exercise the full gRPC path through `MultiShardWriteServiceImpl`
-//! and `MultiShardReadServiceImpl`, validating that namespace→shard routing,
+//! and `MultiShardReadServiceImpl`, validating that organization→shard routing,
 //! idempotency, and error handling work correctly across shard boundaries.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
@@ -19,35 +19,40 @@ use common::{MultiShardTestCluster, create_admin_client, create_read_client, cre
 // Test Helpers
 // ============================================================================
 
-/// Creates a namespace on a multi-shard cluster and return its ID.
-async fn create_namespace(
+/// Creates a organization on a multi-shard cluster and return its ID.
+async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
+        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             shard_id: None,
             quota: None,
         })
         .await?;
 
-    let namespace_id =
-        response.into_inner().namespace_id.map(|n| n.id).ok_or("No namespace_id in response")?;
+    let organization_id = response
+        .into_inner()
+        .organization_slug
+        .map(|n| n.slug as i64)
+        .ok_or("No organization_id in response")?;
 
-    Ok(namespace_id)
+    Ok(organization_id)
 }
 
-/// Creates a vault in a namespace and return its ID.
+/// Creates a vault in a organization and return its ID.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization_id as u64,
+            }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -61,7 +66,7 @@ async fn create_vault(
 /// Writes an entity and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
     value: &[u8],
@@ -69,7 +74,9 @@ async fn write_entity(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "multi-shard-test".to_string(),
@@ -103,14 +110,16 @@ async fn write_entity(
 /// Reads an entity from a vault.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
@@ -124,7 +133,7 @@ async fn read_entity(
 // Multi-Shard Integration Tests
 // ============================================================================
 
-/// Tests that writes to a namespace are routed to the correct shard and readable.
+/// Tests that writes to a organization are routed to the correct shard and readable.
 ///
 /// Exercises the full write→route→Raft→apply→read path through gRPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -137,8 +146,8 @@ async fn test_multi_shard_write_and_read() {
 
     let node = cluster.any_node();
 
-    // Create namespace (gets assigned to a data shard)
-    let ns_id = create_namespace(node.addr, "ms-write-read").await.expect("create namespace");
+    // Create organization (gets assigned to a data shard)
+    let ns_id = create_organization(node.addr, "ms-write-read").await.expect("create organization");
     let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Write entity
@@ -151,12 +160,12 @@ async fn test_multi_shard_write_and_read() {
     assert_eq!(value, Some(b"value1".to_vec()), "should read back written value");
 }
 
-/// Tests that multiple namespaces on different shards are isolated.
+/// Tests that multiple organizations on different shards are isolated.
 ///
-/// Writes to namespace A should not be visible in namespace B, even if both
+/// Writes to organization A should not be visible in organization B, even if both
 /// are served by the same node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_namespace_isolation() {
+async fn test_multi_shard_organization_isolation() {
     let cluster = MultiShardTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
@@ -165,17 +174,17 @@ async fn test_multi_shard_namespace_isolation() {
 
     let node = cluster.any_node();
 
-    // Create two namespaces (may land on different shards)
-    let ns_a = create_namespace(node.addr, "isolated-a").await.expect("create ns A");
-    let ns_b = create_namespace(node.addr, "isolated-b").await.expect("create ns B");
+    // Create two organizations (may land on different shards)
+    let ns_a = create_organization(node.addr, "isolated-a").await.expect("create ns A");
+    let ns_b = create_organization(node.addr, "isolated-b").await.expect("create ns B");
 
     let vault_a = create_vault(node.addr, ns_a).await.expect("create vault A");
     let vault_b = create_vault(node.addr, ns_b).await.expect("create vault B");
 
-    // Write to namespace A
+    // Write to organization A
     write_entity(node.addr, ns_a, vault_a, "shared-key", b"value-a").await.expect("write to ns A");
 
-    // Write different value to namespace B with same key
+    // Write different value to organization B with same key
     write_entity(node.addr, ns_b, vault_b, "shared-key", b"value-b").await.expect("write to ns B");
 
     // Read from both — values should be independent
@@ -199,14 +208,16 @@ async fn test_multi_shard_batch_write() {
 
     let node = cluster.any_node();
 
-    let ns_id = create_namespace(node.addr, "ms-batch").await.expect("create namespace");
+    let ns_id = create_organization(node.addr, "ms-batch").await.expect("create organization");
     let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Submit a batch write with multiple operations
     let mut client = create_write_client(node.addr).await.expect("connect");
 
     let request = inferadb_ledger_proto::proto::BatchWriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: ns_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: ns_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-client".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -272,14 +283,16 @@ async fn test_multi_shard_write_idempotency() {
 
     let node = cluster.any_node();
 
-    let ns_id = create_namespace(node.addr, "ms-idempotent").await.expect("create namespace");
+    let ns_id = create_organization(node.addr, "ms-idempotent").await.expect("create organization");
     let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
 
     let mut client = create_write_client(node.addr).await.expect("connect");
     let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: ns_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: ns_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "idempotent-ms".to_string() }),
         idempotency_key: idempotency_key.clone(),
@@ -318,12 +331,12 @@ async fn test_multi_shard_write_idempotency() {
     }
 }
 
-/// Tests that writes to a non-existent namespace return an appropriate error.
+/// Tests that writes to a non-existent organization return an appropriate error.
 ///
-/// The multi-shard service should reject writes for namespaces that haven't
+/// The multi-shard service should reject writes for organizations that haven't
 /// been created, rather than silently dropping them or panicking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_write_nonexistent_namespace() {
+async fn test_multi_shard_write_nonexistent_organization() {
     let cluster = MultiShardTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
@@ -333,9 +346,9 @@ async fn test_multi_shard_write_nonexistent_namespace() {
     let node = cluster.any_node();
     let mut client = create_write_client(node.addr).await.expect("connect");
 
-    // Write to namespace 99999 which doesn't exist
+    // Write to organization 99999 which doesn't exist
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: 99999 }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 99999 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "nonexistent-ns".to_string(),
@@ -362,13 +375,13 @@ async fn test_multi_shard_write_nonexistent_namespace() {
             let inner = response.into_inner();
             match inner.result {
                 Some(inferadb_ledger_proto::proto::write_response::Result::Error(_)) => {
-                    // Expected: write error for nonexistent namespace
+                    // Expected: write error for nonexistent organization
                 },
                 Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-                    panic!("write to nonexistent namespace should not succeed");
+                    panic!("write to nonexistent organization should not succeed");
                 },
                 None => {
-                    panic!("expected error result for nonexistent namespace");
+                    panic!("expected error result for nonexistent organization");
                 },
             }
         },
@@ -379,16 +392,16 @@ async fn test_multi_shard_write_nonexistent_namespace() {
                     || status.code() == tonic::Code::Internal
                     || status.code() == tonic::Code::FailedPrecondition
                     || status.code() == tonic::Code::InvalidArgument,
-                "expected NOT_FOUND, INTERNAL, FAILED_PRECONDITION, or INVALID_ARGUMENT for nonexistent namespace, got: {:?}",
+                "expected NOT_FOUND, INTERNAL, FAILED_PRECONDITION, or INVALID_ARGUMENT for nonexistent organization, got: {:?}",
                 status.code()
             );
         },
     }
 }
 
-/// Tests concurrent writes to multiple namespaces across shards.
+/// Tests concurrent writes to multiple organizations across shards.
 ///
-/// Verifies that writes to different namespaces can proceed in parallel
+/// Verifies that writes to different organizations can proceed in parallel
 /// without interfering with each other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_shard_concurrent_writes() {
@@ -400,21 +413,21 @@ async fn test_multi_shard_concurrent_writes() {
 
     let node = cluster.any_node();
 
-    // Create 3 namespaces
-    let mut namespaces = Vec::new();
+    // Create 3 organizations
+    let mut organizations = Vec::new();
     for i in 0..3 {
-        let ns_id = create_namespace(node.addr, &format!("concurrent-{}", i))
+        let ns_id = create_organization(node.addr, &format!("concurrent-{}", i))
             .await
-            .expect("create namespace");
+            .expect("create organization");
         let vault_id = create_vault(node.addr, ns_id).await.expect("create vault");
-        namespaces.push((ns_id, vault_id));
+        organizations.push((ns_id, vault_id));
     }
 
-    // Spawn concurrent writes to all namespaces
+    // Spawn concurrent writes to all organizations
     let addr = node.addr;
     let mut handles = Vec::new();
 
-    for (i, &(ns_id, vault_id)) in namespaces.iter().enumerate() {
+    for (i, &(ns_id, vault_id)) in organizations.iter().enumerate() {
         let handle = tokio::spawn(async move {
             for j in 0..5 {
                 let key = format!("concurrent-{}-{}", i, j);
@@ -433,7 +446,7 @@ async fn test_multi_shard_concurrent_writes() {
     }
 
     // Verify all writes are readable
-    for (i, &(ns_id, vault_id)) in namespaces.iter().enumerate() {
+    for (i, &(ns_id, vault_id)) in organizations.iter().enumerate() {
         for j in 0..5 {
             let key = format!("concurrent-{}-{}", i, j);
             let expected = format!("value-{}-{}", i, j);

@@ -10,7 +10,9 @@ use std::{fmt, io::Cursor};
 
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
-use inferadb_ledger_types::{Hash, NamespaceId, SetCondition, ShardId, Transaction, VaultId};
+use inferadb_ledger_types::{
+    Hash, OrganizationId, OrganizationSlug, SetCondition, ShardId, Transaction, VaultId,
+};
 use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
 
@@ -46,34 +48,36 @@ openraft::declare_raft_types!(
 /// Request to the Raft state machine.
 ///
 /// This is the "D" (data) type in OpenRaft's type configuration.
-/// Each request targets a specific namespace and vault.
+/// Each request targets a specific organization and vault.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerRequest {
     /// Writes transactions to a vault.
     Write {
-        /// Target namespace.
-        namespace_id: NamespaceId,
-        /// Target vault within the namespace.
+        /// Target organization.
+        organization_id: OrganizationId,
+        /// Target vault within the organization.
         vault_id: VaultId,
         /// Transactions to apply atomically.
         transactions: Vec<Transaction>,
     },
 
-    /// Creates a new namespace (applied to `_system`).
-    CreateNamespace {
-        /// Requested namespace name.
+    /// Creates a new organization (applied to `_system`).
+    CreateOrganization {
+        /// Requested organization name.
         name: String,
+        /// External slug for API lookups (generated before Raft proposal).
+        slug: OrganizationSlug,
         /// Target shard ID (None = auto-assign to shard 0).
         shard_id: Option<ShardId>,
-        /// Optional resource quota for this namespace.
+        /// Optional resource quota for this organization.
         /// When `None`, server-wide default quota applies.
-        quota: Option<inferadb_ledger_types::config::NamespaceQuota>,
+        quota: Option<inferadb_ledger_types::config::OrganizationQuota>,
     },
 
-    /// Creates a new vault within a namespace.
+    /// Creates a new vault within an organization.
     CreateVault {
-        /// Namespace to create the vault in.
-        namespace_id: NamespaceId,
+        /// Organization to create the vault in.
+        organization_id: OrganizationId,
         /// Optional vault name (for display).
         name: Option<String>,
         /// Block retention policy for this vault.
@@ -81,55 +85,55 @@ pub enum LedgerRequest {
         retention_policy: Option<BlockRetentionPolicy>,
     },
 
-    /// Deletes a namespace.
-    DeleteNamespace {
-        /// Namespace ID to delete.
-        namespace_id: NamespaceId,
+    /// Deletes an organization.
+    DeleteOrganization {
+        /// Organization ID to delete.
+        organization_id: OrganizationId,
     },
 
     /// Deletes a vault.
     DeleteVault {
-        /// Namespace containing the vault.
-        namespace_id: NamespaceId,
+        /// Organization containing the vault.
+        organization_id: OrganizationId,
         /// Vault ID to delete.
         vault_id: VaultId,
     },
 
-    /// Suspends a namespace (billing hold or policy violation).
-    /// Suspended namespaces reject writes but allow reads.
-    SuspendNamespace {
-        /// Namespace to suspend.
-        namespace_id: NamespaceId,
+    /// Suspends an organization (billing hold or policy violation).
+    /// Suspended organizations reject writes but allow reads.
+    SuspendOrganization {
+        /// Organization to suspend.
+        organization_id: OrganizationId,
         /// Optional reason for suspension (e.g., "Payment overdue", "TOS violation").
         reason: Option<String>,
     },
 
-    /// Resumes a suspended namespace.
-    ResumeNamespace {
-        /// Namespace to resume.
-        namespace_id: NamespaceId,
+    /// Resumes a suspended organization.
+    ResumeOrganization {
+        /// Organization to resume.
+        organization_id: OrganizationId,
     },
 
-    /// Starts namespace migration to a new shard.
+    /// Starts organization migration to a new shard.
     /// Sets status to Migrating, blocking writes until CompleteMigration.
     StartMigration {
-        /// Namespace to migrate.
-        namespace_id: NamespaceId,
+        /// Organization to migrate.
+        organization_id: OrganizationId,
         /// Target shard ID for migration.
         target_shard_id: ShardId,
     },
 
-    /// Completes a pending namespace migration.
+    /// Completes a pending organization migration.
     /// Updates shard_id and returns status to Active.
     CompleteMigration {
-        /// Namespace being migrated.
-        namespace_id: NamespaceId,
+        /// Organization being migrated.
+        organization_id: OrganizationId,
     },
 
     /// Updates vault health status (used during recovery).
     UpdateVaultHealth {
-        /// Namespace containing the vault.
-        namespace_id: NamespaceId,
+        /// Organization containing the vault.
+        organization_id: OrganizationId,
         /// Vault ID to update.
         vault_id: VaultId,
         /// New health status: true = Healthy, false = Diverged/Recovering.
@@ -163,7 +167,7 @@ pub enum LedgerRequest {
     },
 }
 
-/// System-level requests that modify `_system` namespace.
+/// System-level requests that modify `_system` organization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemRequest {
     /// Creates a new user.
@@ -188,10 +192,10 @@ pub enum SystemRequest {
         node_id: LedgerNodeId,
     },
 
-    /// Updates namespace-to-shard mapping.
-    UpdateNamespaceRouting {
-        /// Namespace to update.
-        namespace_id: NamespaceId,
+    /// Updates organization-to-shard mapping.
+    UpdateOrganizationRouting {
+        /// Organization to update.
+        organization_id: OrganizationId,
         /// New shard assignment.
         shard_id: i32,
     },
@@ -216,10 +220,10 @@ pub enum LedgerResponse {
         assigned_sequence: u64,
     },
 
-    /// Namespace created.
-    NamespaceCreated {
-        /// Assigned namespace ID.
-        namespace_id: NamespaceId,
+    /// Organization created.
+    OrganizationCreated {
+        /// Assigned organization ID.
+        organization_id: OrganizationId,
         /// Assigned shard ID.
         shard_id: ShardId,
     },
@@ -230,61 +234,61 @@ pub enum LedgerResponse {
         vault_id: VaultId,
     },
 
-    /// Namespace deleted.
-    NamespaceDeleted {
+    /// Organization deleted.
+    OrganizationDeleted {
         /// Whether the deletion was successful.
         /// If false, `blocking_vault_ids` contains the vaults that must be deleted first.
         success: bool,
         /// Vault IDs that are blocking deletion (only set when success=false).
-        /// Clients should delete these vaults before retrying namespace deletion.
+        /// Clients should delete these vaults before retrying organization deletion.
         blocking_vault_ids: Vec<VaultId>,
     },
 
-    /// Namespace migrated to a new shard.
-    NamespaceMigrated {
-        /// Namespace that was migrated.
-        namespace_id: NamespaceId,
+    /// Organization migrated to a new shard.
+    OrganizationMigrated {
+        /// Organization that was migrated.
+        organization_id: OrganizationId,
         /// Previous shard assignment.
         old_shard_id: ShardId,
         /// New shard assignment.
         new_shard_id: ShardId,
     },
 
-    /// Namespace suspended.
-    NamespaceSuspended {
-        /// Namespace that was suspended.
-        namespace_id: NamespaceId,
+    /// Organization suspended.
+    OrganizationSuspended {
+        /// Organization that was suspended.
+        organization_id: OrganizationId,
     },
 
-    /// Namespace resumed (suspension lifted).
-    NamespaceResumed {
-        /// Namespace that was resumed.
-        namespace_id: NamespaceId,
+    /// Organization resumed (suspension lifted).
+    OrganizationResumed {
+        /// Organization that was resumed.
+        organization_id: OrganizationId,
     },
 
-    /// Namespace migration started.
+    /// Organization migration started.
     MigrationStarted {
-        /// Namespace entering migration.
-        namespace_id: NamespaceId,
+        /// Organization entering migration.
+        organization_id: OrganizationId,
         /// Target shard for migration.
         target_shard_id: ShardId,
     },
 
-    /// Namespace migration completed.
+    /// Organization migration completed.
     MigrationCompleted {
-        /// Namespace that was migrated.
-        namespace_id: NamespaceId,
+        /// Organization that was migrated.
+        organization_id: OrganizationId,
         /// Previous shard assignment.
         old_shard_id: ShardId,
         /// New shard assignment.
         new_shard_id: ShardId,
     },
 
-    /// Namespace marked for deletion (has active vaults).
+    /// Organization marked for deletion (has active vaults).
     /// Transitions to Deleted once all vaults are deleted.
-    NamespaceDeleting {
-        /// Namespace marked for deletion.
-        namespace_id: NamespaceId,
+    OrganizationDeleting {
+        /// Organization marked for deletion.
+        organization_id: OrganizationId,
         /// Vault IDs that must be deleted first.
         blocking_vault_ids: Vec<VaultId>,
     },
@@ -343,8 +347,8 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
             },
-            LedgerResponse::NamespaceCreated { namespace_id, shard_id } => {
-                write!(f, "NamespaceCreated(id={}, shard={})", namespace_id, shard_id)
+            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+                write!(f, "OrganizationCreated(id={}, shard={})", organization_id, shard_id)
             },
             LedgerResponse::VaultCreated { vault_id } => {
                 write!(f, "VaultCreated(id={})", vault_id)
@@ -352,45 +356,49 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::UserCreated { user_id } => {
                 write!(f, "UserCreated(id={})", user_id)
             },
-            LedgerResponse::NamespaceDeleted { success, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
                 if *success {
-                    write!(f, "NamespaceDeleted(success=true)")
+                    write!(f, "OrganizationDeleted(success=true)")
                 } else {
                     write!(
                         f,
-                        "NamespaceDeleted(success=false, blocking_vaults={:?})",
+                        "OrganizationDeleted(success=false, blocking_vaults={:?})",
                         blocking_vault_ids
                     )
                 }
             },
-            LedgerResponse::NamespaceMigrated { namespace_id, old_shard_id, new_shard_id } => {
+            LedgerResponse::OrganizationMigrated {
+                organization_id,
+                old_shard_id,
+                new_shard_id,
+            } => {
                 write!(
                     f,
-                    "NamespaceMigrated(id={}, {}->{})",
-                    namespace_id, old_shard_id, new_shard_id
+                    "OrganizationMigrated(id={}, {}->{})",
+                    organization_id, old_shard_id, new_shard_id
                 )
             },
-            LedgerResponse::NamespaceSuspended { namespace_id } => {
-                write!(f, "NamespaceSuspended(id={})", namespace_id)
+            LedgerResponse::OrganizationSuspended { organization_id } => {
+                write!(f, "OrganizationSuspended(id={})", organization_id)
             },
-            LedgerResponse::NamespaceResumed { namespace_id } => {
-                write!(f, "NamespaceResumed(id={})", namespace_id)
+            LedgerResponse::OrganizationResumed { organization_id } => {
+                write!(f, "OrganizationResumed(id={})", organization_id)
             },
-            LedgerResponse::MigrationStarted { namespace_id, target_shard_id } => {
-                write!(f, "MigrationStarted(id={}, target={})", namespace_id, target_shard_id)
+            LedgerResponse::MigrationStarted { organization_id, target_shard_id } => {
+                write!(f, "MigrationStarted(id={}, target={})", organization_id, target_shard_id)
             },
-            LedgerResponse::MigrationCompleted { namespace_id, old_shard_id, new_shard_id } => {
+            LedgerResponse::MigrationCompleted { organization_id, old_shard_id, new_shard_id } => {
                 write!(
                     f,
                     "MigrationCompleted(id={}, {}->{})",
-                    namespace_id, old_shard_id, new_shard_id
+                    organization_id, old_shard_id, new_shard_id
                 )
             },
-            LedgerResponse::NamespaceDeleting { namespace_id, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleting { organization_id, blocking_vault_ids } => {
                 write!(
                     f,
-                    "NamespaceDeleting(id={}, blocking_vaults={:?})",
-                    namespace_id, blocking_vault_ids
+                    "OrganizationDeleting(id={}, blocking_vaults={:?})",
+                    organization_id, blocking_vault_ids
                 )
             },
             LedgerResponse::VaultDeleted { success } => {
@@ -419,8 +427,9 @@ mod tests {
 
     #[test]
     fn test_ledger_request_serialization() {
-        let request = LedgerRequest::CreateNamespace {
-            name: "test-namespace".to_string(),
+        let request = LedgerRequest::CreateOrganization {
+            name: "test-org".to_string(),
+            slug: OrganizationSlug::new(12345),
             shard_id: Some(ShardId::new(1)),
             quota: None,
         };
@@ -429,8 +438,9 @@ mod tests {
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateNamespace { name, shard_id, quota: _ } => {
-                assert_eq!(name, "test-namespace");
+            LedgerRequest::CreateOrganization { name, slug, shard_id, quota: _ } => {
+                assert_eq!(name, "test-org");
+                assert_eq!(slug, OrganizationSlug::new(12345));
                 assert_eq!(shard_id, Some(ShardId::new(1)));
             },
             _ => panic!("unexpected variant"),
@@ -468,7 +478,7 @@ mod tests {
     // ============================================
 
     mod proptest_raft_log {
-        use inferadb_ledger_types::{NamespaceId, ShardId, VaultId};
+        use inferadb_ledger_types::{OrganizationId, ShardId, VaultId};
         use openraft::{CommittedLeaderId, LogId};
         use proptest::prelude::*;
 
@@ -607,23 +617,24 @@ mod tests {
             fn prop_ledger_request_roundtrip(
                 variant_idx in 0u8..4,
                 name in "[a-z]{1,16}",
-                namespace_id in (1i64..10_000).prop_map(NamespaceId::new),
+                organization_id in (1i64..10_000).prop_map(OrganizationId::new),
                 vault_id in (1i64..10_000).prop_map(VaultId::new),
                 shard_id in (1u32..1_000).prop_map(ShardId::new),
             ) {
                 let request = match variant_idx {
-                    0 => LedgerRequest::CreateNamespace {
+                    0 => LedgerRequest::CreateOrganization {
                         name: name.clone(),
+                        slug: inferadb_ledger_types::OrganizationSlug::new(42),
                         shard_id: Some(shard_id),
                         quota: None,
                     },
                     1 => LedgerRequest::CreateVault {
-                        namespace_id,
+                        organization_id,
                         name: Some(name.clone()),
                         retention_policy: None,
                     },
-                    2 => LedgerRequest::DeleteNamespace { namespace_id },
-                    _ => LedgerRequest::DeleteVault { namespace_id, vault_id },
+                    2 => LedgerRequest::DeleteOrganization { organization_id },
+                    _ => LedgerRequest::DeleteVault { organization_id, vault_id },
                 };
 
                 let bytes = postcard::to_allocvec(&request).expect("serialize");

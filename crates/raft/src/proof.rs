@@ -11,7 +11,7 @@ use inferadb_ledger_proto::proto;
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
-    NamespaceId, Transaction, VaultId,
+    OrganizationId, OrganizationSlug, Transaction, VaultId,
     hash::{Hash, tx_hash},
     merkle::MerkleTree,
 };
@@ -31,11 +31,11 @@ pub enum ProofError {
 
     /// Failed to find shard height for the vault block.
     #[snafu(display(
-        "block not found: namespace={namespace_id}, vault={vault_id}, height={vault_height}"
+        "block not found: organization={organization_id}, vault={vault_id}, height={vault_height}"
     ))]
     BlockNotFound {
-        /// The namespace ID that was not found.
-        namespace_id: NamespaceId,
+        /// The organization ID that was not found.
+        organization_id: OrganizationId,
         /// The vault ID that was not found.
         vault_id: VaultId,
         /// The vault height that was not found.
@@ -59,10 +59,10 @@ pub enum ProofError {
     },
 
     /// Vault entry not found in the block.
-    #[snafu(display("vault entry not in block: namespace={namespace_id}, vault={vault_id}"))]
+    #[snafu(display("vault entry not in block: organization={organization_id}, vault={vault_id}"))]
     VaultEntryNotFound {
-        /// The namespace ID that was searched for.
-        namespace_id: NamespaceId,
+        /// The organization ID that was searched for.
+        organization_id: OrganizationId,
         /// The vault ID that was searched for.
         vault_id: VaultId,
     },
@@ -103,16 +103,17 @@ pub struct WriteProof {
 #[allow(clippy::result_large_err)] // ProofError contains BlockArchiveError (160+ bytes)
 pub fn generate_write_proof(
     archive: &Arc<BlockArchive<FileBackend>>,
-    namespace_id: NamespaceId,
+    organization_id: OrganizationId,
+    organization_slug: Option<OrganizationSlug>,
     vault_id: VaultId,
     vault_height: u64,
     tx_index: usize,
 ) -> Result<WriteProof> {
     // Find the shard height containing this vault block
     let shard_height = archive
-        .find_shard_height(namespace_id, vault_id, vault_height)
+        .find_shard_height(organization_id, vault_id, vault_height)
         .context(FindShardHeightSnafu)?
-        .ok_or(ProofError::BlockNotFound { namespace_id, vault_id, vault_height })?;
+        .ok_or(ProofError::BlockNotFound { organization_id, vault_id, vault_height })?;
 
     // Read the block
     let block = archive.read_block(shard_height).context(ReadBlockSnafu { shard_height })?;
@@ -121,8 +122,8 @@ pub fn generate_write_proof(
     let entry = block
         .vault_entries
         .iter()
-        .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)
-        .ok_or(ProofError::VaultEntryNotFound { namespace_id, vault_id })?;
+        .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)
+        .ok_or(ProofError::VaultEntryNotFound { organization_id, vault_id })?;
 
     // Validate transaction index
     if entry.transactions.is_empty() {
@@ -138,7 +139,9 @@ pub fn generate_write_proof(
     // Build block header from vault entry
     let block_header = proto::BlockHeader {
         height: entry.vault_height,
-        namespace_id: Some(proto::NamespaceId { id: entry.namespace_id.value() }),
+        organization_slug: Some(proto::OrganizationSlug {
+            slug: organization_slug.map_or(entry.organization_id.value() as u64, |s| s.value()),
+        }),
         vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),

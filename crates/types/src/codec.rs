@@ -348,7 +348,7 @@ mod tests {
         fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
             (
                 any::<u64>(),
-                (1i64..10_000).prop_map(crate::types::NamespaceId::new),
+                (1i64..10_000).prop_map(crate::types::OrganizationId::new),
                 (1i64..10_000).prop_map(crate::types::VaultId::new),
                 arb_hash(),
                 arb_hash(),
@@ -360,7 +360,7 @@ mod tests {
                 .prop_map(
                     |(
                         height,
-                        namespace_id,
+                        organization_id,
                         vault_id,
                         previous_hash,
                         tx_merkle_root,
@@ -371,7 +371,7 @@ mod tests {
                     )| {
                         BlockHeader {
                             height,
-                            namespace_id,
+                            organization_id,
                             vault_id,
                             previous_hash,
                             tx_merkle_root,
@@ -459,7 +459,7 @@ mod tests {
             /// Any `VaultEntry` must survive postcard roundtrip.
             #[test]
             fn prop_vault_entry_roundtrip(
-                ns_id in (1i64..10_000).prop_map(crate::types::NamespaceId::new),
+                ns_id in (1i64..10_000).prop_map(crate::types::OrganizationId::new),
                 vault_id in (1i64..10_000).prop_map(crate::types::VaultId::new),
                 vault_height in any::<u64>(),
                 previous_vault_hash in arb_hash(),
@@ -468,7 +468,7 @@ mod tests {
                 state_root in arb_hash(),
             ) {
                 let entry = VaultEntry {
-                    namespace_id: ns_id,
+                    organization_id: ns_id,
                     vault_id,
                     vault_height,
                     previous_vault_hash,

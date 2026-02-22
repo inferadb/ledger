@@ -2,7 +2,7 @@
 //!
 //! InferaDB uses a shard-per-Raft-group architecture where
 //! each shard is an independent Raft consensus group. The `_system` shard handles
-//! global coordination, while data shards handle namespace workloads.
+//! global coordination, while data shards handle organization workloads.
 //!
 //! ## Architecture
 //!
@@ -56,9 +56,9 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
-use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemNamespaceService};
+use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend};
-use inferadb_ledger_types::{NamespaceId, ShardId};
+use inferadb_ledger_types::{OrganizationId, ShardId};
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use parking_lot::RwLock;
 use snafu::Snafu;
@@ -331,13 +331,13 @@ impl ShardGroup {
 /// Manager for multiple Raft shard groups.
 ///
 /// Coordinates the lifecycle of multiple independent Raft consensus groups,
-/// each handling a subset of namespaces. Uses FileBackend for production storage.
+/// each handling a subset of organizations. Uses FileBackend for production storage.
 pub struct MultiRaftManager {
     /// Configuration.
     config: MultiRaftConfig,
     /// Active shard groups indexed by shard ID.
     shards: RwLock<HashMap<ShardId, Arc<ShardGroup>>>,
-    /// Router for namespace-to-shard resolution.
+    /// Router for organization-to-shard resolution.
     router: RwLock<Option<Arc<ShardRouter<FileBackend>>>>,
 }
 
@@ -388,39 +388,39 @@ impl MultiRaftManager {
         self.router.read().clone()
     }
 
-    /// Routes a namespace to its shard group.
+    /// Routes an organization to its shard group.
     ///
-    /// Uses the ShardRouter to look up the namespace's shard assignment,
+    /// Uses the ShardRouter to look up the organization's shard assignment,
     /// then returns the local ShardGroup if available.
     ///
     /// Returns `None` if:
     /// - Router not initialized (system shard not started)
-    /// - Namespace not found in routing table
+    /// - Organization not found in routing table
     /// - Shard is on a different node (requires forwarding)
-    pub fn route_namespace(&self, namespace_id: NamespaceId) -> Option<Arc<ShardGroup>> {
+    pub fn route_organization(&self, organization_id: OrganizationId) -> Option<Arc<ShardGroup>> {
         let router = self.router.read().clone()?;
 
         // Look up shard assignment
-        let routing = router.get_routing(namespace_id).ok()?;
+        let routing = router.get_routing(organization_id).ok()?;
 
         // Get local shard group (if we host this shard)
         self.shards.read().get(&routing.shard_id).cloned()
     }
 
-    /// Returns the shard ID for a namespace.
+    /// Returns the shard ID for an organization.
     ///
-    /// Looks up the namespace's shard assignment without checking
+    /// Looks up the organization's shard assignment without checking
     /// if the shard is locally available.
-    pub fn get_namespace_shard(&self, namespace_id: NamespaceId) -> Option<ShardId> {
+    pub fn get_organization_shard(&self, organization_id: OrganizationId) -> Option<ShardId> {
         let router = self.router.read().clone()?;
-        router.get_routing(namespace_id).ok().map(|r| r.shard_id)
+        router.get_routing(organization_id).ok().map(|r| r.shard_id)
     }
 
     /// Starts the system shard (`_system`).
     ///
     /// The system shard must be started before any data shards.
-    /// It stores the namespace routing table and cluster metadata.
-    /// Also initializes the `ShardRouter` for namespace-to-shard routing.
+    /// It stores the organization routing table and cluster metadata.
+    /// Also initializes the `ShardRouter` for organization-to-shard routing.
     ///
     /// # Errors
     ///
@@ -438,11 +438,11 @@ impl MultiRaftManager {
         let shard = self.start_shard(shard_config).await?;
 
         // Initialize the ShardRouter with access to _system's state
-        let system_service = Arc::new(SystemNamespaceService::new(shard.state.clone()));
+        let system_service = Arc::new(SystemOrganizationService::new(shard.state.clone()));
         let router = Arc::new(ShardRouter::new(system_service));
         *self.router.write() = Some(router);
 
-        info!("ShardRouter initialized with _system namespace");
+        info!("ShardRouter initialized with _system organization");
 
         Ok(shard)
     }

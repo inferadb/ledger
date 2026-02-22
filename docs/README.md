@@ -13,7 +13,7 @@ Blockchain database for cryptographically verifiable authorization.
 - [Rust SDK](client/sdk.md) - Comprehensive SDK guide with TLS, retries, streaming, tracing
 - [API Overview](client/api.md) - Read/write operations, pagination, verification
 - [Idempotency](client/idempotency.md) - Sequence tracking and retry semantics
-- [AdminService](client/admin.md) - Namespace, vault, and cluster management
+- [AdminService](client/admin.md) - Organization, vault, and cluster management
 - [HealthService](client/health.md) - Liveness and readiness checks
 - [SystemDiscoveryService](client/discovery.md) - Peer discovery and bootstrap
 - [Error Reference](client/errors.md) - Error codes and handling patterns
@@ -27,7 +27,7 @@ Blockchain database for cryptographically verifiable authorization.
 - [Configuration](operations/configuration.md) - Environment variables reference
 - [Security](operations/security.md) - Trust model and network security
 - [Multi-Region](operations/multi-region.md) - Geographic distribution
-- [Shard Management](operations/shard-management.md) - Namespace-to-shard routing
+- [Shard Management](operations/shard-management.md) - Organization-to-shard routing
 
 ### Monitoring
 
@@ -68,7 +68,7 @@ Implementation details for contributors and advanced operators.
 | ----------------- | -------------------------------------------------------------------------- |
 | Start single node | `inferadb-ledger --single --data /tmp/ledger`                              |
 | Health check      | `grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check`         |
-| List namespaces   | `grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListNamespaces` |
+| List organizations   | `grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations` |
 | View metrics      | `curl localhost:9090/metrics`                                              |
 
 ## gRPC Services
@@ -78,5 +78,5 @@ Implementation details for contributors and advanced operators.
 | `HealthService`          | Liveness and readiness checks            |
 | `ReadService`            | Query entities, relationships, state     |
 | `WriteService`           | Create/update entities and relationships |
-| `AdminService`           | Namespace, vault, cluster management     |
+| `AdminService`           | Organization, vault, cluster management     |
 | `SystemDiscoveryService` | Peer discovery and cluster bootstrap     |

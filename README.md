@@ -28,7 +28,7 @@
 - **Cryptographic Auditability** — Per-vault blockchain with chain-linked state roots, SHA-256 commitments, tamper-evident history
 - **Strong Consistency** — Raft consensus ensures permission changes are immediately visible cluster-wide
 - **Fault Isolation** — Per-vault chains prevent failures from cascading across tenants
-- **Horizontal Scaling** — Shard groups distribute namespaces across independent Raft clusters
+- **Horizontal Scaling** — Shard groups distribute organizations across independent Raft clusters
 
 ## Quick Start
 

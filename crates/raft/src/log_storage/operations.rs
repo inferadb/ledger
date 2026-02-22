@@ -4,17 +4,17 @@
 
 use inferadb_ledger_state::{
     StateError,
-    system::{NamespaceRegistry, NamespaceStatus, SYSTEM_VAULT_ID, SystemKeys},
+    system::{OrganizationRegistry, OrganizationStatus, SYSTEM_VAULT_ID, SystemKeys},
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    Hash, NamespaceId, Operation, VaultEntry, VaultId, compute_tx_merkle_root, encode,
+    Hash, Operation, OrganizationId, VaultEntry, VaultId, compute_tx_merkle_root, encode,
 };
 
 use super::{
     store::RaftLogStore,
     types::{
-        AppliedState, NamespaceMeta, VaultHealthStatus, VaultMeta, estimate_write_storage_delta,
+        AppliedState, OrganizationMeta, VaultHealthStatus, VaultMeta, estimate_write_storage_delta,
         select_least_loaded_shard,
     },
 };
@@ -33,54 +33,54 @@ impl<B: StorageBackend> RaftLogStore<B> {
         state: &mut AppliedState,
     ) -> (LedgerResponse, Option<VaultEntry>) {
         match request {
-            LedgerRequest::Write { namespace_id, vault_id, transactions } => {
-                // Check namespace status before processing write
-                if let Some(ns_meta) = state.namespaces.get(namespace_id) {
-                    match ns_meta.status {
-                        NamespaceStatus::Suspended => {
+            LedgerRequest::Write { organization_id, vault_id, transactions } => {
+                // Check organization status before processing write
+                if let Some(org_meta) = state.organizations.get(organization_id) {
+                    match org_meta.status {
+                        OrganizationStatus::Suspended => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is suspended and not accepting writes",
-                                        namespace_id
+                                        "Organization {} is suspended and not accepting writes",
+                                        organization_id
                                     ),
                                 },
                                 None,
                             );
                         },
-                        NamespaceStatus::Migrating => {
+                        OrganizationStatus::Migrating => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is migrating and not accepting writes",
-                                        namespace_id
+                                        "Organization {} is migrating and not accepting writes",
+                                        organization_id
                                     ),
                                 },
                                 None,
                             );
                         },
-                        NamespaceStatus::Deleting | NamespaceStatus::Deleted => {
+                        OrganizationStatus::Deleting | OrganizationStatus::Deleted => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is deleted and not accepting writes",
-                                        namespace_id
+                                        "Organization {} is deleted and not accepting writes",
+                                        organization_id
                                     ),
                                 },
                                 None,
                             );
                         },
-                        NamespaceStatus::Active => {}, // OK to proceed
+                        OrganizationStatus::Active => {}, // OK to proceed
                     }
                 }
 
-                let key = (*namespace_id, *vault_id);
+                let key = (*organization_id, *vault_id);
                 if let Some(VaultHealthStatus::Diverged { .. }) = state.vault_health.get(&key) {
                     return (
                         LedgerResponse::Error {
                             message: format!(
                                 "Vault {}:{} is diverged and not accepting writes",
-                                namespace_id, vault_id
+                                organization_id, vault_id
                             ),
                         },
                         None,
@@ -168,7 +168,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let transactions_with_sequences: Vec<_> = transactions
                     .iter()
                     .map(|tx| {
-                        let client_key = (*namespace_id, *vault_id, tx.client_id.clone());
+                        let client_key = (*organization_id, *vault_id, tx.client_id.clone());
                         let current = state.client_sequences.get(&client_key).copied().unwrap_or(0);
                         let new_sequence = current + 1;
                         state.client_sequences.insert(client_key, new_sequence);
@@ -187,7 +187,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Build VaultEntry for ShardBlock with server-assigned sequences
                 let vault_entry = VaultEntry {
-                    namespace_id: *namespace_id,
+                    organization_id: *organization_id,
                     vault_id: *vault_id,
                     vault_height: new_height,
                     previous_vault_hash,
@@ -196,17 +196,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     state_root,
                 };
 
-                // Update namespace storage accounting.
+                // Update organization storage accounting.
                 // Increment for sets/creates, decrement for deletes.
                 let storage_delta = estimate_write_storage_delta(transactions);
-                let entry = state.namespace_storage_bytes.entry(*namespace_id).or_insert(0);
+                let entry = state.organization_storage_bytes.entry(*organization_id).or_insert(0);
                 if storage_delta >= 0 {
                     *entry = entry.saturating_add(storage_delta as u64);
                 } else {
                     *entry = entry.saturating_sub(storage_delta.unsigned_abs());
                 }
-                crate::metrics::set_namespace_storage_bytes(namespace_id.value(), *entry);
-                crate::metrics::record_namespace_operation(namespace_id.value(), "write");
+                crate::metrics::set_organization_storage_bytes(organization_id.value(), *entry);
+                crate::metrics::record_organization_operation(organization_id.value(), "write");
 
                 // Compute block hash from vault entry (for response)
                 // We temporarily build a BlockHeader to compute the hash
@@ -222,28 +222,33 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 )
             },
 
-            LedgerRequest::CreateNamespace { name, shard_id, quota } => {
-                let namespace_id = state.sequences.next_namespace();
+            LedgerRequest::CreateOrganization { name, slug, shard_id, quota } => {
+                let organization_id = state.sequences.next_organization();
                 // Use provided shard_id or select least-loaded shard
                 let assigned_shard =
-                    shard_id.unwrap_or_else(|| select_least_loaded_shard(&state.namespaces));
-                state.namespaces.insert(
-                    namespace_id,
-                    NamespaceMeta {
-                        namespace_id,
+                    shard_id.unwrap_or_else(|| select_least_loaded_shard(&state.organizations));
+                state.organizations.insert(
+                    organization_id,
+                    OrganizationMeta {
+                        organization_id,
+                        slug: *slug,
                         name: name.clone(),
                         shard_id: assigned_shard,
-                        status: NamespaceStatus::Active,
+                        status: OrganizationStatus::Active,
                         pending_shard_id: None,
                         quota: quota.clone(),
                     },
                 );
 
-                // Persist namespace to StateLayer for ShardRouter discovery.
-                // This enables the ShardRouter to find the namespace->shard mapping.
+                // Insert into bidirectional slug index
+                state.slug_index.insert(*slug, organization_id);
+                state.id_to_slug.insert(organization_id, *slug);
+
+                // Persist organization to StateLayer for ShardRouter discovery.
+                // This enables the ShardRouter to find the organization->shard mapping.
                 if let Some(state_layer) = &self.state_layer {
-                    let registry = NamespaceRegistry {
-                        namespace_id,
+                    let registry = OrganizationRegistry {
+                        organization_id,
                         name: name.clone(),
                         shard_id: assigned_shard,
                         member_nodes: state
@@ -252,20 +257,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             .nodes()
                             .map(|(id, _)| id.to_string())
                             .collect(),
-                        status: NamespaceStatus::Active,
+                        status: OrganizationStatus::Active,
                         config_version: 1,
                         created_at: chrono::Utc::now(),
                     };
 
                     // Serialize and write to StateLayer
                     if let Ok(value) = encode(&registry) {
-                        let key = SystemKeys::namespace_key(namespace_id);
-                        let name_index_key = SystemKeys::namespace_name_index_key(name);
+                        let key = SystemKeys::organization_key(organization_id);
+                        let slug_index_key = SystemKeys::organization_slug_key(*slug);
                         let ops = vec![
                             Operation::SetEntity { key, value, condition: None, expires_at: None },
                             Operation::SetEntity {
-                                key: name_index_key,
-                                value: namespace_id.to_string().into_bytes(),
+                                key: slug_index_key,
+                                value: organization_id.to_string().into_bytes(),
                                 condition: None,
                                 expires_at: None,
                             },
@@ -273,66 +278,72 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                         if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
                             tracing::error!(
-                                namespace_id = namespace_id.value(),
+                                organization_id = organization_id.value(),
                                 error = %e,
-                                "Failed to persist namespace to StateLayer"
+                                "Failed to persist organization to StateLayer"
                             );
                         }
                     }
                 }
 
-                (LedgerResponse::NamespaceCreated { namespace_id, shard_id: assigned_shard }, None)
+                (
+                    LedgerResponse::OrganizationCreated {
+                        organization_id,
+                        shard_id: assigned_shard,
+                    },
+                    None,
+                )
             },
 
-            LedgerRequest::CreateVault { namespace_id, name, retention_policy } => {
-                // Check namespace status before creating vault
-                if let Some(ns_meta) = state.namespaces.get(namespace_id) {
-                    match ns_meta.status {
-                        NamespaceStatus::Suspended => {
+            LedgerRequest::CreateVault { organization_id, name, retention_policy } => {
+                // Check organization status before creating vault
+                if let Some(org_meta) = state.organizations.get(organization_id) {
+                    match org_meta.status {
+                        OrganizationStatus::Suspended => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is suspended and not accepting new vaults",
-                                        namespace_id
+                                        "Organization {} is suspended and not accepting new vaults",
+                                        organization_id
                                     ),
                                 },
                                 None,
                             );
                         },
-                        NamespaceStatus::Migrating => {
+                        OrganizationStatus::Migrating => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is migrating and not accepting new vaults",
-                                        namespace_id
+                                        "Organization {} is migrating and not accepting new vaults",
+                                        organization_id
                                     ),
                                 },
                                 None,
                             );
                         },
-                        NamespaceStatus::Deleting | NamespaceStatus::Deleted => {
+                        OrganizationStatus::Deleting | OrganizationStatus::Deleted => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is deleted and not accepting new vaults",
-                                        namespace_id
+                                        "Organization {} is deleted and not accepting new vaults",
+                                        organization_id
                                     ),
                                 },
                                 None,
                             );
                         },
-                        NamespaceStatus::Active => {}, // OK to proceed
+                        OrganizationStatus::Active => {}, // OK to proceed
                     }
                 }
 
                 let vault_id = state.sequences.next_vault();
-                let key = (*namespace_id, vault_id);
+                let key = (*organization_id, vault_id);
                 state.vault_heights.insert(key, 0);
                 state.vault_health.insert(key, VaultHealthStatus::Healthy);
                 state.vaults.insert(
                     key,
                     VaultMeta {
-                        namespace_id: *namespace_id,
+                        organization_id: *organization_id,
                         vault_id,
                         name: name.clone(),
                         deleted: false,
@@ -343,33 +354,37 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (LedgerResponse::VaultCreated { vault_id }, None)
             },
 
-            LedgerRequest::DeleteNamespace { namespace_id } => {
-                // Collect active (non-deleted) vault IDs for this namespace
+            LedgerRequest::DeleteOrganization { organization_id } => {
+                // Collect active (non-deleted) vault IDs for this organization
                 let blocking_vault_ids: Vec<VaultId> = state
                     .vaults
                     .iter()
-                    .filter(|((ns, _), v)| *ns == *namespace_id && !v.deleted)
+                    .filter(|((org, _), v)| *org == *organization_id && !v.deleted)
                     .map(|((_, vault_id), _)| *vault_id)
                     .collect();
 
-                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
+                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
                     // Check current status
-                    match ns.status {
-                        NamespaceStatus::Deleted => LedgerResponse::Error {
-                            message: format!("Namespace {} is already deleted", namespace_id),
+                    match org.status {
+                        OrganizationStatus::Deleted => LedgerResponse::Error {
+                            message: format!("Organization {} is already deleted", organization_id),
                         },
-                        NamespaceStatus::Deleting => {
+                        OrganizationStatus::Deleting => {
                             // Already deleting - check if vaults are gone now
                             if blocking_vault_ids.is_empty() {
-                                ns.status = NamespaceStatus::Deleted;
-                                LedgerResponse::NamespaceDeleted {
+                                org.status = OrganizationStatus::Deleted;
+                                // Clean up slug index on final deletion
+                                if let Some(slug) = state.id_to_slug.remove(organization_id) {
+                                    state.slug_index.remove(&slug);
+                                }
+                                LedgerResponse::OrganizationDeleted {
                                     success: true,
                                     blocking_vault_ids: vec![],
                                 }
                             } else {
                                 // Still has vaults
-                                LedgerResponse::NamespaceDeleting {
-                                    namespace_id: *namespace_id,
+                                LedgerResponse::OrganizationDeleting {
+                                    organization_id: *organization_id,
                                     blocking_vault_ids,
                                 }
                             }
@@ -378,16 +393,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // Active, Suspended, or Migrating
                             if blocking_vault_ids.is_empty() {
                                 // No blocking vaults - delete immediately
-                                ns.status = NamespaceStatus::Deleted;
-                                LedgerResponse::NamespaceDeleted {
+                                org.status = OrganizationStatus::Deleted;
+                                // Clean up slug index on final deletion
+                                if let Some(slug) = state.id_to_slug.remove(organization_id) {
+                                    state.slug_index.remove(&slug);
+                                }
+                                LedgerResponse::OrganizationDeleted {
                                     success: true,
                                     blocking_vault_ids: vec![],
                                 }
                             } else {
                                 // Has vaults - transition to Deleting state
-                                ns.status = NamespaceStatus::Deleting;
-                                LedgerResponse::NamespaceDeleting {
-                                    namespace_id: *namespace_id,
+                                org.status = OrganizationStatus::Deleting;
+                                LedgerResponse::OrganizationDeleting {
+                                    organization_id: *organization_id,
                                     blocking_vault_ids,
                                 }
                             }
@@ -395,34 +414,38 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Namespace {} not found", namespace_id),
+                        message: format!("Organization {} not found", organization_id),
                     }
                 };
                 (response, None)
             },
 
-            LedgerRequest::DeleteVault { namespace_id, vault_id } => {
-                let key = (*namespace_id, *vault_id);
+            LedgerRequest::DeleteVault { organization_id, vault_id } => {
+                let key = (*organization_id, *vault_id);
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault) = state.vaults.get_mut(&key) {
                     vault.deleted = true;
 
-                    // Check if namespace is in Deleting state and this was the last vault
-                    if let Some(ns) = state.namespaces.get_mut(namespace_id)
-                        && ns.status == NamespaceStatus::Deleting
+                    // Check if organization is in Deleting state and this was the last vault
+                    if let Some(org) = state.organizations.get_mut(organization_id)
+                        && org.status == OrganizationStatus::Deleting
                     {
                         // Check if any active vaults remain
                         let remaining_vaults = state
                             .vaults
                             .iter()
-                            .any(|((ns_id, _), v)| *ns_id == *namespace_id && !v.deleted);
+                            .any(|((org_id, _), v)| *org_id == *organization_id && !v.deleted);
 
                         if !remaining_vaults {
-                            // Auto-transition namespace to Deleted
-                            ns.status = NamespaceStatus::Deleted;
+                            // Auto-transition organization to Deleted
+                            org.status = OrganizationStatus::Deleted;
+                            // Clean up slug index
+                            if let Some(slug) = state.id_to_slug.remove(organization_id) {
+                                state.slug_index.remove(&slug);
+                            }
                             tracing::info!(
-                                namespace_id = namespace_id.value(),
-                                "Namespace auto-transitioned to Deleted after last vault deleted"
+                                organization_id = organization_id.value(),
+                                "Organization auto-transitioned to Deleted after last vault deleted"
                             );
                         }
                     }
@@ -430,120 +453,136 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     LedgerResponse::VaultDeleted { success: true }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Vault {}:{} not found", namespace_id, vault_id),
+                        message: format!("Vault {}:{} not found", organization_id, vault_id),
                     }
                 };
                 (response, None)
             },
 
-            LedgerRequest::SuspendNamespace { namespace_id, reason: _ } => {
-                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
-                    match ns.status {
-                        NamespaceStatus::Deleted => LedgerResponse::Error {
-                            message: format!("Cannot suspend deleted namespace {}", namespace_id),
+            LedgerRequest::SuspendOrganization { organization_id, reason: _ } => {
+                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+                    match org.status {
+                        OrganizationStatus::Deleted => LedgerResponse::Error {
+                            message: format!(
+                                "Cannot suspend deleted organization {}",
+                                organization_id
+                            ),
                         },
-                        NamespaceStatus::Suspended => LedgerResponse::Error {
-                            message: format!("Namespace {} is already suspended", namespace_id),
+                        OrganizationStatus::Suspended => LedgerResponse::Error {
+                            message: format!(
+                                "Organization {} is already suspended",
+                                organization_id
+                            ),
                         },
                         _ => {
-                            ns.status = NamespaceStatus::Suspended;
-                            LedgerResponse::NamespaceSuspended { namespace_id: *namespace_id }
+                            org.status = OrganizationStatus::Suspended;
+                            LedgerResponse::OrganizationSuspended {
+                                organization_id: *organization_id,
+                            }
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Namespace {} not found", namespace_id),
+                        message: format!("Organization {} not found", organization_id),
                     }
                 };
                 (response, None)
             },
 
-            LedgerRequest::ResumeNamespace { namespace_id } => {
-                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
-                    match ns.status {
-                        NamespaceStatus::Suspended => {
-                            ns.status = NamespaceStatus::Active;
-                            LedgerResponse::NamespaceResumed { namespace_id: *namespace_id }
+            LedgerRequest::ResumeOrganization { organization_id } => {
+                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+                    match org.status {
+                        OrganizationStatus::Suspended => {
+                            org.status = OrganizationStatus::Active;
+                            LedgerResponse::OrganizationResumed {
+                                organization_id: *organization_id,
+                            }
                         },
-                        NamespaceStatus::Active => LedgerResponse::Error {
-                            message: format!("Namespace {} is not suspended", namespace_id),
+                        OrganizationStatus::Active => LedgerResponse::Error {
+                            message: format!("Organization {} is not suspended", organization_id),
                         },
-                        NamespaceStatus::Deleted => LedgerResponse::Error {
-                            message: format!("Cannot resume deleted namespace {}", namespace_id),
+                        OrganizationStatus::Deleted => LedgerResponse::Error {
+                            message: format!(
+                                "Cannot resume deleted organization {}",
+                                organization_id
+                            ),
                         },
                         other => LedgerResponse::Error {
                             message: format!(
-                                "Cannot resume namespace {} in state {:?}",
-                                namespace_id, other
+                                "Cannot resume organization {} in state {:?}",
+                                organization_id, other
                             ),
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Namespace {} not found", namespace_id),
+                        message: format!("Organization {} not found", organization_id),
                     }
                 };
                 (response, None)
             },
 
-            LedgerRequest::StartMigration { namespace_id, target_shard_id } => {
-                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
-                    match ns.status {
-                        NamespaceStatus::Active => {
+            LedgerRequest::StartMigration { organization_id, target_shard_id } => {
+                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+                    match org.status {
+                        OrganizationStatus::Active => {
                             // Validate target shard is different
-                            if *target_shard_id == ns.shard_id {
+                            if *target_shard_id == org.shard_id {
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is already on shard {}",
-                                        namespace_id, target_shard_id
+                                        "Organization {} is already on shard {}",
+                                        organization_id, target_shard_id
                                     ),
                                 }
                             } else {
-                                ns.status = NamespaceStatus::Migrating;
-                                ns.pending_shard_id = Some(*target_shard_id);
+                                org.status = OrganizationStatus::Migrating;
+                                org.pending_shard_id = Some(*target_shard_id);
                                 LedgerResponse::MigrationStarted {
-                                    namespace_id: *namespace_id,
+                                    organization_id: *organization_id,
                                     target_shard_id: *target_shard_id,
                                 }
                             }
                         },
-                        NamespaceStatus::Migrating => LedgerResponse::Error {
-                            message: format!("Namespace {} is already migrating", namespace_id),
-                        },
-                        NamespaceStatus::Suspended => LedgerResponse::Error {
+                        OrganizationStatus::Migrating => LedgerResponse::Error {
                             message: format!(
-                                "Cannot start migration on suspended namespace {}",
-                                namespace_id
+                                "Organization {} is already migrating",
+                                organization_id
                             ),
                         },
-                        NamespaceStatus::Deleting | NamespaceStatus::Deleted => {
+                        OrganizationStatus::Suspended => LedgerResponse::Error {
+                            message: format!(
+                                "Cannot start migration on suspended organization {}",
+                                organization_id
+                            ),
+                        },
+                        OrganizationStatus::Deleting | OrganizationStatus::Deleted => {
                             LedgerResponse::Error {
                                 message: format!(
-                                    "Cannot start migration on deleted namespace {}",
-                                    namespace_id
+                                    "Cannot start migration on deleted organization {}",
+                                    organization_id
                                 ),
                             }
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Namespace {} not found", namespace_id),
+                        message: format!("Organization {} not found", organization_id),
                     }
                 };
                 (response, None)
             },
 
-            LedgerRequest::CompleteMigration { namespace_id } => {
-                let response = if let Some(ns) = state.namespaces.get_mut(namespace_id) {
-                    match ns.status {
-                        NamespaceStatus::Migrating => {
-                            if let Some(target_shard) = ns.pending_shard_id {
-                                let old_shard = ns.shard_id;
-                                ns.shard_id = target_shard;
-                                ns.status = NamespaceStatus::Active;
-                                ns.pending_shard_id = None;
+            LedgerRequest::CompleteMigration { organization_id } => {
+                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+                    match org.status {
+                        OrganizationStatus::Migrating => {
+                            if let Some(target_shard) = org.pending_shard_id {
+                                let old_shard = org.shard_id;
+                                org.shard_id = target_shard;
+                                org.status = OrganizationStatus::Active;
+                                org.pending_shard_id = None;
                                 LedgerResponse::MigrationCompleted {
-                                    namespace_id: *namespace_id,
+                                    organization_id: *organization_id,
                                     old_shard_id: old_shard,
                                     new_shard_id: target_shard,
                                 }
@@ -551,32 +590,32 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 // Should not happen, but handle gracefully
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Namespace {} is migrating but has no target shard",
-                                        namespace_id
+                                        "Organization {} is migrating but has no target shard",
+                                        organization_id
                                     ),
                                 }
                             }
                         },
-                        NamespaceStatus::Active => LedgerResponse::Error {
-                            message: format!("Namespace {} is not migrating", namespace_id),
+                        OrganizationStatus::Active => LedgerResponse::Error {
+                            message: format!("Organization {} is not migrating", organization_id),
                         },
                         other => LedgerResponse::Error {
                             message: format!(
-                                "Cannot complete migration for namespace {} in state {:?}",
-                                namespace_id, other
+                                "Cannot complete migration for organization {} in state {:?}",
+                                organization_id, other
                             ),
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Namespace {} not found", namespace_id),
+                        message: format!("Organization {} not found", organization_id),
                     }
                 };
                 (response, None)
             },
 
             LedgerRequest::UpdateVaultHealth {
-                namespace_id,
+                organization_id,
                 vault_id,
                 healthy,
                 expected_root,
@@ -585,17 +624,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 recovery_attempt,
                 recovery_started_at,
             } => {
-                let key = (*namespace_id, *vault_id);
+                let key = (*organization_id, *vault_id);
                 if *healthy {
                     // Mark vault as healthy
                     state.vault_health.insert(key, VaultHealthStatus::Healthy);
                     crate::metrics::set_vault_health(
-                        namespace_id.value(),
+                        organization_id.value(),
                         vault_id.value(),
                         "healthy",
                     );
                     tracing::info!(
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         vault_id = vault_id.value(),
                         "Vault health updated to Healthy via Raft"
                     );
@@ -611,12 +650,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         },
                     );
                     crate::metrics::set_vault_health(
-                        namespace_id.value(),
+                        organization_id.value(),
                         vault_id.value(),
                         "recovering",
                     );
                     tracing::info!(
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         vault_id = vault_id.value(),
                         attempt,
                         "Vault health updated to Recovering via Raft"
@@ -630,12 +669,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         .vault_health
                         .insert(key, VaultHealthStatus::Diverged { expected, computed, at_height });
                     crate::metrics::set_vault_health(
-                        namespace_id.value(),
+                        organization_id.value(),
                         vault_id.value(),
                         "diverged",
                     );
                     tracing::warn!(
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         vault_id = vault_id.value(),
                         at_height,
                         "Vault health updated to Diverged via Raft"
@@ -653,7 +692,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     SystemRequest::AddNode { .. } | SystemRequest::RemoveNode { .. } => {
                         LedgerResponse::Empty
                     },
-                    SystemRequest::UpdateNamespaceRouting { namespace_id, shard_id } => {
+                    SystemRequest::UpdateOrganizationRouting { organization_id, shard_id } => {
                         // Validate shard_id is non-negative
                         if *shard_id < 0 {
                             LedgerResponse::Error {
@@ -662,30 +701,30 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     shard_id
                                 ),
                             }
-                        } else if let Some(ns) = state.namespaces.get_mut(namespace_id) {
-                            if ns.status == NamespaceStatus::Deleted {
+                        } else if let Some(org) = state.organizations.get_mut(organization_id) {
+                            if org.status == OrganizationStatus::Deleted {
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Cannot migrate deleted namespace {}",
-                                        namespace_id
+                                        "Cannot migrate deleted organization {}",
+                                        organization_id
                                     ),
                                 }
                             } else {
-                                let old_shard_id = ns.shard_id;
+                                let old_shard_id = org.shard_id;
                                 // Safe cast: we already validated shard_id >= 0 above
                                 #[allow(clippy::cast_sign_loss)]
                                 let new_shard_id =
                                     inferadb_ledger_types::ShardId::new(*shard_id as u32);
-                                ns.shard_id = new_shard_id;
-                                LedgerResponse::NamespaceMigrated {
-                                    namespace_id: *namespace_id,
+                                org.shard_id = new_shard_id;
+                                LedgerResponse::OrganizationMigrated {
+                                    organization_id: *organization_id,
                                     old_shard_id,
                                     new_shard_id,
                                 }
                             }
                         } else {
                             LedgerResponse::Error {
-                                message: format!("Namespace {} not found", namespace_id),
+                                message: format!("Organization {} not found", organization_id),
                             }
                         }
                     },
@@ -726,13 +765,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
     #[allow(dead_code)] // reserved for block hash computation in state machine
     pub(super) fn compute_block_hash(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         height: u64,
     ) -> Hash {
         use inferadb_ledger_types::sha256;
         let mut data = Vec::new();
-        data.extend_from_slice(&namespace_id.value().to_le_bytes());
+        data.extend_from_slice(&organization_id.value().to_le_bytes());
         data.extend_from_slice(&vault_id.value().to_le_bytes());
         data.extend_from_slice(&height.to_le_bytes());
         sha256(&data)

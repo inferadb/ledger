@@ -36,8 +36,8 @@ Fields are categorized by requirement level:
 | `method`       | Required    | String | -                        | gRPC method name                              | `"write"`                                |
 | `client_id`    | Conditional | String | When provided            | Idempotency client identifier (max 128 chars) | `"api_acme_corp"`                        |
 | `sequence`     | Conditional | u64    | When provided            | Per-client sequence number                    | `42`                                     |
-| `namespace_id` | Conditional | i64    | When targeting namespace | Target namespace                              | `1001`                                   |
-| `vault_id`     | Conditional | i64    | When targeting vault     | Target vault (0 for namespace-level ops)      | `2001`                                   |
+| `organization_slug` | Conditional | i64    | When targeting organization | Target organization                              | `1001`                                   |
+| `vault_id`     | Conditional | i64    | When targeting vault     | Target vault (0 for organization-level ops)      | `2001`                                   |
 | `actor`        | Conditional | String | When authenticated       | Identity performing operation                 | `"user:123"`                             |
 
 ### System Context
@@ -48,7 +48,7 @@ Fields are categorized by requirement level:
 | `is_leader` | Required | bool | -         | Raft leadership status at request time | `true`  |
 | `raft_term` | Required | u64  | -         | Current Raft term                      | `15`    |
 | `shard_id`  | Required | u32  | -         | Shard routing identifier               | `0`     |
-| `is_vip`    | Required | bool | -         | VIP namespace indicator                | `false` |
+| `is_vip`    | Required | bool | -         | VIP organization indicator                | `false` |
 
 ### Write Operation Fields
 
@@ -80,8 +80,8 @@ Fields are categorized by requirement level:
 
 | Field                   | Level       | Type   | Condition      | Description                           | Example              |
 | ----------------------- | ----------- | ------ | -------------- | ------------------------------------- | -------------------- |
-| `admin_action`          | Conditional | String | Admin ops      | Administrative action name            | `"create_namespace"` |
-| `target_namespace_name` | Conditional | String | Namespace ops  | Target namespace name (max 128 chars) | `"acme_production"`  |
+| `admin_action`          | Conditional | String | Admin ops      | Administrative action name            | `"create_organization"` |
+| `target_organization_name` | Conditional | String | Organization ops  | Target organization name (max 128 chars) | `"acme_production"`  |
 | `retention_mode`        | Conditional | String | Vault creation | Vault retention mode                  | `"compliance"`       |
 | `recovery_force`        | Conditional | bool   | Recovery ops   | Whether force mode was used           | `false`              |
 
@@ -229,7 +229,7 @@ index=inferadb outcome=error | stats count by error_code
 
 ```logql
 {job="inferadb-ledger"} | json | outcome="rate_limited"
-| line_format "{{.client_id}}: {{.namespace_id}}"
+| line_format "{{.client_id}}: {{.organization_slug}}"
 ```
 
 </details>
@@ -261,8 +261,8 @@ service:inferadb-ledger outcome:rate_limited | group by client_id | count()
     }
   },
   "aggs": {
-    "by_namespace": {
-      "terms": { "field": "namespace_id" },
+    "by_organization": {
+      "terms": { "field": "organization_slug" },
       "aggs": { "avg_duration": { "avg": { "field": "duration_ms" } } }
     }
   }
@@ -284,7 +284,7 @@ service:inferadb-ledger outcome:rate_limited | group by client_id | count()
 <summary>Datadog</summary>
 
 ```
-service:inferadb-ledger method:write @duration_ms:>100 | group by namespace_id | avg(@duration_ms)
+service:inferadb-ledger method:write @duration_ms:>100 | group by organization_slug | avg(@duration_ms)
 ```
 
 </details>
@@ -294,7 +294,7 @@ service:inferadb-ledger method:write @duration_ms:>100 | group by namespace_id |
 
 ```spl
 index=inferadb method=write duration_ms>100
-| table _time client_id namespace_id duration_ms raft_latency_ms storage_latency_ms
+| table _time client_id organization_slug duration_ms raft_latency_ms storage_latency_ms
 | sort -duration_ms
 ```
 
@@ -418,14 +418,14 @@ service:inferadb-ledger | group by client_id | count() | top 10
 
 ### Capacity Planning
 
-#### Request Distribution by Namespace
+#### Request Distribution by Organization
 
 <details>
 <summary>Grafana Loki (LogQL)</summary>
 
 ```logql
 topk(10,
-  sum by (namespace_id) (count_over_time({job="inferadb-ledger"} | json [1h]))
+  sum by (organization_slug) (count_over_time({job="inferadb-ledger"} | json [1h]))
 )
 ```
 
@@ -435,7 +435,7 @@ topk(10,
 <summary>Datadog</summary>
 
 ```
-service:inferadb-ledger | timeseries count() by namespace_id
+service:inferadb-ledger | timeseries count() by organization_slug
 ```
 
 </details>
@@ -580,7 +580,7 @@ Request completes
          │ No
          ▼
 ┌──────────────────┐
-│ Is VIP namespace?│──Yes──► SAMPLE at 50%
+│ Is VIP organization?│──Yes──► SAMPLE at 50%
 └────────┬─────────┘
          │ No
          ▼
@@ -610,12 +610,12 @@ This means:
 | Write     | 100ms             | Writes involve consensus; allow more time      |
 | Admin     | 1000ms            | Admin ops may involve bulk operations          |
 
-### VIP Namespaces
+### VIP Organizations
 
-VIP namespaces get 50% sampling (vs 10% for writes, 1% for reads):
+VIP organizations get 50% sampling (vs 10% for writes, 1% for reads):
 
-1. **Static configuration**: List namespace IDs in `vip_namespaces`
-2. **Dynamic discovery**: Tag namespaces with `vip=true` in `_system` metadata
+1. **Static configuration**: List organization IDs in `vip_organizations`
+2. **Dynamic discovery**: Tag organizations with `vip=true` in `_system` metadata
 3. **Override behavior**: Static config takes precedence over dynamic discovery
 
 Dynamic VIP tags can be modified at runtime without restarting the server. Changes take effect within 60 seconds (cache TTL).

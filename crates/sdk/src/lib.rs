@@ -83,7 +83,7 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{
     BlockAnnouncement, BlockHeader, ChainProof, Direction, Entity, HealthCheckResult, HealthStatus,
     LedgerClient, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof,
-    MerkleSibling, NamespaceInfo, NamespaceStatus, Operation, PagedResult, ReadConsistency,
+    MerkleSibling, Operation, OrganizationInfo, OrganizationStatus, PagedResult, ReadConsistency,
     Relationship, SetCondition, VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
 };
 pub use config::{
@@ -94,7 +94,7 @@ pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
-pub use inferadb_ledger_types::{NamespaceId, VaultId};
+pub use inferadb_ledger_types::{OrganizationId, VaultId};
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{

@@ -1,7 +1,7 @@
 //! Multi-shard write service implementation.
 //!
-//! Routes write requests to the appropriate shard based on namespace.
-//! Each namespace is assigned to a shard, and requests are routed to the
+//! Routes write requests to the appropriate shard based on organization.
+//! Each organization is assigned to a shard, and requests are routed to the
 //! Raft instance for that shard.
 
 use std::{
@@ -27,6 +27,7 @@ use crate::{
     services::{
         metadata::{response_with_correlation, status_with_correlation},
         shard_resolver::ShardResolver,
+        slug_resolver::SlugResolver,
     },
     trace_context,
     types::{LedgerRequest, LedgerResponse},
@@ -34,7 +35,7 @@ use crate::{
 
 // Note: SetCondition conversion is internal to convert_set_condition
 
-/// Routes write requests to the correct shard via Raft consensus based on namespace ID.
+/// Routes write requests to the correct shard via Raft consensus based on organization ID.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct MultiShardWriteService {
@@ -42,7 +43,7 @@ pub struct MultiShardWriteService {
     resolver: Arc<dyn ShardResolver>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
-    /// Per-namespace rate limiter (optional).
+    /// Per-organization rate limiter (optional).
     #[builder(default)]
     rate_limiter: Option<Arc<RateLimiter>>,
     /// Hot key detector for identifying frequently accessed keys (optional).
@@ -56,20 +57,20 @@ pub struct MultiShardWriteService {
     /// If a gRPC deadline is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
     proposal_timeout: Duration,
-    /// Per-namespace resource quota checker.
+    /// Per-organization resource quota checker.
     #[builder(default)]
     quota_checker: Option<crate::quota::QuotaChecker>,
 }
 
 #[allow(clippy::result_large_err)]
 impl MultiShardWriteService {
-    /// Checks all rate limit tiers (backpressure, namespace, client).
+    /// Checks all rate limit tiers (backpressure, organization, client).
     fn check_rate_limit(
         &self,
         client_id: &str,
-        namespace_id: inferadb_ledger_types::NamespaceId,
+        organization_id: inferadb_ledger_types::OrganizationId,
     ) -> Result<(), Status> {
-        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, namespace_id)
+        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization_id)
     }
 
     /// Sets input validation configuration for request field limits.
@@ -97,22 +98,26 @@ impl MultiShardWriteService {
     /// Generates block header and transaction proof for a committed write.
     fn generate_write_proof(
         &self,
-        namespace_id: inferadb_ledger_types::NamespaceId,
+        organization_id: inferadb_ledger_types::OrganizationId,
         vault_id: inferadb_ledger_types::VaultId,
         vault_height: u64,
     ) -> (
         Option<inferadb_ledger_proto::proto::BlockHeader>,
         Option<inferadb_ledger_proto::proto::MerkleProof>,
     ) {
-        let ctx = match self.resolver.resolve(namespace_id) {
+        let ctx = match self.resolver.resolve(organization_id) {
             Ok(ctx) => ctx,
             Err(_) => return (None, None),
         };
 
+        // Resolve internal ID to slug for response construction
+        let slug = ctx.applied_state.resolve_id_to_slug(organization_id);
+
         // Use the proof module's implementation
         match proof::generate_write_proof(
             &ctx.block_archive,
-            namespace_id,
+            organization_id,
+            slug,
             vault_id,
             vault_height,
             0,
@@ -139,7 +144,7 @@ impl MultiShardWriteService {
     fn build_request(
         &self,
         operations: &[Operation],
-        namespace_id: inferadb_ledger_types::NamespaceId,
+        organization_id: inferadb_ledger_types::OrganizationId,
         vault_id: inferadb_ledger_types::VaultId,
         client_id: &str,
         actor: &str,
@@ -164,13 +169,13 @@ impl MultiShardWriteService {
             actor: actor.to_string(),
         };
 
-        Ok(LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] })
+        Ok(LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] })
     }
 }
 
 #[tonic::async_trait]
 impl WriteService for MultiShardWriteService {
-    #[instrument(skip(self, request), fields(client_id, namespace_id, vault_id))]
+    #[instrument(skip(self, request), fields(client_id, organization_id, vault_id))]
     async fn write(
         &self,
         request: Request<WriteRequest>,
@@ -186,12 +191,9 @@ impl WriteService for MultiShardWriteService {
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let namespace_id = inferadb_ledger_types::NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id =
             inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         // Actor is set by upstream Engine/Control services - Ledger uses "system" internally
@@ -211,13 +213,13 @@ impl WriteService for MultiShardWriteService {
 
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
 
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id.value(),
+            organization_id.value(),
             vault_id.value(),
             &client_id,
             idempotency_key,
@@ -264,14 +266,14 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(&client_id, namespace_id)
+        self.check_rate_limit(&client_id, organization_id)
             .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
 
         // Check storage quota (estimated from operation payload size)
         let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
         super::helpers::check_storage_quota(
             self.quota_checker.as_ref(),
-            namespace_id,
+            organization_id,
             estimated_bytes,
         )
         .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
@@ -281,12 +283,12 @@ impl WriteService for MultiShardWriteService {
 
         // Server-assigned sequences: no gap check needed
 
-        // Resolve shard for this namespace
-        let ctx = self.resolver.resolve(namespace_id)?;
+        // Resolve shard for this organization
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Build request
         let ledger_request =
-            self.build_request(&req.operations, namespace_id, vault_id, &client_id, &actor)?;
+            self.build_request(&req.operations, organization_id, vault_id, &client_id, &actor)?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -327,7 +329,7 @@ impl WriteService for MultiShardWriteService {
             LedgerResponse::Write { block_height, block_hash: _, assigned_sequence } => {
                 // Generate proof if requested
                 let (block_header, tx_proof) = if req.include_tx_proof {
-                    self.generate_write_proof(namespace_id, vault_id, block_height)
+                    self.generate_write_proof(organization_id, vault_id, block_height)
                 } else {
                     (None, None)
                 };
@@ -342,7 +344,7 @@ impl WriteService for MultiShardWriteService {
 
                 // Cache the successful result
                 self.idempotency.insert(
-                    namespace_id.value(),
+                    organization_id.value(),
                     vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
@@ -351,8 +353,8 @@ impl WriteService for MultiShardWriteService {
                 );
 
                 metrics::record_write(true, latency);
-                metrics::record_namespace_operation(namespace_id.value(), "write");
-                metrics::record_namespace_latency(namespace_id.value(), "write", latency);
+                metrics::record_organization_operation(organization_id.value(), "write");
+                metrics::record_organization_latency(organization_id.value(), "write", latency);
                 info!(
                     trace_id = %trace_ctx.trace_id,
                     block_height,
@@ -385,7 +387,7 @@ impl WriteService for MultiShardWriteService {
 
     #[instrument(
         skip(self, request),
-        fields(client_id, sequence, namespace_id, vault_id, batch_size)
+        fields(client_id, sequence, organization_id, vault_id, batch_size)
     )]
     async fn batch_write(
         &self,
@@ -402,12 +404,9 @@ impl WriteService for MultiShardWriteService {
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let namespace_id = inferadb_ledger_types::NamespaceId::new(
-            req.namespace_id
-                .as_ref()
-                .map(|n| n.id)
-                .ok_or_else(|| Status::invalid_argument("Missing namespace_id"))?,
-        );
+        let system = self.resolver.system_shard()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
         let vault_id =
             inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
@@ -431,14 +430,14 @@ impl WriteService for MultiShardWriteService {
 
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
-        tracing::Span::current().record("namespace_id", namespace_id.value());
+        tracing::Span::current().record("organization_id", organization_id.value());
         tracing::Span::current().record("vault_id", vault_id.value());
         tracing::Span::current().record("batch_size", batch_size);
 
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            namespace_id.value(),
+            organization_id.value(),
             vault_id.value(),
             &client_id,
             idempotency_key,
@@ -489,14 +488,14 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(&client_id, namespace_id)
+        self.check_rate_limit(&client_id, organization_id)
             .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
 
         // Check storage quota (estimated from operation payload size)
         let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
         super::helpers::check_storage_quota(
             self.quota_checker.as_ref(),
-            namespace_id,
+            organization_id,
             estimated_bytes,
         )
         .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
@@ -505,11 +504,11 @@ impl WriteService for MultiShardWriteService {
         self.record_hot_keys(vault_id, &all_operations);
 
         // Resolve shard
-        let ctx = self.resolver.resolve(namespace_id)?;
+        let ctx = self.resolver.resolve(organization_id)?;
 
         // Build request with flattened operations
         let ledger_request =
-            self.build_request(&all_operations, namespace_id, vault_id, &client_id, "system")?;
+            self.build_request(&all_operations, organization_id, vault_id, &client_id, "system")?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -550,7 +549,7 @@ impl WriteService for MultiShardWriteService {
             LedgerResponse::Write { block_height, block_hash: _, assigned_sequence } => {
                 // Generate proof if requested
                 let (block_header, tx_proof) = if req.include_tx_proofs {
-                    self.generate_write_proof(namespace_id, vault_id, block_height)
+                    self.generate_write_proof(organization_id, vault_id, block_height)
                 } else {
                     (None, None)
                 };
@@ -566,7 +565,7 @@ impl WriteService for MultiShardWriteService {
 
                 // Cache the successful result
                 self.idempotency.insert(
-                    namespace_id.value(),
+                    organization_id.value(),
                     vault_id.value(),
                     client_id.clone(),
                     idempotency_key,
@@ -583,8 +582,8 @@ impl WriteService for MultiShardWriteService {
                 };
 
                 metrics::record_batch_write(true, batch_size, latency);
-                metrics::record_namespace_operation(namespace_id.value(), "write");
-                metrics::record_namespace_latency(namespace_id.value(), "write", latency);
+                metrics::record_organization_operation(organization_id.value(), "write");
+                metrics::record_organization_latency(organization_id.value(), "write", latency);
                 info!(
                     trace_id = %trace_ctx.trace_id,
                     block_height,

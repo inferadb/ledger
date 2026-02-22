@@ -1,12 +1,12 @@
-//! Saga orchestrator for cross-namespace operations.
+//! Saga orchestrator for cross-organization operations.
 //!
-//! Sagas coordinate operations spanning multiple namespaces
+//! Sagas coordinate operations spanning multiple organizations
 //! using eventual consistency. The orchestrator polls for pending sagas and
 //! drives state transitions.
 //!
 //! ## Saga Storage
 //!
-//! Sagas are stored in `_system` namespace under `saga:{saga_id}` keys.
+//! Sagas are stored in `_system` organization under `saga:{saga_id}` keys.
 //! The orchestrator polls every 30 seconds for incomplete sagas.
 //!
 //! ## Execution Model
@@ -26,7 +26,7 @@ use inferadb_ledger_state::{
     },
 };
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{NamespaceId, Operation, Transaction, UserId, VaultId};
+use inferadb_ledger_types::{Operation, OrganizationId, Transaction, UserId, VaultId};
 use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
@@ -38,19 +38,19 @@ use crate::{
     types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
 };
 
-/// Key prefix for saga records in _system namespace.
+/// Key prefix for saga records in _system organization.
 const SAGA_KEY_PREFIX: &str = "saga:";
 
 /// Actor identifier for saga operations.
 const SAGA_ACTOR: &str = "system:saga";
 
-/// System namespace ID.
-const SYSTEM_NAMESPACE_ID: NamespaceId = NamespaceId::new(0);
+/// System organization ID.
+const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
 
-/// System vault ID (vault 0 in _system namespace).
+/// System vault ID (vault 0 in _system organization).
 const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 
-/// Saga orchestrator for cross-namespace operations.
+/// Saga orchestrator for cross-organization operations.
 ///
 /// Runs as a background task, periodically polling for pending sagas
 /// and driving their state transitions through Raft consensus.
@@ -79,7 +79,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         metrics.current_leader == Some(self.node_id)
     }
 
-    /// Loads all pending sagas from _system namespace.
+    /// Loads all pending sagas from _system organization.
     fn load_pending_sagas(&self) -> Vec<Saga> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
@@ -135,7 +135,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            namespace_id: SYSTEM_NAMESPACE_ID,
+            organization_id: SYSTEM_ORGANIZATION_ID,
             vault_id: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
         };
@@ -176,14 +176,19 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         "created_at": chrono::Utc::now().to_rfc3339(),
                     });
 
-                    self.write_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &user_key, &user_value)
-                        .await?;
+                    self.write_entity(
+                        SYSTEM_ORGANIZATION_ID,
+                        SYSTEM_VAULT_ID,
+                        &user_key,
+                        &user_value,
+                    )
+                    .await?;
 
                     // Also write email index
                     let email_idx_key = format!("_idx:user:email:{}", saga.input.user_email);
                     let email_idx_value = serde_json::json!({ "user_id": user_id.value() });
                     self.write_entity(
-                        SYSTEM_NAMESPACE_ID,
+                        SYSTEM_ORGANIZATION_ID,
                         SYSTEM_VAULT_ID,
                         &email_idx_key,
                         &email_idx_value,
@@ -197,38 +202,43 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             },
 
             CreateOrgSagaState::UserCreated { user_id } => {
-                // Step 2: Create namespace
-                let raw_ns_id = self.allocate_sequence_id("namespace").await?;
-                let namespace_id = NamespaceId::new(raw_ns_id);
+                // Step 2: Create organization
+                let raw_ns_id = self.allocate_sequence_id("organization").await?;
+                let organization_id = OrganizationId::new(raw_ns_id);
 
-                let ns_key = format!("namespace:{}", namespace_id.value());
+                let ns_key = format!("organization:{}", organization_id.value());
                 let ns_value = serde_json::json!({
-                    "id": namespace_id.value(),
+                    "id": organization_id.value(),
                     "name": saga.input.org_name,
                     "owner_user_id": user_id.value(),
                     "created_at": chrono::Utc::now().to_rfc3339(),
                 });
 
-                self.write_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &ns_key, &ns_value).await?;
+                self.write_entity(SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, &ns_key, &ns_value)
+                    .await?;
 
-                // Write namespace name index
-                let name_idx_key = format!("_idx:namespace:name:{}", saga.input.org_name);
-                let name_idx_value = serde_json::json!({ "namespace_id": namespace_id.value() });
+                // Write organization name index
+                let name_idx_key = format!("_idx:organization:name:{}", saga.input.org_name);
+                let name_idx_value =
+                    serde_json::json!({ "organization_id": organization_id.value() });
                 self.write_entity(
-                    SYSTEM_NAMESPACE_ID,
+                    SYSTEM_ORGANIZATION_ID,
                     SYSTEM_VAULT_ID,
                     &name_idx_key,
                     &name_idx_value,
                 )
                 .await?;
 
-                saga.transition(CreateOrgSagaState::NamespaceCreated { user_id, namespace_id });
-                info!(saga_id = %saga.id, namespace_id = namespace_id.value(), "CreateOrg: namespace created");
+                saga.transition(CreateOrgSagaState::OrganizationCreated {
+                    user_id,
+                    organization_id,
+                });
+                info!(saga_id = %saga.id, organization_id = organization_id.value(), "CreateOrg: organization created");
                 Ok(())
             },
 
-            CreateOrgSagaState::NamespaceCreated { user_id, namespace_id } => {
-                // Step 3: Create membership record in the new namespace
+            CreateOrgSagaState::OrganizationCreated { user_id, organization_id } => {
+                // Step 3: Create membership record in the new organization
                 let member_key = format!("member:{}", user_id.value());
                 let member_value = serde_json::json!({
                     "user_id": user_id.value(),
@@ -236,15 +246,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     "created_at": chrono::Utc::now().to_rfc3339(),
                 });
 
-                // Write to the new namespace (not _system)
-                self.write_entity(namespace_id, SYSTEM_VAULT_ID, &member_key, &member_value)
+                // Write to the new organization (not _system)
+                self.write_entity(organization_id, SYSTEM_VAULT_ID, &member_key, &member_value)
                     .await?;
 
-                saga.transition(CreateOrgSagaState::Completed { user_id, namespace_id });
+                saga.transition(CreateOrgSagaState::Completed { user_id, organization_id });
                 info!(
                     saga_id = %saga.id,
                     user_id = user_id.value(),
-                    namespace_id = namespace_id.value(),
+                    organization_id = organization_id.value(),
                     "CreateOrg: saga completed"
                 );
                 Ok(())
@@ -283,12 +293,17 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     user_data["deleted_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
                     user_data["status"] = serde_json::json!("DELETING");
 
-                    self.write_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &user_key, &user_data)
-                        .await?;
+                    self.write_entity(
+                        SYSTEM_ORGANIZATION_ID,
+                        SYSTEM_VAULT_ID,
+                        &user_key,
+                        &user_data,
+                    )
+                    .await?;
 
                     saga.transition(DeleteUserSagaState::MarkingDeleted {
                         user_id: saga.input.user_id,
-                        remaining_namespaces: saga.input.namespace_ids.clone(),
+                        remaining_organizations: saga.input.organization_ids.clone(),
                     });
                     info!(
                         saga_id = %saga.id,
@@ -302,20 +317,20 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 Ok(())
             },
 
-            DeleteUserSagaState::MarkingDeleted { user_id, remaining_namespaces } => {
-                // Step 2: Remove memberships from each namespace
-                if let Some(namespace_id) = remaining_namespaces.first() {
+            DeleteUserSagaState::MarkingDeleted { user_id, remaining_organizations } => {
+                // Step 2: Remove memberships from each organization
+                if let Some(organization_id) = remaining_organizations.first() {
                     let member_key = format!("member:{}", user_id.value());
 
-                    // Delete membership in this namespace
-                    self.delete_entity(*namespace_id, SYSTEM_VAULT_ID, &member_key).await?;
+                    // Delete membership in this organization
+                    self.delete_entity(*organization_id, SYSTEM_VAULT_ID, &member_key).await?;
 
                     // Also delete the index
                     let idx_key = format!("_idx:member:user:{}", user_id.value());
-                    let _ = self.delete_entity(*namespace_id, SYSTEM_VAULT_ID, &idx_key).await;
+                    let _ = self.delete_entity(*organization_id, SYSTEM_VAULT_ID, &idx_key).await;
 
-                    // Update remaining namespaces
-                    let remaining: Vec<_> = remaining_namespaces[1..].to_vec();
+                    // Update remaining organizations
+                    let remaining: Vec<_> = remaining_organizations[1..].to_vec();
                     if remaining.is_empty() {
                         saga.transition(DeleteUserSagaState::MembershipsRemoved {
                             user_id: *user_id,
@@ -323,13 +338,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     } else {
                         saga.transition(DeleteUserSagaState::MarkingDeleted {
                             user_id: *user_id,
-                            remaining_namespaces: remaining,
+                            remaining_organizations: remaining,
                         });
                     }
                     info!(
                         saga_id = %saga.id,
                         user_id = user_id.value(),
-                        namespace_id = namespace_id.value(),
+                        organization_id = organization_id.value(),
                         "DeleteUser: removed membership"
                     );
                 } else {
@@ -341,7 +356,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             DeleteUserSagaState::MembershipsRemoved { user_id } => {
                 // Step 3: Delete user record
                 let user_key = format!("user:{}", user_id.value());
-                self.delete_entity(SYSTEM_NAMESPACE_ID, SYSTEM_VAULT_ID, &user_key).await?;
+                self.delete_entity(SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, &user_key).await?;
 
                 // Delete email index (need to look up email first)
                 // In production, we'd read the user first to get their email
@@ -395,7 +410,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            namespace_id: SYSTEM_NAMESPACE_ID,
+            organization_id: SYSTEM_ORGANIZATION_ID,
             vault_id: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
         };
@@ -411,7 +426,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Writes an entity to storage through Raft.
     async fn write_entity(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         key: &str,
         value: &serde_json::Value,
@@ -438,7 +453,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request =
-            LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
+            LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
         self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
             message: format!("{:?}", e),
@@ -451,7 +466,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Deletes an entity from storage through Raft.
     async fn delete_entity(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         key: &str,
     ) -> Result<(), SagaError> {
@@ -470,7 +485,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request =
-            LedgerRequest::Write { namespace_id, vault_id, transactions: vec![transaction] };
+            LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
         self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
             message: format!("{:?}", e),
@@ -508,7 +523,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     Saga::CreateOrg(s) => match &s.state {
                         CreateOrgSagaState::Pending => 0,
                         CreateOrgSagaState::UserCreated { .. } => 1,
-                        CreateOrgSagaState::NamespaceCreated { .. } => 2,
+                        CreateOrgSagaState::OrganizationCreated { .. } => 2,
                         _ => 0,
                     },
                     Saga::DeleteUser(s) => match &s.state {
@@ -612,7 +627,11 @@ mod tests {
     fn test_delete_user_saga_serialization() {
         let input = DeleteUserInput {
             user_id: UserId::new(42),
-            namespace_ids: vec![NamespaceId::new(1), NamespaceId::new(2), NamespaceId::new(3)],
+            organization_ids: vec![
+                OrganizationId::new(1),
+                OrganizationId::new(2),
+                OrganizationId::new(3),
+            ],
         };
 
         let saga = DeleteUserSaga::new("delete-456".to_string(), input);

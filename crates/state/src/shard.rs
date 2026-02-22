@@ -1,6 +1,6 @@
 //! Shard management for multi-vault state coordination.
 //!
-//! - Multiple namespaces share a single Raft group (shard)
+//! - Multiple organizations share a single Raft group (shard)
 //! - Each vault maintains independent cryptographic chain
 //! - State root divergence in one vault doesn't cascade to others
 
@@ -8,7 +8,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use inferadb_ledger_store::{Database, StorageBackend};
 use inferadb_ledger_types::{
-    EMPTY_HASH, Hash, NamespaceId, ShardBlock, ShardId, VaultHealth, VaultId, ZERO_HASH,
+    EMPTY_HASH, Hash, OrganizationId, ShardBlock, ShardId, VaultHealth, VaultId, ZERO_HASH,
     compute_chain_commitment, encode,
 };
 use parking_lot::RwLock;
@@ -72,8 +72,8 @@ fn compute_snapshot_header_hash(header: &crate::snapshot::SnapshotHeader) -> Has
 /// Per-vault metadata tracked by the shard.
 #[derive(Debug, Clone)]
 pub struct VaultMeta {
-    /// Namespace owning this vault.
-    pub namespace_id: NamespaceId,
+    /// Organization owning this vault.
+    pub organization_id: OrganizationId,
     /// Current vault height.
     pub height: u64,
     /// Latest state root.
@@ -167,12 +167,12 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Registers a new vault in this shard.
-    pub fn register_vault(&self, namespace_id: NamespaceId, vault_id: VaultId) {
+    pub fn register_vault(&self, organization_id: OrganizationId, vault_id: VaultId) {
         let mut meta = self.vault_meta.write();
         meta.insert(
             vault_id,
             VaultMeta {
-                namespace_id,
+                organization_id,
                 height: 0,
                 state_root: EMPTY_HASH,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -241,7 +241,7 @@ impl<B: StorageBackend> ShardManager<B> {
             if computed_root != entry.state_root {
                 // Mark vault as diverged
                 let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
-                    namespace_id: entry.namespace_id,
+                    organization_id: entry.organization_id,
                     height: 0,
                     state_root: EMPTY_HASH,
                     previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -263,7 +263,7 @@ impl<B: StorageBackend> ShardManager<B> {
 
             // Update vault metadata
             let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
-                namespace_id: entry.namespace_id,
+                organization_id: entry.organization_id,
                 height: 0,
                 state_root: EMPTY_HASH,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -413,7 +413,7 @@ impl<B: StorageBackend> ShardManager<B> {
             vault_meta.insert(
                 vault_state.vault_id,
                 VaultMeta {
-                    namespace_id: NamespaceId::new(0), // Would need to be stored in snapshot
+                    organization_id: OrganizationId::new(0), // Would need to be stored in snapshot
                     height: vault_state.vault_height,
                     state_root: vault_state.state_root,
                     previous_hash: inferadb_ledger_types::ZERO_HASH, // Would need snapshot
@@ -494,8 +494,8 @@ mod tests {
     fn test_register_vault() {
         let (manager, _temp) = create_test_manager();
 
-        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
-        manager.register_vault(NamespaceId::new(1), VaultId::new(2));
+        manager.register_vault(OrganizationId::new(1), VaultId::new(1));
+        manager.register_vault(OrganizationId::new(1), VaultId::new(2));
 
         let vaults = manager.list_vaults();
         assert_eq!(vaults.len(), 2);
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn test_apply_block() {
         let (manager, _temp) = create_test_manager();
-        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
+        manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
         // Create a block with a SetEntity operation
         let tx = Transaction {
@@ -532,14 +532,14 @@ mod tests {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
         let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
-        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
+        manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
         let block = ShardBlock {
             shard_id: ShardId::new(1),
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 vault_height: 1,
                 previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn test_state_root_mismatch() {
         let (manager, _temp) = create_test_manager();
-        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
+        manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
         let tx = Transaction {
             id: [0u8; 16],
@@ -586,7 +586,7 @@ mod tests {
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
-                namespace_id: NamespaceId::new(1),
+                organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 vault_height: 1,
                 previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
@@ -614,7 +614,7 @@ mod tests {
         let temp = TestDir::new();
         let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
 
-        manager.register_vault(NamespaceId::new(1), VaultId::new(1));
+        manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
         // Add some data
         let ops = vec![Operation::SetEntity {

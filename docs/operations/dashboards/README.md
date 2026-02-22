@@ -396,12 +396,12 @@ pipeline_stages:
         service: service
         method: method
         outcome: outcome
-        namespace_id: namespace_id
+        organization_slug: organization_slug
   - labels:
       service:
       method:
       outcome:
-      namespace_id:
+      organization_slug:
 ```
 
 Alternatively, use Loki's JSON parser in queries (already configured in the dashboard).
@@ -413,7 +413,7 @@ Alternatively, use Loki's JSON parser in queries (already configured in the dash
 | `datasource` | Loki datasource to query                                         |
 | `service`    | Filter by gRPC service (WriteService, ReadService, AdminService) |
 | `method`     | Filter by gRPC method                                            |
-| `namespace`  | Filter by namespace ID                                           |
+| `organization`  | Filter by organization ID                                           |
 | `outcome`    | Filter by request outcome                                        |
 
 ## Kibana (Elasticsearch)
@@ -447,7 +447,7 @@ PUT _index_template/inferadb-wide-events
         "request_id": { "type": "keyword" },
         "client_id": { "type": "keyword" },
         "sequence": { "type": "long" },
-        "namespace_id": { "type": "long" },
+        "organization_slug": { "type": "long" },
         "vault_id": { "type": "long" },
         "service": { "type": "keyword" },
         "method": { "type": "keyword" },
@@ -514,7 +514,7 @@ Create facets for efficient filtering. In Datadog Logs → Configuration → Fac
 | Method       | `@method`       | String  |
 | Outcome      | `@outcome`      | String  |
 | Client ID    | `@client_id`    | String  |
-| Namespace ID | `@namespace_id` | Integer |
+| Organization ID | `@organization_slug` | Integer |
 | Duration     | `@duration_ms`  | Double  |
 | Error Code   | `@error_code`   | String  |
 | Trace ID     | `@trace_id`     | String  |
@@ -525,7 +525,7 @@ Create facets for efficient filtering. In Datadog Logs → Configuration → Fac
 | ----------- | ------------------------------ |
 | `service`   | Filter by gRPC service         |
 | `method`    | Filter by gRPC method          |
-| `namespace` | Filter by namespace ID         |
+| `organization` | Filter by organization ID         |
 | `outcome`   | Filter by request outcome      |
 | `trace_id`  | Filter by distributed trace ID |
 
@@ -540,7 +540,7 @@ All templates include equivalent panels:
 | Latency Percentiles by Method  | p50/p95/p99 latency over time     |
 | Latency Heatmap                | Distribution of request durations |
 | Top 10 Clients                 | Highest-volume clients            |
-| Top 10 Namespaces by Errors    | Problem namespaces                |
+| Top 10 Organizations by Errors    | Problem organizations                |
 | Sampling/Outcomes              | Pie chart of request outcomes     |
 | Batch Coalescing Efficiency    | Average batch size over time      |
 | Idempotency Cache Hit Rate     | Cache effectiveness metric        |

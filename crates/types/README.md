@@ -6,7 +6,7 @@ Core types, errors, and cryptographic primitives for InferaDB Ledger.
 
 This crate provides foundational types used throughout InferaDB Ledger:
 
-- **Identifiers**: `NamespaceId`, `VaultId`, `BlockHeight`, `TxId`
+- **Identifiers**: `OrganizationSlug`, `OrganizationId`, `VaultId`, `BlockHeight`, `TxId`
 - **Data structures**: Blocks, transactions, operations, entities, relationships
 - **Cryptography**: SHA-256 hashing, Merkle tree implementation
 - **Errors**: Unified error types using `snafu`
@@ -17,7 +17,7 @@ This crate provides foundational types used throughout InferaDB Ledger:
 ```rust
 use inferadb_ledger_types::{
     Hash, sha256, sha256_concat,
-    NamespaceId, VaultId, BlockHeight,
+    OrganizationSlug, VaultId, BlockHeight,
     Operation, Entity, Relationship,
     LedgerError, Result,
 };
@@ -29,7 +29,7 @@ let hash: Hash = sha256(b"hello");
 let combined = sha256_concat(&hash, b"world");
 
 // Type-safe identifiers
-let ns: NamespaceId = 1;
+let org: OrganizationSlug = OrganizationSlug::new(1);
 let vault: VaultId = 0;
 
 // Build domain types with type-safe builders
@@ -38,7 +38,7 @@ use chrono::Utc;
 
 let header = BlockHeader::builder()
     .height(100)
-    .namespace_id(ns)
+    .organization_slug(org)
     .vault_id(vault)
     .timestamp(Utc::now())
     .prev_hash(Hash::zero())

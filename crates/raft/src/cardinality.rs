@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_hash_label_set_deterministic() {
-        let labels = [("namespace_id", "123"), ("operation", "write")];
+        let labels = [("organization_id", "123"), ("operation", "write")];
         let h1 = hash_label_set(&labels);
         let h2 = hash_label_set(&labels);
         assert_eq!(h1, h2);

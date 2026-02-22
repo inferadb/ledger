@@ -39,7 +39,7 @@ expected sequence 5, got 7
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "client_id": {"id": "my-client"}}' \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "my-client"}}' \
   localhost:50051 ledger.v1.ReadService/GetClientState
 ```
 
@@ -91,13 +91,13 @@ grpcurl -plaintext \
 
 **Resolution**: This is expected for idempotent retries. The cached response is returned.
 
-### NAMESPACE_NOT_FOUND
+### ORGANIZATION_NOT_FOUND
 
 **Code**: `NOT_FOUND`
 
-**Cause**: Operation references a non-existent namespace.
+**Cause**: Operation references a non-existent organization.
 
-**Resolution**: Create the namespace first with `AdminService/CreateNamespace`.
+**Resolution**: Create the organization first with `AdminService/CreateOrganization`.
 
 ### VAULT_NOT_FOUND
 
@@ -144,7 +144,7 @@ for i := 0; i < maxRetries; i++ {
 
 **Code**: `RESOURCE_EXHAUSTED`
 
-**Cause**: Request rate exceeded namespace limits.
+**Cause**: Request rate exceeded organization limits.
 
 **Resolution**: Implement rate limiting on the client side or request limit increase.
 
@@ -161,7 +161,7 @@ for i := 0; i < maxRetries; i++ {
 ```bash
 # Get current tip to find available height
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
@@ -215,7 +215,7 @@ Example with grpcurl:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "999"}}' \
+  -d '{"organization_slug": {"id": "999"}}' \
   localhost:50051 ledger.v1.ReadService/Read 2>&1
 ```
 
@@ -224,12 +224,12 @@ Output:
 ```
 ERROR:
   Code: NotFound
-  Message: namespace not found
+  Message: organization not found
   Details:
-    - code: NAMESPACE_NOT_FOUND
-      message: namespace with id 999 does not exist
+    - code: ORGANIZATION_NOT_FOUND
+      message: organization with id 999 does not exist
       metadata:
-        namespace_id: "999"
+        organization_slug: "999"
 ```
 
 ## Client Best Practices
@@ -262,14 +262,14 @@ def call_with_retry(fn, max_retries=5):
 // Pseudo-code for sequence recovery
 async fn write_with_recovery(client: &Client, ops: Vec<Op>) -> Result<()> {
     loop {
-        match client.write(namespace_id, client_id, sequence, &ops).await {
+        match client.write(organization_slug, client_id, sequence, &ops).await {
             Ok(resp) => {
                 sequence = resp.committed_sequence + 1;
                 return Ok(());
             }
             Err(e) if e.code() == FAILED_PRECONDITION => {
                 // Sequence gap - recover
-                let state = client.get_client_state(namespace_id, client_id).await?;
+                let state = client.get_client_state(organization_slug, client_id).await?;
                 sequence = state.last_committed_sequence + 1;
                 continue;
             }
@@ -286,12 +286,12 @@ All write operations are idempotent when using the same `(client_id, sequence)` 
 ```bash
 # First call
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "client_id": {"id": "c1"}, "sequence": "1", ...}' \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "c1"}, "sequence": "1", ...}' \
   localhost:50051 ledger.v1.WriteService/Write
 
 # Retry with same client_id and sequence returns cached response
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "client_id": {"id": "c1"}, "sequence": "1", ...}' \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "c1"}, "sequence": "1", ...}' \
   localhost:50051 ledger.v1.WriteService/Write
 ```
 

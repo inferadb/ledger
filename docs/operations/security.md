@@ -217,13 +217,13 @@ These properties are verified by 22 Byzantine fault tests in `crates/raft/src/se
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         _system namespace                       │
+│                         _system organization                       │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │  User accounts, namespace routing, global metadata      │   │
+│   │  User accounts, organization routing, global metadata      │   │
 │   │  Accessible only via Control (trusted)                  │   │
 │   └─────────────────────────────────────────────────────────┘   │
 ├─────────────────────────────────────────────────────────────────┤
-│                      Organization Namespaces                    │
+│                         Organizations                             │
 │     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐      │
 │     │  Org A       │   │  Org B       │   │  Org C       │      │
 │     │  (isolated)  │   │  (isolated)  │   │  (isolated)  │      │
@@ -233,8 +233,8 @@ These properties are verified by 22 Byzantine fault tests in `crates/raft/src/se
 
 **Isolation guarantees:**
 
-- Namespaces cannot access each other's data
-- Vaults within a namespace are cryptographically independent
+- Organizations cannot access each other's data
+- Vaults within an organization are cryptographically independent
 - Shard assignment is transparent to clients
 
 ## Operational Security

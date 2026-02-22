@@ -31,7 +31,7 @@ pub enum TableId {
     /// Block storage: shard_height -> serialized ShardBlock
     Blocks = 4,
 
-    /// Vault block index: (namespace_id, vault_id, vault_height) -> shard_height
+    /// Vault block index: (organization_id, vault_id, vault_height) -> shard_height
     VaultBlockIndex = 5,
 
     // ========================================================================
@@ -49,8 +49,8 @@ pub enum TableId {
     /// Vault metadata: vault_id -> VaultMeta
     VaultMeta = 8,
 
-    /// Namespace metadata: namespace_id -> NamespaceMeta
-    NamespaceMeta = 9,
+    /// Organization metadata: organization_id -> OrganizationMeta
+    OrganizationMeta = 9,
 
     /// Sequence counters for ID generation.
     Sequences = 10,
@@ -69,11 +69,17 @@ pub enum TableId {
 
     /// Time-travel index entries for historical lookups.
     TimeTravelIndex = 14,
+
+    // ========================================================================
+    // Organization Index Tables
+    // ========================================================================
+    /// Organization slug → internal ID mapping for external identifier resolution.
+    OrganizationSlugIndex = 15,
 }
 
 impl TableId {
     /// Total number of tables.
-    pub const COUNT: usize = 15;
+    pub const COUNT: usize = 16;
 
     /// Returns the key type for this table.
     #[inline]
@@ -83,7 +89,7 @@ impl TableId {
             Self::Blocks | Self::RaftLog => KeyType::U64,
 
             // i64 keys (transformed for lexicographic ordering)
-            Self::VaultMeta | Self::NamespaceMeta => KeyType::I64,
+            Self::VaultMeta | Self::OrganizationMeta => KeyType::I64,
 
             // String keys
             Self::RaftState | Self::Sequences | Self::ClientSequences | Self::CompactionMeta => {
@@ -100,6 +106,9 @@ impl TableId {
 
             // u64 keys (time-travel config uses vault_id)
             Self::TimeTravelConfig => KeyType::U64,
+
+            // u64 keys (organization slug → internal ID)
+            Self::OrganizationSlugIndex => KeyType::U64,
         }
     }
 
@@ -116,12 +125,13 @@ impl TableId {
             Self::RaftLog => "raft_log",
             Self::RaftState => "raft_state",
             Self::VaultMeta => "vault_meta",
-            Self::NamespaceMeta => "namespace_meta",
+            Self::OrganizationMeta => "organization_meta",
             Self::Sequences => "sequences",
             Self::ClientSequences => "client_sequences",
             Self::CompactionMeta => "compaction_meta",
             Self::TimeTravelConfig => "time_travel_config",
             Self::TimeTravelIndex => "time_travel_index",
+            Self::OrganizationSlugIndex => "organization_slug_index",
         }
     }
 
@@ -137,12 +147,13 @@ impl TableId {
             Self::RaftLog,
             Self::RaftState,
             Self::VaultMeta,
-            Self::NamespaceMeta,
+            Self::OrganizationMeta,
             Self::Sequences,
             Self::ClientSequences,
             Self::CompactionMeta,
             Self::TimeTravelConfig,
             Self::TimeTravelIndex,
+            Self::OrganizationSlugIndex,
         ]
     }
 
@@ -159,12 +170,13 @@ impl TableId {
             6 => Some(Self::RaftLog),
             7 => Some(Self::RaftState),
             8 => Some(Self::VaultMeta),
-            9 => Some(Self::NamespaceMeta),
+            9 => Some(Self::OrganizationMeta),
             10 => Some(Self::Sequences),
             11 => Some(Self::ClientSequences),
             12 => Some(Self::CompactionMeta),
             13 => Some(Self::TimeTravelConfig),
             14 => Some(Self::TimeTravelIndex),
+            15 => Some(Self::OrganizationSlugIndex),
             _ => None,
         }
     }
@@ -266,10 +278,10 @@ impl Table for VaultMeta {
     type ValueType = Vec<u8>;
 }
 
-/// Namespace metadata table mapping namespace IDs to serialized namespace configuration.
-pub struct NamespaceMeta;
-impl Table for NamespaceMeta {
-    const ID: TableId = TableId::NamespaceMeta;
+/// Organization metadata table mapping organization IDs to serialized organization configuration.
+pub struct OrganizationMeta;
+impl Table for OrganizationMeta {
+    const ID: TableId = TableId::OrganizationMeta;
     type KeyType = i64;
     type ValueType = Vec<u8>;
 }
@@ -314,6 +326,14 @@ impl Table for TimeTravelIndex {
     type ValueType = Vec<u8>;
 }
 
+/// Organization slug index: maps external slugs to internal organization IDs.
+pub struct OrganizationSlugIndex;
+impl Table for OrganizationSlugIndex {
+    const ID: TableId = TableId::OrganizationSlugIndex;
+    type KeyType = u64;
+    type ValueType = Vec<u8>;
+}
+
 // ============================================================================
 // Table Directory Entry
 // ============================================================================
@@ -321,7 +341,7 @@ impl Table for TimeTravelIndex {
 /// On-disk representation of a table's metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct TableEntry {
-    /// Table identifier (0-14).
+    /// Table identifier (0-15).
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,

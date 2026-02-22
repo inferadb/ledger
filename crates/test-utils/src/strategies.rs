@@ -19,8 +19,8 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use inferadb_ledger_types::types::{
-    BlockHeader, ChainCommitment, Entity, NamespaceId, Operation, Relationship, SetCondition,
-    ShardBlock, ShardId, Transaction, VaultBlock, VaultEntry, VaultId,
+    BlockHeader, ChainCommitment, Entity, Operation, OrganizationId, OrganizationSlug,
+    Relationship, SetCondition, ShardBlock, ShardId, Transaction, VaultBlock, VaultEntry, VaultId,
 };
 use proptest::prelude::*;
 
@@ -148,9 +148,17 @@ pub fn arb_timestamp() -> impl Strategy<Value = DateTime<Utc>> {
     })
 }
 
-/// Generates an arbitrary [`NamespaceId`] in the range 1-9,999.
-pub fn arb_namespace_id() -> impl Strategy<Value = NamespaceId> {
-    (1i64..10_000).prop_map(NamespaceId::new)
+/// Generates an arbitrary [`OrganizationId`] in the range 1-9,999.
+pub fn arb_organization_id() -> impl Strategy<Value = OrganizationId> {
+    (1i64..10_000).prop_map(OrganizationId::new)
+}
+
+/// Generates an arbitrary [`OrganizationSlug`] as a valid Snowflake-structured `u64`.
+///
+/// Produces values in the range `2^22..2^53` to simulate realistic Snowflake IDs
+/// (timestamp bits + machine/sequence bits) while staying within safe integer bounds.
+pub fn arb_organization_slug() -> impl Strategy<Value = OrganizationSlug> {
+    ((1u64 << 22)..(1u64 << 53)).prop_map(OrganizationSlug::new)
 }
 
 /// Generates an arbitrary [`VaultId`] in the range 1-9,999.
@@ -187,7 +195,7 @@ pub fn arb_transaction() -> impl Strategy<Value = Transaction> {
 pub fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
     (
         0u64..1_000_000, // height
-        arb_namespace_id(),
+        arb_organization_id(),
         arb_vault_id(),
         arb_hash(), // previous_hash
         arb_hash(), // tx_merkle_root
@@ -199,7 +207,7 @@ pub fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
         .prop_map(
             |(
                 height,
-                namespace_id,
+                organization_id,
                 vault_id,
                 previous_hash,
                 tx_merkle_root,
@@ -210,7 +218,7 @@ pub fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
             )| {
                 BlockHeader {
                     height,
-                    namespace_id,
+                    organization_id,
                     vault_id,
                     previous_hash,
                     tx_merkle_root,
@@ -232,7 +240,7 @@ pub fn arb_vault_block() -> impl Strategy<Value = VaultBlock> {
 /// Generates an arbitrary [`VaultEntry`] with height 0-999,999 and 0-2 transactions.
 pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
     (
-        arb_namespace_id(),
+        arb_organization_id(),
         arb_vault_id(),
         0u64..1_000_000,
         arb_hash(),
@@ -242,7 +250,7 @@ pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
     )
         .prop_map(
             |(
-                namespace_id,
+                organization_id,
                 vault_id,
                 vault_height,
                 previous_vault_hash,
@@ -251,7 +259,7 @@ pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
                 state_root,
             )| {
                 VaultEntry {
-                    namespace_id,
+                    organization_id,
                     vault_id,
                     vault_height,
                     previous_vault_hash,
@@ -351,7 +359,7 @@ mod tests {
 
         #[test]
         fn strategy_produces_valid_block_headers(header in arb_block_header()) {
-            prop_assert!(header.namespace_id.value() > 0);
+            prop_assert!(header.organization_id.value() > 0);
             prop_assert!(header.vault_id.value() > 0);
         }
 

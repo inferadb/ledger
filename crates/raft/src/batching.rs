@@ -360,9 +360,9 @@ mod tests {
 
     use super::*;
 
-    fn make_request(namespace_id: i64, vault_id: i64) -> LedgerRequest {
+    fn make_request(organization_id: i64, vault_id: i64) -> LedgerRequest {
         LedgerRequest::Write {
-            namespace_id: inferadb_ledger_types::NamespaceId::new(namespace_id),
+            organization_id: inferadb_ledger_types::OrganizationId::new(organization_id),
             vault_id: inferadb_ledger_types::VaultId::new(vault_id),
             transactions: vec![],
         }

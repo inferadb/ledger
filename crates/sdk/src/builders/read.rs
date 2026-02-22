@@ -51,7 +51,7 @@ pub struct HasKeys(());
 /// guarantee.
 pub struct BatchReadBuilder<'a, S = NoKeys> {
     client: &'a LedgerClient,
-    namespace_id: i64,
+    organization_slug: u64,
     vault_id: Option<i64>,
     keys: Vec<String>,
     consistency: ReadConsistency,
@@ -60,11 +60,15 @@ pub struct BatchReadBuilder<'a, S = NoKeys> {
 }
 
 impl<'a> BatchReadBuilder<'a, NoKeys> {
-    /// Creates a new batch read builder targeting a namespace and optional vault.
-    pub(crate) fn new(client: &'a LedgerClient, namespace_id: i64, vault_id: Option<i64>) -> Self {
+    /// Creates a new batch read builder targeting a organization and optional vault.
+    pub(crate) fn new(
+        client: &'a LedgerClient,
+        organization_slug: u64,
+        vault_id: Option<i64>,
+    ) -> Self {
         Self {
             client,
-            namespace_id,
+            organization_slug,
             vault_id,
             keys: Vec::new(),
             consistency: ReadConsistency::Eventual,
@@ -79,7 +83,7 @@ impl<'a, S> BatchReadBuilder<'a, S> {
     fn into_has_keys(self) -> BatchReadBuilder<'a, HasKeys> {
         BatchReadBuilder {
             client: self.client,
-            namespace_id: self.namespace_id,
+            organization_slug: self.organization_slug,
             vault_id: self.vault_id,
             keys: self.keys,
             consistency: self.consistency,
@@ -145,7 +149,7 @@ impl<'a> BatchReadBuilder<'a, HasKeys> {
             (ReadConsistency::Eventual, Some(token)) => {
                 self.client
                     .batch_read_with_token(
-                        self.namespace_id,
+                        self.organization_slug,
                         self.vault_id,
                         self.keys,
                         token.clone(),
@@ -153,12 +157,14 @@ impl<'a> BatchReadBuilder<'a, HasKeys> {
                     .await
             },
             (ReadConsistency::Eventual, None) => {
-                self.client.batch_read(self.namespace_id, self.vault_id, self.keys).await
+                self.client.batch_read(self.organization_slug, self.vault_id, self.keys).await
             },
             (ReadConsistency::Linearizable, _) => {
                 // batch_read_consistent doesn't have a _with_token variant;
                 // client-level cancellation still applies.
-                self.client.batch_read_consistent(self.namespace_id, self.vault_id, self.keys).await
+                self.client
+                    .batch_read_consistent(self.organization_slug, self.vault_id, self.keys)
+                    .await
             },
         }
     }
@@ -232,10 +238,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_read_preserves_namespace_and_vault() {
+    async fn batch_read_preserves_organization_and_vault() {
         let client = test_client().await;
         let builder = client.batch_read_builder(42, Some(99)).key("k");
-        assert_eq!(builder.namespace_id, 42);
+        assert_eq!(builder.organization_slug, 42);
         assert_eq!(builder.vault_id, Some(99));
     }
 

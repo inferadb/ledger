@@ -19,30 +19,33 @@ use serial_test::serial;
 // Test Helpers
 // ============================================================================
 
-/// Creates a namespace and return its ID.
-async fn create_namespace(
+/// Creates a organization and return its ID.
+async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
-        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
+        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             shard_id: None,
             quota: None,
         })
         .await?;
 
-    let namespace_id =
-        response.into_inner().namespace_id.map(|n| n.id).ok_or("No namespace_id in response")?;
+    let organization_id = response
+        .into_inner()
+        .organization_slug
+        .map(|n| n.slug as i64)
+        .ok_or("No organization_id in response")?;
 
-    Ok(namespace_id)
+    Ok(organization_id)
 }
 
-/// Writes an entity to a specific namespace.
+/// Writes an entity to a specific organization.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
     value: &serde_json::Value,
@@ -51,7 +54,9 @@ async fn write_entity(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -79,17 +84,19 @@ async fn write_entity(
     }
 }
 
-/// Reads an entity from a namespace.
+/// Reads an entity from a organization.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization_id as u64,
+        }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
@@ -236,9 +243,9 @@ async fn test_membership_data_format() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create a namespace
+    // Create a organization
     let ns_id =
-        create_namespace(leader.addr, "membership-test-ns").await.expect("create namespace");
+        create_organization(leader.addr, "membership-test-ns").await.expect("create organization");
 
     // Create a membership record
     let user_id = 2001i64;
@@ -264,12 +271,12 @@ async fn test_membership_data_format() {
     assert_eq!(membership.get("role").and_then(|r| r.as_str()), Some("member"));
 }
 
-/// Tests that orphan cleanup respects system namespace boundaries.
+/// Tests that orphan cleanup respects system organization boundaries.
 ///
-/// Cleanup should skip the _system namespace (namespace_id = 0).
+/// Cleanup should skip the _system organization (organization_id = 0).
 #[serial]
 #[tokio::test]
-async fn test_orphan_cleanup_skips_system_namespace() {
+async fn test_orphan_cleanup_skips_system_organization() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
@@ -299,21 +306,21 @@ async fn test_orphan_cleanup_skips_system_namespace() {
     assert_eq!(member.get("user_id").and_then(|v| v.as_i64()), Some(9999));
 }
 
-/// Tests orphan cleanup handles empty namespaces gracefully.
+/// Tests orphan cleanup handles empty organizations gracefully.
 #[serial]
 #[tokio::test]
-async fn test_orphan_cleanup_handles_empty_namespace() {
+async fn test_orphan_cleanup_handles_empty_organization() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create a namespace with no memberships
-    let _ns_id = create_namespace(leader.addr, "empty-ns").await.expect("create namespace");
+    // Create a organization with no memberships
+    let _ns_id = create_organization(leader.addr, "empty-ns").await.expect("create organization");
 
     // Give cleanup time to run
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Cluster should remain healthy (no errors from empty namespace scan)
+    // Cluster should remain healthy (no errors from empty organization scan)
     let metrics = leader.raft.metrics().borrow().clone();
     assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
 }
@@ -328,9 +335,9 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
     // Create some state to exercise all background jobs
     let mut client = create_admin_client(leader.addr).await.unwrap();
 
-    // Create namespace
+    // Create organization
     let ns_response = client
-        .create_namespace(inferadb_ledger_proto::proto::CreateNamespaceRequest {
+        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: "concurrent-jobs-test".to_string(),
             shard_id: None,
             quota: None,
@@ -338,12 +345,15 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
         .await
         .unwrap();
 
-    let namespace_id = ns_response.into_inner().namespace_id.map(|n| n.id).unwrap();
+    let organization_id =
+        ns_response.into_inner().organization_slug.map(|n| n.slug as i64).unwrap();
 
     // Create vault
     let _vault_response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization_id as u64,
+            }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,

@@ -1,7 +1,7 @@
 //! Multi-shard gRPC server for InferaDB Ledger.
 //!
 //! This module provides a server that supports multi-shard deployments,
-//! routing requests to the appropriate shard based on namespace.
+//! routing requests to the appropriate shard based on organization.
 //!
 //! ## Architecture
 //!
@@ -62,9 +62,9 @@ pub struct MultiShardLedgerServer {
     /// Request timeout in seconds.
     #[builder(default = 30)]
     timeout_secs: u64,
-    /// Per-namespace rate limiter (optional).
+    /// Per-organization rate limiter (optional).
     #[builder(default)]
-    namespace_rate_limiter: Option<Arc<RateLimiter>>,
+    organization_rate_limiter: Option<Arc<RateLimiter>>,
     /// Hot key detector for identifying frequently accessed keys (optional).
     #[builder(default)]
     hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
@@ -118,13 +118,13 @@ impl MultiShardLedgerServer {
         let write_service = MultiShardWriteService::builder()
             .resolver(resolver.clone())
             .idempotency(self.idempotency.clone())
-            .rate_limiter(self.namespace_rate_limiter.clone())
+            .rate_limiter(self.organization_rate_limiter.clone())
             .hot_key_detector(self.hot_key_detector.clone())
             .proposal_timeout(self.proposal_timeout)
             .build();
 
         // Admin, Health, and Discovery services use the system shard
-        // These handle global operations like namespace management
+        // These handle global operations like organization management
         let system_shard = self.manager.system_shard().map_err(|e| {
             Box::new(std::io::Error::other(format!("System shard not available: {}", e)))
                 as Box<dyn std::error::Error>

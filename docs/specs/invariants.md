@@ -57,7 +57,7 @@ Formal guarantees the system maintains under all conditions.
 | #   | Invariant                    | Description                                                                   |
 | --- | ---------------------------- | ----------------------------------------------------------------------------- |
 | 21  | Vault chain independence     | Each vault's chain is independently verifiable regardless of shard assignment |
-| 22  | Shard membership consistency | Namespace-to-shard mapping in `_system` matches actual shard state            |
+| 22  | Shard membership consistency | Organization-to-shard mapping in `_system` matches actual shard state            |
 | 23  | Cross-shard isolation        | Transactions in one shard cannot affect state in another shard                |
 
 ## Idempotency Invariants

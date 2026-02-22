@@ -390,17 +390,17 @@ kubectl apply -f ledger-prometheusrule.yaml
 
 ## 6. Create Initial Resources
 
-Create a namespace and vault:
+Create an organization and vault:
 
 ```bash
-# Create namespace
+# Create organization
 grpcurl -plaintext \
   -d '{"name": "production"}' \
-  localhost:50051 ledger.v1.AdminService/CreateNamespace
+  localhost:50051 ledger.v1.AdminService/CreateOrganization
 
-# Create vault (note the namespace_id from previous response)
+# Create vault (note the organization_slug from previous response)
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/CreateVault
 ```
 
@@ -479,7 +479,7 @@ spec:
 
 ```bash
 kubectl exec ledger-0 -- grpcurl -plaintext localhost:50051 \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   ledger.v1.AdminService/CreateSnapshot
 ```
 
@@ -546,12 +546,12 @@ kubectl exec ledger-0 -- grpcurl -plaintext localhost:50051 ledger.v1.HealthServ
 
 echo "=== Write Test ==="
 kubectl exec ledger-0 -- grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "client_id": {"id": "test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:deploy", "value": "dGVzdA=="}}]}' \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:deploy", "value": "dGVzdA=="}}]}' \
   localhost:50051 ledger.v1.WriteService/Write
 
 echo "=== Read Test ==="
 kubectl exec ledger-0 -- grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "key": "test:deploy"}' \
+  -d '{"organization_slug": {"id": "1"}, "key": "test:deploy"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 

@@ -1,6 +1,6 @@
 //! Learner state refresh from voters.
 //!
-//! Learner nodes maintain a cache of system state (namespace
+//! Learner nodes maintain a cache of system state (organization
 //! registry, routing info) that they periodically refresh from voters. This ensures
 //! learners can serve read requests with reasonably fresh data without participating
 //! in consensus.
@@ -67,8 +67,8 @@ impl Default for LearnerRefreshConfig {
 pub struct CachedSystemState {
     /// Version number for cache comparison.
     pub version: u64,
-    /// Number of namespaces in the cache.
-    pub namespace_count: usize,
+    /// Number of organizations in the cache.
+    pub organization_count: usize,
     /// Number of vaults in the cache.
     pub vault_count: usize,
     /// Timestamp when this cache was last updated.
@@ -79,7 +79,7 @@ impl Default for CachedSystemState {
     fn default() -> Self {
         Self {
             version: 0,
-            namespace_count: 0,
+            organization_count: 0,
             vault_count: 0,
             last_updated: std::time::Instant::now(),
         }
@@ -184,13 +184,13 @@ impl LearnerRefreshJob {
 
         if voter_version > cache.version {
             cache.version = voter_version;
-            cache.namespace_count = response.namespaces.len();
-            cache.vault_count = response.namespaces.len(); // One entry per namespace
+            cache.organization_count = response.organizations.len();
+            cache.vault_count = response.organizations.len(); // One entry per organization
             cache.last_updated = std::time::Instant::now();
 
             debug!(
                 voter_version,
-                namespace_count = cache.namespace_count,
+                organization_count = cache.organization_count,
                 node_count = response.nodes.len(),
                 "Updated learner cache from voter"
             );

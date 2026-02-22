@@ -2,30 +2,30 @@
 
 ## Context
 
-InferaDB Ledger runs multi-tenant shards where multiple namespaces share a single Raft group. Without rate limiting, a single misconfigured client or a traffic spike in one namespace can saturate the Raft proposal pipeline, degrading write latency for all tenants on the shard.
+InferaDB Ledger runs multi-tenant shards where multiple organizations share a single Raft group. Without rate limiting, a single misconfigured client or a traffic spike in one organization can saturate the Raft proposal pipeline, degrading write latency for all tenants on the shard.
 
 ### The Problem
 
 Rate limiting must address three distinct failure modes:
 
 1. **Cluster overload** — the Raft consensus layer has too many pending proposals, regardless of source
-2. **Noisy neighbor** — one namespace generates disproportionate traffic, starving others
-3. **Bad actor** — a single client within a namespace sends excessive requests
+2. **Noisy neighbor** — one organization generates disproportionate traffic, starving others
+3. **Bad actor** — a single client within an organization sends excessive requests
 
 A single-tier limit addresses only one of these. Two tiers leave one mode unprotected.
 
 ### Options Evaluated
 
-| Option                 | Cluster Protection | Namespace Isolation | Client Fairness |
+| Option                 | Cluster Protection | Organization Isolation | Client Fairness |
 | ---------------------- | ------------------ | ------------------- | --------------- |
 | Global limit only      | Yes                | No                  | No              |
 | Global + per-client    | Yes                | No                  | Yes             |
-| Global + per-namespace | Yes                | Yes                 | No              |
+| Global + per-organization | Yes                | Yes                 | No              |
 | Three-tier (chosen)    | Yes                | Yes                 | Yes             |
 
 ## Decision
 
-**Implement three-tier admission control: global backpressure, per-client token bucket, per-namespace token bucket** (`crates/raft/src/rate_limit.rs`).
+**Implement three-tier admission control: global backpressure, per-client token bucket, per-organization token bucket** (`crates/raft/src/rate_limit.rs`).
 
 ### Tier 1: Global Backpressure
 
@@ -43,33 +43,33 @@ A single-tier limit addresses only one of these. Two tiers leave one mode unprot
 - **Precision:** Millisecond-granularity tokens (`u64 × 1000`) for sub-token accuracy
 - **Purpose:** Prevents a single client from monopolizing resources. A misconfigured retry loop or a runaway batch job is contained to its client quota.
 
-### Tier 3: Per-Namespace Token Bucket
+### Tier 3: Per-Organization Token Bucket
 
-- **Mechanism:** Token bucket per `NamespaceId`
+- **Mechanism:** Token bucket per `OrganizationSlug`
 - **Default capacity:** 1,000 tokens (10× client burst)
 - **Default refill rate:** 500 tokens/sec (10× client rate)
-- **Purpose:** Ensures fair sharing across tenants. Even if a namespace spawns many clients that individually stay under their limits, the aggregate is capped.
+- **Purpose:** Ensures fair sharing across tenants. Even if an organization spawns many clients that individually stay under their limits, the aggregate is capped.
 
 ### Check Order
 
 ```
-Request → Backpressure check → Per-client check → Per-namespace check → Accept
+Request → Backpressure check → Per-client check → Per-organization check → Accept
               (cheapest)          (more specific)     (shared resource)
 ```
 
-1. **Backpressure first** — single atomic load, no lock, no token consumption. If the cluster is overloaded, reject immediately without touching per-client/namespace state.
-2. **Per-client second** — checked before namespace to avoid wasting shared namespace tokens on requests that would be client-rejected anyway.
-3. **Per-namespace last** — shared resource consumed only after the client passes its individual check.
+1. **Backpressure first** — single atomic load, no lock, no token consumption. If the cluster is overloaded, reject immediately without touching per-client/organization state.
+2. **Per-client second** — checked before organization to avoid wasting shared organization tokens on requests that would be client-rejected anyway.
+3. **Per-organization last** — shared resource consumed only after the client passes its individual check.
 
 ### Why Three Tiers Instead of Two?
 
-**Without per-namespace limits (global + per-client only):**
+**Without per-organization limits (global + per-client only):**
 
-A namespace spawns 1,000 unique `client_id` values, each staying under its 50 req/sec limit. Combined: 50,000 req/sec — far exceeding the namespace's fair share of the shard. Other namespaces on the same shard are starved.
+An organization spawns 1,000 unique `client_id` values, each staying under its 50 req/sec limit. Combined: 50,000 req/sec — far exceeding the organization's fair share of the shard. Other organizations on the same shard are starved.
 
-**Without per-client limits (global + per-namespace only):**
+**Without per-client limits (global + per-organization only):**
 
-A single misbehaving client within a namespace consumes the entire namespace quota. Other legitimate clients in the same namespace receive `RESOURCE_EXHAUSTED` errors for traffic they didn't cause. Per-client limits provide fairness _within_ a namespace.
+A single misbehaving client within an organization consumes the entire organization quota. Other legitimate clients in the same organization receive `RESOURCE_EXHAUSTED` errors for traffic they didn't cause. Per-client limits provide fairness _within_ an organization.
 
 ### Runtime Reconfiguration
 
@@ -81,14 +81,14 @@ All threshold values use `AtomicU64` for lock-free updates (floats stored via `f
 
 ### Memory Management
 
-Per-client and per-namespace buckets are stored in `HashMap` protected by `parking_lot::Mutex`. Stale entries (clients that haven't sent traffic within `max_idle`) are cleaned up via `cleanup_stale()` to prevent unbounded growth.
+Per-client and per-organization buckets are stored in `HashMap` protected by `parking_lot::Mutex`. Stale entries (clients that haven't sent traffic within `max_idle`) are cleaned up via `cleanup_stale()` to prevent unbounded growth.
 
 ## Consequences
 
 ### Positive
 
 - **Defense in depth** — three independent failure modes covered by three independent mechanisms
-- **Fair multi-tenancy** — namespace limits prevent noisy-neighbor effects across tenants
+- **Fair multi-tenancy** — organization limits prevent noisy-neighbor effects across tenants
 - **Graceful degradation** — backpressure check is cheapest and fires first, shedding load before consuming tokens
 - **Informative rejections** — `RESOURCE_EXHAUSTED` with `retry-after-ms` metadata enables intelligent client backoff
 - **Runtime tunable** — operators can adjust limits without restart via `UpdateConfig` RPC or SIGHUP
@@ -97,7 +97,7 @@ Per-client and per-namespace buckets are stored in `HashMap` protected by `parki
 
 - **Three configuration surfaces** — operators must understand and tune three sets of limits (mitigated by sensible defaults)
 - **Per-client HashMap growth** — under many unique `client_id` values, memory grows linearly (mitigated by stale entry cleanup)
-- **Mutex on hot path** — per-client and per-namespace checks acquire `parking_lot::Mutex` (uncontended: ~10–50ns, acceptable given Raft latency of 1–10ms)
+- **Mutex on hot path** — per-client and per-organization checks acquire `parking_lot::Mutex` (uncontended: ~10–50ns, acceptable given Raft latency of 1–10ms)
 
 ### Neutral
 
@@ -111,4 +111,4 @@ Per-client and per-namespace buckets are stored in `HashMap` protected by `parki
 - `crates/types/src/config.rs` — `RateLimitConfig` with defaults and validation
 - `crates/raft/src/services/write.rs` — `check_rate_limit()` integration, `RESOURCE_EXHAUSTED` mapping
 - `crates/raft/src/runtime_config.rs` — `AtomicU64`-based runtime reconfiguration
-- `DESIGN.md` §Write Path — "Rate limit check (3-tier: backpressure, namespace, client)"
+- `DESIGN.md` §Write Path — "Rate limit check (3-tier: backpressure, organization, client)"

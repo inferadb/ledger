@@ -115,7 +115,7 @@ Release Please uses commit messages to determine version bumps:
 
 | Commit Type                    | Version Bump | Example                       |
 | ------------------------------ | ------------ | ----------------------------- |
-| `fix:`                         | PATCH        | `fix: handle empty namespace` |
+| `fix:`                         | PATCH        | `fix: handle empty organization` |
 | `feat:`                        | MINOR        | `feat: add batch write API`   |
 | `feat!:` or `BREAKING CHANGE:` | MAJOR        | `feat!: change proto format`  |
 | `docs:`, `chore:`, `test:`     | No bump      | `docs: update API reference`  |

@@ -125,7 +125,7 @@ fn bench_sampling_decision(c: &mut Criterion) {
                 Some(&Outcome::Success),
                 50.0, // duration_ms
                 inferadb_ledger_raft::wide_events::OperationType::Write,
-                Some(1), // namespace_id
+                Some(1), // organization_id
             );
             black_box(decision)
         });

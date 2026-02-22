@@ -29,10 +29,10 @@ Covers the gRPC request lifecycle from ingestion through response.
 | Error Class Breakdown       | `ledger_grpc_requests_total` by `error_class`     | Root cause triage            |
 | Rate Limit Rejections       | `ledger_rate_limit_rejected_total`                | Backpressure visibility      |
 | Batch Write Performance     | `ledger_batch_flush_latency_seconds`              | SLO: p99 < 100ms             |
-| Namespace Operations        | `ledger_namespace_operations_total`               | Per-tenant traffic           |
-| Namespace Latency           | `ledger_namespace_latency_seconds`                | Per-tenant latency           |
+| Organization Operations        | `ledger_organization_operations_total`               | Per-tenant traffic           |
+| Organization Latency           | `ledger_organization_latency_seconds`                | Per-tenant latency           |
 
-**Variables:** `$datasource`, `$node_id`, `$namespace_id`, `$service`, `$method`
+**Variables:** `$datasource`, `$node_id`, `$organization_slug`, `$service`, `$method`
 
 ### Raft Consensus Health (`raft-health.json`)
 
@@ -72,10 +72,10 @@ Tracks disk usage, page cache efficiency, B-tree structure, and compaction progr
 | Compaction Lag      | `ledger_compaction_lag_blocks`                  | Compaction backlog            |
 | Storage I/O         | `ledger_storage_bytes_{written,read}_total`     | I/O bandwidth                 |
 | Storage Operations  | `ledger_storage_operations_total`               | IOPS                          |
-| Namespace Storage   | `ledger_namespace_storage_bytes`                | Per-tenant disk usage         |
+| Organization Storage   | `ledger_organization_storage_bytes`                | Per-tenant disk usage         |
 | Integrity Scrubber  | `ledger_integrity_{pages_checked,errors}_total` | Corruption detection          |
 
-**Variables:** `$datasource`, `$node_id`, `$namespace_id`, `$shard_id`
+**Variables:** `$datasource`, `$node_id`, `$organization_slug`, `$shard_id`
 
 ### Resource Saturation (`resource-saturation.json`)
 

@@ -1,22 +1,22 @@
-//! Cross-namespace saga support.
+//! Cross-organization saga support.
 //!
-//! Sagas coordinate operations spanning multiple namespaces using eventual
+//! Sagas coordinate operations spanning multiple organizations using eventual
 //! consistency. Each saga step is idempotent for crash recovery.
 //!
 //! ## Saga Patterns
 //!
-//! - **CreateOrg**: Creates user in `_system`, then namespace with membership
+//! - **CreateOrg**: Creates user in `_system`, then organization with membership
 //! - **DeleteUser**: Marks user as deleting, removes memberships, then deletes user
 //!
 //! ## Storage
 //!
-//! Sagas are stored in `_system` namespace under `saga:{saga_id}` keys.
+//! Sagas are stored in `_system` organization under `saga:{saga_id}` keys.
 //! The leader polls for incomplete sagas every 30 seconds.
 
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use inferadb_ledger_types::{NamespaceId, UserId};
+use inferadb_ledger_types::{OrganizationId, UserId};
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a saga.
@@ -37,29 +37,29 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 /// State machine for the Create Organization saga.
 ///
-/// Creates a new user (if needed) and a new organization namespace.
+/// Creates a new user (if needed) and a new organization.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CreateOrgSagaState {
     /// Initial state: about to create user.
     Pending,
-    /// User created in `_system`, waiting for namespace creation.
+    /// User created in `_system`, waiting for organization creation.
     UserCreated {
         /// The created user's ID.
         user_id: UserId,
     },
-    /// Namespace created, waiting for finalization.
-    NamespaceCreated {
+    /// Organization created, waiting for finalization.
+    OrganizationCreated {
         /// The user's ID.
         user_id: UserId,
-        /// The created namespace's ID.
-        namespace_id: NamespaceId,
+        /// The created organization's ID.
+        organization_id: OrganizationId,
     },
     /// Saga completed successfully.
     Completed {
         /// The user's ID.
         user_id: UserId,
-        /// The created namespace's ID.
-        namespace_id: NamespaceId,
+        /// The created organization's ID.
+        organization_id: OrganizationId,
     },
     /// Saga failed and compensation was attempted.
     Failed {
@@ -191,7 +191,7 @@ impl CreateOrgSaga {
 
 /// State machine for the Delete User saga.
 ///
-/// Removes a user and all their memberships across namespaces.
+/// Removes a user and all their memberships across organizations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DeleteUserSagaState {
     /// Initial state: about to mark user as deleting.
@@ -200,8 +200,8 @@ pub enum DeleteUserSagaState {
     MarkingDeleted {
         /// The user being deleted.
         user_id: UserId,
-        /// Namespaces with memberships to remove.
-        remaining_namespaces: Vec<NamespaceId>,
+        /// Organizations with memberships to remove.
+        remaining_organizations: Vec<OrganizationId>,
     },
     /// All memberships removed, ready to delete user record.
     MembershipsRemoved {
@@ -227,8 +227,8 @@ pub enum DeleteUserSagaState {
 pub struct DeleteUserInput {
     /// User to delete.
     pub user_id: UserId,
-    /// Lists of namespace IDs where user has memberships.
-    pub namespace_ids: Vec<NamespaceId>,
+    /// Lists of organization IDs where user has memberships.
+    pub organization_ids: Vec<OrganizationId>,
 }
 
 /// Record for the Delete User saga, tracking state and retry progress.
@@ -454,17 +454,17 @@ mod tests {
         ));
         assert!(!saga.is_terminal());
 
-        // Transition to NamespaceCreated
-        saga.transition(CreateOrgSagaState::NamespaceCreated {
+        // Transition to OrganizationCreated
+        saga.transition(CreateOrgSagaState::OrganizationCreated {
             user_id: UserId::new(1),
-            namespace_id: NamespaceId::new(100),
+            organization_id: OrganizationId::new(100),
         });
         assert!(!saga.is_terminal());
 
         // Transition to Completed
         saga.transition(CreateOrgSagaState::Completed {
             user_id: UserId::new(1),
-            namespace_id: NamespaceId::new(100),
+            organization_id: OrganizationId::new(100),
         });
         assert!(saga.is_terminal());
     }
@@ -534,7 +534,7 @@ mod tests {
     fn test_delete_user_saga() {
         let input = DeleteUserInput {
             user_id: UserId::new(1),
-            namespace_ids: vec![NamespaceId::new(100), NamespaceId::new(101)],
+            organization_ids: vec![OrganizationId::new(100), OrganizationId::new(101)],
         };
         let mut saga = DeleteUserSaga::new("delete-123".to_string(), input);
 
@@ -542,7 +542,7 @@ mod tests {
 
         saga.transition(DeleteUserSagaState::MarkingDeleted {
             user_id: UserId::new(1),
-            remaining_namespaces: vec![NamespaceId::new(100), NamespaceId::new(101)],
+            remaining_organizations: vec![OrganizationId::new(100), OrganizationId::new(101)],
         });
         assert!(!saga.is_terminal());
 

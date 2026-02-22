@@ -12,8 +12,9 @@ use std::{
 
 use inferadb_ledger_proto::proto::{
     AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-    GetSystemStateRequest, GetSystemStateResponse, NamespaceId, NamespaceRegistry, NodeId,
-    NodeInfo, NodeRole, PeerInfo, ShardId, system_discovery_service_server::SystemDiscoveryService,
+    GetSystemStateRequest, GetSystemStateResponse, NodeId, NodeInfo, NodeRole,
+    OrganizationRegistry, OrganizationSlug, PeerInfo, ShardId,
+    system_discovery_service_server::SystemDiscoveryService,
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -166,10 +167,10 @@ const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from
 pub struct DiscoveryServiceImpl {
     /// Raft consensus handle for membership and leader queries.
     raft: Arc<Raft<LedgerTypeConfig>>,
-    /// State layer for namespace registry access.
+    /// State layer for organization registry access.
     #[allow(dead_code)] // retained to maintain Arc reference count
     state: Arc<StateLayer<FileBackend>>,
-    /// Accessor for applied state (namespace registry).
+    /// Accessor for applied state (organization registry).
     applied_state: AppliedStateAccessor,
     /// Tracks when peers were last seen.
     #[builder(default = RwLock::new(PeerTracker::new()))]
@@ -349,7 +350,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             return Ok(Response::new(GetSystemStateResponse {
                 version: current_version,
                 nodes: vec![],
-                namespaces: vec![],
+                organizations: vec![],
             }));
         }
 
@@ -372,18 +373,23 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             })
             .collect();
 
-        // Build namespace registry from applied state
+        // Build organization registry from applied state
         let member_nodes: Vec<NodeId> =
             membership.nodes().map(|(id, _)| NodeId { id: id.to_string() }).collect();
 
-        let namespaces: Vec<NamespaceRegistry> = self
+        let organizations: Vec<OrganizationRegistry> = self
             .applied_state
-            .list_namespaces()
+            .list_organizations()
             .into_iter()
             .map(|ns| {
-                let status = crate::proto_compat::namespace_status_to_proto(ns.status);
-                NamespaceRegistry {
-                    namespace_id: Some(NamespaceId { id: ns.namespace_id.value() }),
+                let status = crate::proto_compat::organization_status_to_proto(ns.status);
+                OrganizationRegistry {
+                    organization_slug: Some(OrganizationSlug {
+                        slug: self
+                            .applied_state
+                            .resolve_id_to_slug(ns.organization_id)
+                            .map_or(ns.organization_id.value() as u64, |s| s.value()),
+                    }),
                     name: ns.name,
                     shard_id: Some(ShardId { id: ns.shard_id.value() }),
                     members: member_nodes.clone(),
@@ -394,7 +400,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             })
             .collect();
 
-        Ok(Response::new(GetSystemStateResponse { version: current_version, nodes, namespaces }))
+        Ok(Response::new(GetSystemStateResponse { version: current_version, nodes, organizations }))
     }
 }
 

@@ -10,13 +10,13 @@
 //! - **Timestamp**: When the action occurred (UTC)
 //! - **Event ID**: Unique identifier for deduplication and ordering
 //! - **Principal**: Who performed the action (client ID or system)
-//! - **Action**: What was done (write, create namespace, delete vault, etc.)
-//! - **Resource**: Target of the action (namespace, vault, entity)
+//! - **Action**: What was done (write, create organization, delete vault, etc.)
+//! - **Resource**: Target of the action (organization, vault, entity)
 //! - **Outcome**: Success or failure with optional detail
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NamespaceId, ShardId, VaultId};
+use crate::types::{OrganizationId, ShardId, VaultId};
 
 /// Outcome of an audited operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ pub enum AuditOutcome {
 ///
 /// Covers all operations that require audit trails for SOC2/HIPAA compliance:
 /// - Data mutations (writes, deletes)
-/// - Administrative operations (namespace/vault lifecycle)
+/// - Administrative operations (organization/vault lifecycle)
 /// - Security events (rate limiting, precondition failures)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,15 +53,15 @@ pub enum AuditAction {
     /// Batch write to one or more vaults.
     BatchWrite,
 
-    // --- Namespace Lifecycle ---
-    /// Creates a new namespace.
-    CreateNamespace,
-    /// Deletes a namespace.
-    DeleteNamespace,
-    /// Suspends a namespace.
-    SuspendNamespace,
-    /// Resumes a suspended namespace.
-    ResumeNamespace,
+    // --- Organization Lifecycle ---
+    /// Creates a new organization.
+    CreateOrganization,
+    /// Deletes an organization.
+    DeleteOrganization,
+    /// Suspends an organization.
+    SuspendOrganization,
+    /// Resumes a suspended organization.
+    ResumeOrganization,
 
     // --- Vault Lifecycle ---
     /// Creates a new vault.
@@ -86,9 +86,9 @@ pub enum AuditAction {
     ForceGc,
 
     // --- Migration ---
-    /// Starts namespace migration.
+    /// Starts organization migration.
     StartMigration,
-    /// Completes namespace migration.
+    /// Completes organization migration.
     CompleteMigration,
 
     // --- Configuration ---
@@ -102,10 +102,10 @@ impl AuditAction {
         match self {
             Self::Write => "write",
             Self::BatchWrite => "batch_write",
-            Self::CreateNamespace => "create_namespace",
-            Self::DeleteNamespace => "delete_namespace",
-            Self::SuspendNamespace => "suspend_namespace",
-            Self::ResumeNamespace => "resume_namespace",
+            Self::CreateOrganization => "create_organization",
+            Self::DeleteOrganization => "delete_organization",
+            Self::SuspendOrganization => "suspend_organization",
+            Self::ResumeOrganization => "resume_organization",
             Self::CreateVault => "create_vault",
             Self::DeleteVault => "delete_vault",
             Self::JoinCluster => "join_cluster",
@@ -124,30 +124,35 @@ impl AuditAction {
 /// The target resource of an audited operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditResource {
-    /// Target namespace (if applicable).
+    /// Target organization (if applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub namespace_id: Option<NamespaceId>,
+    pub organization_id: Option<OrganizationId>,
     /// Target vault (if applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault_id: Option<VaultId>,
     /// Target shard (if applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shard_id: Option<ShardId>,
-    /// Additional resource context (e.g., namespace name, entity key).
+    /// Additional resource context (e.g., organization name, entity key).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
 impl AuditResource {
-    /// Creates a resource targeting a namespace.
-    pub fn namespace(namespace_id: NamespaceId) -> Self {
-        Self { namespace_id: Some(namespace_id), vault_id: None, shard_id: None, detail: None }
+    /// Creates a resource targeting an organization.
+    pub fn organization(organization_id: OrganizationId) -> Self {
+        Self {
+            organization_id: Some(organization_id),
+            vault_id: None,
+            shard_id: None,
+            detail: None,
+        }
     }
 
-    /// Creates a resource targeting a vault within a namespace.
-    pub fn vault(namespace_id: NamespaceId, vault_id: VaultId) -> Self {
+    /// Creates a resource targeting a vault within an organization.
+    pub fn vault(organization_id: OrganizationId, vault_id: VaultId) -> Self {
         Self {
-            namespace_id: Some(namespace_id),
+            organization_id: Some(organization_id),
             vault_id: Some(vault_id),
             shard_id: None,
             detail: None,
@@ -156,12 +161,12 @@ impl AuditResource {
 
     /// Creates a resource targeting a shard.
     pub fn shard(shard_id: ShardId) -> Self {
-        Self { namespace_id: None, vault_id: None, shard_id: Some(shard_id), detail: None }
+        Self { organization_id: None, vault_id: None, shard_id: Some(shard_id), detail: None }
     }
 
     /// Creates a resource targeting the cluster.
     pub fn cluster() -> Self {
-        Self { namespace_id: None, vault_id: None, shard_id: None, detail: None }
+        Self { organization_id: None, vault_id: None, shard_id: None, detail: None }
     }
 
     /// Adds a detail string to the resource.
@@ -222,10 +227,10 @@ mod tests {
         let actions = [
             (AuditAction::Write, "write"),
             (AuditAction::BatchWrite, "batch_write"),
-            (AuditAction::CreateNamespace, "create_namespace"),
-            (AuditAction::DeleteNamespace, "delete_namespace"),
-            (AuditAction::SuspendNamespace, "suspend_namespace"),
-            (AuditAction::ResumeNamespace, "resume_namespace"),
+            (AuditAction::CreateOrganization, "create_organization"),
+            (AuditAction::DeleteOrganization, "delete_organization"),
+            (AuditAction::SuspendOrganization, "suspend_organization"),
+            (AuditAction::ResumeOrganization, "resume_organization"),
             (AuditAction::CreateVault, "create_vault"),
             (AuditAction::DeleteVault, "delete_vault"),
             (AuditAction::JoinCluster, "join_cluster"),
@@ -243,9 +248,9 @@ mod tests {
     }
 
     #[test]
-    fn test_audit_resource_namespace() {
-        let r = AuditResource::namespace(NamespaceId::new(42));
-        assert_eq!(r.namespace_id, Some(NamespaceId::new(42)));
+    fn test_audit_resource_organization() {
+        let r = AuditResource::organization(OrganizationId::new(42));
+        assert_eq!(r.organization_id, Some(OrganizationId::new(42)));
         assert_eq!(r.vault_id, None);
         assert_eq!(r.shard_id, None);
         assert_eq!(r.detail, None);
@@ -253,8 +258,8 @@ mod tests {
 
     #[test]
     fn test_audit_resource_vault() {
-        let r = AuditResource::vault(NamespaceId::new(1), VaultId::new(2));
-        assert_eq!(r.namespace_id, Some(NamespaceId::new(1)));
+        let r = AuditResource::vault(OrganizationId::new(1), VaultId::new(2));
+        assert_eq!(r.organization_id, Some(OrganizationId::new(1)));
         assert_eq!(r.vault_id, Some(VaultId::new(2)));
     }
 
@@ -262,13 +267,13 @@ mod tests {
     fn test_audit_resource_shard() {
         let r = AuditResource::shard(ShardId::new(5));
         assert_eq!(r.shard_id, Some(ShardId::new(5)));
-        assert_eq!(r.namespace_id, None);
+        assert_eq!(r.organization_id, None);
     }
 
     #[test]
     fn test_audit_resource_cluster() {
         let r = AuditResource::cluster();
-        assert_eq!(r.namespace_id, None);
+        assert_eq!(r.organization_id, None);
         assert_eq!(r.vault_id, None);
         assert_eq!(r.shard_id, None);
         assert_eq!(r.detail, None);
@@ -276,8 +281,8 @@ mod tests {
 
     #[test]
     fn test_audit_resource_with_detail() {
-        let r = AuditResource::namespace(NamespaceId::new(1)).with_detail("test-ns");
-        assert_eq!(r.detail, Some("test-ns".to_string()));
+        let r = AuditResource::organization(OrganizationId::new(1)).with_detail("test-org");
+        assert_eq!(r.detail, Some("test-org".to_string()));
     }
 
     #[test]
@@ -315,7 +320,7 @@ mod tests {
             event_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             principal: "client:app-1".to_string(),
             action: AuditAction::Write,
-            resource: AuditResource::vault(NamespaceId::new(1), VaultId::new(2)),
+            resource: AuditResource::vault(OrganizationId::new(1), VaultId::new(2)),
             outcome: AuditOutcome::Success,
             node_id: Some(1),
             trace_id: Some("abc123".to_string()),
@@ -350,10 +355,10 @@ mod tests {
         let actions = vec![
             AuditAction::Write,
             AuditAction::BatchWrite,
-            AuditAction::CreateNamespace,
-            AuditAction::DeleteNamespace,
-            AuditAction::SuspendNamespace,
-            AuditAction::ResumeNamespace,
+            AuditAction::CreateOrganization,
+            AuditAction::DeleteOrganization,
+            AuditAction::SuspendOrganization,
+            AuditAction::ResumeOrganization,
             AuditAction::CreateVault,
             AuditAction::DeleteVault,
             AuditAction::JoinCluster,
@@ -386,7 +391,7 @@ mod tests {
     fn test_audit_resource_none_fields_skipped() {
         let r = AuditResource::cluster();
         let json = serde_json::to_string(&r).expect("serialize");
-        assert!(!json.contains("namespace_id"));
+        assert!(!json.contains("organization_id"));
         assert!(!json.contains("vault_id"));
         assert!(!json.contains("shard_id"));
         assert!(!json.contains("detail"));

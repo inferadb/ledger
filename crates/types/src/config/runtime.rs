@@ -1,4 +1,4 @@
-//! Runtime-reconfigurable configuration and namespace quota management.
+//! Runtime-reconfigurable configuration and organization quota management.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -10,36 +10,36 @@ use super::{
     storage::{BTreeCompactionConfig, IntegrityConfig},
 };
 
-/// Default maximum storage bytes per namespace (10 GiB).
+/// Default maximum storage bytes per organization (10 GiB).
 const fn default_max_storage_bytes() -> u64 {
     10 * 1024 * 1024 * 1024
 }
 
-/// Default maximum vault count per namespace.
+/// Default maximum vault count per organization.
 const fn default_max_vaults() -> u32 {
     1000
 }
 
-/// Default maximum write operations per second per namespace.
+/// Default maximum write operations per second per organization.
 const fn default_max_write_ops_per_sec() -> u32 {
     10_000
 }
 
-/// Default maximum read operations per second per namespace.
+/// Default maximum read operations per second per organization.
 const fn default_max_read_ops_per_sec() -> u32 {
     50_000
 }
 
-/// Per-namespace resource quota configuration.
+/// Per-organization resource quota configuration.
 ///
-/// Enforces hard resource limits per namespace to prevent any single tenant
+/// Enforces hard resource limits per organization to prevent any single tenant
 /// from exhausting shared infrastructure. Quotas are checked at the service
 /// layer before operations reach the storage engine.
 ///
 /// # Fields
 ///
 /// - `max_storage_bytes`: Maximum cumulative storage bytes (estimated from payload sizes).
-/// - `max_vaults`: Maximum number of vaults within the namespace.
+/// - `max_vaults`: Maximum number of vaults within the organization.
 /// - `max_write_ops_per_sec`: Maximum write operations per second (separate from global rate
 ///   limits).
 /// - `max_read_ops_per_sec`: Maximum read operations per second (separate from global rate limits).
@@ -47,30 +47,30 @@ const fn default_max_read_ops_per_sec() -> u32 {
 /// # Example
 ///
 /// ```no_run
-/// # use inferadb_ledger_types::config::NamespaceQuota;
-/// let quota = NamespaceQuota::builder()
+/// # use inferadb_ledger_types::config::OrganizationQuota;
+/// let quota = OrganizationQuota::builder()
 ///     .max_storage_bytes(1024 * 1024 * 1024) // 1 GiB
 ///     .max_vaults(100)
 ///     .build()
 ///     .expect("valid quota");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct NamespaceQuota {
-    /// Maximum cumulative storage bytes for the namespace.
+pub struct OrganizationQuota {
+    /// Maximum cumulative storage bytes for the organization.
     #[serde(default = "default_max_storage_bytes")]
     pub max_storage_bytes: u64,
-    /// Maximum number of vaults within the namespace.
+    /// Maximum number of vaults within the organization.
     #[serde(default = "default_max_vaults")]
     pub max_vaults: u32,
-    /// Maximum write operations per second (namespace-level rate).
+    /// Maximum write operations per second (organization-level rate).
     #[serde(default = "default_max_write_ops_per_sec")]
     pub max_write_ops_per_sec: u32,
-    /// Maximum read operations per second (namespace-level rate).
+    /// Maximum read operations per second (organization-level rate).
     #[serde(default = "default_max_read_ops_per_sec")]
     pub max_read_ops_per_sec: u32,
 }
 
-impl Default for NamespaceQuota {
+impl Default for OrganizationQuota {
     fn default() -> Self {
         Self {
             max_storage_bytes: default_max_storage_bytes(),
@@ -82,8 +82,8 @@ impl Default for NamespaceQuota {
 }
 
 #[bon::bon]
-impl NamespaceQuota {
-    /// Creates a new namespace quota with validation.
+impl OrganizationQuota {
+    /// Creates a new organization quota with validation.
     ///
     /// # Errors
     ///
@@ -102,7 +102,7 @@ impl NamespaceQuota {
     }
 }
 
-impl NamespaceQuota {
+impl OrganizationQuota {
     /// Validates an existing quota configuration (e.g., after deserialization).
     ///
     /// # Errors
@@ -165,9 +165,9 @@ pub struct RuntimeConfig {
     /// Input validation limits.
     #[serde(default)]
     pub validation: Option<ValidationConfig>,
-    /// Default namespace quota applied to new namespaces without explicit quotas.
+    /// Default organization quota applied to new organizations without explicit quotas.
     #[serde(default)]
-    pub default_quota: Option<NamespaceQuota>,
+    pub default_quota: Option<OrganizationQuota>,
     /// Integrity scrubber parameters.
     #[serde(default)]
     pub integrity: Option<IntegrityConfig>,

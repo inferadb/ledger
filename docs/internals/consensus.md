@@ -6,7 +6,7 @@ This document covers Raft integration, write/read paths, batching, and state det
 
 ## Raft Integration
 
-Ledger uses [Openraft](https://github.com/datafuselabs/openraft) for consensus. Each shard has one Raft group; multiple namespaces share a shard.
+Ledger uses [Openraft](https://github.com/datafuselabs/openraft) for consensus. Each shard has one Raft group; multiple organizations share a shard.
 
 ### Raft Properties
 

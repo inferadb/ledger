@@ -13,7 +13,7 @@ See [Security](operations/security.md) for the full trust model.
 ### How does Ledger relate to Engine and Control?
 
 - **Engine**: Evaluates authorization policies, performs graph traversal. Reads/writes relationships to Ledger.
-- **Control**: Manages users, organizations, tokens. Manages namespaces and vaults in Ledger.
+- **Control**: Manages users, organizations, tokens. Manages organizations and vaults in Ledger.
 - **Ledger**: Stores authorization data with cryptographic verification. Does not interpret the data semantically.
 
 Engine and Control are the only intended clients of Ledger.
@@ -24,15 +24,15 @@ Ledger operates within a trusted network where all nodes are honest. Byzantine f
 
 ### What is a vault?
 
-A vault is an isolated authorization store within a namespace. Each vault has its own blockchain (genesis block, transaction history, state root). Vaults enable:
+A vault is an isolated authorization store within an organization. Each vault has its own blockchain (genesis block, transaction history, state root). Vaults enable:
 
-- Tenant isolation within a namespace
+- Tenant isolation within an organization
 - Independent scaling and sharding
 - Separate retention policies
 
-### What is a namespace?
+### What is an organization?
 
-A namespace is an organizational boundary (typically one per customer/org). Namespaces are assigned to shards for scaling. Multiple vaults can exist within a namespace.
+An organization is an organizational boundary (typically one per customer/org). Organizations are assigned to shards for scaling. Multiple vaults can exist within an organization.
 
 ## Operations
 
@@ -81,7 +81,7 @@ For manual backup, trigger a snapshot:
 
 ```bash
 grpcurl -plaintext localhost:50051 \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   ledger.v1.AdminService/CreateSnapshot
 ```
 
@@ -137,7 +137,7 @@ Yes. All read operations accept an optional `height` parameter:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "key": "user:alice", "height": "100"}' \
+  -d '{"organization_slug": {"id": "1"}, "key": "user:alice", "height": "100"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 
@@ -195,17 +195,17 @@ Throughput can be increased by:
 
 - Increasing `batch_size`
 - Using multiple vaults for parallel workloads
-- Adding shards for namespace isolation
+- Adding shards for organization isolation
 
 ### Does Ledger support horizontal scaling?
 
 Yes, through sharding:
 
 - Each shard is an independent Raft group
-- Namespaces are assigned to shards
+- Organizations are assigned to shards
 - Shards can be added without downtime
 
-Cross-shard operations are not supported; design your namespace/vault layout accordingly.
+Cross-shard operations are not supported; design your organization/vault layout accordingly.
 
 ## Debugging
 
@@ -239,7 +239,7 @@ For persistent logging, configure a log aggregator (Loki, CloudWatch, etc.).
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 

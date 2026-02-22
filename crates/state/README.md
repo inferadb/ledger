@@ -40,7 +40,7 @@ let state = StateLayer::new(engine);
 let commitment = state.apply_block(&block)?;
 
 // Query relationships
-let rels = state.get_relationships(namespace, vault, "doc:1", "viewer")?;
+let rels = state.get_relationships(organization, vault, "doc:1", "viewer")?;
 ```
 
 ## License

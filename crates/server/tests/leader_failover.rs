@@ -22,19 +22,21 @@ mod common;
 use std::{collections::HashSet, time::Duration};
 
 use common::{TestCluster, create_read_client, create_write_client};
-use inferadb_ledger_proto::proto::{ClientId, NamespaceId, ReadRequest, VaultId, WriteRequest};
+use inferadb_ledger_proto::proto::{
+    ClientId, OrganizationSlug, ReadRequest, VaultId, WriteRequest,
+};
 use serial_test::serial;
 
 /// Helper to create a write request with a single SetEntity operation.
 fn make_write_request(
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
     value: &[u8],
     client_id: &str,
 ) -> WriteRequest {
     WriteRequest {
-        namespace_id: Some(NamespaceId { id: namespace_id }),
+        organization_slug: Some(OrganizationSlug { slug: organization_id as u64 }),
         vault_id: Some(VaultId { id: vault_id }),
         client_id: Some(ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -66,14 +68,14 @@ fn extract_block_height(response: inferadb_ledger_proto::proto::WriteResponse) -
 /// Helper to read an entity and return its value.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    namespace_id: i64,
+    organization_id: i64,
     vault_id: i64,
     key: &str,
 ) -> Option<Vec<u8>> {
     let mut client = create_read_client(addr).await.ok()?;
     let response = client
         .read(ReadRequest {
-            namespace_id: Some(NamespaceId { id: namespace_id }),
+            organization_slug: Some(OrganizationSlug { slug: organization_id as u64 }),
             vault_id: Some(VaultId { id: vault_id }),
             key: key.to_string(),
             consistency: 0, // EVENTUAL (default)
@@ -395,7 +397,7 @@ async fn test_term_agreement_maintained() {
     assert_eq!(unique_terms.len(), 1, "all nodes should be on the same term, got {:?}", terms);
 }
 
-// Note: Vault and namespace isolation tests are in write_read.rs.
+// Note: Vault and organization isolation tests are in write_read.rs.
 // These chaos tests focus on leader failover and replication consistency.
 
 /// Tests that overwriting a key works correctly across the cluster.

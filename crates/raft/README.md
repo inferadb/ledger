@@ -18,7 +18,7 @@ This crate provides the distributed consensus layer:
 | ------------------ | --------------------------------------- |
 | `ReadService`      | Entity/relationship queries, proofs     |
 | `WriteService`     | Transactions with Raft replication      |
-| `AdminService`     | Namespace/vault management, cluster ops |
+| `AdminService`     | Organization/vault management, cluster ops |
 | `HealthService`    | Liveness and readiness checks           |
 | `DiscoveryService` | Peer discovery via DNS                  |
 

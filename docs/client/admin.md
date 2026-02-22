@@ -2,17 +2,17 @@
 
 # AdminService API
 
-Operations for namespace, vault, and cluster management.
+Operations for organization, vault, and cluster management.
 
 ## Service Definition
 
 ```protobuf
 service AdminService {
-  // Namespace operations
-  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
-  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
-  rpc GetNamespace(GetNamespaceRequest) returns (GetNamespaceResponse);
-  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+  // Organization operations
+  rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
+  rpc DeleteOrganization(DeleteOrganizationRequest) returns (DeleteOrganizationResponse);
+  rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
+  rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse);
 
   // Vault operations
   rpc CreateVault(CreateVaultRequest) returns (CreateVaultResponse);
@@ -34,71 +34,71 @@ service AdminService {
 }
 ```
 
-## Namespace Operations
+## Organization Operations
 
-### CreateNamespace
+### CreateOrganization
 
-Creates a new namespace and assigns it to a shard.
+Creates a new organization and assigns it to a shard.
 
 ```bash
 grpcurl -plaintext \
   -d '{"name": "acme_corp"}' \
-  localhost:50051 ledger.v1.AdminService/CreateNamespace
+  localhost:50051 ledger.v1.AdminService/CreateOrganization
 ```
 
 **Request:**
 
 | Field      | Type    | Description                                       |
 | ---------- | ------- | ------------------------------------------------- |
-| `name`     | string  | Human-readable namespace name                     |
+| `name`     | string  | Human-readable organization name                     |
 | `shard_id` | ShardId | (Optional) Target shard; auto-assigned if omitted |
 
 **Response:**
 
 | Field          | Type        | Description                   |
 | -------------- | ----------- | ----------------------------- |
-| `namespace_id` | NamespaceId | Assigned namespace identifier |
+| `organization_slug` | OrganizationSlug | Assigned organization identifier |
 | `shard_id`     | ShardId     | Assigned shard                |
 
-### DeleteNamespace
+### DeleteOrganization
 
-Marks a namespace for deletion. All vaults must be deleted first.
+Marks an organization for deletion. All vaults must be deleted first.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}}' \
-  localhost:50051 ledger.v1.AdminService/DeleteNamespace
+  -d '{"organization_slug": {"id": "1"}}' \
+  localhost:50051 ledger.v1.AdminService/DeleteOrganization
 ```
 
-### GetNamespace
+### GetOrganization
 
-Retrieves namespace metadata. Lookup by ID or name.
+Retrieves organization metadata. Lookup by ID or name.
 
 ```bash
 # By ID
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}}' \
-  localhost:50051 ledger.v1.AdminService/GetNamespace
+  -d '{"organization_slug": {"id": "1"}}' \
+  localhost:50051 ledger.v1.AdminService/GetOrganization
 
 # By name
 grpcurl -plaintext \
   -d '{"name": "acme_corp"}' \
-  localhost:50051 ledger.v1.AdminService/GetNamespace
+  localhost:50051 ledger.v1.AdminService/GetOrganization
 ```
 
 **Response fields:**
 
 | Field            | Type            | Description            |
 | ---------------- | --------------- | ---------------------- |
-| `namespace_id`   | NamespaceId     | Namespace identifier   |
-| `name`           | string          | Namespace name         |
+| `organization_slug`   | OrganizationSlug     | Organization identifier   |
+| `name`           | string          | Organization name         |
 | `shard_id`       | ShardId         | Hosting shard          |
 | `member_nodes`   | NodeId[]        | Nodes in the shard     |
-| `status`         | NamespaceStatus | Lifecycle state        |
+| `status`         | OrganizationStatus | Lifecycle state        |
 | `config_version` | uint64          | For cache invalidation |
 | `created_at`     | Timestamp       | Creation time          |
 
-**NamespaceStatus values:**
+**OrganizationStatus values:**
 
 | Value       | Description                     |
 | ----------- | ------------------------------- |
@@ -108,14 +108,14 @@ grpcurl -plaintext \
 | `DELETING`  | Deletion in progress            |
 | `DELETED`   | Tombstone                       |
 
-### ListNamespaces
+### ListOrganizations
 
-Lists all namespaces with pagination.
+Lists all organizations with pagination.
 
 ```bash
 grpcurl -plaintext \
   -d '{"page_size": 100}' \
-  localhost:50051 ledger.v1.AdminService/ListNamespaces
+  localhost:50051 ledger.v1.AdminService/ListOrganizations
 ```
 
 **Request:**
@@ -129,11 +129,11 @@ grpcurl -plaintext \
 
 ### CreateVault
 
-Creates a new vault within a namespace.
+Creates a new vault within an organization.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/CreateVault
 ```
 
@@ -141,7 +141,7 @@ grpcurl -plaintext \
 
 | Field                | Type                 | Description                             |
 | -------------------- | -------------------- | --------------------------------------- |
-| `namespace_id`       | NamespaceId          | Parent namespace                        |
+| `organization_slug`       | OrganizationSlug          | Parent organization                        |
 | `replication_factor` | uint32               | (Optional) Number of replicas           |
 | `initial_nodes`      | NodeId[]             | (Optional) Specific nodes to host vault |
 | `retention_policy`   | BlockRetentionPolicy | (Optional) Block retention mode         |
@@ -166,7 +166,7 @@ Marks a vault for deletion. Vault must be empty.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/DeleteVault
 ```
 
@@ -176,7 +176,7 @@ Retrieves vault metadata and current state.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/GetVault
 ```
 
@@ -184,7 +184,7 @@ grpcurl -plaintext \
 
 | Field              | Type                 | Description              |
 | ------------------ | -------------------- | ------------------------ |
-| `namespace_id`     | NamespaceId          | Parent namespace         |
+| `organization_slug`     | OrganizationSlug          | Parent organization         |
 | `vault_id`         | VaultId              | Vault identifier         |
 | `height`           | uint64               | Current block height     |
 | `state_root`       | Hash                 | Current state root       |
@@ -276,7 +276,7 @@ Triggers a manual snapshot for a vault.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/CreateSnapshot
 ```
 
@@ -295,12 +295,12 @@ Runs an integrity check on a vault.
 ```bash
 # Quick check
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}, "full_check": false}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}, "full_check": false}' \
   localhost:50051 ledger.v1.AdminService/CheckIntegrity
 
 # Full replay from genesis
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}, "full_check": true}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}, "full_check": true}' \
   localhost:50051 ledger.v1.AdminService/CheckIntegrity
 ```
 
@@ -317,7 +317,7 @@ Recovers a diverged vault by replaying transactions from block archive.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/RecoverVault
 ```
 
@@ -341,7 +341,7 @@ Simulates vault divergence for testing recovery procedures. Forces a vault into 
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}, "expected_state_root": {"bytes": "AAAA..."}, "computed_state_root": {"bytes": "BBBB..."}, "at_height": 100}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}, "expected_state_root": {"bytes": "AAAA..."}, "computed_state_root": {"bytes": "BBBB..."}, "at_height": 100}' \
   localhost:50051 ledger.v1.AdminService/SimulateDivergence
 ```
 
@@ -349,7 +349,7 @@ grpcurl -plaintext \
 
 | Field                 | Type        | Description                          |
 | --------------------- | ----------- | ------------------------------------ |
-| `namespace_id`        | NamespaceId | Target namespace                     |
+| `organization_slug`        | OrganizationSlug | Target organization                     |
 | `vault_id`            | VaultId     | Target vault                         |
 | `expected_state_root` | Hash        | Fake expected state root             |
 | `computed_state_root` | Hash        | Fake computed state root (different) |
@@ -371,7 +371,7 @@ Forces a garbage collection cycle for expired entities.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"namespace_id": {"id": "1"}, "vault_id": {"id": "1"}}' \
+  -d '{"organization_slug": {"id": "1"}, "vault_id": {"id": "1"}}' \
   localhost:50051 ledger.v1.AdminService/ForceGc
 ```
 

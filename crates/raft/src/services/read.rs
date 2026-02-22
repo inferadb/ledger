@@ -28,7 +28,7 @@ use inferadb_ledger_proto::{
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::{NamespaceId, VaultId};
+use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId};
 use openraft::Raft;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -40,6 +40,7 @@ use crate::{
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     metrics,
     pagination::{PageToken, PageTokenCodec},
+    services::slug_resolver::SlugResolver,
     trace_context,
     types::{LedgerNodeId, LedgerTypeConfig},
     wide_events::{OperationType, RequestContext, Sampler},
@@ -50,7 +51,7 @@ use crate::{
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct ReadServiceImpl {
-    /// State layer providing entity, vault, and namespace read access.
+    /// State layer providing entity, vault, and organization read access.
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
@@ -127,7 +128,7 @@ impl ReadServiceImpl {
     fn get_block_header(
         &self,
         archive: &BlockArchive<FileBackend>,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         vault_height: u64,
     ) -> Option<inferadb_ledger_proto::proto::BlockHeader> {
@@ -138,7 +139,7 @@ impl ReadServiceImpl {
 
         // Find the shard height containing this vault block
         let shard_height =
-            archive.find_shard_height(namespace_id, vault_id, vault_height).ok().flatten()?;
+            archive.find_shard_height(organization_id, vault_id, vault_height).ok().flatten()?;
 
         // Read the shard block
         let shard_block = archive.read_block(shard_height).ok()?;
@@ -147,13 +148,16 @@ impl ReadServiceImpl {
         let entry = shard_block
             .vault_entries
             .iter()
-            .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)?;
+            .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)?;
 
         // Build proto block header
         Some(inferadb_ledger_proto::proto::BlockHeader {
             height: entry.vault_height,
-            namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
-                id: entry.namespace_id.value(),
+            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: self
+                    .applied_state
+                    .resolve_id_to_slug(entry.organization_id)
+                    .map_or(entry.organization_id.value() as u64, |s| s.value()),
             }),
             vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: entry.vault_id.value() }),
             previous_hash: Some(inferadb_ledger_proto::proto::Hash {
@@ -183,14 +187,15 @@ impl ReadServiceImpl {
     fn get_tip_hashes(
         &self,
         archive: &BlockArchive<FileBackend>,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         vault_height: u64,
     ) -> (Option<inferadb_ledger_proto::proto::Hash>, Option<inferadb_ledger_proto::proto::Hash>)
     {
         // Find the shard height containing this vault block
         let shard_height =
-            match archive.find_shard_height(namespace_id, vault_id, vault_height).ok().flatten() {
+            match archive.find_shard_height(organization_id, vault_id, vault_height).ok().flatten()
+            {
                 Some(h) => h,
                 None => return (None, None),
             };
@@ -205,7 +210,7 @@ impl ReadServiceImpl {
         let entry = match shard_block
             .vault_entries
             .iter()
-            .find(|e| e.namespace_id == namespace_id && e.vault_id == vault_id)
+            .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)
         {
             Some(e) => e,
             None => return (None, None),
@@ -315,7 +320,7 @@ impl ReadServiceImpl {
     fn build_chain_proof(
         &self,
         archive: &BlockArchive<FileBackend>,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         trusted_height: u64,
         response_height: u64,
@@ -329,7 +334,7 @@ impl ReadServiceImpl {
         let mut headers = Vec::with_capacity((response_height - trusted_height) as usize);
 
         for height in (trusted_height + 1)..=response_height {
-            let header = self.get_block_header(archive, namespace_id, vault_id, height)?;
+            let header = self.get_block_header(archive, organization_id, vault_id, height)?;
             headers.push(header);
         }
 
@@ -341,7 +346,7 @@ impl ReadServiceImpl {
     /// Used by watch_blocks to replay committed blocks before streaming new ones.
     fn fetch_historical_announcements(
         &self,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
         vault_id: VaultId,
         start_height: u64,
         end_height: u64,
@@ -360,7 +365,7 @@ impl ReadServiceImpl {
 
         for height in start_height..=end_height {
             // Find the shard height containing this vault block
-            let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
+            let shard_height = match archive.find_shard_height(organization_id, vault_id, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     debug!(height, "Vault block not found in archive");
@@ -383,14 +388,19 @@ impl ReadServiceImpl {
 
             // Find the vault entry in the shard block
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+                e.organization_id == organization_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
             }) {
                 // Compute vault block hash using the same function as get_tip_hashes
                 let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
                 announcements.push(BlockAnnouncement {
-                    namespace_id: Some(inferadb_ledger_proto::proto::NamespaceId {
-                        id: entry.namespace_id.value(),
+                    organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                        slug: self
+                            .applied_state
+                            .resolve_id_to_slug(entry.organization_id)
+                            .map_or(entry.organization_id.value() as u64, |s| s.value()),
                     }),
                     vault_id: Some(inferadb_ledger_proto::proto::VaultId {
                         id: entry.vault_id.value(),
@@ -459,15 +469,22 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        ctx.set_target(org_slug, vault_id.value());
 
         // Check vault health - diverged vaults cannot be read
-        let health = self.applied_state.vault_health(namespace_id, vault_id);
+        let health = self.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            let msg =
-                format!("Vault {}:{} has diverged at height {}", namespace_id, vault_id, at_height);
+            let msg = format!(
+                "Vault {}:{} has diverged at height {}",
+                organization_id, vault_id, at_height
+            );
             ctx.set_error("vault_diverged", &msg);
             return Err(Status::unavailable(msg));
         }
@@ -505,12 +522,12 @@ impl ReadService for ReadServiceImpl {
 
         let elapsed = ctx.elapsed_secs();
         metrics::record_read(true, elapsed);
-        metrics::record_namespace_operation(namespace_id.value(), "read");
-        metrics::record_namespace_latency(namespace_id.value(), "read", elapsed);
+        metrics::record_organization_operation(organization_id.value(), "read");
+        metrics::record_organization_latency(organization_id.value(), "read", elapsed);
         ctx.set_success();
 
         // Get current block height for this vault
-        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = self.applied_state.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
@@ -519,7 +536,7 @@ impl ReadService for ReadServiceImpl {
     /// Batches read multiple keys in a single RPC call.
     ///
     /// Amortizes network overhead across multiple reads for higher throughput.
-    /// All reads use the same namespace/vault scope and consistency level.
+    /// All reads use the same organization/vault scope and consistency level.
     async fn batch_read(
         &self,
         request: Request<inferadb_ledger_proto::proto::BatchReadRequest>,
@@ -576,15 +593,22 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        ctx.set_target(org_slug, vault_id.value());
 
         // Check vault health - diverged vaults cannot be read
-        let health = self.applied_state.vault_health(namespace_id, vault_id);
+        let health = self.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            let msg =
-                format!("Vault {}:{} has diverged at height {}", namespace_id, vault_id, at_height);
+            let msg = format!(
+                "Vault {}:{} has diverged at height {}",
+                organization_id, vault_id, at_height
+            );
             ctx.set_error("vault_diverged", &msg);
             return Err(Status::unavailable(msg));
         }
@@ -641,13 +665,13 @@ impl ReadService for ReadServiceImpl {
         for _ in 0..batch_size {
             metrics::record_read(true, latency / batch_size as f64);
         }
-        metrics::record_namespace_operation(namespace_id.value(), "read");
-        metrics::record_namespace_latency(namespace_id.value(), "read", latency);
+        metrics::record_organization_operation(organization_id.value(), "read");
+        metrics::record_organization_latency(organization_id.value(), "read", latency);
 
         ctx.set_success();
 
         // Get current block height for this vault
-        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = self.applied_state.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         Ok(Response::new(BatchReadResponse { results, block_height }))
@@ -687,15 +711,22 @@ impl ReadService for ReadServiceImpl {
         ctx.set_consistency("linearizable"); // verified reads are always linearizable
 
         // Extract IDs
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        ctx.set_target(org_slug, vault_id.value());
 
         // Check vault health - diverged vaults cannot be read
-        let health = self.applied_state.vault_health(namespace_id, vault_id);
+        let health = self.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
-            let msg =
-                format!("Vault {}:{} has diverged at height {}", namespace_id, vault_id, at_height);
+            let msg = format!(
+                "Vault {}:{} has diverged at height {}",
+                organization_id, vault_id, at_height
+            );
             ctx.set_error("vault_diverged", &msg);
             metrics::record_verified_read(false, ctx.elapsed_secs());
             return Err(Status::unavailable(msg));
@@ -726,12 +757,12 @@ impl ReadService for ReadServiceImpl {
         ctx.set_bytes_read(value_size);
 
         // Get current block height for this vault
-        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = self.applied_state.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         // Fetch block header from archive if available
         let block_header = if let Some(archive) = &self.block_archive {
-            self.get_block_header(archive, namespace_id, vault_id, block_height)
+            self.get_block_header(archive, organization_id, vault_id, block_height)
         } else {
             None
         };
@@ -749,7 +780,7 @@ impl ReadService for ReadServiceImpl {
                 let trusted_height = req.trusted_height.unwrap_or(0);
                 self.build_chain_proof(
                     archive,
-                    namespace_id,
+                    organization_id,
                     vault_id,
                     trusted_height,
                     block_height,
@@ -819,9 +850,14 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        ctx.set_target(namespace_id.value(), vault_id.value());
+        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        ctx.set_target(org_slug, vault_id.value());
 
         // Get block archive - required for historical reads
         let archive = match &self.block_archive {
@@ -835,7 +871,7 @@ impl ReadService for ReadServiceImpl {
         };
 
         // Check that requested height doesn't exceed current tip
-        let tip_height = self.applied_state.vault_height(namespace_id, vault_id);
+        let tip_height = self.applied_state.vault_height(organization_id, vault_id);
         if req.at_height > tip_height {
             let msg =
                 format!("Requested height {} exceeds current tip {}", req.at_height, tip_height);
@@ -878,7 +914,7 @@ impl ReadService for ReadServiceImpl {
         // Replay blocks from start_height to at_height
         for height in start_height..=req.at_height {
             // Find shard height for this vault block
-            let shard_height = match archive.find_shard_height(namespace_id, vault_id, height) {
+            let shard_height = match archive.find_shard_height(organization_id, vault_id, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => continue, // Block might not exist at this height (sparse)
                 Err(e) => {
@@ -902,7 +938,9 @@ impl ReadService for ReadServiceImpl {
 
             // Find the vault entry
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+                e.organization_id == organization_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
@@ -953,7 +991,7 @@ impl ReadService for ReadServiceImpl {
 
         // Get block header for proof (if include_proof is set)
         let block_header = if req.include_proof {
-            self.get_block_header(archive, namespace_id, vault_id, req.at_height)
+            self.get_block_header(archive, organization_id, vault_id, req.at_height)
         } else {
             None
         };
@@ -961,7 +999,13 @@ impl ReadService for ReadServiceImpl {
         // Build chain proof if requested (requires include_proof to be useful)
         let chain_proof = if req.include_chain_proof && req.include_proof {
             let trusted_height = req.trusted_height.unwrap_or(0);
-            self.build_chain_proof(archive, namespace_id, vault_id, trusted_height, req.at_height)
+            self.build_chain_proof(
+                archive,
+                organization_id,
+                vault_id,
+                trusted_height,
+                req.at_height,
+            )
         } else {
             None
         };
@@ -999,7 +1043,11 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Extract identifiers
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let start_height = req.start_height;
 
@@ -1011,7 +1059,7 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Get current tip for this vault
-        let current_tip = self.applied_state.vault_height(namespace_id, vault_id);
+        let current_tip = self.applied_state.vault_height(organization_id, vault_id);
 
         // Subscribe to broadcast BEFORE reading historical blocks
         // This ensures we don't miss any blocks committed between reading history and subscribing
@@ -1019,13 +1067,18 @@ impl ReadService for ReadServiceImpl {
 
         // Build historical blocks stream if start_height <= current_tip
         let historical_blocks: Vec<BlockAnnouncement> = if start_height <= current_tip {
-            self.fetch_historical_announcements(namespace_id, vault_id, start_height, current_tip)
+            self.fetch_historical_announcements(
+                organization_id,
+                vault_id,
+                start_height,
+                current_tip,
+            )
         } else {
             vec![]
         };
 
         debug!(
-            namespace_id = namespace_id.value(),
+            organization_id = organization_id.value(),
             vault_id = vault_id.value(),
             start_height,
             current_tip,
@@ -1047,15 +1100,19 @@ impl ReadService for ReadServiceImpl {
             start_height - 1 // Will accept blocks at start_height and above
         };
 
-        let ns_raw = namespace_id.value();
+        // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
+        // not slug-to-internal-id, since announcements carry the original slug)
+        let watch_slug = req.organization_slug.as_ref().map_or(0u64, |n| n.slug);
         let vault_raw = vault_id.value();
         let broadcast_stream =
             tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
                 async move {
                     match result {
                         Ok(announcement) => {
-                            // Filter by namespace
-                            if announcement.namespace_id.as_ref().map_or(0, |n| n.id) != ns_raw {
+                            // Filter by organization
+                            if announcement.organization_slug.as_ref().map_or(0, |n| n.slug)
+                                != watch_slug
+                            {
                                 return None;
                             }
                             // Filter by vault
@@ -1091,13 +1148,17 @@ impl ReadService for ReadServiceImpl {
             None => return Ok(Response::new(GetBlockResponse { block: None })),
         };
 
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let height = req.height;
 
         // Find the shard height containing this vault block
         let shard_height = archive
-            .find_shard_height(namespace_id, vault_id, height)
+            .find_shard_height(organization_id, vault_id, height)
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
         let shard_height = match shard_height {
@@ -1112,7 +1173,9 @@ impl ReadService for ReadServiceImpl {
 
         // Find the vault entry in the shard block
         let vault_entry = shard_block.vault_entries.iter().find(|e| {
-            e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+            e.organization_id == organization_id
+                && e.vault_id == vault_id
+                && e.vault_height == height
         });
 
         let block = vault_entry.map(|entry| vault_entry_to_proto_block(entry, &shard_block));
@@ -1134,7 +1197,11 @@ impl ReadService for ReadServiceImpl {
             },
         };
 
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let start_height = req.start_height;
         let end_height = req.end_height;
@@ -1149,7 +1216,7 @@ impl ReadService for ReadServiceImpl {
         for height in start_height..=end_height {
             // Find the shard height for this vault block
             let shard_height = match archive
-                .find_shard_height(namespace_id, vault_id, height)
+                .find_shard_height(organization_id, vault_id, height)
                 .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
             {
                 Some(h) => h,
@@ -1163,14 +1230,16 @@ impl ReadService for ReadServiceImpl {
 
             // Find the vault entry
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.namespace_id == namespace_id && e.vault_id == vault_id && e.vault_height == height
+                e.organization_id == organization_id
+                    && e.vault_id == vault_id
+                    && e.vault_height == height
             }) {
                 blocks.push(vault_entry_to_proto_block(entry, &shard_block));
             }
         }
 
         // Get current tip for this vault
-        let current_tip = self.applied_state.vault_height(namespace_id, vault_id);
+        let current_tip = self.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(GetBlockRangeResponse { blocks, current_tip }))
     }
@@ -1182,18 +1251,22 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Get the vault specified in the request, or return the global max height
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         let height = if vault_id.value() != 0 {
             // Specific vault requested
-            self.applied_state.vault_height(namespace_id, vault_id)
-        } else if namespace_id.value() != 0 {
-            // Namespace requested - return max height across all vaults in namespace
+            self.applied_state.vault_height(organization_id, vault_id)
+        } else if organization_id.value() != 0 {
+            // Organization requested - return max height across all vaults in organization
             self.applied_state
                 .all_vault_heights()
                 .iter()
-                .filter(|((ns, _), _)| *ns == namespace_id)
+                .filter(|((ns, _), _)| *ns == organization_id)
                 .map(|(_, h)| *h)
                 .max()
                 .unwrap_or(0)
@@ -1206,7 +1279,7 @@ impl ReadService for ReadServiceImpl {
         let (block_hash, state_root) = if let (Some(archive), true) =
             (&self.block_archive, vault_id.value() != 0 && height > 0)
         {
-            self.get_tip_hashes(archive, namespace_id, vault_id, height)
+            self.get_tip_hashes(archive, organization_id, vault_id, height)
         } else {
             (None, None)
         };
@@ -1221,7 +1294,11 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Extract IDs
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
@@ -1229,7 +1306,7 @@ impl ReadService for ReadServiceImpl {
         // The idempotency cache no longer tracks sequence numbers by sequence;
         // it uses idempotency keys instead.
         let last_committed_sequence =
-            self.applied_state.client_sequence(namespace_id, vault_id, client_id);
+            self.applied_state.client_sequence(organization_id, vault_id, client_id);
 
         Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }
@@ -1243,7 +1320,11 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
@@ -1257,7 +1338,7 @@ impl ReadService for ReadServiceImpl {
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
-        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = self.applied_state.vault_height(organization_id, vault_id);
 
         // Decode and validate page token if provided
         let (resume_key, at_height) = if req.page_token.is_empty() {
@@ -1270,7 +1351,7 @@ impl ReadService for ReadServiceImpl {
 
             // Validate token context matches request
             self.page_token_codec
-                .validate_context(&token, namespace_id.value(), vault_id.value(), query_hash)
+                .validate_context(&token, organization_id.value(), vault_id.value(), query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
@@ -1332,7 +1413,7 @@ impl ReadService for ReadServiceImpl {
                     let cursor = format!("{}#{}@{}", r.resource, r.relation, r.subject);
                     let token = PageToken {
                         version: 1,
-                        namespace_id: namespace_id.value(),
+                        organization_id: organization_id.value(),
                         vault_id: vault_id.value(),
                         last_key: cursor.into_bytes(),
                         at_height,
@@ -1361,7 +1442,11 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
@@ -1370,7 +1455,7 @@ impl ReadService for ReadServiceImpl {
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
-        let block_height = self.applied_state.vault_height(namespace_id, vault_id);
+        let block_height = self.applied_state.vault_height(organization_id, vault_id);
 
         // Decode and validate page token if provided
         let (resume_key, at_height) = if req.page_token.is_empty() {
@@ -1383,7 +1468,7 @@ impl ReadService for ReadServiceImpl {
 
             // Validate token context matches request
             self.page_token_codec
-                .validate_context(&token, namespace_id.value(), vault_id.value(), query_hash)
+                .validate_context(&token, organization_id.value(), vault_id.value(), query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
@@ -1414,7 +1499,7 @@ impl ReadService for ReadServiceImpl {
                 .map(|res| {
                     let token = PageToken {
                         version: 1,
-                        namespace_id: namespace_id.value(),
+                        organization_id: organization_id.value(),
                         vault_id: vault_id.value(),
                         last_key: res.as_bytes().to_vec(),
                         at_height,
@@ -1439,11 +1524,15 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let namespace_id = NamespaceId::new(req.namespace_id.as_ref().map_or(0, |n| n.id));
+        let organization_id = match req.organization_slug.as_ref() {
+            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
+                .resolve(OrganizationSlug::new(n.slug))?,
+            _ => OrganizationId::new(0),
+        };
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
-        // Use vault_id from request, defaulting to 0 for namespace-level entities
+        // Use vault_id from request, defaulting to 0 for organization-level entities
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Compute query hash from filter parameters for token validation
@@ -1457,13 +1546,13 @@ impl ReadService for ReadServiceImpl {
         // Get current block height for consistent pagination
         let block_height = if vault_id.value() != 0 {
             // Specific vault requested - use its height
-            self.applied_state.vault_height(namespace_id, vault_id)
+            self.applied_state.vault_height(organization_id, vault_id)
         } else {
-            // Namespace-level entities - use max height across all vaults in namespace
+            // Organization-level entities - use max height across all vaults in organization
             self.applied_state
                 .all_vault_heights()
                 .iter()
-                .filter(|((ns, _), _)| *ns == namespace_id)
+                .filter(|((ns, _), _)| *ns == organization_id)
                 .map(|(_, h)| *h)
                 .max()
                 .unwrap_or(0)
@@ -1480,7 +1569,7 @@ impl ReadService for ReadServiceImpl {
 
             // Validate token context matches request
             self.page_token_codec
-                .validate_context(&token, namespace_id.value(), vault_id.value(), query_hash)
+                .validate_context(&token, organization_id.value(), vault_id.value(), query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
@@ -1518,7 +1607,7 @@ impl ReadService for ReadServiceImpl {
                 .map(|e| {
                     let token = PageToken {
                         version: 1,
-                        namespace_id: namespace_id.value(),
+                        organization_id: organization_id.value(),
                         vault_id: vault_id.value(),
                         last_key: e.key.clone(),
                         at_height,

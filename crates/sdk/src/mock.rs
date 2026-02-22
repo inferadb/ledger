@@ -60,14 +60,14 @@ use parking_lot::RwLock;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, transport::Server};
 
-/// Key for client state: (namespace_id, vault_id, client_id)
-type ClientKey = (i64, i64, String);
+/// Key for client state: (organization_slug, vault_id, client_id)
+type ClientKey = (u64, i64, String);
 
-/// Key for entity storage: (namespace_id, vault_id, key)
-type EntityKey = (i64, i64, String);
+/// Key for entity storage: (organization_slug, vault_id, key)
+type EntityKey = (u64, i64, String);
 
-/// Key for idempotency cache: (namespace_id, vault_id, client_id, idempotency_key)
-type IdempotencyKey = (i64, i64, String, Vec<u8>);
+/// Key for idempotency cache: (organization_slug, vault_id, client_id, idempotency_key)
+type IdempotencyKey = (u64, i64, String, Vec<u8>);
 
 /// Value for idempotency cache: (tx_id, block_height, assigned_sequence)
 type IdempotencyCacheEntry = (Vec<u8>, u64, u64);
@@ -105,17 +105,17 @@ struct MockState {
     /// Current block height (incremented on each write)
     block_height: AtomicU64,
 
-    /// Relationships storage: (namespace_id, vault_id) -> Vec<Relationship>
-    relationships: RwLock<HashMap<(i64, i64), Vec<proto::Relationship>>>,
+    /// Relationships storage: (organization_slug, vault_id) -> Vec<Relationship>
+    relationships: RwLock<HashMap<(u64, i64), Vec<proto::Relationship>>>,
 
-    /// Namespace info: namespace_id -> NamespaceInfo
-    namespaces: RwLock<HashMap<i64, NamespaceData>>,
+    /// Organization info: organization_slug -> OrganizationInfo
+    organizations: RwLock<HashMap<u64, OrganizationData>>,
 
-    /// Vault info: (namespace_id, vault_id) -> VaultData
-    vaults: RwLock<HashMap<(i64, i64), VaultData>>,
+    /// Vault info: (organization_slug, vault_id) -> VaultData
+    vaults: RwLock<HashMap<(u64, i64), VaultData>>,
 
-    /// Next namespace ID to assign
-    next_namespace_id: AtomicU64,
+    /// Next organization ID to assign
+    next_organization_slug: AtomicU64,
 
     /// Next vault ID to assign
     next_vault_id: AtomicU64,
@@ -124,9 +124,9 @@ struct MockState {
     peers: RwLock<Vec<proto::PeerInfo>>,
 }
 
-/// Namespace metadata for mock storage.
+/// Organization metadata for mock storage.
 #[derive(Debug, Clone)]
-struct NamespaceData {
+struct OrganizationData {
     name: String,
     shard_id: u32,
     status: i32,
@@ -144,7 +144,7 @@ impl MockState {
     fn new() -> Self {
         Self {
             block_height: AtomicU64::new(1),
-            next_namespace_id: AtomicU64::new(1),
+            next_organization_slug: AtomicU64::new(1),
             next_vault_id: AtomicU64::new(1),
             ..Default::default()
         }
@@ -278,14 +278,14 @@ impl MockLedgerServer {
     /// Sets an entity value for read tests.
     ///
     /// The entity will be stored with a version of 1 and no expiration.
-    pub fn set_entity(&self, namespace_id: i64, vault_id: i64, key: &str, value: &[u8]) {
-        self.set_entity_with_options(namespace_id, vault_id, key, value, 1, None);
+    pub fn set_entity(&self, organization_slug: u64, vault_id: i64, key: &str, value: &[u8]) {
+        self.set_entity_with_options(organization_slug, vault_id, key, value, 1, None);
     }
 
     /// Sets an entity value with version and optional expiration.
     pub fn set_entity_with_options(
         &self,
-        namespace_id: i64,
+        organization_slug: u64,
         vault_id: i64,
         key: &str,
         value: &[u8],
@@ -294,34 +294,40 @@ impl MockLedgerServer {
     ) {
         let mut entities = self.state.entities.write();
         entities.insert(
-            (namespace_id, vault_id, key.to_string()),
+            (organization_slug, vault_id, key.to_string()),
             (value.to_vec(), version, expires_at),
         );
     }
 
     /// Removes an entity from storage.
-    pub fn remove_entity(&self, namespace_id: i64, vault_id: i64, key: &str) {
+    pub fn remove_entity(&self, organization_slug: u64, vault_id: i64, key: &str) {
         let mut entities = self.state.entities.write();
-        entities.remove(&(namespace_id, vault_id, key.to_string()));
+        entities.remove(&(organization_slug, vault_id, key.to_string()));
     }
 
     /// Sets the last committed sequence for a client.
     ///
     /// Used to test idempotency behavior (ALREADY_COMMITTED, SEQUENCE_GAP).
-    pub fn set_client_state(&self, namespace_id: i64, vault_id: i64, client_id: &str, seq: u64) {
+    pub fn set_client_state(
+        &self,
+        organization_slug: u64,
+        vault_id: i64,
+        client_id: &str,
+        seq: u64,
+    ) {
         let mut sequences = self.state.client_sequences.write();
-        sequences.insert((namespace_id, vault_id, client_id.to_string()), seq);
+        sequences.insert((organization_slug, vault_id, client_id.to_string()), seq);
     }
 
     /// Returns the last committed sequence for a client.
     pub fn get_client_state(
         &self,
-        namespace_id: i64,
+        organization_slug: u64,
         vault_id: i64,
         client_id: &str,
     ) -> Option<u64> {
         let sequences = self.state.client_sequences.read();
-        sequences.get(&(namespace_id, vault_id, client_id.to_string())).copied()
+        sequences.get(&(organization_slug, vault_id, client_id.to_string())).copied()
     }
 
     /// Injects UNAVAILABLE errors for the next N requests.
@@ -356,14 +362,14 @@ impl MockLedgerServer {
     /// Adds a relationship for query tests.
     pub fn add_relationship(
         &self,
-        namespace_id: i64,
+        organization_slug: u64,
         vault_id: i64,
         resource: &str,
         relation: &str,
         subject: &str,
     ) {
         let mut relationships = self.state.relationships.write();
-        let entry = relationships.entry((namespace_id, vault_id)).or_default();
+        let entry = relationships.entry((organization_slug, vault_id)).or_default();
         entry.push(proto::Relationship {
             resource: resource.to_string(),
             relation: relation.to_string(),
@@ -371,24 +377,24 @@ impl MockLedgerServer {
         });
     }
 
-    /// Adds a namespace for admin tests.
-    pub fn add_namespace(&self, namespace_id: i64, name: &str, shard_id: u32) {
-        let mut namespaces = self.state.namespaces.write();
-        namespaces.insert(
-            namespace_id,
-            NamespaceData {
+    /// Adds a organization for admin tests.
+    pub fn add_organization(&self, organization_slug: u64, name: &str, shard_id: u32) {
+        let mut organizations = self.state.organizations.write();
+        organizations.insert(
+            organization_slug,
+            OrganizationData {
                 name: name.to_string(),
                 shard_id,
-                status: proto::NamespaceStatus::Active as i32,
+                status: proto::OrganizationStatus::Active as i32,
             },
         );
     }
 
     /// Adds a vault for admin tests.
-    pub fn add_vault(&self, namespace_id: i64, vault_id: i64) {
+    pub fn add_vault(&self, organization_slug: u64, vault_id: i64) {
         let mut vaults = self.state.vaults.write();
         vaults.insert(
-            (namespace_id, vault_id),
+            (organization_slug, vault_id),
             VaultData {
                 height: 1,
                 state_root: vec![0u8; 32],
@@ -414,7 +420,7 @@ impl MockLedgerServer {
         self.state.client_sequences.write().clear();
         self.state.idempotency_cache.write().clear();
         self.state.relationships.write().clear();
-        self.state.namespaces.write().clear();
+        self.state.organizations.write().clear();
         self.state.vaults.write().clear();
         self.state.peers.write().clear();
         self.state.unavailable_count.store(0, Ordering::SeqCst);
@@ -465,11 +471,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
-        let key = (namespace_id, vault_id, req.key);
+        let key = (organization_slug, vault_id, req.key);
 
         let (value, block_height) = match entities.get(&key) {
             Some((v, ..)) => (Some(v.clone()), self.state.block_height.load(Ordering::SeqCst)),
@@ -488,7 +494,7 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
@@ -496,7 +502,7 @@ impl ReadService for MockReadService {
             .keys
             .iter()
             .map(|key| {
-                let entity_key = (namespace_id, vault_id, key.clone());
+                let entity_key = (organization_slug, vault_id, key.clone());
                 match entities.get(&entity_key) {
                     Some((v, ..)) => proto::BatchReadResult {
                         key: key.clone(),
@@ -523,11 +529,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
-        let key = (namespace_id, vault_id, req.key);
+        let key = (organization_slug, vault_id, req.key);
         let block_height = self.state.block_height.load(Ordering::SeqCst);
 
         let value = entities.get(&key).map(|(v, ..)| v.clone());
@@ -536,7 +542,7 @@ impl ReadService for MockReadService {
         let state_root = vec![0u8; 32];
         let block_header = proto::BlockHeader {
             height: block_height,
-            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
             vault_id: Some(proto::VaultId { id: vault_id }),
             previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
             tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -571,11 +577,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
-        let key = (namespace_id, vault_id, req.key);
+        let key = (organization_slug, vault_id, req.key);
         let value = entities.get(&key).map(|(v, ..)| v.clone());
 
         Ok(Response::new(proto::HistoricalReadResponse {
@@ -606,13 +612,13 @@ impl ReadService for MockReadService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let block = proto::Block {
             header: Some(proto::BlockHeader {
                 height: req.height,
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
                 previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
                 tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -635,14 +641,14 @@ impl ReadService for MockReadService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let blocks: Vec<proto::Block> = (req.start_height..=req.end_height)
             .map(|height| proto::Block {
                 header: Some(proto::BlockHeader {
                     height,
-                    namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                    organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
                     vault_id: Some(proto::VaultId { id: vault_id }),
                     previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
                     tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -685,12 +691,13 @@ impl ReadService for MockReadService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
 
         let sequences = self.state.client_sequences.read();
-        let last_seq = sequences.get(&(namespace_id, vault_id, client_id)).copied().unwrap_or(0);
+        let last_seq =
+            sequences.get(&(organization_slug, vault_id, client_id)).copied().unwrap_or(0);
 
         Ok(Response::new(proto::GetClientStateResponse { last_committed_sequence: last_seq }))
     }
@@ -704,11 +711,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let relationships = self.state.relationships.read();
-        let rels = relationships.get(&(namespace_id, vault_id)).cloned().unwrap_or_default();
+        let rels = relationships.get(&(organization_slug, vault_id)).cloned().unwrap_or_default();
 
         // Apply filters
         let filtered: Vec<proto::Relationship> = rels
@@ -735,12 +742,12 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let relationships = self.state.relationships.read();
         let resources: Vec<String> = relationships
-            .get(&(namespace_id, vault_id))
+            .get(&(organization_slug, vault_id))
             .map(|rels| {
                 rels.iter()
                     .filter(|r| r.resource.starts_with(&format!("{}:", req.resource_type)))
@@ -768,13 +775,13 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
 
         let entities = self.state.entities.read();
         let matching: Vec<proto::Entity> = entities
             .iter()
             .filter(|((ns, _vault, key), _)| {
-                *ns == namespace_id && key.starts_with(&req.key_prefix)
+                *ns == organization_slug && key.starts_with(&req.key_prefix)
             })
             .map(|((_, _, key), (value, version, expires_at))| proto::Entity {
                 key: key.clone(),
@@ -827,13 +834,13 @@ impl WriteService for MockWriteService {
         self.state.write_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let idempotency_key = req.idempotency_key;
 
         // Check idempotency cache
-        let cache_key = (namespace_id, vault_id, client_id.clone(), idempotency_key.clone());
+        let cache_key = (organization_slug, vault_id, client_id.clone(), idempotency_key.clone());
         {
             let cache = self.state.idempotency_cache.read();
             if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
@@ -862,16 +869,17 @@ impl WriteService for MockWriteService {
                     match op_inner {
                         proto::operation::Op::SetEntity(set) => {
                             entities.insert(
-                                (namespace_id, vault_id, set.key),
+                                (organization_slug, vault_id, set.key),
                                 (set.value, block_height, set.expires_at),
                             );
                         },
                         proto::operation::Op::DeleteEntity(del) => {
-                            entities.remove(&(namespace_id, vault_id, del.key));
+                            entities.remove(&(organization_slug, vault_id, del.key));
                         },
                         proto::operation::Op::CreateRelationship(rel) => {
                             let mut relationships = self.state.relationships.write();
-                            let entry = relationships.entry((namespace_id, vault_id)).or_default();
+                            let entry =
+                                relationships.entry((organization_slug, vault_id)).or_default();
                             entry.push(proto::Relationship {
                                 resource: rel.resource,
                                 relation: rel.relation,
@@ -880,7 +888,9 @@ impl WriteService for MockWriteService {
                         },
                         proto::operation::Op::DeleteRelationship(del) => {
                             let mut relationships = self.state.relationships.write();
-                            if let Some(rels) = relationships.get_mut(&(namespace_id, vault_id)) {
+                            if let Some(rels) =
+                                relationships.get_mut(&(organization_slug, vault_id))
+                            {
                                 rels.retain(|r| {
                                     r.resource != del.resource
                                         || r.relation != del.relation
@@ -889,7 +899,7 @@ impl WriteService for MockWriteService {
                             }
                         },
                         proto::operation::Op::ExpireEntity(expire) => {
-                            entities.remove(&(namespace_id, vault_id, expire.key));
+                            entities.remove(&(organization_slug, vault_id, expire.key));
                         },
                     }
                 }
@@ -897,7 +907,7 @@ impl WriteService for MockWriteService {
         }
 
         // Assign server sequence and update client state
-        let client_key = (namespace_id, vault_id, client_id);
+        let client_key = (organization_slug, vault_id, client_id);
         let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
             let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
@@ -932,13 +942,13 @@ impl WriteService for MockWriteService {
         self.state.write_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let idempotency_key = req.idempotency_key;
 
         // Check idempotency cache
-        let cache_key = (namespace_id, vault_id, client_id.clone(), idempotency_key.clone());
+        let cache_key = (organization_slug, vault_id, client_id.clone(), idempotency_key.clone());
         {
             let cache = self.state.idempotency_cache.read();
             if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
@@ -968,17 +978,17 @@ impl WriteService for MockWriteService {
                         match op_inner {
                             proto::operation::Op::SetEntity(set) => {
                                 entities.insert(
-                                    (namespace_id, vault_id, set.key),
+                                    (organization_slug, vault_id, set.key),
                                     (set.value, block_height, set.expires_at),
                                 );
                             },
                             proto::operation::Op::DeleteEntity(del) => {
-                                entities.remove(&(namespace_id, vault_id, del.key));
+                                entities.remove(&(organization_slug, vault_id, del.key));
                             },
                             proto::operation::Op::CreateRelationship(rel) => {
                                 let mut relationships = self.state.relationships.write();
                                 let entry =
-                                    relationships.entry((namespace_id, vault_id)).or_default();
+                                    relationships.entry((organization_slug, vault_id)).or_default();
                                 entry.push(proto::Relationship {
                                     resource: rel.resource,
                                     relation: rel.relation,
@@ -987,7 +997,8 @@ impl WriteService for MockWriteService {
                             },
                             proto::operation::Op::DeleteRelationship(del) => {
                                 let mut relationships = self.state.relationships.write();
-                                if let Some(rels) = relationships.get_mut(&(namespace_id, vault_id))
+                                if let Some(rels) =
+                                    relationships.get_mut(&(organization_slug, vault_id))
                                 {
                                     rels.retain(|r| {
                                         r.resource != del.resource
@@ -997,7 +1008,7 @@ impl WriteService for MockWriteService {
                                 }
                             },
                             proto::operation::Op::ExpireEntity(expire) => {
-                                entities.remove(&(namespace_id, vault_id, expire.key));
+                                entities.remove(&(organization_slug, vault_id, expire.key));
                             },
                         }
                     }
@@ -1006,7 +1017,7 @@ impl WriteService for MockWriteService {
         }
 
         // Assign server sequence and update client state
-        let client_key = (namespace_id, vault_id, client_id);
+        let client_key = (organization_slug, vault_id, client_id);
         let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
             let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
@@ -1049,69 +1060,62 @@ impl MockAdminService {
 
 #[tonic::async_trait]
 impl AdminService for MockAdminService {
-    async fn create_namespace(
+    async fn create_organization(
         &self,
-        request: Request<proto::CreateNamespaceRequest>,
-    ) -> Result<Response<proto::CreateNamespaceResponse>, Status> {
+        request: Request<proto::CreateOrganizationRequest>,
+    ) -> Result<Response<proto::CreateOrganizationResponse>, Status> {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = self.state.next_namespace_id.fetch_add(1, Ordering::SeqCst) as i64;
+        let organization_slug = self.state.next_organization_slug.fetch_add(1, Ordering::SeqCst);
 
         {
-            let mut namespaces = self.state.namespaces.write();
-            namespaces.insert(
-                namespace_id,
-                NamespaceData {
+            let mut organizations = self.state.organizations.write();
+            organizations.insert(
+                organization_slug,
+                OrganizationData {
                     name: req.name,
                     shard_id: req.shard_id.map_or(1, |s| s.id),
-                    status: proto::NamespaceStatus::Active as i32,
+                    status: proto::OrganizationStatus::Active as i32,
                 },
             );
         }
 
-        Ok(Response::new(proto::CreateNamespaceResponse {
-            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+        Ok(Response::new(proto::CreateOrganizationResponse {
+            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
             shard_id: Some(proto::ShardId { id: 1 }),
         }))
     }
 
-    async fn delete_namespace(
+    async fn delete_organization(
         &self,
-        _request: Request<proto::DeleteNamespaceRequest>,
-    ) -> Result<Response<proto::DeleteNamespaceResponse>, Status> {
+        _request: Request<proto::DeleteOrganizationRequest>,
+    ) -> Result<Response<proto::DeleteOrganizationResponse>, Status> {
         self.state.check_injection().await?;
 
-        Ok(Response::new(proto::DeleteNamespaceResponse { deleted_at: None }))
+        Ok(Response::new(proto::DeleteOrganizationResponse { deleted_at: None }))
     }
 
-    async fn get_namespace(
+    async fn get_organization(
         &self,
-        request: Request<proto::GetNamespaceRequest>,
-    ) -> Result<Response<proto::GetNamespaceResponse>, Status> {
+        request: Request<proto::GetOrganizationRequest>,
+    ) -> Result<Response<proto::GetOrganizationResponse>, Status> {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = match req.lookup {
-            Some(proto::get_namespace_request::Lookup::NamespaceId(id)) => id.id,
-            Some(proto::get_namespace_request::Lookup::Name(name)) => {
-                let namespaces = self.state.namespaces.read();
-                namespaces
-                    .iter()
-                    .find(|(_, data)| data.name == name)
-                    .map(|(id, _)| *id)
-                    .ok_or_else(|| Status::not_found("Namespace not found"))?
-            },
-            None => return Err(Status::invalid_argument("Missing lookup")),
-        };
+        let organization_slug = req
+            .organization_slug
+            .as_ref()
+            .map(|s| s.slug)
+            .ok_or_else(|| Status::invalid_argument("Missing organization_slug"))?;
 
-        let namespaces = self.state.namespaces.read();
-        let data = namespaces
-            .get(&namespace_id)
-            .ok_or_else(|| Status::not_found("Namespace not found"))?;
+        let organizations = self.state.organizations.read();
+        let data = organizations
+            .get(&organization_slug)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
 
-        Ok(Response::new(proto::GetNamespaceResponse {
-            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+        Ok(Response::new(proto::GetOrganizationResponse {
+            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
             name: data.name.clone(),
             shard_id: Some(proto::ShardId { id: data.shard_id }),
             member_nodes: vec![],
@@ -1121,17 +1125,17 @@ impl AdminService for MockAdminService {
         }))
     }
 
-    async fn list_namespaces(
+    async fn list_organizations(
         &self,
-        _request: Request<proto::ListNamespacesRequest>,
-    ) -> Result<Response<proto::ListNamespacesResponse>, Status> {
+        _request: Request<proto::ListOrganizationsRequest>,
+    ) -> Result<Response<proto::ListOrganizationsResponse>, Status> {
         self.state.check_injection().await?;
 
-        let namespaces = self.state.namespaces.read();
-        let responses: Vec<proto::GetNamespaceResponse> = namespaces
+        let organizations = self.state.organizations.read();
+        let responses: Vec<proto::GetOrganizationResponse> = organizations
             .iter()
-            .map(|(id, data)| proto::GetNamespaceResponse {
-                namespace_id: Some(proto::NamespaceId { id: *id }),
+            .map(|(id, data)| proto::GetOrganizationResponse {
+                organization_slug: Some(proto::OrganizationSlug { slug: *id }),
                 name: data.name.clone(),
                 shard_id: Some(proto::ShardId { id: data.shard_id }),
                 member_nodes: vec![],
@@ -1141,8 +1145,8 @@ impl AdminService for MockAdminService {
             })
             .collect();
 
-        Ok(Response::new(proto::ListNamespacesResponse {
-            namespaces: responses,
+        Ok(Response::new(proto::ListOrganizationsResponse {
+            organizations: responses,
             next_page_token: None,
         }))
     }
@@ -1154,13 +1158,13 @@ impl AdminService for MockAdminService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = self.state.next_vault_id.fetch_add(1, Ordering::SeqCst) as i64;
 
         {
             let mut vaults = self.state.vaults.write();
             vaults.insert(
-                (namespace_id, vault_id),
+                (organization_slug, vault_id),
                 VaultData {
                     height: 1,
                     state_root: vec![0u8; 32],
@@ -1173,7 +1177,7 @@ impl AdminService for MockAdminService {
             vault_id: Some(proto::VaultId { id: vault_id }),
             genesis: Some(proto::BlockHeader {
                 height: 0,
-                namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+                organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
                 previous_hash: None,
                 tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -1202,16 +1206,16 @@ impl AdminService for MockAdminService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let namespace_id = req.namespace_id.map_or(0, |n| n.id);
+        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let vaults = self.state.vaults.read();
         let data = vaults
-            .get(&(namespace_id, vault_id))
+            .get(&(organization_slug, vault_id))
             .ok_or_else(|| Status::not_found("Vault not found"))?;
 
         Ok(Response::new(proto::GetVaultResponse {
-            namespace_id: Some(proto::NamespaceId { id: namespace_id }),
+            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
             vault_id: Some(proto::VaultId { id: vault_id }),
             height: data.height,
             state_root: Some(proto::Hash { value: data.state_root.clone() }),
@@ -1231,8 +1235,8 @@ impl AdminService for MockAdminService {
         let vaults = self.state.vaults.read();
         let responses: Vec<proto::GetVaultResponse> = vaults
             .iter()
-            .map(|((namespace_id, vault_id), data)| proto::GetVaultResponse {
-                namespace_id: Some(proto::NamespaceId { id: *namespace_id }),
+            .map(|((organization_slug, vault_id), data)| proto::GetVaultResponse {
+                organization_slug: Some(proto::OrganizationSlug { slug: *organization_slug }),
                 vault_id: Some(proto::VaultId { id: *vault_id }),
                 height: data.height,
                 state_root: Some(proto::Hash { value: data.state_root.clone() }),
@@ -1490,7 +1494,7 @@ impl SystemDiscoveryService for MockDiscoveryService {
         Ok(Response::new(proto::GetSystemStateResponse {
             version: 1,
             nodes: vec![],
-            namespaces: vec![],
+            organizations: vec![],
         }))
     }
 }
@@ -1596,12 +1600,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_mock_server_add_namespace() {
+        async fn test_mock_server_add_organization() {
             let server = MockLedgerServer::start().await.unwrap();
 
-            server.add_namespace(1, "test-namespace", 1);
+            server.add_organization(1, "test-organization", 1);
 
-            // Namespace should be stored (verify no panic)
+            // Organization should be stored (verify no panic)
         }
 
         #[tokio::test]
@@ -1630,7 +1634,7 @@ mod tests {
             server.set_entity(1, 0, "key", b"value");
             server.set_client_state(1, 0, "client", 5);
             server.add_relationship(1, 0, "r", "rel", "s");
-            server.add_namespace(1, "ns", 1);
+            server.add_organization(1, "ns", 1);
             server.add_vault(1, 0);
             server.add_peer("node", vec![], 5000);
             server.inject_unavailable(3);
@@ -2087,29 +2091,29 @@ mod tests {
         // ==================== Admin Operations ====================
 
         #[tokio::test]
-        async fn test_create_and_get_namespace() {
+        async fn test_create_and_get_organization() {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let ns_id = client.create_namespace("test-namespace").await.unwrap();
-            assert!(ns_id > 0);
+            let org = client.create_organization("test-organization").await.unwrap();
+            assert!(org.organization_slug > 0);
 
-            let ns_info = client.get_namespace(ns_id).await.unwrap();
-            assert_eq!(ns_info.namespace_id, ns_id);
-            assert_eq!(ns_info.name, "test-namespace");
+            let org_info = client.get_organization(org.organization_slug).await.unwrap();
+            assert_eq!(org_info.organization_slug, org.organization_slug);
+            assert_eq!(org_info.name, "test-organization");
         }
 
         #[tokio::test]
-        async fn test_list_namespaces() {
+        async fn test_list_organizations() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_namespace(1, "ns1", 1);
-            server.add_namespace(2, "ns2", 1);
+            server.add_organization(1, "ns1", 1);
+            server.add_organization(2, "ns2", 1);
             let client = create_client_for_mock(&server).await;
 
-            let namespaces = client.list_namespaces().await.unwrap();
+            let organizations = client.list_organizations().await.unwrap();
 
-            assert_eq!(namespaces.len(), 2);
-            let names: Vec<_> = namespaces.iter().map(|n| n.name.as_str()).collect();
+            assert_eq!(organizations.len(), 2);
+            let names: Vec<_> = organizations.iter().map(|n| n.name.as_str()).collect();
             assert!(names.contains(&"ns1"));
             assert!(names.contains(&"ns2"));
         }
@@ -2117,7 +2121,7 @@ mod tests {
         #[tokio::test]
         async fn test_create_and_get_vault() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_namespace(1, "ns", 1);
+            server.add_organization(1, "ns", 1);
             let client = create_client_for_mock(&server).await;
 
             let vault_info = client.create_vault(1).await.unwrap();
@@ -2277,15 +2281,15 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_read_namespace_level_without_vault() {
+        async fn test_read_organization_level_without_vault() {
             let server = MockLedgerServer::start().await.unwrap();
-            // Set entity at namespace level (vault_id = 0 is treated as default)
-            server.set_entity(1, 0, "ns-entity", b"namespace data");
+            // Set entity at organization level (vault_id = 0 is treated as default)
+            server.set_entity(1, 0, "ns-entity", b"organization data");
             let client = create_client_for_mock(&server).await;
 
             let result = client.read(1, None, "ns-entity").await.unwrap();
 
-            assert_eq!(result, Some(b"namespace data".to_vec()));
+            assert_eq!(result, Some(b"organization data".to_vec()));
         }
 
         #[tokio::test]

@@ -499,8 +499,8 @@ mod tests {
         let config = RateLimitConfig::builder().build().expect("defaults should be valid");
         assert_eq!(config.client_burst, 100);
         assert_eq!(config.client_rate, 50.0);
-        assert_eq!(config.namespace_burst, 1000);
-        assert_eq!(config.namespace_rate, 500.0);
+        assert_eq!(config.organization_burst, 1000);
+        assert_eq!(config.organization_rate, 500.0);
         assert_eq!(config.backpressure_threshold, 100);
     }
 
@@ -509,15 +509,15 @@ mod tests {
         let config = RateLimitConfig::builder()
             .client_burst(200)
             .client_rate(100.0)
-            .namespace_burst(5000)
-            .namespace_rate(2000.0)
+            .organization_burst(5000)
+            .organization_rate(2000.0)
             .backpressure_threshold(200)
             .build()
             .expect("valid custom config");
         assert_eq!(config.client_burst, 200);
         assert_eq!(config.client_rate, 100.0);
-        assert_eq!(config.namespace_burst, 5000);
-        assert_eq!(config.namespace_rate, 2000.0);
+        assert_eq!(config.organization_burst, 5000);
+        assert_eq!(config.organization_rate, 2000.0);
         assert_eq!(config.backpressure_threshold, 200);
     }
 
@@ -544,19 +544,19 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limit_config_namespace_burst_zero() {
-        let result = RateLimitConfig::builder().namespace_burst(0).build();
+    fn test_rate_limit_config_organization_burst_zero() {
+        let result = RateLimitConfig::builder().organization_burst(0).build();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("namespace_burst"));
+        assert!(err.to_string().contains("organization_burst"));
     }
 
     #[test]
-    fn test_rate_limit_config_namespace_rate_zero() {
-        let result = RateLimitConfig::builder().namespace_rate(0.0).build();
+    fn test_rate_limit_config_organization_rate_zero() {
+        let result = RateLimitConfig::builder().organization_rate(0.0).build();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("namespace_rate"));
+        assert!(err.to_string().contains("organization_rate"));
     }
 
     #[test]
@@ -573,8 +573,8 @@ mod tests {
         let result = RateLimitConfig::builder()
             .client_burst(1)
             .client_rate(0.001)
-            .namespace_burst(1)
-            .namespace_rate(0.001)
+            .organization_burst(1)
+            .organization_rate(0.001)
             .backpressure_threshold(1)
             .build();
         assert!(result.is_ok());
@@ -585,8 +585,8 @@ mod tests {
         let config = RateLimitConfig::default();
         assert_eq!(config.client_burst, 100);
         assert_eq!(config.client_rate, 50.0);
-        assert_eq!(config.namespace_burst, 1000);
-        assert_eq!(config.namespace_rate, 500.0);
+        assert_eq!(config.organization_burst, 1000);
+        assert_eq!(config.organization_rate, 500.0);
         assert_eq!(config.backpressure_threshold, 100);
         assert!(config.validate().is_ok());
     }
@@ -600,7 +600,7 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.client_burst = 100;
-        config.namespace_rate = 0.0;
+        config.organization_rate = 0.0;
         assert!(config.validate().is_err());
     }
 
@@ -609,8 +609,8 @@ mod tests {
         let config = RateLimitConfig::builder()
             .client_burst(200)
             .client_rate(100.0)
-            .namespace_burst(3000)
-            .namespace_rate(1500.0)
+            .organization_burst(3000)
+            .organization_rate(1500.0)
             .backpressure_threshold(150)
             .build()
             .expect("valid");
@@ -1104,7 +1104,7 @@ mod tests {
             .max_value_bytes(1024)
             .max_operations_per_write(500)
             .max_batch_payload_bytes(50 * 1024 * 1024)
-            .max_namespace_name_bytes(128)
+            .max_organization_name_bytes(128)
             .max_relationship_string_bytes(512)
             .build()
             .unwrap();
@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(config.max_value_bytes, 1024);
         assert_eq!(config.max_operations_per_write, 500);
         assert_eq!(config.max_batch_payload_bytes, 50 * 1024 * 1024);
-        assert_eq!(config.max_namespace_name_bytes, 128);
+        assert_eq!(config.max_organization_name_bytes, 128);
         assert_eq!(config.max_relationship_string_bytes, 512);
     }
 
@@ -1141,8 +1141,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_config_max_namespace_name_bytes_zero() {
-        let result = ValidationConfig::builder().max_namespace_name_bytes(0).build();
+    fn test_validation_config_max_organization_name_bytes_zero() {
+        let result = ValidationConfig::builder().max_organization_name_bytes(0).build();
         assert!(result.is_err());
     }
 
@@ -1509,8 +1509,8 @@ mod tests {
         let props = value.get("properties").and_then(|v| v.as_object()).unwrap();
         assert!(props.contains_key("client_burst"));
         assert!(props.contains_key("client_rate"));
-        assert!(props.contains_key("namespace_burst"));
-        assert!(props.contains_key("namespace_rate"));
+        assert!(props.contains_key("organization_burst"));
+        assert!(props.contains_key("organization_rate"));
         assert!(props.contains_key("backpressure_threshold"));
     }
 }

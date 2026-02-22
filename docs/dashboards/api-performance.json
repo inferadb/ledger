@@ -32,10 +32,10 @@
         "sort": 1
       },
       {
-        "name": "namespace_id",
+        "name": "organization_slug",
         "type": "query",
         "datasource": { "uid": "${datasource}" },
-        "query": "label_values(ledger_namespace_operations_total, namespace_id)",
+        "query": "label_values(ledger_organization_operations_total, organization_slug)",
         "includeAll": true,
         "multi": true,
         "current": { "text": "All", "value": "$__all" },
@@ -382,7 +382,7 @@
       ]
     },
     {
-      "title": "Namespace Operations",
+      "title": "Organization Operations",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
       "datasource": { "uid": "${datasource}" },
@@ -394,13 +394,13 @@
       },
       "targets": [
         {
-          "expr": "sum by (namespace_id, operation) (rate(ledger_namespace_operations_total{namespace_id=~\"$namespace_id\"}[$__rate_interval]))",
-          "legendFormat": "ns:{{namespace_id}} {{operation}}"
+          "expr": "sum by (organization_slug, operation) (rate(ledger_organization_operations_total{organization_slug=~\"$organization_slug\"}[$__rate_interval]))",
+          "legendFormat": "ns:{{organization_slug}} {{operation}}"
         }
       ]
     },
     {
-      "title": "Namespace Latency — p99",
+      "title": "Organization Latency — p99",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
       "datasource": { "uid": "${datasource}" },
@@ -412,8 +412,8 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (namespace_id, le) (rate(ledger_namespace_latency_seconds_bucket{namespace_id=~\"$namespace_id\"}[$__rate_interval])))",
-          "legendFormat": "ns:{{namespace_id}} p99"
+          "expr": "histogram_quantile(0.99, sum by (organization_slug, le) (rate(ledger_organization_latency_seconds_bucket{organization_slug=~\"$organization_slug\"}[$__rate_interval])))",
+          "legendFormat": "ns:{{organization_slug}} p99"
         }
       ]
     }

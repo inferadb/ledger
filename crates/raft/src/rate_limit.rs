@@ -3,7 +3,7 @@
 //! Provides three tiers of admission control for write requests:
 //!
 //! 1. **Per-client** — prevents a single bad actor from monopolizing resources
-//! 2. **Per-namespace** — ensures fair sharing across tenants in a multi-tenant shard
+//! 2. **Per-organization** — ensures fair sharing across tenants in a multi-tenant shard
 //! 3. **Global backpressure** — throttles all requests when Raft queue depth is high
 //!
 //! Uses the token bucket algorithm, which allows controlled bursts while maintaining
@@ -11,7 +11,7 @@
 //! throughput). Tokens are consumed on each request and refilled over time.
 //!
 //! Mitigates noisy neighbor problems in multi-tenant shards by applying rate
-//! limits per namespace_id at the shard leader.
+//! limits per organization_id at the shard leader.
 
 use std::{
     collections::HashMap,
@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_types::NamespaceId;
+use inferadb_ledger_types::OrganizationId;
 use parking_lot::Mutex;
 
 /// Level at which a rate limit was enforced.
@@ -27,8 +27,8 @@ use parking_lot::Mutex;
 pub enum RateLimitLevel {
     /// Per-client rate limit.
     Client,
-    /// Per-namespace rate limit.
-    Namespace,
+    /// Per-organization rate limit.
+    Organization,
     /// Global backpressure based on Raft queue depth.
     Backpressure,
 }
@@ -38,7 +38,7 @@ impl RateLimitLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Client => "client",
-            Self::Namespace => "namespace",
+            Self::Organization => "organization",
             Self::Backpressure => "backpressure",
         }
     }
@@ -72,7 +72,7 @@ pub struct RateLimitRejection {
     pub reason: RateLimitReason,
     /// Estimated milliseconds until the client should retry.
     pub retry_after_ms: u64,
-    /// The identifier that was rate limited (client_id or namespace_id).
+    /// The identifier that was rate limited (client_id or organization_id).
     pub identifier: String,
 }
 
@@ -151,7 +151,7 @@ impl TokenBucket {
     }
 }
 
-/// Multi-level rate limiter with per-client, per-namespace, and backpressure tiers.
+/// Multi-level rate limiter with per-client, per-organization, and backpressure tiers.
 ///
 /// Thread-safe: all mutable state is behind `Mutex`.
 /// Config thresholds use atomics for lock-free runtime reconfiguration.
@@ -163,7 +163,7 @@ impl TokenBucket {
 ///
 /// let limiter = RateLimiter::new(
 ///     1000, 500.0,  // per-client: burst 1000, 500/s sustained
-///     5000, 2000.0, // per-namespace: burst 5000, 2000/s sustained
+///     5000, 2000.0, // per-organization: burst 5000, 2000/s sustained
 ///     100,          // backpressure threshold: 100 pending proposals
 /// );
 ///
@@ -174,18 +174,18 @@ impl TokenBucket {
 pub struct RateLimiter {
     /// Per-client token buckets keyed by client_id.
     client_buckets: Mutex<HashMap<String, TokenBucket>>,
-    /// Per-namespace token buckets keyed by namespace_id.
-    namespace_buckets: Mutex<HashMap<NamespaceId, TokenBucket>>,
+    /// Per-organization token buckets keyed by organization_id.
+    organization_buckets: Mutex<HashMap<OrganizationId, TokenBucket>>,
 
     /// Capacity for per-client token buckets (max burst).
     client_capacity: AtomicU64,
     /// Refill rate for per-client buckets (tokens per second), stored as f64 bits.
     client_refill_rate_bits: AtomicU64,
 
-    /// Capacity for per-namespace token buckets (max burst).
-    namespace_capacity: AtomicU64,
-    /// Refill rate for per-namespace buckets (tokens per second), stored as f64 bits.
-    namespace_refill_rate_bits: AtomicU64,
+    /// Capacity for per-organization token buckets (max burst).
+    organization_capacity: AtomicU64,
+    /// Refill rate for per-organization buckets (tokens per second), stored as f64 bits.
+    organization_refill_rate_bits: AtomicU64,
 
     /// Raft pending proposal count above which backpressure is applied.
     backpressure_threshold: AtomicU64,
@@ -203,23 +203,23 @@ impl RateLimiter {
     ///
     /// * `client_capacity` — max burst size per client
     /// * `client_refill_rate` — sustained requests/sec per client
-    /// * `namespace_capacity` — max burst size per namespace
-    /// * `namespace_refill_rate` — sustained requests/sec per namespace
+    /// * `organization_capacity` — max burst size per organization
+    /// * `organization_refill_rate` — sustained requests/sec per organization
     /// * `backpressure_threshold` — pending Raft proposals above which all requests are throttled
     pub fn new(
         client_capacity: u64,
         client_refill_rate: f64,
-        namespace_capacity: u64,
-        namespace_refill_rate: f64,
+        organization_capacity: u64,
+        organization_refill_rate: f64,
         backpressure_threshold: u64,
     ) -> Self {
         Self {
             client_buckets: Mutex::new(HashMap::new()),
-            namespace_buckets: Mutex::new(HashMap::new()),
+            organization_buckets: Mutex::new(HashMap::new()),
             client_capacity: AtomicU64::new(client_capacity),
             client_refill_rate_bits: AtomicU64::new(client_refill_rate.to_bits()),
-            namespace_capacity: AtomicU64::new(namespace_capacity),
-            namespace_refill_rate_bits: AtomicU64::new(namespace_refill_rate.to_bits()),
+            organization_capacity: AtomicU64::new(organization_capacity),
+            organization_refill_rate_bits: AtomicU64::new(organization_refill_rate.to_bits()),
             backpressure_threshold: AtomicU64::new(backpressure_threshold),
             pending_proposals: AtomicU64::new(0),
             rejected_count: AtomicU64::new(0),
@@ -230,8 +230,8 @@ impl RateLimiter {
     ///
     /// Checks order ensures shared tokens are not wasted by per-client rejections:
     /// 1. Global backpressure (no token consumption — atomic threshold check)
-    /// 2. Per-client token bucket (most specific, checked before shared namespace bucket)
-    /// 3. Per-namespace token bucket (shared resource, only consumed after client passes)
+    /// 2. Per-client token bucket (most specific, checked before shared organization bucket)
+    /// 3. Per-organization token bucket (shared resource, only consumed after client passes)
     ///
     /// Returns `Ok(())` if allowed, `Err(RateLimitRejection)` with retry hint if rejected.
     ///
@@ -240,11 +240,11 @@ impl RateLimiter {
     /// Returns [`RateLimitRejection`] when any tier rejects the request:
     /// - **Backpressure**: Raft pending proposals exceed the configured threshold.
     /// - **Client**: Per-client token bucket is exhausted.
-    /// - **Namespace**: Per-namespace token bucket is exhausted.
+    /// - **Organization**: Per-organization token bucket is exhausted.
     pub fn check(
         &self,
         client_id: &str,
-        namespace_id: NamespaceId,
+        organization_id: OrganizationId,
     ) -> Result<(), RateLimitRejection> {
         // Tier 1: Global backpressure (cheapest — single atomic load, no token consumption)
         let pending = self.pending_proposals.load(Ordering::Relaxed);
@@ -260,8 +260,8 @@ impl RateLimiter {
             });
         }
 
-        // Tier 2: Per-client token bucket (checked before namespace to avoid
-        // wasting shared namespace tokens on client-rejected requests)
+        // Tier 2: Per-client token bucket (checked before organization to avoid
+        // wasting shared organization tokens on client-rejected requests)
         if !client_id.is_empty() {
             let mut buckets = self.client_buckets.lock();
             let bucket = buckets.entry(client_id.to_string()).or_insert_with(|| {
@@ -283,13 +283,13 @@ impl RateLimiter {
             }
         }
 
-        // Tier 3: Per-namespace token bucket (shared across all clients in a namespace)
+        // Tier 3: Per-organization token bucket (shared across all clients in a organization)
         {
-            let mut buckets = self.namespace_buckets.lock();
-            let bucket = buckets.entry(namespace_id).or_insert_with(|| {
+            let mut buckets = self.organization_buckets.lock();
+            let bucket = buckets.entry(organization_id).or_insert_with(|| {
                 TokenBucket::new(
-                    self.namespace_capacity.load(Ordering::Relaxed),
-                    f64::from_bits(self.namespace_refill_rate_bits.load(Ordering::Relaxed)),
+                    self.organization_capacity.load(Ordering::Relaxed),
+                    f64::from_bits(self.organization_refill_rate_bits.load(Ordering::Relaxed)),
                 )
             });
 
@@ -297,10 +297,10 @@ impl RateLimiter {
                 let retry_after_ms = bucket.retry_after_ms();
                 self.rejected_count.fetch_add(1, Ordering::Relaxed);
                 return Err(RateLimitRejection {
-                    level: RateLimitLevel::Namespace,
+                    level: RateLimitLevel::Organization,
                     reason: RateLimitReason::TokensExhausted,
                     retry_after_ms,
-                    identifier: namespace_id.to_string(),
+                    identifier: organization_id.to_string(),
                 });
             }
         }
@@ -330,7 +330,7 @@ impl RateLimiter {
     /// Removes stale entries that haven't been accessed recently.
     ///
     /// Call periodically to prevent unbounded memory growth from departed
-    /// clients or decommissioned namespaces.
+    /// clients or decommissioned organizations.
     pub fn cleanup_stale(&self, max_idle: Duration) {
         let now = Instant::now();
         {
@@ -338,16 +338,16 @@ impl RateLimiter {
             buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
         }
         {
-            let mut buckets = self.namespace_buckets.lock();
+            let mut buckets = self.organization_buckets.lock();
             buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
         }
     }
 
-    /// Returns the current token count for a specific namespace (for testing/metrics).
+    /// Returns the current token count for a specific organization (for testing/metrics).
     #[cfg(test)]
-    fn namespace_tokens(&self, namespace_id: NamespaceId) -> Option<u64> {
-        let buckets = self.namespace_buckets.lock();
-        buckets.get(&namespace_id).map(|b| b.tokens_millis / 1000)
+    fn organization_tokens(&self, organization_id: OrganizationId) -> Option<u64> {
+        let buckets = self.organization_buckets.lock();
+        buckets.get(&organization_id).map(|b| b.tokens_millis / 1000)
     }
 
     /// Returns the current token count for a specific client (for testing/metrics).
@@ -366,22 +366,23 @@ impl RateLimiter {
         &self,
         client_capacity: u64,
         client_refill_rate: f64,
-        namespace_capacity: u64,
-        namespace_refill_rate: f64,
+        organization_capacity: u64,
+        organization_refill_rate: f64,
         backpressure_threshold: u64,
     ) {
         self.client_capacity.store(client_capacity, Ordering::Relaxed);
         self.client_refill_rate_bits.store(client_refill_rate.to_bits(), Ordering::Relaxed);
-        self.namespace_capacity.store(namespace_capacity, Ordering::Relaxed);
-        self.namespace_refill_rate_bits.store(namespace_refill_rate.to_bits(), Ordering::Relaxed);
+        self.organization_capacity.store(organization_capacity, Ordering::Relaxed);
+        self.organization_refill_rate_bits
+            .store(organization_refill_rate.to_bits(), Ordering::Relaxed);
         self.backpressure_threshold.store(backpressure_threshold, Ordering::Relaxed);
     }
 }
 
-// Backwards compatibility: re-export as NamespaceRateLimiter for existing call sites
-// that only need namespace-level rate limiting.
-/// Alias for backwards compatibility with code using the namespace-only rate limiter.
-pub type NamespaceRateLimiter = RateLimiter;
+// Backwards compatibility: re-export as OrganizationRateLimiter for existing call sites
+// that only need organization-level rate limiting.
+/// Alias for backwards compatibility with code using the organization-only rate limiter.
+pub type OrganizationRateLimiter = RateLimiter;
 
 /// Alias for backwards compatibility.
 pub type RateLimitExceeded = RateLimitRejection;
@@ -396,8 +397,8 @@ mod tests {
         RateLimiter::new(
             5,    // client burst: 5
             10.0, // client refill: 10/s
-            10,   // namespace burst: 10
-            20.0, // namespace refill: 20/s
+            10,   // organization burst: 10
+            20.0, // organization refill: 20/s
             50,   // backpressure threshold: 50 pending
         )
     }
@@ -500,46 +501,46 @@ mod tests {
         let limiter = RateLimiter::new(
             1,     // very low client burst
             0.1,   // very low client refill
-            1000,  // high namespace burst
-            500.0, // high namespace refill
+            1000,  // high organization burst
+            500.0, // high organization refill
             100,   // backpressure threshold
         );
 
-        // With empty client_id, should only hit namespace limit
+        // With empty client_id, should only hit organization limit
         for _ in 0..100 {
             assert!(limiter.check("", 1.into()).is_ok());
         }
     }
 
-    // ── Per-namespace rate limiting ──────────────────────────────────────
+    // ── Per-organization rate limiting ──────────────────────────────────────
 
     #[test]
-    fn namespace_rate_limit_enforced() {
+    fn organization_rate_limit_enforced() {
         let limiter = test_limiter();
 
-        // Exhaust namespace burst (10 requests, using different clients to avoid client limit)
+        // Exhaust organization burst (10 requests, using different clients to avoid client limit)
         for i in 0..10 {
             assert!(limiter.check(&format!("client-{i}"), 42.into()).is_ok());
         }
 
-        // 11th request should be rejected at namespace level
+        // 11th request should be rejected at organization level
         let err = limiter.check("client-99", 42.into()).unwrap_err();
-        assert_eq!(err.level, RateLimitLevel::Namespace);
+        assert_eq!(err.level, RateLimitLevel::Organization);
         assert_eq!(err.reason, RateLimitReason::TokensExhausted);
-        assert_eq!(err.identifier, "ns:42");
+        assert_eq!(err.identifier, "org:42");
     }
 
     #[test]
-    fn different_namespaces_have_separate_buckets() {
+    fn different_organizations_have_separate_buckets() {
         let limiter = test_limiter();
 
-        // Exhaust namespace 1
+        // Exhaust organization 1
         for i in 0..10 {
             limiter.check(&format!("c-{i}"), 1.into()).unwrap();
         }
         assert!(limiter.check("c-99", 1.into()).is_err());
 
-        // Namespace 2 should still have its own quota
+        // Organization 2 should still have its own quota
         for i in 0..10 {
             assert!(limiter.check(&format!("c-{i}"), 2.into()).is_ok());
         }
@@ -587,12 +588,12 @@ mod tests {
 
     #[test]
     fn check_order_backpressure_first() {
-        // If both backpressure and namespace are exceeded, backpressure wins
+        // If both backpressure and organization are exceeded, backpressure wins
         let limiter = RateLimiter::new(100, 100.0, 1, 0.001, 10);
 
-        // Exhaust namespace
+        // Exhaust organization
         limiter.check("c", 1.into()).unwrap();
-        assert!(limiter.check("c2", 1.into()).is_err()); // namespace exhausted
+        assert!(limiter.check("c2", 1.into()).is_err()); // organization exhausted
 
         // Now also trigger backpressure
         limiter.set_pending_proposals(20);
@@ -606,7 +607,7 @@ mod tests {
         let limiter = test_limiter();
         assert_eq!(limiter.rejected_count(), 0);
 
-        // Exhaust namespace to trigger rejection
+        // Exhaust organization to trigger rejection
         for i in 0..10 {
             limiter.check(&format!("c-{i}"), 1.into()).unwrap();
         }
@@ -635,7 +636,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         limiter.cleanup_stale(Duration::ZERO);
         assert!(limiter.client_tokens("client-1").is_none());
-        assert!(limiter.namespace_tokens(1.into()).is_none());
+        assert!(limiter.organization_tokens(1.into()).is_none());
     }
 
     #[test]
@@ -649,13 +650,13 @@ mod tests {
     #[test]
     fn rejection_display_format() {
         let rejection = RateLimitRejection {
-            level: RateLimitLevel::Namespace,
+            level: RateLimitLevel::Organization,
             reason: RateLimitReason::TokensExhausted,
             retry_after_ms: 50,
             identifier: "42".to_string(),
         };
         let msg = format!("{rejection}");
-        assert!(msg.contains("namespace"));
+        assert!(msg.contains("organization"));
         assert!(msg.contains("42"));
         assert!(msg.contains("tokens_exhausted"));
     }
@@ -663,7 +664,7 @@ mod tests {
     #[test]
     fn level_and_reason_as_str() {
         assert_eq!(RateLimitLevel::Client.as_str(), "client");
-        assert_eq!(RateLimitLevel::Namespace.as_str(), "namespace");
+        assert_eq!(RateLimitLevel::Organization.as_str(), "organization");
         assert_eq!(RateLimitLevel::Backpressure.as_str(), "backpressure");
         assert_eq!(RateLimitReason::TokensExhausted.as_str(), "tokens_exhausted");
         assert_eq!(RateLimitReason::QueueDepth.as_str(), "queue_depth");
@@ -690,7 +691,7 @@ mod tests {
         // Start with generous limits so initial checks pass
         let limiter = Arc::new(RateLimiter::new(
             10_000, 5_000.0, // per-client: high burst, high refill
-            50_000, 20_000.0, // per-namespace: very high
+            50_000, 20_000.0, // per-organization: very high
             1000,     // backpressure threshold
         ));
 
@@ -703,12 +704,12 @@ mod tests {
             let running = Arc::clone(&running);
             handles.push(thread::spawn(move || {
                 let client_id = format!("client-{}", thread_id);
-                let namespace_id = NamespaceId::new((thread_id % 5 + 1) as i64);
+                let organization_id = OrganizationId::new((thread_id % 5 + 1) as i64);
                 let mut ok_count = 0u64;
                 let mut reject_count = 0u64;
 
                 while running.load(AOrdering::Relaxed) {
-                    match limiter.check(&client_id, namespace_id) {
+                    match limiter.check(&client_id, organization_id) {
                         Ok(()) => ok_count += 1,
                         Err(_) => reject_count += 1,
                     }
@@ -781,7 +782,7 @@ mod tests {
             burst_capacity,
             0.0, // Zero refill — tokens don't regenerate during test
             100_000,
-            100_000.0, // Namespace limits are generous
+            100_000.0, // Organization limits are generous
             10_000,    // No backpressure
         ));
 
@@ -803,7 +804,7 @@ mod tests {
                 barrier.wait();
 
                 // All use the same client_id to contend on one bucket
-                match limiter.check("shared-client", NamespaceId::new(1)) {
+                match limiter.check("shared-client", OrganizationId::new(1)) {
                     Ok(()) => {
                         allowed.fetch_add(1, AOrdering::Relaxed);
                     },
