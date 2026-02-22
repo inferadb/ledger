@@ -3056,7 +3056,7 @@ mod tests {
 
         // Verify we can send through the stored sender
         let announcement = BlockAnnouncement {
-            organization_slug: Some(ProtoOrganizationSlug { slug: 1 }),
+            organization: Some(ProtoOrganizationSlug { slug: 1 }),
             vault_id: Some(VaultId { id: 2 }),
             height: 3,
             block_hash: Some(Hash { value: vec![0u8; 32] }),
@@ -3068,7 +3068,7 @@ mod tests {
 
         // Verify receiver gets the announcement
         let received = receiver.recv().await.expect("receive");
-        assert_eq!(received.organization_slug, announcement.organization_slug);
+        assert_eq!(received.organization, announcement.organization);
         assert_eq!(received.vault_id, announcement.vault_id);
         assert_eq!(received.height, announcement.height);
     }
@@ -3207,7 +3207,7 @@ mod tests {
         );
 
         // Verify announcement contents
-        assert_eq!(received.organization_slug, Some(ProtoOrganizationSlug { slug: 42 }));
+        assert_eq!(received.organization, Some(ProtoOrganizationSlug { slug: 42 }));
         assert_eq!(received.vault_id, Some(ProtoVaultId { id: 1 }));
         assert_eq!(received.height, 1);
         assert!(received.block_hash.is_some(), "block_hash should be set");

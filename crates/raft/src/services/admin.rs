@@ -270,7 +270,7 @@ impl AdminService for AdminServiceImpl {
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         match result.data {
             LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
-                ctx.set_organization_slug(slug.value());
+                ctx.set_organization(slug.value());
                 ctx.set_success();
                 metrics::record_organization_operation(organization_id.value(), "admin");
                 metrics::record_organization_latency(
@@ -290,7 +290,7 @@ impl AdminService for AdminServiceImpl {
                 );
                 let org_slug = slug_resolver.resolve_slug(organization_id)?;
                 Ok(Response::new(CreateOrganizationResponse {
-                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                    slug: Some(OrganizationSlug { slug: org_slug.value() }),
                     shard_id: Some(ShardId { id: shard_id.value() }),
                 }))
             },
@@ -348,13 +348,13 @@ impl AdminService for AdminServiceImpl {
         );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
-            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+            slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_organization_slug(org_slug_val);
+        ctx.set_organization(org_slug_val);
 
         // Submit delete organization through Raft
         let ledger_request = LedgerRequest::DeleteOrganization { organization_id };
@@ -481,23 +481,23 @@ impl AdminService for AdminServiceImpl {
 
         // Extract organization from request
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
-            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+            slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
-        ctx.set_organization_slug(org_slug_val);
+        ctx.set_organization(org_slug_val);
 
         let org_meta = self.applied_state.get_organization(organization_id);
 
         match org_meta {
             Some(org) => {
-                ctx.set_organization_slug(org_slug_val);
+                ctx.set_organization(org_slug_val);
                 ctx.set_success();
                 let status = crate::proto_compat::organization_status_to_proto(org.status);
                 let org_slug = slug_resolver.resolve_slug(org.organization_id)?;
                 Ok(Response::new(GetOrganizationResponse {
-                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                    slug: Some(OrganizationSlug { slug: org_slug.value() }),
                     name: org.name,
                     shard_id: Some(ShardId { id: org.shard_id.value() }),
                     member_nodes: vec![],
@@ -537,7 +537,7 @@ impl AdminService for AdminServiceImpl {
                 let status = crate::proto_compat::organization_status_to_proto(org.status);
                 let org_slug = slug_resolver.resolve_slug(org.organization_id)?;
                 Ok(inferadb_ledger_proto::proto::GetOrganizationResponse {
-                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                    slug: Some(OrganizationSlug { slug: org_slug.value() }),
                     name: org.name,
                     shard_id: Some(ShardId { id: org.shard_id.value() }),
                     member_nodes: vec![],
@@ -589,13 +589,13 @@ impl AdminService for AdminServiceImpl {
         }
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
-            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        ctx.set_organization_slug(org_slug_val);
+        ctx.set_organization(org_slug_val);
 
         // Check vault count quota before submitting to Raft
         super::helpers::check_vault_quota(self.quota_checker.as_ref(), organization_id).map_err(
@@ -683,7 +683,7 @@ impl AdminService for AdminServiceImpl {
                 let org_slug = slug_resolver.resolve_slug(organization_id)?;
                 let genesis = BlockHeader {
                     height: 0,
-                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                    organization: Some(OrganizationSlug { slug: org_slug.value() }),
                     vault_id: Some(VaultId { id: vault_id.value() }),
                     previous_hash: Some(Hash { value: ZERO_HASH.to_vec() }),
                     tx_merkle_root: Some(Hash {
@@ -748,9 +748,9 @@ impl AdminService for AdminServiceImpl {
         );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
-            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -880,9 +880,9 @@ impl AdminService for AdminServiceImpl {
         );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
-            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -904,7 +904,7 @@ impl AdminService for AdminServiceImpl {
                 ctx.set_success();
                 let org_slug = slug_resolver.resolve_slug(organization_id)?;
                 Ok(Response::new(GetVaultResponse {
-                    organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                    organization: Some(OrganizationSlug { slug: org_slug.value() }),
                     vault_id: Some(VaultId { id: vault_id.value() }),
                     height,
                     state_root: None,
@@ -947,7 +947,7 @@ impl AdminService for AdminServiceImpl {
                     let height = self.applied_state.vault_height(v.organization_id, v.vault_id);
                     let org_slug = slug_resolver.resolve_slug(v.organization_id)?;
                     Ok(inferadb_ledger_proto::proto::GetVaultResponse {
-                        organization_slug: Some(OrganizationSlug { slug: org_slug.value() }),
+                        organization: Some(OrganizationSlug { slug: org_slug.value() }),
                         vault_id: Some(VaultId { id: v.vault_id.value() }),
                         height,
                         state_root: None,
@@ -1056,12 +1056,12 @@ impl AdminService for AdminServiceImpl {
         );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map(|n| n.slug);
-        let organization_id = slug_resolver.extract_and_resolve_optional(&req.organization_slug)?;
+        let org_slug_val = req.organization.as_ref().map(|n| n.slug);
+        let organization_id = slug_resolver.extract_and_resolve_optional(&req.organization)?;
         let vault_id = req.vault_id.as_ref().map(|v| DomainVaultId::new(v.id));
 
         if let Some(slug_val) = org_slug_val {
-            ctx.set_organization_slug(slug_val);
+            ctx.set_organization(slug_val);
         }
         if let Some(v_id) = vault_id {
             ctx.set_vault_id(v_id.value());
@@ -1757,9 +1757,9 @@ impl AdminService for AdminServiceImpl {
         );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
-            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
         let vault_id =
@@ -2105,9 +2105,9 @@ impl AdminService for AdminServiceImpl {
         );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let org_slug_val = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
-            slug_resolver.extract_and_resolve(&req.organization_slug).inspect_err(|status| {
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -2252,22 +2252,18 @@ impl AdminService for AdminServiceImpl {
 
         // Determine which vaults to scan
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let vault_heights: Vec<((DomainOrganizationId, DomainVaultId), u64)> = if let (
-            Some(ref org_slug_proto),
-            Some(ref v),
-        ) =
-            (req.organization_slug, req.vault_id)
-        {
-            let org_id = slug_resolver.extract_and_resolve(&Some(*org_slug_proto))?;
-            let v_id = DomainVaultId::new(v.id);
-            ctx.set_target(org_slug_proto.slug, v_id.value());
-            // Single vault
-            let height = self.applied_state.vault_height(org_id, v_id);
-            vec![((org_id, v_id), height)]
-        } else {
-            // All vaults
-            self.applied_state.all_vault_heights().into_iter().collect()
-        };
+        let vault_heights: Vec<((DomainOrganizationId, DomainVaultId), u64)> =
+            if let (Some(ref org_slug_proto), Some(ref v)) = (req.organization, req.vault_id) {
+                let org_id = slug_resolver.extract_and_resolve(&Some(*org_slug_proto))?;
+                let v_id = DomainVaultId::new(v.id);
+                ctx.set_target(org_slug_proto.slug, v_id.value());
+                // Single vault
+                let height = self.applied_state.vault_height(org_id, v_id);
+                vec![((org_id, v_id), height)]
+            } else {
+                // All vaults
+                self.applied_state.all_vault_heights().into_iter().collect()
+            };
 
         ctx.start_raft_timer();
         for ((organization_id, vault_id), _height) in vault_heights {

@@ -53,13 +53,13 @@ mod tests {
     #[test]
     fn test_build_error_details_with_retry_and_context() {
         let mut context = HashMap::new();
-        context.insert("organization_slug".to_owned(), "42".to_owned());
+        context.insert("organization".to_owned(), "42".to_owned());
 
         let details = build_error_details(3204, true, Some(1000), context, None);
         assert_eq!(details.error_code, "3204");
         assert!(details.is_retryable);
         assert_eq!(details.retry_after_ms, Some(1000));
-        assert_eq!(details.context.get("organization_slug").unwrap(), "42");
+        assert_eq!(details.context.get("organization").unwrap(), "42");
         assert_eq!(details.suggested_action, None);
     }
 
@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn test_build_error_details_all_fields_populated() {
         let mut context = HashMap::new();
-        context.insert("organization_slug".to_owned(), "42".to_owned());
+        context.insert("organization".to_owned(), "42".to_owned());
         context.insert("level".to_owned(), "backpressure".to_owned());
 
         let details =
@@ -97,7 +97,7 @@ mod tests {
         assert!(decoded.is_retryable);
         assert_eq!(decoded.retry_after_ms, Some(500));
         assert_eq!(decoded.context.len(), 2);
-        assert_eq!(decoded.context.get("organization_slug").unwrap(), "42");
+        assert_eq!(decoded.context.get("organization").unwrap(), "42");
         assert_eq!(decoded.context.get("level").unwrap(), "backpressure");
         assert_eq!(decoded.suggested_action.as_deref(), Some("Reduce request rate"));
     }

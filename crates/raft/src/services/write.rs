@@ -519,13 +519,13 @@ impl WriteService for WriteServiceImpl {
 
         // Extract organization and vault IDs (needed for idempotency key)
         let organization_id = if let Some(ref state) = self.applied_state {
-            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization_slug)?
+            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization)?
         } else {
             OrganizationId::new(
-                req.organization_slug
+                req.organization
                     .as_ref()
                     .map(|n| n.slug as i64)
-                    .ok_or_else(|| Status::invalid_argument("Missing organization_slug"))?,
+                    .ok_or_else(|| Status::invalid_argument("Missing organization"))?,
             )
         };
 
@@ -545,7 +545,7 @@ impl WriteService for WriteServiceImpl {
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         ctx.set_target(org_slug, vault_id.value());
 
         // Populate write operation fields
@@ -931,13 +931,13 @@ impl WriteService for WriteServiceImpl {
 
         // Extract organization and vault IDs (needed for idempotency key)
         let organization_id = if let Some(ref state) = self.applied_state {
-            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization_slug)?
+            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization)?
         } else {
             OrganizationId::new(
-                req.organization_slug
+                req.organization
                     .as_ref()
                     .map(|n| n.slug as i64)
-                    .ok_or_else(|| Status::invalid_argument("Missing organization_slug"))?,
+                    .ok_or_else(|| Status::invalid_argument("Missing organization"))?,
             )
         };
 
@@ -951,7 +951,7 @@ impl WriteService for WriteServiceImpl {
 
         // Populate wide event context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         ctx.set_target(org_slug, vault_id.value());
 
         // Flatten all operations from all groups

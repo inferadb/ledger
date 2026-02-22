@@ -16,7 +16,7 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation, ServerSource};
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation, OrganizationSlug, ServerSource};
 //!
 //! #[tokio::main]
 //! async fn main() -> inferadb_ledger_sdk::Result<()> {
@@ -26,13 +26,14 @@
 //!         .build()?;
 //!
 //!     let client = LedgerClient::new(config).await?;
+//!     # let organization = OrganizationSlug::new(1);
 //!
 //!     // Read operations
-//!     let value = client.read(1, None, "user:123").await?;
+//!     let value = client.read(organization, None, "user:123").await?;
 //!
 //!     // Write operations with automatic idempotency
 //!     let operations = vec![Operation::set_entity("user:123", b"data".to_vec())];
-//!     let result = client.write(1, None, operations).await?;
+//!     let result = client.write(organization, None, operations).await?;
 //!     println!("Committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
 //!
 //!     Ok(())
@@ -94,7 +95,7 @@ pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
-pub use inferadb_ledger_types::{OrganizationId, VaultId};
+pub use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId};
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{

@@ -86,7 +86,7 @@ impl HealthService for HealthServiceImpl {
         if let Some(vault_id_proto) = req.vault_id {
             let vault_id = inferadb_ledger_types::VaultId::new(vault_id_proto.id);
             // Get organization_id from request, default to 0 if not provided
-            let organization_id = match req.organization_slug.as_ref() {
+            let organization_id = match req.organization.as_ref() {
                 Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                     .resolve(inferadb_ledger_types::OrganizationSlug::new(n.slug))?,
                 _ => inferadb_ledger_types::OrganizationId::new(0),

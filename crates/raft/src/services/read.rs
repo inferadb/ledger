@@ -153,7 +153,7 @@ impl ReadServiceImpl {
         // Build proto block header
         Some(inferadb_ledger_proto::proto::BlockHeader {
             height: entry.vault_height,
-            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: self
                     .applied_state
                     .resolve_id_to_slug(entry.organization_id)
@@ -396,7 +396,7 @@ impl ReadServiceImpl {
                 let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
                 announcements.push(BlockAnnouncement {
-                    organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                         slug: self
                             .applied_state
                             .resolve_id_to_slug(entry.organization_id)
@@ -469,13 +469,13 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         ctx.set_target(org_slug, vault_id.value());
 
         // Check vault health - diverged vaults cannot be read
@@ -593,13 +593,13 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         ctx.set_target(org_slug, vault_id.value());
 
         // Check vault health - diverged vaults cannot be read
@@ -711,13 +711,13 @@ impl ReadService for ReadServiceImpl {
         ctx.set_consistency("linearizable"); // verified reads are always linearizable
 
         // Extract IDs
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         ctx.set_target(org_slug, vault_id.value());
 
         // Check vault health - diverged vaults cannot be read
@@ -850,13 +850,13 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Extract IDs
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
         };
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
-        let org_slug = req.organization_slug.as_ref().map_or(0, |n| n.slug);
+        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         ctx.set_target(org_slug, vault_id.value());
 
         // Get block archive - required for historical reads
@@ -1043,7 +1043,7 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Extract identifiers
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
@@ -1102,7 +1102,7 @@ impl ReadService for ReadServiceImpl {
 
         // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
         // not slug-to-internal-id, since announcements carry the original slug)
-        let watch_slug = req.organization_slug.as_ref().map_or(0u64, |n| n.slug);
+        let watch_slug = req.organization.as_ref().map_or(0u64, |n| n.slug);
         let vault_raw = vault_id.value();
         let broadcast_stream =
             tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
@@ -1110,7 +1110,7 @@ impl ReadService for ReadServiceImpl {
                     match result {
                         Ok(announcement) => {
                             // Filter by organization
-                            if announcement.organization_slug.as_ref().map_or(0, |n| n.slug)
+                            if announcement.organization.as_ref().map_or(0, |n| n.slug)
                                 != watch_slug
                             {
                                 return None;
@@ -1148,7 +1148,7 @@ impl ReadService for ReadServiceImpl {
             None => return Ok(Response::new(GetBlockResponse { block: None })),
         };
 
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
@@ -1197,7 +1197,7 @@ impl ReadService for ReadServiceImpl {
             },
         };
 
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
@@ -1251,7 +1251,7 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Get the vault specified in the request, or return the global max height
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
@@ -1294,7 +1294,7 @@ impl ReadService for ReadServiceImpl {
         let req = request.into_inner();
 
         // Extract IDs
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
@@ -1320,7 +1320,7 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
@@ -1442,7 +1442,7 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),
@@ -1524,7 +1524,7 @@ impl ReadService for ReadServiceImpl {
         // Check consistency requirements first
         self.check_consistency(req.consistency)?;
 
-        let organization_id = match req.organization_slug.as_ref() {
+        let organization_id = match req.organization.as_ref() {
             Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
                 .resolve(OrganizationSlug::new(n.slug))?,
             _ => OrganizationId::new(0),

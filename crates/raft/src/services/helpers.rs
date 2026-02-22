@@ -96,7 +96,7 @@ pub(crate) fn check_rate_limit(
             // Build structured error details with rate limit context
             let retry_ms = i32::try_from(rejection.retry_after_ms).unwrap_or(i32::MAX);
             let mut context = std::collections::HashMap::new();
-            context.insert("organization_slug".to_owned(), organization_id.value().to_string());
+            context.insert("organization".to_owned(), organization_id.value().to_string());
             context.insert("level".to_owned(), rejection.level.as_str().to_owned());
             context.insert("reason".to_owned(), rejection.reason.as_str().to_owned());
 
@@ -149,7 +149,7 @@ pub(crate) fn check_vault_quota(
         );
 
         let mut context = std::collections::HashMap::new();
-        context.insert("organization_slug".to_owned(), organization_id.value().to_string());
+        context.insert("organization".to_owned(), organization_id.value().to_string());
         context.insert("resource".to_owned(), exceeded.resource.to_string());
         context.insert("current".to_owned(), exceeded.current.to_string());
         context.insert("limit".to_owned(), exceeded.limit.to_string());
@@ -198,7 +198,7 @@ pub(crate) fn check_storage_quota(
         );
 
         let mut context = std::collections::HashMap::new();
-        context.insert("organization_slug".to_owned(), organization_id.value().to_string());
+        context.insert("organization".to_owned(), organization_id.value().to_string());
         context.insert("resource".to_owned(), exceeded.resource.to_string());
         context.insert("estimated_bytes".to_owned(), estimated_bytes.to_string());
         context.insert("limit".to_owned(), exceeded.limit.to_string());

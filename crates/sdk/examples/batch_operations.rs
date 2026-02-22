@@ -42,11 +42,11 @@ async fn main() -> Result<()> {
     // 2. Create a organization and vault
     // -------------------------------------------------------------------------
     let org = client.create_organization("batch_example").await?;
-    let organization_slug = org.organization_slug;
-    let vault_info = client.create_vault(organization_slug).await?;
+    let organization = org.slug;
+    let vault_info = client.create_vault(organization).await?;
     let vault_id = vault_info.vault_id;
 
-    println!("Using organization={organization_slug}, vault={vault_id}\n");
+    println!("Using organization={organization}, vault={vault_id}\n");
 
     // -------------------------------------------------------------------------
     // 3. Simple batch write - multiple operations, single transaction
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
 
     let result = client
         .write(
-            organization_slug,
+            organization,
             Some(vault_id),
             vec![
                 Operation::set_entity("team:engineering", b"Engineering Team".to_vec()),
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
     // All groups are applied atomically in array order
     let result = client
         .batch_write(
-            organization_slug,
+            organization,
             Some(vault_id),
             vec![
                 // Group 1: Create user entities
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
     // Create an entity that must not exist (CREATE IF NOT EXISTS)
     let result = client
         .write(
-            organization_slug,
+            organization,
             Some(vault_id),
             vec![Operation::set_entity_if(
                 "config:settings",
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
     // Update an entity that must exist (UPDATE IF EXISTS)
     let result = client
         .write(
-            organization_slug,
+            organization,
             Some(vault_id),
             vec![Operation::set_entity_if(
                 "config:settings",
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     let new_user_id = "user:charlie";
     let result = client
         .batch_write(
-            organization_slug,
+            organization,
             Some(vault_id),
             vec![
                 // Step 1: Create the user entity
@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     println!("\n=== Verification ===");
 
-    let value = client.read(organization_slug, Some(vault_id), new_user_id).await?;
+    let value = client.read(organization, Some(vault_id), new_user_id).await?;
 
     if let Some(bytes) = value {
         let user: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");

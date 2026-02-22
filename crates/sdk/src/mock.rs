@@ -14,15 +14,17 @@
 //!
 //! ```no_run
 //! use inferadb_ledger_sdk::mock::MockLedgerServer;
-//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource};
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, OrganizationSlug, ServerSource};
 //!
 //! #[tokio::test]
 //! async fn test_read() {
+//!     let organization = OrganizationSlug::new(1);
+//!
 //!     // Start mock server on ephemeral port
 //!     let server = MockLedgerServer::start().await.unwrap();
 //!
 //!     // Set up test data
-//!     server.set_entity(1, 0, "user:123", b"test-value");
+//!     server.set_entity(organization, 0, "user:123", b"test-value");
 //!
 //!     // Create client connected to mock server
 //!     let config = ClientConfig::builder()
@@ -33,7 +35,7 @@
 //!     let client = LedgerClient::new(config).await.unwrap();
 //!
 //!     // Test read operation
-//!     let value = client.read(1, Some(0), "user:123").await.unwrap();
+//!     let value = client.read(organization, Some(0), "user:123").await.unwrap();
 //!     assert_eq!(value, Some(b"test-value".to_vec()));
 //! }
 //! ```
@@ -56,17 +58,18 @@ use inferadb_ledger_proto::proto::{
     system_discovery_service_server::{SystemDiscoveryService, SystemDiscoveryServiceServer},
     write_service_server::{WriteService, WriteServiceServer},
 };
+use inferadb_ledger_types::OrganizationSlug;
 use parking_lot::RwLock;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, transport::Server};
 
-/// Key for client state: (organization_slug, vault_id, client_id)
+/// Key for client state: (organization, vault_id, client_id)
 type ClientKey = (u64, i64, String);
 
-/// Key for entity storage: (organization_slug, vault_id, key)
+/// Key for entity storage: (organization, vault_id, key)
 type EntityKey = (u64, i64, String);
 
-/// Key for idempotency cache: (organization_slug, vault_id, client_id, idempotency_key)
+/// Key for idempotency cache: (organization, vault_id, client_id, idempotency_key)
 type IdempotencyKey = (u64, i64, String, Vec<u8>);
 
 /// Value for idempotency cache: (tx_id, block_height, assigned_sequence)
@@ -105,17 +108,17 @@ struct MockState {
     /// Current block height (incremented on each write)
     block_height: AtomicU64,
 
-    /// Relationships storage: (organization_slug, vault_id) -> Vec<Relationship>
+    /// Relationships storage: (organization, vault_id) -> Vec<Relationship>
     relationships: RwLock<HashMap<(u64, i64), Vec<proto::Relationship>>>,
 
-    /// Organization info: organization_slug -> OrganizationInfo
+    /// Organization info: organization -> OrganizationInfo
     organizations: RwLock<HashMap<u64, OrganizationData>>,
 
-    /// Vault info: (organization_slug, vault_id) -> VaultData
+    /// Vault info: (organization, vault_id) -> VaultData
     vaults: RwLock<HashMap<(u64, i64), VaultData>>,
 
     /// Next organization ID to assign
-    next_organization_slug: AtomicU64,
+    next_organization: AtomicU64,
 
     /// Next vault ID to assign
     next_vault_id: AtomicU64,
@@ -144,7 +147,7 @@ impl MockState {
     fn new() -> Self {
         Self {
             block_height: AtomicU64::new(1),
-            next_organization_slug: AtomicU64::new(1),
+            next_organization: AtomicU64::new(1),
             next_vault_id: AtomicU64::new(1),
             ..Default::default()
         }
@@ -278,14 +281,20 @@ impl MockLedgerServer {
     /// Sets an entity value for read tests.
     ///
     /// The entity will be stored with a version of 1 and no expiration.
-    pub fn set_entity(&self, organization_slug: u64, vault_id: i64, key: &str, value: &[u8]) {
-        self.set_entity_with_options(organization_slug, vault_id, key, value, 1, None);
+    pub fn set_entity(
+        &self,
+        organization: OrganizationSlug,
+        vault_id: i64,
+        key: &str,
+        value: &[u8],
+    ) {
+        self.set_entity_with_options(organization, vault_id, key, value, 1, None);
     }
 
     /// Sets an entity value with version and optional expiration.
     pub fn set_entity_with_options(
         &self,
-        organization_slug: u64,
+        organization: OrganizationSlug,
         vault_id: i64,
         key: &str,
         value: &[u8],
@@ -294,15 +303,15 @@ impl MockLedgerServer {
     ) {
         let mut entities = self.state.entities.write();
         entities.insert(
-            (organization_slug, vault_id, key.to_string()),
+            (organization.value(), vault_id, key.to_string()),
             (value.to_vec(), version, expires_at),
         );
     }
 
     /// Removes an entity from storage.
-    pub fn remove_entity(&self, organization_slug: u64, vault_id: i64, key: &str) {
+    pub fn remove_entity(&self, organization: OrganizationSlug, vault_id: i64, key: &str) {
         let mut entities = self.state.entities.write();
-        entities.remove(&(organization_slug, vault_id, key.to_string()));
+        entities.remove(&(organization.value(), vault_id, key.to_string()));
     }
 
     /// Sets the last committed sequence for a client.
@@ -310,24 +319,24 @@ impl MockLedgerServer {
     /// Used to test idempotency behavior (ALREADY_COMMITTED, SEQUENCE_GAP).
     pub fn set_client_state(
         &self,
-        organization_slug: u64,
+        organization: OrganizationSlug,
         vault_id: i64,
         client_id: &str,
         seq: u64,
     ) {
         let mut sequences = self.state.client_sequences.write();
-        sequences.insert((organization_slug, vault_id, client_id.to_string()), seq);
+        sequences.insert((organization.value(), vault_id, client_id.to_string()), seq);
     }
 
     /// Returns the last committed sequence for a client.
     pub fn get_client_state(
         &self,
-        organization_slug: u64,
+        organization: OrganizationSlug,
         vault_id: i64,
         client_id: &str,
     ) -> Option<u64> {
         let sequences = self.state.client_sequences.read();
-        sequences.get(&(organization_slug, vault_id, client_id.to_string())).copied()
+        sequences.get(&(organization.value(), vault_id, client_id.to_string())).copied()
     }
 
     /// Injects UNAVAILABLE errors for the next N requests.
@@ -362,14 +371,14 @@ impl MockLedgerServer {
     /// Adds a relationship for query tests.
     pub fn add_relationship(
         &self,
-        organization_slug: u64,
+        organization: OrganizationSlug,
         vault_id: i64,
         resource: &str,
         relation: &str,
         subject: &str,
     ) {
         let mut relationships = self.state.relationships.write();
-        let entry = relationships.entry((organization_slug, vault_id)).or_default();
+        let entry = relationships.entry((organization.value(), vault_id)).or_default();
         entry.push(proto::Relationship {
             resource: resource.to_string(),
             relation: relation.to_string(),
@@ -378,10 +387,10 @@ impl MockLedgerServer {
     }
 
     /// Adds a organization for admin tests.
-    pub fn add_organization(&self, organization_slug: u64, name: &str, shard_id: u32) {
+    pub fn add_organization(&self, organization: OrganizationSlug, name: &str, shard_id: u32) {
         let mut organizations = self.state.organizations.write();
         organizations.insert(
-            organization_slug,
+            organization.value(),
             OrganizationData {
                 name: name.to_string(),
                 shard_id,
@@ -391,10 +400,10 @@ impl MockLedgerServer {
     }
 
     /// Adds a vault for admin tests.
-    pub fn add_vault(&self, organization_slug: u64, vault_id: i64) {
+    pub fn add_vault(&self, organization: OrganizationSlug, vault_id: i64) {
         let mut vaults = self.state.vaults.write();
         vaults.insert(
-            (organization_slug, vault_id),
+            (organization.value(), vault_id),
             VaultData {
                 height: 1,
                 state_root: vec![0u8; 32],
@@ -471,11 +480,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
-        let key = (organization_slug, vault_id, req.key);
+        let key = (organization, vault_id, req.key);
 
         let (value, block_height) = match entities.get(&key) {
             Some((v, ..)) => (Some(v.clone()), self.state.block_height.load(Ordering::SeqCst)),
@@ -494,7 +503,7 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
@@ -502,7 +511,7 @@ impl ReadService for MockReadService {
             .keys
             .iter()
             .map(|key| {
-                let entity_key = (organization_slug, vault_id, key.clone());
+                let entity_key = (organization, vault_id, key.clone());
                 match entities.get(&entity_key) {
                     Some((v, ..)) => proto::BatchReadResult {
                         key: key.clone(),
@@ -529,11 +538,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
-        let key = (organization_slug, vault_id, req.key);
+        let key = (organization, vault_id, req.key);
         let block_height = self.state.block_height.load(Ordering::SeqCst);
 
         let value = entities.get(&key).map(|(v, ..)| v.clone());
@@ -542,7 +551,7 @@ impl ReadService for MockReadService {
         let state_root = vec![0u8; 32];
         let block_header = proto::BlockHeader {
             height: block_height,
-            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
+            organization: Some(proto::OrganizationSlug { slug: organization }),
             vault_id: Some(proto::VaultId { id: vault_id }),
             previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
             tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -577,11 +586,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let entities = self.state.entities.read();
-        let key = (organization_slug, vault_id, req.key);
+        let key = (organization, vault_id, req.key);
         let value = entities.get(&key).map(|(v, ..)| v.clone());
 
         Ok(Response::new(proto::HistoricalReadResponse {
@@ -612,13 +621,13 @@ impl ReadService for MockReadService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let block = proto::Block {
             header: Some(proto::BlockHeader {
                 height: req.height,
-                organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
+                organization: Some(proto::OrganizationSlug { slug: organization }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
                 previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
                 tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -641,14 +650,14 @@ impl ReadService for MockReadService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let blocks: Vec<proto::Block> = (req.start_height..=req.end_height)
             .map(|height| proto::Block {
                 header: Some(proto::BlockHeader {
                     height,
-                    organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
+                    organization: Some(proto::OrganizationSlug { slug: organization }),
                     vault_id: Some(proto::VaultId { id: vault_id }),
                     previous_hash: Some(proto::Hash { value: vec![0u8; 32] }),
                     tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -691,13 +700,12 @@ impl ReadService for MockReadService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
 
         let sequences = self.state.client_sequences.read();
-        let last_seq =
-            sequences.get(&(organization_slug, vault_id, client_id)).copied().unwrap_or(0);
+        let last_seq = sequences.get(&(organization, vault_id, client_id)).copied().unwrap_or(0);
 
         Ok(Response::new(proto::GetClientStateResponse { last_committed_sequence: last_seq }))
     }
@@ -711,11 +719,11 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let relationships = self.state.relationships.read();
-        let rels = relationships.get(&(organization_slug, vault_id)).cloned().unwrap_or_default();
+        let rels = relationships.get(&(organization, vault_id)).cloned().unwrap_or_default();
 
         // Apply filters
         let filtered: Vec<proto::Relationship> = rels
@@ -742,12 +750,12 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let relationships = self.state.relationships.read();
         let resources: Vec<String> = relationships
-            .get(&(organization_slug, vault_id))
+            .get(&(organization, vault_id))
             .map(|rels| {
                 rels.iter()
                     .filter(|r| r.resource.starts_with(&format!("{}:", req.resource_type)))
@@ -775,13 +783,13 @@ impl ReadService for MockReadService {
         self.state.read_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
 
         let entities = self.state.entities.read();
         let matching: Vec<proto::Entity> = entities
             .iter()
             .filter(|((ns, _vault, key), _)| {
-                *ns == organization_slug && key.starts_with(&req.key_prefix)
+                *ns == organization && key.starts_with(&req.key_prefix)
             })
             .map(|((_, _, key), (value, version, expires_at))| proto::Entity {
                 key: key.clone(),
@@ -834,13 +842,13 @@ impl WriteService for MockWriteService {
         self.state.write_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let idempotency_key = req.idempotency_key;
 
         // Check idempotency cache
-        let cache_key = (organization_slug, vault_id, client_id.clone(), idempotency_key.clone());
+        let cache_key = (organization, vault_id, client_id.clone(), idempotency_key.clone());
         {
             let cache = self.state.idempotency_cache.read();
             if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
@@ -869,17 +877,16 @@ impl WriteService for MockWriteService {
                     match op_inner {
                         proto::operation::Op::SetEntity(set) => {
                             entities.insert(
-                                (organization_slug, vault_id, set.key),
+                                (organization, vault_id, set.key),
                                 (set.value, block_height, set.expires_at),
                             );
                         },
                         proto::operation::Op::DeleteEntity(del) => {
-                            entities.remove(&(organization_slug, vault_id, del.key));
+                            entities.remove(&(organization, vault_id, del.key));
                         },
                         proto::operation::Op::CreateRelationship(rel) => {
                             let mut relationships = self.state.relationships.write();
-                            let entry =
-                                relationships.entry((organization_slug, vault_id)).or_default();
+                            let entry = relationships.entry((organization, vault_id)).or_default();
                             entry.push(proto::Relationship {
                                 resource: rel.resource,
                                 relation: rel.relation,
@@ -888,9 +895,7 @@ impl WriteService for MockWriteService {
                         },
                         proto::operation::Op::DeleteRelationship(del) => {
                             let mut relationships = self.state.relationships.write();
-                            if let Some(rels) =
-                                relationships.get_mut(&(organization_slug, vault_id))
-                            {
+                            if let Some(rels) = relationships.get_mut(&(organization, vault_id)) {
                                 rels.retain(|r| {
                                     r.resource != del.resource
                                         || r.relation != del.relation
@@ -899,7 +904,7 @@ impl WriteService for MockWriteService {
                             }
                         },
                         proto::operation::Op::ExpireEntity(expire) => {
-                            entities.remove(&(organization_slug, vault_id, expire.key));
+                            entities.remove(&(organization, vault_id, expire.key));
                         },
                     }
                 }
@@ -907,7 +912,7 @@ impl WriteService for MockWriteService {
         }
 
         // Assign server sequence and update client state
-        let client_key = (organization_slug, vault_id, client_id);
+        let client_key = (organization, vault_id, client_id);
         let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
             let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
@@ -942,13 +947,13 @@ impl WriteService for MockWriteService {
         self.state.write_count.fetch_add(1, Ordering::SeqCst);
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
         let client_id = req.client_id.map(|c| c.id).unwrap_or_default();
         let idempotency_key = req.idempotency_key;
 
         // Check idempotency cache
-        let cache_key = (organization_slug, vault_id, client_id.clone(), idempotency_key.clone());
+        let cache_key = (organization, vault_id, client_id.clone(), idempotency_key.clone());
         {
             let cache = self.state.idempotency_cache.read();
             if let Some((tx_id, block_height, assigned_sequence)) = cache.get(&cache_key) {
@@ -978,17 +983,17 @@ impl WriteService for MockWriteService {
                         match op_inner {
                             proto::operation::Op::SetEntity(set) => {
                                 entities.insert(
-                                    (organization_slug, vault_id, set.key),
+                                    (organization, vault_id, set.key),
                                     (set.value, block_height, set.expires_at),
                                 );
                             },
                             proto::operation::Op::DeleteEntity(del) => {
-                                entities.remove(&(organization_slug, vault_id, del.key));
+                                entities.remove(&(organization, vault_id, del.key));
                             },
                             proto::operation::Op::CreateRelationship(rel) => {
                                 let mut relationships = self.state.relationships.write();
                                 let entry =
-                                    relationships.entry((organization_slug, vault_id)).or_default();
+                                    relationships.entry((organization, vault_id)).or_default();
                                 entry.push(proto::Relationship {
                                     resource: rel.resource,
                                     relation: rel.relation,
@@ -997,8 +1002,7 @@ impl WriteService for MockWriteService {
                             },
                             proto::operation::Op::DeleteRelationship(del) => {
                                 let mut relationships = self.state.relationships.write();
-                                if let Some(rels) =
-                                    relationships.get_mut(&(organization_slug, vault_id))
+                                if let Some(rels) = relationships.get_mut(&(organization, vault_id))
                                 {
                                     rels.retain(|r| {
                                         r.resource != del.resource
@@ -1008,7 +1012,7 @@ impl WriteService for MockWriteService {
                                 }
                             },
                             proto::operation::Op::ExpireEntity(expire) => {
-                                entities.remove(&(organization_slug, vault_id, expire.key));
+                                entities.remove(&(organization, vault_id, expire.key));
                             },
                         }
                     }
@@ -1017,7 +1021,7 @@ impl WriteService for MockWriteService {
         }
 
         // Assign server sequence and update client state
-        let client_key = (organization_slug, vault_id, client_id);
+        let client_key = (organization, vault_id, client_id);
         let assigned_sequence = {
             let mut sequences = self.state.client_sequences.write();
             let next_seq = sequences.get(&client_key).copied().unwrap_or(0) + 1;
@@ -1067,12 +1071,12 @@ impl AdminService for MockAdminService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let organization_slug = self.state.next_organization_slug.fetch_add(1, Ordering::SeqCst);
+        let organization = self.state.next_organization.fetch_add(1, Ordering::SeqCst);
 
         {
             let mut organizations = self.state.organizations.write();
             organizations.insert(
-                organization_slug,
+                organization,
                 OrganizationData {
                     name: req.name,
                     shard_id: req.shard_id.map_or(1, |s| s.id),
@@ -1082,7 +1086,7 @@ impl AdminService for MockAdminService {
         }
 
         Ok(Response::new(proto::CreateOrganizationResponse {
-            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
+            slug: Some(proto::OrganizationSlug { slug: organization }),
             shard_id: Some(proto::ShardId { id: 1 }),
         }))
     }
@@ -1103,19 +1107,19 @@ impl AdminService for MockAdminService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let organization_slug = req
-            .organization_slug
+        let organization = req
+            .slug
             .as_ref()
             .map(|s| s.slug)
-            .ok_or_else(|| Status::invalid_argument("Missing organization_slug"))?;
+            .ok_or_else(|| Status::invalid_argument("Missing organization slug"))?;
 
         let organizations = self.state.organizations.read();
         let data = organizations
-            .get(&organization_slug)
+            .get(&organization)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
         Ok(Response::new(proto::GetOrganizationResponse {
-            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
+            slug: Some(proto::OrganizationSlug { slug: organization }),
             name: data.name.clone(),
             shard_id: Some(proto::ShardId { id: data.shard_id }),
             member_nodes: vec![],
@@ -1135,7 +1139,7 @@ impl AdminService for MockAdminService {
         let responses: Vec<proto::GetOrganizationResponse> = organizations
             .iter()
             .map(|(id, data)| proto::GetOrganizationResponse {
-                organization_slug: Some(proto::OrganizationSlug { slug: *id }),
+                slug: Some(proto::OrganizationSlug { slug: *id }),
                 name: data.name.clone(),
                 shard_id: Some(proto::ShardId { id: data.shard_id }),
                 member_nodes: vec![],
@@ -1158,13 +1162,13 @@ impl AdminService for MockAdminService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = self.state.next_vault_id.fetch_add(1, Ordering::SeqCst) as i64;
 
         {
             let mut vaults = self.state.vaults.write();
             vaults.insert(
-                (organization_slug, vault_id),
+                (organization, vault_id),
                 VaultData {
                     height: 1,
                     state_root: vec![0u8; 32],
@@ -1177,7 +1181,7 @@ impl AdminService for MockAdminService {
             vault_id: Some(proto::VaultId { id: vault_id }),
             genesis: Some(proto::BlockHeader {
                 height: 0,
-                organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
+                organization: Some(proto::OrganizationSlug { slug: organization }),
                 vault_id: Some(proto::VaultId { id: vault_id }),
                 previous_hash: None,
                 tx_merkle_root: Some(proto::Hash { value: vec![0u8; 32] }),
@@ -1206,16 +1210,16 @@ impl AdminService for MockAdminService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        let organization_slug = req.organization_slug.map_or(0, |n| n.slug);
+        let organization = req.organization.map_or(0, |n| n.slug);
         let vault_id = req.vault_id.map_or(0, |v| v.id);
 
         let vaults = self.state.vaults.read();
         let data = vaults
-            .get(&(organization_slug, vault_id))
+            .get(&(organization, vault_id))
             .ok_or_else(|| Status::not_found("Vault not found"))?;
 
         Ok(Response::new(proto::GetVaultResponse {
-            organization_slug: Some(proto::OrganizationSlug { slug: organization_slug }),
+            organization: Some(proto::OrganizationSlug { slug: organization }),
             vault_id: Some(proto::VaultId { id: vault_id }),
             height: data.height,
             state_root: Some(proto::Hash { value: data.state_root.clone() }),
@@ -1235,8 +1239,8 @@ impl AdminService for MockAdminService {
         let vaults = self.state.vaults.read();
         let responses: Vec<proto::GetVaultResponse> = vaults
             .iter()
-            .map(|((organization_slug, vault_id), data)| proto::GetVaultResponse {
-                organization_slug: Some(proto::OrganizationSlug { slug: *organization_slug }),
+            .map(|((organization, vault_id), data)| proto::GetVaultResponse {
+                organization: Some(proto::OrganizationSlug { slug: *organization }),
                 vault_id: Some(proto::VaultId { id: *vault_id }),
                 height: data.height,
                 state_root: Some(proto::Hash { value: data.state_root.clone() }),
@@ -1504,6 +1508,8 @@ impl SystemDiscoveryService for MockDiscoveryService {
 mod tests {
     use super::*;
 
+    const ORG: OrganizationSlug = OrganizationSlug::new(1);
+
     mod mock_server_tests {
         use super::*;
 
@@ -1519,7 +1525,7 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
 
             // Set entity
-            server.set_entity(1, 0, "test-key", b"test-value");
+            server.set_entity(ORG, 0, "test-key", b"test-value");
 
             // Verify read_count starts at 0
             assert_eq!(server.read_count(), 0);
@@ -1529,7 +1535,7 @@ mod tests {
         async fn test_mock_server_entity_with_options() {
             let server = MockLedgerServer::start().await.unwrap();
 
-            server.set_entity_with_options(1, 0, "test-key", b"value", 42, Some(1000000));
+            server.set_entity_with_options(ORG, 0, "test-key", b"value", 42, Some(1000000));
 
             // Entity should be stored (we can't directly read it without a client, but we verify no
             // panic)
@@ -1539,8 +1545,8 @@ mod tests {
         async fn test_mock_server_remove_entity() {
             let server = MockLedgerServer::start().await.unwrap();
 
-            server.set_entity(1, 0, "test-key", b"test-value");
-            server.remove_entity(1, 0, "test-key");
+            server.set_entity(ORG, 0, "test-key", b"test-value");
+            server.remove_entity(ORG, 0, "test-key");
 
             // Entity should be removed (verify no panic)
         }
@@ -1550,14 +1556,14 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
 
             // Initially no client state
-            assert_eq!(server.get_client_state(1, 0, "client-1"), None);
+            assert_eq!(server.get_client_state(ORG, 0, "client-1"), None);
 
             // Set client state
-            server.set_client_state(1, 0, "client-1", 5);
-            assert_eq!(server.get_client_state(1, 0, "client-1"), Some(5));
+            server.set_client_state(ORG, 0, "client-1", 5);
+            assert_eq!(server.get_client_state(ORG, 0, "client-1"), Some(5));
 
             // Different client has no state
-            assert_eq!(server.get_client_state(1, 0, "client-2"), None);
+            assert_eq!(server.get_client_state(ORG, 0, "client-2"), None);
         }
 
         #[tokio::test]
@@ -1594,7 +1600,7 @@ mod tests {
         async fn test_mock_server_add_relationship() {
             let server = MockLedgerServer::start().await.unwrap();
 
-            server.add_relationship(1, 0, "doc:1", "viewer", "user:alice");
+            server.add_relationship(ORG, 0, "doc:1", "viewer", "user:alice");
 
             // Relationship should be stored (verify no panic)
         }
@@ -1603,7 +1609,7 @@ mod tests {
         async fn test_mock_server_add_organization() {
             let server = MockLedgerServer::start().await.unwrap();
 
-            server.add_organization(1, "test-organization", 1);
+            server.add_organization(ORG, "test-organization", 1);
 
             // Organization should be stored (verify no panic)
         }
@@ -1612,7 +1618,7 @@ mod tests {
         async fn test_mock_server_add_vault() {
             let server = MockLedgerServer::start().await.unwrap();
 
-            server.add_vault(1, 0);
+            server.add_vault(ORG, 0);
 
             // Vault should be stored (verify no panic)
         }
@@ -1631,11 +1637,11 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
 
             // Add some data
-            server.set_entity(1, 0, "key", b"value");
-            server.set_client_state(1, 0, "client", 5);
-            server.add_relationship(1, 0, "r", "rel", "s");
-            server.add_organization(1, "ns", 1);
-            server.add_vault(1, 0);
+            server.set_entity(ORG, 0, "key", b"value");
+            server.set_client_state(ORG, 0, "client", 5);
+            server.add_relationship(ORG, 0, "r", "rel", "s");
+            server.add_organization(ORG, "ns", 1);
+            server.add_vault(ORG, 0);
             server.add_peer("node", vec![], 5000);
             server.inject_unavailable(3);
             server.inject_delay(100);
@@ -1644,7 +1650,7 @@ mod tests {
             server.reset();
 
             // Verify reset (client state should be None)
-            assert_eq!(server.get_client_state(1, 0, "client"), None);
+            assert_eq!(server.get_client_state(ORG, 0, "client"), None);
             assert_eq!(server.write_count(), 0);
             assert_eq!(server.read_count(), 0);
             assert_eq!(server.block_height(), 1);
@@ -1757,10 +1763,10 @@ mod tests {
         #[tokio::test]
         async fn test_read_existing_key_returns_value() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "user:123", b"test data");
+            server.set_entity(ORG, 0, "user:123", b"test data");
             let client = create_client_for_mock(&server).await;
 
-            let result = client.read(1, Some(0), "user:123").await.unwrap();
+            let result = client.read(ORG, Some(0), "user:123").await.unwrap();
 
             assert_eq!(result, Some(b"test data".to_vec()));
         }
@@ -1770,7 +1776,7 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let result = client.read(1, Some(0), "nonexistent").await.unwrap();
+            let result = client.read(ORG, Some(0), "nonexistent").await.unwrap();
 
             assert_eq!(result, None);
         }
@@ -1778,10 +1784,10 @@ mod tests {
         #[tokio::test]
         async fn test_read_consistent_returns_value() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "key", b"consistent value");
+            server.set_entity(ORG, 0, "key", b"consistent value");
             let client = create_client_for_mock(&server).await;
 
-            let result = client.read_consistent(1, Some(0), "key").await.unwrap();
+            let result = client.read_consistent(ORG, Some(0), "key").await.unwrap();
 
             assert_eq!(result, Some(b"consistent value".to_vec()));
         }
@@ -1789,12 +1795,12 @@ mod tests {
         #[tokio::test]
         async fn test_batch_read_mixed_found_not_found() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "exists1", b"value1");
-            server.set_entity(1, 0, "exists2", b"value2");
+            server.set_entity(ORG, 0, "exists1", b"value1");
+            server.set_entity(ORG, 0, "exists2", b"value2");
             let client = create_client_for_mock(&server).await;
 
             let keys = vec!["exists1".to_string(), "missing".to_string(), "exists2".to_string()];
-            let result = client.batch_read(1, Some(0), keys).await.unwrap();
+            let result = client.batch_read(ORG, Some(0), keys).await.unwrap();
 
             assert_eq!(result.len(), 3);
             assert_eq!(result[0], ("exists1".to_string(), Some(b"value1".to_vec())));
@@ -1805,12 +1811,12 @@ mod tests {
         #[tokio::test]
         async fn test_batch_read_consistent_returns_values() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "a", b"1");
-            server.set_entity(1, 0, "b", b"2");
+            server.set_entity(ORG, 0, "a", b"1");
+            server.set_entity(ORG, 0, "b", b"2");
             let client = create_client_for_mock(&server).await;
 
             let keys = vec!["a".to_string(), "b".to_string()];
-            let result = client.batch_read_consistent(1, Some(0), keys).await.unwrap();
+            let result = client.batch_read_consistent(ORG, Some(0), keys).await.unwrap();
 
             assert_eq!(result.len(), 2);
             assert_eq!(result[0], ("a".to_string(), Some(b"1".to_vec())));
@@ -1820,15 +1826,15 @@ mod tests {
         #[tokio::test]
         async fn test_read_increments_read_count() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "key", b"value");
+            server.set_entity(ORG, 0, "key", b"value");
             let client = create_client_for_mock(&server).await;
 
             assert_eq!(server.read_count(), 0);
 
-            client.read(1, Some(0), "key").await.unwrap();
+            client.read(ORG, Some(0), "key").await.unwrap();
             assert_eq!(server.read_count(), 1);
 
-            client.read(1, Some(0), "key").await.unwrap();
+            client.read(ORG, Some(0), "key").await.unwrap();
             assert_eq!(server.read_count(), 2);
         }
 
@@ -1840,7 +1846,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let ops = vec![Operation::set_entity("entity:1", b"data".to_vec())];
-            let result = client.write(1, Some(0), ops).await.unwrap();
+            let result = client.write(ORG, Some(0), ops).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
             assert!(result.block_height > 0);
@@ -1853,9 +1859,9 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let ops = vec![Operation::set_entity("user:abc", b"user data".to_vec())];
-            client.write(1, Some(0), ops).await.unwrap();
+            client.write(ORG, Some(0), ops).await.unwrap();
 
-            let value = client.read(1, Some(0), "user:abc").await.unwrap();
+            let value = client.read(ORG, Some(0), "user:abc").await.unwrap();
             assert_eq!(value, Some(b"user data".to_vec()));
         }
 
@@ -1869,31 +1875,31 @@ mod tests {
                 Operation::set_entity("k2", b"v2".to_vec()),
                 Operation::set_entity("k3", b"v3".to_vec()),
             ];
-            let result = client.write(1, Some(0), ops).await.unwrap();
+            let result = client.write(ORG, Some(0), ops).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
 
             // All three should be readable
-            assert_eq!(client.read(1, Some(0), "k1").await.unwrap(), Some(b"v1".to_vec()));
-            assert_eq!(client.read(1, Some(0), "k2").await.unwrap(), Some(b"v2".to_vec()));
-            assert_eq!(client.read(1, Some(0), "k3").await.unwrap(), Some(b"v3".to_vec()));
+            assert_eq!(client.read(ORG, Some(0), "k1").await.unwrap(), Some(b"v1".to_vec()));
+            assert_eq!(client.read(ORG, Some(0), "k2").await.unwrap(), Some(b"v2".to_vec()));
+            assert_eq!(client.read(ORG, Some(0), "k3").await.unwrap(), Some(b"v3".to_vec()));
         }
 
         #[tokio::test]
         async fn test_write_delete_entity() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "to_delete", b"exists");
+            server.set_entity(ORG, 0, "to_delete", b"exists");
             let client = create_client_for_mock(&server).await;
 
             // Verify it exists
-            assert!(client.read(1, Some(0), "to_delete").await.unwrap().is_some());
+            assert!(client.read(ORG, Some(0), "to_delete").await.unwrap().is_some());
 
             // Delete it
             let ops = vec![Operation::delete_entity("to_delete")];
-            client.write(1, Some(0), ops).await.unwrap();
+            client.write(ORG, Some(0), ops).await.unwrap();
 
             // Verify deleted
-            assert_eq!(client.read(1, Some(0), "to_delete").await.unwrap(), None);
+            assert_eq!(client.read(ORG, Some(0), "to_delete").await.unwrap(), None);
         }
 
         #[tokio::test]
@@ -1902,7 +1908,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let ops = vec![Operation::create_relationship("document:123", "viewer", "user:456")];
-            client.write(1, Some(0), ops).await.unwrap();
+            client.write(ORG, Some(0), ops).await.unwrap();
 
             // Relationship was created (verified by write count, detailed check via list)
             assert_eq!(server.write_count(), 1);
@@ -1920,15 +1926,15 @@ mod tests {
                     Operation::set_entity("batch2:c", b"c".to_vec()),
                 ],
             ];
-            let result = client.batch_write(1, Some(0), batches).await.unwrap();
+            let result = client.batch_write(ORG, Some(0), batches).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
             assert_eq!(server.write_count(), 1); // Single batch write
 
             // All entities from all batches should be readable
-            assert_eq!(client.read(1, Some(0), "batch1:a").await.unwrap(), Some(b"a".to_vec()));
-            assert_eq!(client.read(1, Some(0), "batch2:b").await.unwrap(), Some(b"b".to_vec()));
-            assert_eq!(client.read(1, Some(0), "batch2:c").await.unwrap(), Some(b"c".to_vec()));
+            assert_eq!(client.read(ORG, Some(0), "batch1:a").await.unwrap(), Some(b"a".to_vec()));
+            assert_eq!(client.read(ORG, Some(0), "batch2:b").await.unwrap(), Some(b"b".to_vec()));
+            assert_eq!(client.read(ORG, Some(0), "batch2:c").await.unwrap(), Some(b"c".to_vec()));
         }
 
         // ==================== Idempotency ====================
@@ -1939,13 +1945,13 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let ops = vec![Operation::set_entity("key1", b"data".to_vec())];
-            let result = client.write(1, Some(0), ops).await.unwrap();
+            let result = client.write(ORG, Some(0), ops).await.unwrap();
 
             assert_eq!(result.assigned_sequence, 1);
 
             // Second write gets next sequence
             let ops2 = vec![Operation::set_entity("key2", b"data2".to_vec())];
-            let result2 = client.write(1, Some(0), ops2).await.unwrap();
+            let result2 = client.write(ORG, Some(0), ops2).await.unwrap();
 
             assert_eq!(result2.assigned_sequence, 2);
         }
@@ -1956,7 +1962,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let batches = vec![vec![Operation::set_entity("bw:1", b"first".to_vec())]];
-            let result = client.batch_write(1, Some(0), batches).await.unwrap();
+            let result = client.batch_write(ORG, Some(0), batches).await.unwrap();
 
             assert_eq!(result.assigned_sequence, 1);
         }
@@ -1969,7 +1975,7 @@ mod tests {
             // Each write to the same vault gets incrementing sequences
             for i in 1..=5 {
                 let ops = vec![Operation::set_entity(format!("seq:{i}"), b"data".to_vec())];
-                let result = client.write(1, Some(0), ops).await.unwrap();
+                let result = client.write(ORG, Some(0), ops).await.unwrap();
                 assert_eq!(result.assigned_sequence, i);
             }
 
@@ -1985,9 +1991,9 @@ mod tests {
 
             // Inject 1 UNAVAILABLE error - second attempt should succeed
             server.inject_unavailable(1);
-            server.set_entity(1, 0, "retry-key", b"retry-value");
+            server.set_entity(ORG, 0, "retry-key", b"retry-value");
 
-            let result = client.read(1, Some(0), "retry-key").await.unwrap();
+            let result = client.read(ORG, Some(0), "retry-key").await.unwrap();
 
             assert_eq!(result, Some(b"retry-value".to_vec()));
             // 2 reads: 1 failed, 1 succeeded
@@ -2002,7 +2008,7 @@ mod tests {
             // Inject more failures than max attempts
             server.inject_unavailable(5);
 
-            let result = client.read(1, Some(0), "any-key").await;
+            let result = client.read(ORG, Some(0), "any-key").await;
 
             assert!(result.is_err());
             let err = result.unwrap_err();
@@ -2024,7 +2030,7 @@ mod tests {
             server.inject_unavailable(1);
 
             let ops = vec![Operation::set_entity("retry-write", b"value".to_vec())];
-            let result = client.write(1, Some(0), ops).await.unwrap();
+            let result = client.write(ORG, Some(0), ops).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
         }
@@ -2043,14 +2049,14 @@ mod tests {
             let handle1 = tokio::spawn(async move {
                 for i in 0..10 {
                     let ops = vec![Operation::set_entity(format!("v0:k{i}"), b"v0".to_vec())];
-                    client1.write(1, Some(0), ops).await.unwrap();
+                    client1.write(ORG, Some(0), ops).await.unwrap();
                 }
             });
 
             let handle2 = tokio::spawn(async move {
                 for i in 0..10 {
                     let ops = vec![Operation::set_entity(format!("v1:k{i}"), b"v1".to_vec())];
-                    client2.write(1, Some(1), ops).await.unwrap();
+                    client2.write(ORG, Some(1), ops).await.unwrap();
                 }
             });
 
@@ -2065,7 +2071,7 @@ mod tests {
         async fn test_concurrent_reads() {
             let server = MockLedgerServer::start().await.unwrap();
             for i in 0..100 {
-                server.set_entity(1, 0, &format!("key:{}", i), format!("value:{}", i).as_bytes());
+                server.set_entity(ORG, 0, &format!("key:{}", i), format!("value:{}", i).as_bytes());
             }
             let client = create_client_for_mock(&server).await;
 
@@ -2076,7 +2082,7 @@ mod tests {
                 handles.push(tokio::spawn(async move {
                     let key = format!("key:{}", i);
                     let expected = format!("value:{}", i).into_bytes();
-                    let result = client_clone.read(1, Some(0), &key).await.unwrap();
+                    let result = client_clone.read(ORG, Some(0), &key).await.unwrap();
                     assert_eq!(result, Some(expected));
                 }));
             }
@@ -2096,18 +2102,18 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let org = client.create_organization("test-organization").await.unwrap();
-            assert!(org.organization_slug > 0);
+            assert!(org.slug.value() > 0);
 
-            let org_info = client.get_organization(org.organization_slug).await.unwrap();
-            assert_eq!(org_info.organization_slug, org.organization_slug);
+            let org_info = client.get_organization(org.slug).await.unwrap();
+            assert_eq!(org_info.slug, org.slug);
             assert_eq!(org_info.name, "test-organization");
         }
 
         #[tokio::test]
         async fn test_list_organizations() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_organization(1, "ns1", 1);
-            server.add_organization(2, "ns2", 1);
+            server.add_organization(ORG, "ns1", 1);
+            server.add_organization(OrganizationSlug::new(2), "ns2", 1);
             let client = create_client_for_mock(&server).await;
 
             let organizations = client.list_organizations().await.unwrap();
@@ -2121,21 +2127,21 @@ mod tests {
         #[tokio::test]
         async fn test_create_and_get_vault() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_organization(1, "ns", 1);
+            server.add_organization(ORG, "ns", 1);
             let client = create_client_for_mock(&server).await;
 
-            let vault_info = client.create_vault(1).await.unwrap();
+            let vault_info = client.create_vault(ORG).await.unwrap();
             assert!(vault_info.vault_id > 0);
 
-            let fetched = client.get_vault(1, vault_info.vault_id).await.unwrap();
+            let fetched = client.get_vault(ORG, vault_info.vault_id).await.unwrap();
             assert_eq!(fetched.vault_id, vault_info.vault_id);
         }
 
         #[tokio::test]
         async fn test_list_vaults() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_vault(1, 0);
-            server.add_vault(1, 1);
+            server.add_vault(ORG, 0);
+            server.add_vault(ORG, 1);
             let client = create_client_for_mock(&server).await;
 
             let vaults = client.list_vaults().await.unwrap();
@@ -2170,14 +2176,14 @@ mod tests {
         #[tokio::test]
         async fn test_list_entities_with_prefix() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "user:1", b"data1");
-            server.set_entity(1, 0, "user:2", b"data2");
-            server.set_entity(1, 0, "team:1", b"team");
+            server.set_entity(ORG, 0, "user:1", b"data1");
+            server.set_entity(ORG, 0, "user:2", b"data2");
+            server.set_entity(ORG, 0, "team:1", b"team");
             let client = create_client_for_mock(&server).await;
 
             use crate::ListEntitiesOpts;
             let result =
-                client.list_entities(1, ListEntitiesOpts::with_prefix("user:")).await.unwrap();
+                client.list_entities(ORG, ListEntitiesOpts::with_prefix("user:")).await.unwrap();
 
             assert_eq!(result.items.len(), 2);
             assert!(result.items.iter().all(|e| e.key.starts_with("user:")));
@@ -2186,13 +2192,13 @@ mod tests {
         #[tokio::test]
         async fn test_list_relationships_returns_relationships() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_relationship(1, 0, "doc:1", "viewer", "user:alice");
-            server.add_relationship(1, 0, "doc:1", "editor", "user:bob");
+            server.add_relationship(ORG, 0, "doc:1", "viewer", "user:alice");
+            server.add_relationship(ORG, 0, "doc:1", "editor", "user:bob");
             let client = create_client_for_mock(&server).await;
 
             use crate::ListRelationshipsOpts;
             let result =
-                client.list_relationships(1, 0, ListRelationshipsOpts::new()).await.unwrap();
+                client.list_relationships(ORG, 0, ListRelationshipsOpts::new()).await.unwrap();
 
             assert_eq!(result.items.len(), 2);
         }
@@ -2200,14 +2206,14 @@ mod tests {
         #[tokio::test]
         async fn test_list_relationships_with_filter() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_relationship(1, 0, "doc:1", "viewer", "user:alice");
-            server.add_relationship(1, 0, "doc:1", "editor", "user:bob");
-            server.add_relationship(1, 0, "doc:2", "viewer", "user:charlie");
+            server.add_relationship(ORG, 0, "doc:1", "viewer", "user:alice");
+            server.add_relationship(ORG, 0, "doc:1", "editor", "user:bob");
+            server.add_relationship(ORG, 0, "doc:2", "viewer", "user:charlie");
             let client = create_client_for_mock(&server).await;
 
             use crate::ListRelationshipsOpts;
             let result = client
-                .list_relationships(1, 0, ListRelationshipsOpts::new().relation("viewer"))
+                .list_relationships(ORG, 0, ListRelationshipsOpts::new().relation("viewer"))
                 .await
                 .unwrap();
 
@@ -2275,7 +2281,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let empty_keys: Vec<String> = vec![];
-            let result = client.batch_read(1, Some(0), empty_keys).await.unwrap();
+            let result = client.batch_read(ORG, Some(0), empty_keys).await.unwrap();
 
             assert!(result.is_empty());
         }
@@ -2284,10 +2290,10 @@ mod tests {
         async fn test_read_organization_level_without_vault() {
             let server = MockLedgerServer::start().await.unwrap();
             // Set entity at organization level (vault_id = 0 is treated as default)
-            server.set_entity(1, 0, "ns-entity", b"organization data");
+            server.set_entity(ORG, 0, "ns-entity", b"organization data");
             let client = create_client_for_mock(&server).await;
 
-            let result = client.read(1, None, "ns-entity").await.unwrap();
+            let result = client.read(ORG, None, "ns-entity").await.unwrap();
 
             assert_eq!(result, Some(b"organization data".to_vec()));
         }
@@ -2298,12 +2304,12 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let ops = vec![Operation::set_entity("ns:key", b"value".to_vec())];
-            let result = client.write(1, None, ops).await.unwrap();
+            let result = client.write(ORG, None, ops).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
 
             // Read back with None vault_id
-            let value = client.read(1, None, "ns:key").await.unwrap();
+            let value = client.read(ORG, None, "ns:key").await.unwrap();
             assert_eq!(value, Some(b"value".to_vec()));
         }
 
@@ -2315,9 +2321,9 @@ mod tests {
             // 1MB value
             let large_value = vec![0u8; 1024 * 1024];
             let ops = vec![Operation::set_entity("large:key", large_value.clone())];
-            client.write(1, Some(0), ops).await.unwrap();
+            client.write(ORG, Some(0), ops).await.unwrap();
 
-            let result = client.read(1, Some(0), "large:key").await.unwrap();
+            let result = client.read(ORG, Some(0), "large:key").await.unwrap();
             assert_eq!(result.unwrap().len(), 1024 * 1024);
         }
 
@@ -2333,16 +2339,16 @@ mod tests {
             let ops1 = vec![Operation::set_entity("c1:key", b"from-c1".to_vec())];
             let ops2 = vec![Operation::set_entity("c2:key", b"from-c2".to_vec())];
 
-            client1.write(1, Some(0), ops1).await.unwrap();
-            client2.write(1, Some(0), ops2).await.unwrap();
+            client1.write(ORG, Some(0), ops1).await.unwrap();
+            client2.write(ORG, Some(0), ops2).await.unwrap();
 
             // Both can read each other's data
             assert_eq!(
-                client1.read(1, Some(0), "c2:key").await.unwrap(),
+                client1.read(ORG, Some(0), "c2:key").await.unwrap(),
                 Some(b"from-c2".to_vec())
             );
             assert_eq!(
-                client2.read(1, Some(0), "c1:key").await.unwrap(),
+                client2.read(ORG, Some(0), "c1:key").await.unwrap(),
                 Some(b"from-c1".to_vec())
             );
         }
@@ -2359,7 +2365,7 @@ mod tests {
 
             // Start a slow read in background
             let client_clone = client.clone();
-            let handle = tokio::spawn(async move { client_clone.read(1, Some(0), "key").await });
+            let handle = tokio::spawn(async move { client_clone.read(ORG, Some(0), "key").await });
 
             // Give time for request to start
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2377,23 +2383,23 @@ mod tests {
         #[tokio::test]
         async fn test_client_shutdown_prevents_new_requests() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "key", b"value");
+            server.set_entity(ORG, 0, "key", b"value");
             let client = create_client_for_mock(&server).await;
 
             // Verify normal operation
-            let result = client.read(1, Some(0), "key").await;
+            let result = client.read(ORG, Some(0), "key").await;
             assert!(result.is_ok());
 
             // Shutdown
             client.shutdown().await;
 
             // New requests should fail with Shutdown error
-            let result = client.read(1, Some(0), "key").await;
+            let result = client.read(ORG, Some(0), "key").await;
             assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
 
             // Write should also fail
             let ops = vec![Operation::set_entity("new:key", b"value".to_vec())];
-            let result = client.write(1, Some(0), ops).await;
+            let result = client.write(ORG, Some(0), ops).await;
             assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
         }
 
@@ -2408,7 +2414,7 @@ mod tests {
                     format!("key:{i}"),
                     format!("value:{i}").into_bytes(),
                 )];
-                client.write(1, Some(0), ops).await.unwrap();
+                client.write(ORG, Some(0), ops).await.unwrap();
             }
 
             // Verify writes completed
@@ -2419,7 +2425,7 @@ mod tests {
 
             // Operations should fail
             let ops = vec![Operation::set_entity("key:5", b"value".to_vec())];
-            let result = client.write(1, Some(0), ops).await;
+            let result = client.write(ORG, Some(0), ops).await;
             assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
 
             // Write count should not have increased (rejected before reaching server)
@@ -2433,31 +2439,31 @@ mod tests {
         #[tokio::test]
         async fn test_cloned_client_shutdown_affects_all_clones() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.set_entity(1, 0, "key", b"value");
+            server.set_entity(ORG, 0, "key", b"value");
 
             let client1 = create_client_for_mock(&server).await;
             let client2 = client1.clone();
             let client3 = client1.clone();
 
             // All clones should work initially
-            assert!(client1.read(1, Some(0), "key").await.is_ok());
-            assert!(client2.read(1, Some(0), "key").await.is_ok());
-            assert!(client3.read(1, Some(0), "key").await.is_ok());
+            assert!(client1.read(ORG, Some(0), "key").await.is_ok());
+            assert!(client2.read(ORG, Some(0), "key").await.is_ok());
+            assert!(client3.read(ORG, Some(0), "key").await.is_ok());
 
             // Shutdown through client2
             client2.shutdown().await;
 
             // All clones should now fail
             assert!(matches!(
-                client1.read(1, Some(0), "key").await,
+                client1.read(ORG, Some(0), "key").await,
                 Err(crate::error::SdkError::Shutdown)
             ));
             assert!(matches!(
-                client2.read(1, Some(0), "key").await,
+                client2.read(ORG, Some(0), "key").await,
                 Err(crate::error::SdkError::Shutdown)
             ));
             assert!(matches!(
-                client3.read(1, Some(0), "key").await,
+                client3.read(ORG, Some(0), "key").await,
                 Err(crate::error::SdkError::Shutdown)
             ));
         }

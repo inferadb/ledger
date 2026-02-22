@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use inferadb_ledger_sdk::{ClientConfig, LedgerClient, TraceConfig, ServerSource};
+//! use inferadb_ledger_sdk::{ClientConfig, LedgerClient, OrganizationSlug, TraceConfig, ServerSource};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = ClientConfig::builder()
@@ -22,10 +22,11 @@
 //!     .build()?;
 //!
 //! let client = LedgerClient::new(config).await?;
+//! # let organization = OrganizationSlug::new(1);
 //!
 //! // When called within an instrumented span, trace context is automatically propagated
 //! tracing::info_span!("my_operation").in_scope(|| async {
-//!     client.read(1, None, "key").await
+//!     client.read(organization, None, "key").await
 //! }).await?;
 //! # Ok(())
 //! # }

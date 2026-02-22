@@ -233,7 +233,7 @@ pub struct SpanAttributes {
     pub request_id: Option<String>,
     pub client_id: Option<String>,
     pub sequence: Option<u64>,
-    pub organization_slug: Option<u64>,
+    pub organization: Option<u64>,
     pub vault_id: Option<i64>,
     pub service: Option<&'static str>,
     pub method: Option<&'static str>,
@@ -311,7 +311,7 @@ impl SpanAttributes {
         push_attr!("request_id", self.request_id);
         push_attr!("client_id", self.client_id);
         push_attr!("sequence", self.sequence, |v| v as i64);
-        push_attr!("organization_slug", self.organization_slug, |v| v as i64);
+        push_attr!("organization", self.organization, |v| v as i64);
         push_attr!("vault_id", self.vault_id, |v| v);
         if let Some(v) = self.service {
             attrs.push(KeyValue::new("service", v));
@@ -496,7 +496,7 @@ mod tests {
             request_id: Some("abc123".to_string()),
             client_id: Some("client1".to_string()),
             sequence: Some(42),
-            organization_slug: Some(1),
+            organization: Some(1),
             vault_id: Some(2),
             service: Some("WriteService"),
             method: Some("write"),
@@ -510,7 +510,7 @@ mod tests {
         assert!(kvs.iter().any(|kv| kv.key.as_str() == "request_id"));
         assert!(kvs.iter().any(|kv| kv.key.as_str() == "client_id"));
         assert!(kvs.iter().any(|kv| kv.key.as_str() == "sequence"));
-        assert!(kvs.iter().any(|kv| kv.key.as_str() == "organization_slug"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "organization"));
         assert!(kvs.iter().any(|kv| kv.key.as_str() == "service"));
         assert!(kvs.iter().any(|kv| kv.key.as_str() == "method"));
         assert!(kvs.iter().any(|kv| kv.key.as_str() == "outcome"));

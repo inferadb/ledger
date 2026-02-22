@@ -35,7 +35,7 @@ async fn create_organization(
 
     let organization_id = response
         .into_inner()
-        .organization_slug
+        .slug
         .map(|n| n.slug as i64)
         .ok_or("No organization_id in response")?;
 
@@ -50,7 +50,7 @@ async fn create_vault(
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: organization_id as u64,
             }),
             replication_factor: 0,
@@ -74,7 +74,7 @@ async fn write_entity(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
@@ -117,7 +117,7 @@ async fn read_entity(
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
@@ -215,9 +215,7 @@ async fn test_multi_shard_batch_write() {
     let mut client = create_write_client(node.addr).await.expect("connect");
 
     let request = inferadb_ledger_proto::proto::BatchWriteRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: ns_id as u64,
-        }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id as u64 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-client".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -290,9 +288,7 @@ async fn test_multi_shard_write_idempotency() {
     let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: ns_id as u64,
-        }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id as u64 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "idempotent-ms".to_string() }),
         idempotency_key: idempotency_key.clone(),
@@ -348,7 +344,7 @@ async fn test_multi_shard_write_nonexistent_organization() {
 
     // Write to organization 99999 which doesn't exist
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 99999 }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 99999 }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: 1 }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "nonexistent-ns".to_string(),

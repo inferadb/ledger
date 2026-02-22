@@ -52,7 +52,7 @@ async fn test_auto_recovery_job_starts() {
         create_health_client_from_url(cluster.any_endpoint()).await.expect("connect to health");
 
     let response = health_client
-        .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization: None, vault_id: None })
         .await
         .expect("health check");
 
@@ -68,7 +68,7 @@ async fn test_auto_recovery_job_starts() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let response = health_client
-        .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization: None, vault_id: None })
         .await
         .expect("second health check");
 
@@ -101,13 +101,12 @@ async fn test_vault_health_tracking() {
         .await
         .expect("create organization");
 
-    let organization_id =
-        ns_response.into_inner().organization_slug.map(|n| n.slug as i64).unwrap();
+    let organization_id = ns_response.into_inner().slug.map(|n| n.slug as i64).unwrap();
 
     // Create vault
     let vault_response = admin_client
         .create_vault(proto::CreateVaultRequest {
-            organization_slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
+            organization: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -126,7 +125,7 @@ async fn test_vault_health_tracking() {
         create_health_client_from_url(&leader_ep).await.expect("connect to health");
 
     let response = health_client
-        .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
+        .check(proto::HealthCheckRequest { organization: None, vault_id: None })
         .await
         .expect("health check after vault creation");
 
@@ -154,7 +153,7 @@ async fn test_learner_refresh_job_starts() {
             create_health_client_from_url(endpoint).await.expect("connect to health");
 
         let response = health_client
-            .check(proto::HealthCheckRequest { organization_slug: None, vault_id: None })
+            .check(proto::HealthCheckRequest { organization: None, vault_id: None })
             .await
             .expect("health check");
 
@@ -212,8 +211,7 @@ async fn test_learner_cache_initialization() {
         .await
         .expect("create organization");
 
-    let organization_id =
-        ns_response.into_inner().organization_slug.map(|n| n.slug as i64).unwrap();
+    let organization_id = ns_response.into_inner().slug.map(|n| n.slug as i64).unwrap();
 
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -224,7 +222,7 @@ async fn test_learner_cache_initialization() {
 
         let response = client
             .get_organization(proto::GetOrganizationRequest {
-                organization_slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
+                slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
             })
             .await
             .unwrap_or_else(|e| panic!("get_organization from {} failed: {}", endpoint, e));
@@ -261,12 +259,11 @@ async fn test_concurrent_background_jobs() {
         .await
         .expect("create organization");
 
-    let organization_id =
-        ns_response.into_inner().organization_slug.map(|n| n.slug as i64).unwrap();
+    let organization_id = ns_response.into_inner().slug.map(|n| n.slug as i64).unwrap();
 
     let _vault_response = admin_client
         .create_vault(proto::CreateVaultRequest {
-            organization_slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
+            organization: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,

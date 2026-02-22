@@ -42,11 +42,11 @@ async fn main() -> Result<()> {
     // 2. Create a organization and vault with some data
     // -------------------------------------------------------------------------
     let org = client.create_organization("verified_example").await?;
-    let organization_slug = org.organization_slug;
-    let vault_info = client.create_vault(organization_slug).await?;
+    let organization = org.slug;
+    let vault_info = client.create_vault(organization).await?;
     let vault_id = vault_info.vault_id;
 
-    println!("Using organization={organization_slug}, vault={vault_id}\n");
+    println!("Using organization={organization}, vault={vault_id}\n");
 
     // Write some test data
     let test_key = "verified:test";
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
 
     let write_result = client
         .write(
-            organization_slug,
+            organization,
             Some(vault_id),
             vec![Operation::set_entity(test_key, test_value.clone())],
         )
@@ -70,9 +70,8 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     println!("=== Example 1: Basic Verified Read ===");
 
-    let result = client
-        .verified_read(organization_slug, Some(vault_id), test_key, VerifyOpts::new())
-        .await?;
+    let result =
+        client.verified_read(organization, Some(vault_id), test_key, VerifyOpts::new()).await?;
 
     match result {
         Some(verified) => {
@@ -104,7 +103,7 @@ async fn main() -> Result<()> {
     // Write another value to advance the block height
     let result2 = client
         .write(
-            organization_slug,
+            organization,
             Some(vault_id),
             vec![Operation::set_entity(test_key, b"Updated value".to_vec())],
         )
@@ -114,8 +113,7 @@ async fn main() -> Result<()> {
 
     // Read at the ORIGINAL block height (before the update)
     let opts = VerifyOpts::new().at_height(write_result.block_height);
-    let historical =
-        client.verified_read(organization_slug, Some(vault_id), test_key, opts).await?;
+    let historical = client.verified_read(organization, Some(vault_id), test_key, opts).await?;
 
     match historical {
         Some(verified) => {
@@ -137,9 +135,8 @@ async fn main() -> Result<()> {
     }
 
     // Read at the CURRENT block height (after the update)
-    let current = client
-        .verified_read(organization_slug, Some(vault_id), test_key, VerifyOpts::new())
-        .await?;
+    let current =
+        client.verified_read(organization, Some(vault_id), test_key, VerifyOpts::new()).await?;
 
     if let Some(verified) = current {
         let value_str = verified

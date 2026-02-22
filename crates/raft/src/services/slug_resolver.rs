@@ -15,7 +15,7 @@
 //! use inferadb_ledger_raft::services::slug_resolver::SlugResolver;
 //!
 //! let resolver = SlugResolver::new(applied_state.clone());
-//! // resolver.extract_and_resolve(&request.organization_slug)?;
+//! // resolver.extract_and_resolve(&request.organization)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -47,11 +47,10 @@ impl SlugResolver {
     pub fn extract_slug(
         proto_slug: &Option<proto::OrganizationSlug>,
     ) -> Result<OrganizationSlug, Status> {
-        let slug = proto_slug
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("Missing organization_slug"))?;
+        let slug =
+            proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing organization"))?;
         if slug.slug == 0 {
-            return Err(Status::invalid_argument("organization_slug must be non-zero"));
+            return Err(Status::invalid_argument("organization must be non-zero"));
         }
         Ok(OrganizationSlug::new(slug.slug))
     }
@@ -97,7 +96,7 @@ impl SlugResolver {
         match proto_slug {
             None => Ok(None),
             Some(slug) if slug.slug == 0 => {
-                Err(Status::invalid_argument("organization_slug must be non-zero"))
+                Err(Status::invalid_argument("organization must be non-zero"))
             },
             Some(slug) => {
                 let domain_slug = OrganizationSlug::new(slug.slug);

@@ -139,7 +139,7 @@ pub fn generate_write_proof(
     // Build block header from vault entry
     let block_header = proto::BlockHeader {
         height: entry.vault_height,
-        organization_slug: Some(proto::OrganizationSlug {
+        organization: Some(proto::OrganizationSlug {
             slug: organization_slug.map_or(entry.organization_id.value() as u64, |s| s.value()),
         }),
         vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),

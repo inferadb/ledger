@@ -193,7 +193,7 @@ impl WriteService for MultiShardWriteService {
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id =
             inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         // Actor is set by upstream Engine/Control services - Ledger uses "system" internally
@@ -406,7 +406,7 @@ impl WriteService for MultiShardWriteService {
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id =
             inferadb_ledger_types::VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 

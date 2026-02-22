@@ -384,7 +384,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
             .map(|ns| {
                 let status = crate::proto_compat::organization_status_to_proto(ns.status);
                 OrganizationRegistry {
-                    organization_slug: Some(OrganizationSlug {
+                    slug: Some(OrganizationSlug {
                         slug: self
                             .applied_state
                             .resolve_id_to_slug(ns.organization_id)

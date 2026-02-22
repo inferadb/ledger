@@ -441,9 +441,7 @@ pub fn vault_entry_to_proto_block(
     // Build block header
     let header = proto::BlockHeader {
         height: entry.vault_height,
-        organization_slug: Some(proto::OrganizationSlug {
-            slug: entry.organization_id.value() as u64,
-        }),
+        organization: Some(proto::OrganizationSlug { slug: entry.organization_id.value() as u64 }),
         vault_id: Some(proto::VaultId { id: entry.vault_id.value() }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
@@ -779,7 +777,7 @@ mod tests {
 
         let header = block.header.expect("Block should have header");
         assert_eq!(header.height, 10);
-        assert_eq!(header.organization_slug.unwrap().slug, 1);
+        assert_eq!(header.organization.unwrap().slug, 1);
         assert_eq!(header.vault_id.unwrap().id, 2);
         assert_eq!(header.term, 5);
         assert_eq!(header.committed_index, 99);

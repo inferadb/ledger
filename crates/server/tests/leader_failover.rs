@@ -36,7 +36,7 @@ fn make_write_request(
     client_id: &str,
 ) -> WriteRequest {
     WriteRequest {
-        organization_slug: Some(OrganizationSlug { slug: organization_id as u64 }),
+        organization: Some(OrganizationSlug { slug: organization_id as u64 }),
         vault_id: Some(VaultId { id: vault_id }),
         client_id: Some(ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -75,7 +75,7 @@ async fn read_entity(
     let mut client = create_read_client(addr).await.ok()?;
     let response = client
         .read(ReadRequest {
-            organization_slug: Some(OrganizationSlug { slug: organization_id as u64 }),
+            organization: Some(OrganizationSlug { slug: organization_id as u64 }),
             vault_id: Some(VaultId { id: vault_id }),
             key: key.to_string(),
             consistency: 0, // EVENTUAL (default)

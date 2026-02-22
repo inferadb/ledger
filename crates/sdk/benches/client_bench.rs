@@ -26,9 +26,13 @@ use std::{hint::black_box, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use inferadb_ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource, mock::MockLedgerServer,
+    ClientConfig, LedgerClient, Operation, OrganizationSlug, RetryPolicy, ServerSource,
+    mock::MockLedgerServer,
 };
 use tokio::runtime::Runtime;
+
+/// Organization slug used across all benchmarks.
+const ORG: OrganizationSlug = OrganizationSlug::new(1);
 
 /// Creates a runtime for async benchmarks.
 fn create_runtime() -> Runtime {
@@ -69,14 +73,14 @@ fn bench_read_single(c: &mut Criterion) {
     // Setup: start mock server and create client
     let (client, _server) = rt.block_on(async {
         let server = MockLedgerServer::start().await.expect("Failed to start mock server");
-        server.set_entity(1, 0, "test-key", b"test-value-data");
+        server.set_entity(ORG, 0, "test-key", b"test-value-data");
         let client = create_client_for_mock(server.endpoint()).await;
         (client, server)
     });
 
     c.bench_function("read_single_key", |b| {
         b.to_async(&rt).iter(|| async {
-            black_box(client.read(1, Some(0), "test-key").await.expect("read failed"))
+            black_box(client.read(ORG, Some(0), "test-key").await.expect("read failed"))
         })
     });
 }
@@ -93,7 +97,7 @@ fn bench_read_batch(c: &mut Criterion) {
 
         // Pre-populate 100 keys
         for i in 0..100 {
-            server.set_entity(1, 0, &format!("key-{:03}", i), format!("value-{}", i).as_bytes());
+            server.set_entity(ORG, 0, &format!("key-{:03}", i), format!("value-{}", i).as_bytes());
         }
 
         let client = create_client_for_mock(server.endpoint()).await;
@@ -109,7 +113,7 @@ fn bench_read_batch(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(batch_size), &keys, |b, keys| {
             b.to_async(&rt).iter(|| async {
                 black_box(
-                    client.batch_read(1, Some(0), keys.clone()).await.expect("batch_read failed"),
+                    client.batch_read(ORG, Some(0), keys.clone()).await.expect("batch_read failed"),
                 )
             })
         });
@@ -142,7 +146,7 @@ fn bench_write_single(c: &mut Criterion) {
             let key = format!("bench-key-{}", key_counter);
             let ops = vec![Operation::set_entity(&key, b"bench-value".to_vec())];
 
-            async { black_box(client.write(1, Some(0), ops).await.expect("write failed")) }
+            async { black_box(client.write(ORG, Some(0), ops).await.expect("write failed")) }
         })
     });
 }
@@ -177,7 +181,7 @@ fn bench_write_multi_op(c: &mut Criterion) {
                     })
                     .collect();
 
-                async { black_box(client.write(1, Some(0), ops).await.expect("write failed")) }
+                async { black_box(client.write(ORG, Some(0), ops).await.expect("write failed")) }
             })
         });
     }
@@ -220,7 +224,7 @@ fn bench_batch_write(c: &mut Criterion) {
                     async {
                         black_box(
                             client
-                                .batch_write(1, Some(0), batches)
+                                .batch_write(ORG, Some(0), batches)
                                 .await
                                 .expect("batch_write failed"),
                         )
@@ -246,7 +250,7 @@ fn bench_mixed_read_heavy(c: &mut Criterion) {
 
         // Pre-populate some keys
         for i in 0..10 {
-            server.set_entity(1, 0, &format!("static-key-{}", i), b"static-value");
+            server.set_entity(ORG, 0, &format!("static-key-{}", i), b"static-value");
         }
 
         let client = create_client_for_mock(server.endpoint()).await;
@@ -268,10 +272,10 @@ fn bench_mixed_read_heavy(c: &mut Criterion) {
                         format!("dynamic-key-{}", key_num),
                         b"dynamic-value".to_vec(),
                     )];
-                    black_box(client.write(1, Some(0), ops).await.expect("write failed"));
+                    black_box(client.write(ORG, Some(0), ops).await.expect("write failed"));
                 } else {
                     let key = format!("static-key-{}", key_num % 10);
-                    black_box(client.read(1, Some(0), &key).await.expect("read failed"));
+                    black_box(client.read(ORG, Some(0), &key).await.expect("read failed"));
                 }
             }
         })

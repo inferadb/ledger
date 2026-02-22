@@ -22,7 +22,9 @@ use std::time::Duration;
 use inferadb_ledger_proto::proto::{
     GetClusterInfoRequest, admin_service_client::AdminServiceClient,
 };
-use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource};
+use inferadb_ledger_sdk::{
+    ClientConfig, LedgerClient, Operation, OrganizationSlug, RetryPolicy, ServerSource,
+};
 
 // ============================================================================
 // External Cluster Helpers
@@ -98,11 +100,11 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
 }
 
 /// Creates a test organization and vault, returning (organization_slug, vault_id).
-async fn setup_test_org_vault(client: &LedgerClient) -> (u64, i64) {
+async fn setup_test_org_vault(client: &LedgerClient) -> (OrganizationSlug, i64) {
     let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
     let org = client.create_organization(&ns_name).await.expect("create organization");
-    let vault_info = client.create_vault(org.organization_slug).await.expect("create vault");
-    (org.organization_slug, vault_info.vault_id)
+    let vault_info = client.create_vault(org.slug).await.expect("create vault");
+    (org.slug, vault_info.vault_id)
 }
 
 /// Finds the leader endpoint via `GetClusterInfo`.
@@ -443,8 +445,8 @@ async fn test_admin_operations() {
     // Create an organization
     let ns_name = format!("test-admin-{}", uuid::Uuid::new_v4());
     let org = client.create_organization(&ns_name).await.expect("create organization");
-    let org_slug = org.organization_slug;
-    assert!(org_slug > 0, "should get valid organization slug");
+    let org_slug = org.slug;
+    assert!(org_slug.value() > 0, "should get valid organization slug");
 
     // Get the organization
     let org_info = client.get_organization(org_slug).await.expect("get organization");
@@ -457,7 +459,7 @@ async fn test_admin_operations() {
     // List organizations
     let organizations = client.list_organizations().await.expect("list organizations");
     assert!(
-        organizations.iter().any(|org| org.organization_slug == org_slug),
+        organizations.iter().any(|org| org.slug == org_slug),
         "created organization should be in list"
     );
 }

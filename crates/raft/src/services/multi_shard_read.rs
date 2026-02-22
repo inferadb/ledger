@@ -290,15 +290,13 @@ impl MultiShardReadService {
 
         // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
         // not slug-to-internal-id, since announcements carry the original slug)
-        let watch_slug = req.organization_slug.as_ref().map_or(0u64, |n| n.slug);
+        let watch_slug = req.organization.as_ref().map_or(0u64, |n| n.slug);
         let broadcast_stream = BroadcastStream::new(receiver).filter_map(move |result| {
             async move {
                 match result {
                     Ok(announcement) => {
                         // Filter by organization
-                        if announcement.organization_slug.as_ref().map_or(0, |n| n.slug)
-                            != watch_slug
-                        {
+                        if announcement.organization.as_ref().map_or(0, |n| n.slug) != watch_slug {
                             return None;
                         }
                         // Filter by vault
@@ -374,7 +372,7 @@ impl MultiShardReadService {
                     Some(inferadb_ledger_proto::proto::Hash { value: entry.state_root.to_vec() });
 
                 announcements.push(BlockAnnouncement {
-                    organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                         slug: ctx
                             .applied_state
                             .resolve_id_to_slug(organization_id)
@@ -406,7 +404,7 @@ impl ReadService for MultiShardReadService {
         // Extract organization_id for routing
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Record span fields
@@ -469,7 +467,7 @@ impl ReadService for MultiShardReadService {
         // Extract organization_id for routing
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         // Limit batch size
@@ -553,7 +551,7 @@ impl ReadService for MultiShardReadService {
         // Extract organization_id for routing
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         tracing::Span::current().record("organization_id", organization_id.value());
@@ -616,7 +614,7 @@ impl ReadService for MultiShardReadService {
 
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         tracing::Span::current().record("organization_id", organization_id.value());
@@ -644,7 +642,7 @@ impl ReadService for MultiShardReadService {
 
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
@@ -717,7 +715,7 @@ impl ReadService for MultiShardReadService {
 
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
 
@@ -774,7 +772,7 @@ impl ReadService for MultiShardReadService {
 
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
@@ -824,7 +822,7 @@ impl ReadService for MultiShardReadService {
 
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or_default();
 
@@ -853,7 +851,7 @@ impl ReadService for MultiShardReadService {
 
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
 
         // Block retrieval is complex for multi-shard
         // Return None for now - full implementation would use vault_entry_to_proto_block helper
@@ -874,7 +872,7 @@ impl ReadService for MultiShardReadService {
 
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
 
         // Resolve shard to get current tip
         let ctx = self.resolver.resolve(organization_id)?;
@@ -902,7 +900,7 @@ impl ReadService for MultiShardReadService {
         // Extract identifiers
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         tracing::Span::current().record("organization_id", organization_id.value());
@@ -954,7 +952,7 @@ impl ReadService for MultiShardReadService {
         // Extract identifiers
         let system = self.resolver.system_shard()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization_slug)?;
+            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let vault_id = VaultId::new(req.vault_id.as_ref().map_or(0, |v| v.id));
 
         tracing::Span::current().record("organization_id", organization_id.value());

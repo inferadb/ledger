@@ -21,7 +21,7 @@
 //! |-------|--------|-------------|
 //! | Identity | `request_id`, `service`, `method` | Request routing |
 //! | Client | `client_id`, `sequence`, `actor`, `sdk_version`, `source_ip` | Client metadata |
-//! | Target | `organization_slug`, `vault_id` | Scope of the operation |
+//! | Target | `organization`, `vault_id` | Scope of the operation |
 //! | System | `node_id`, `is_leader`, `raft_term`, `shard_id` | Cluster state |
 //! | Write | `operations_count`, `operation_types`, `bytes_written`, `raft_round_trips` | Write metrics |
 //! | Read | `key`, `keys_count`, `found_count`, `bytes_read` | Read metrics |
@@ -247,7 +247,7 @@ impl Sampler {
         outcome: Option<&Outcome>,
         duration_ms: f64,
         operation_type: OperationType,
-        organization_slug: Option<u64>,
+        organization: Option<u64>,
     ) -> bool {
         // If sampling is disabled, always emit
         if !self.config.enabled {
@@ -275,7 +275,7 @@ impl Sampler {
         }
 
         // Rule 4: VIP organizations get elevated sampling
-        if organization_slug.is_some_and(|org_id| self.config.vip_organizations.contains(&org_id)) {
+        if organization.is_some_and(|org_id| self.config.vip_organizations.contains(&org_id)) {
             return self.sample_at_rate(request_id, self.config.vip_rate);
         }
 
@@ -503,7 +503,7 @@ pub struct RequestContext {
     actor: Option<String>,
 
     // Target
-    organization_slug: Option<u64>,
+    organization: Option<u64>,
     vault_id: Option<i64>,
 
     // System context (populated externally)
@@ -590,7 +590,7 @@ impl RequestContext {
             client_id: None,
             sequence: None,
             actor: None,
-            organization_slug: None,
+            organization: None,
             vault_id: None,
             node_id: None,
             is_leader: None,
@@ -688,14 +688,14 @@ impl RequestContext {
     // =========================================================================
 
     /// Sets the target organization and vault.
-    pub fn set_target(&mut self, organization_slug: u64, vault_id: i64) {
-        self.organization_slug = Some(organization_slug);
+    pub fn set_target(&mut self, organization: u64, vault_id: i64) {
+        self.organization = Some(organization);
         self.vault_id = Some(vault_id);
     }
 
-    /// Sets the organization slug only.
-    pub fn set_organization_slug(&mut self, organization_slug: u64) {
-        self.organization_slug = Some(organization_slug);
+    /// Sets the organization only.
+    pub fn set_organization(&mut self, organization: u64) {
+        self.organization = Some(organization);
     }
 
     /// Sets the vault ID only.
@@ -1133,7 +1133,7 @@ impl RequestContext {
                 self.outcome.as_ref(),
                 duration_ms,
                 self.operation_type,
-                self.organization_slug,
+                self.organization,
             )
         }) {
             // Event sampled out, don't emit
@@ -1162,7 +1162,7 @@ impl RequestContext {
             client_id = self.client_id.as_deref(),
             sequence = self.sequence,
             actor = self.actor.as_deref(),
-            organization_slug = self.organization_slug,
+            organization = self.organization,
             vault_id = self.vault_id,
             node_id = self.node_id,
             is_leader = self.is_leader,
@@ -1217,7 +1217,7 @@ impl RequestContext {
                 request_id: Some(self.request_id.to_string()),
                 client_id: self.client_id.clone(),
                 sequence: self.sequence,
-                organization_slug: self.organization_slug,
+                organization: self.organization,
                 vault_id: self.vault_id,
                 service: Some(self.service),
                 method: Some(self.method),
@@ -1374,7 +1374,7 @@ mod tests {
     fn test_set_target() {
         let mut ctx = RequestContext::new("WriteService", "write");
         ctx.set_target(1, 2);
-        assert_eq!(ctx.organization_slug, Some(1));
+        assert_eq!(ctx.organization, Some(1));
         assert_eq!(ctx.vault_id, Some(2));
         ctx.suppress_emission();
     }
@@ -1518,9 +1518,9 @@ mod tests {
     #[test]
     fn test_field_overwrite() {
         let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_organization_slug(1);
-        ctx.set_organization_slug(2);
-        assert_eq!(ctx.organization_slug, Some(2));
+        ctx.set_organization(1);
+        ctx.set_organization(2);
+        assert_eq!(ctx.organization, Some(2));
         ctx.suppress_emission();
     }
 
@@ -1703,7 +1703,7 @@ mod tests {
         let (_, events) = with_json_capturing_subscriber(|| {
             let mut ctx = RequestContext::new("WriteService", "write");
             ctx.set_client_id("test_client");
-            ctx.set_organization_slug(42);
+            ctx.set_organization(42);
             ctx.set_success();
         });
 
@@ -1716,10 +1716,7 @@ mod tests {
         assert!(obj.contains_key("service"), "service field should be at top level");
         assert!(obj.contains_key("method"), "method field should be at top level");
         assert!(obj.contains_key("client_id"), "client_id field should be at top level");
-        assert!(
-            obj.contains_key("organization_slug"),
-            "organization_slug field should be at top level"
-        );
+        assert!(obj.contains_key("organization"), "organization field should be at top level");
         assert!(obj.contains_key("outcome"), "outcome field should be at top level");
     }
 
@@ -2483,7 +2480,7 @@ mod tests {
     fn test_is_vip_in_json_output() {
         let (_, events) = with_json_capturing_subscriber(|| {
             let mut ctx = RequestContext::new("WriteService", "write");
-            ctx.set_organization_slug(42);
+            ctx.set_organization(42);
             ctx.set_is_vip(true);
             ctx.set_success();
         });
@@ -2491,7 +2488,7 @@ mod tests {
         assert!(!events.is_empty(), "Expected at least one event");
         let json: serde_json::Value = serde_json::from_str(&events[0]).unwrap_or_default();
         assert_eq!(json["is_vip"], serde_json::Value::Bool(true));
-        assert_eq!(json["organization_slug"], serde_json::Value::Number(42.into()));
+        assert_eq!(json["organization"], serde_json::Value::Number(42.into()));
     }
 
     // === Trace Context Tests ===
@@ -2798,7 +2795,7 @@ mod tests {
         assert!(event.contains("\"client_id\":\"client_123\""), "missing client_id");
 
         // Target
-        assert!(event.contains("\"organization_slug\":1"), "missing organization_slug");
+        assert!(event.contains("\"organization\":1"), "missing organization");
         assert!(event.contains("\"vault_id\":2"), "missing vault_id");
 
         // System

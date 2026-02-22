@@ -194,7 +194,7 @@ async fn setup_organization_and_vault(
 
     // Create vault (replication_factor=1 for test simplicity)
     let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: config.organization_id as u64,
         }),
         replication_factor: 1,
@@ -255,13 +255,13 @@ async fn setup_multi_shard_organizations(
 
         let organization_id = ns_response
             .into_inner()
-            .organization_slug
+            .slug
             .map(|n| n.slug as i64)
             .ok_or_else(|| format!("No organization_id in response for shard {}", shard_id))?;
 
         // Create vault in this organization
         let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: organization_id as u64,
             }),
             replication_factor: 1,
@@ -508,7 +508,7 @@ async fn write_worker(
                     .collect();
 
             let request = inferadb_ledger_proto::proto::BatchWriteRequest {
-                organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                     slug: config.organization_id as u64,
                 }),
                 vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
@@ -607,7 +607,7 @@ async fn write_worker(
             let request = inferadb_ledger_proto::proto::WriteRequest {
                 client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-                organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                     slug: config.organization_id as u64,
                 }),
                 vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
@@ -750,7 +750,7 @@ async fn read_worker(
                 .collect();
 
             let request = inferadb_ledger_proto::proto::BatchReadRequest {
-                organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                     slug: config.organization_id as u64,
                 }),
                 vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
@@ -794,7 +794,7 @@ async fn read_worker(
                 format!("stress-key-{}-{}-0", worker_id % config.write_workers, key_counter % 1000);
 
             let request = inferadb_ledger_proto::proto::ReadRequest {
-                organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                     slug: config.organization_id as u64,
                 }),
                 vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
@@ -841,7 +841,7 @@ async fn verify_consistency(
 
     for (i, (key, expected_value)) in written.iter().take(sample_size).enumerate() {
         let request = inferadb_ledger_proto::proto::ReadRequest {
-            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: config.organization_id as u64,
             }),
             vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: config.vault_id }),
@@ -952,7 +952,7 @@ async fn verify_multi_shard_consistency(
         let written_value = written.get(key).unwrap();
 
         let request = inferadb_ledger_proto::proto::ReadRequest {
-            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: written_value.organization_id as u64,
             }),
             vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: written_value.vault_id }),

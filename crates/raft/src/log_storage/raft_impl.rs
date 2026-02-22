@@ -438,7 +438,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 for entry in &vault_entries {
                     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
                     let announcement = inferadb_ledger_proto::proto::BlockAnnouncement {
-                        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                             slug: state
                                 .id_to_slug
                                 .get(&entry.organization_id)

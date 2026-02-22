@@ -35,7 +35,7 @@ async fn create_organization(
 
     let organization_id = response
         .into_inner()
-        .organization_slug
+        .slug
         .map(|n| n.slug as i64)
         .ok_or("No organization_id in response")?;
 
@@ -50,7 +50,7 @@ async fn create_vault(
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: organization_id as u64,
             }),
             replication_factor: 0,
@@ -77,7 +77,7 @@ async fn write_entity_with_ttl(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
@@ -119,7 +119,7 @@ async fn read_entity(
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        organization_slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
         vault_id: Some(inferadb_ledger_proto::proto::VaultId { id: vault_id }),
@@ -140,7 +140,7 @@ async fn force_gc(
     let mut client = create_admin_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ForceGcRequest {
-        organization_slug: organization_id
+        organization: organization_id
             .map(|id| inferadb_ledger_proto::proto::OrganizationSlug { slug: id as u64 }),
         vault_id: vault_id.map(|id| inferadb_ledger_proto::proto::VaultId { id }),
     };
