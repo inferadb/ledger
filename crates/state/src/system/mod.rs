@@ -24,5 +24,5 @@ pub use service::{
 };
 pub use types::{
     EmailVerificationToken, NodeInfo, NodeRole, OrganizationRegistry, OrganizationStatus, User,
-    UserEmail, UserStatus,
+    UserEmail, UserRole, UserStatus,
 };

@@ -2283,10 +2283,12 @@ mod tests {
             LedgerRequest::System(SystemRequest::CreateUser {
                 name: "Alice".to_string(),
                 email: "alice@example.com".to_string(),
+                admin: false,
             }),
             LedgerRequest::System(SystemRequest::CreateUser {
                 name: "Bob".to_string(),
                 email: "bob@example.com".to_string(),
+                admin: false,
             }),
         ];
 

@@ -24,6 +24,8 @@ pub struct User {
     pub primary_email_id: i64,
     /// Current user status.
     pub status: UserStatus,
+    /// Authorization role (regular user or service admin).
+    pub role: UserRole,
     /// Account creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last modification timestamp.
@@ -45,6 +47,20 @@ pub enum UserStatus {
     Deleting,
     /// User has been deleted (tombstone for audit).
     Deleted,
+}
+
+/// User authorization role.
+///
+/// Determines what operations a user can perform at the global service level.
+/// Organization-level permissions are separate (derived from membership records).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserRole {
+    /// Regular user with standard permissions.
+    #[default]
+    User,
+    /// Global service administrator.
+    Admin,
 }
 
 // ============================================================================
@@ -185,12 +201,18 @@ mod tests {
     }
 
     #[test]
+    fn test_user_role_default() {
+        assert_eq!(UserRole::default(), UserRole::User);
+    }
+
+    #[test]
     fn test_user_serialization() {
         let user = User {
             id: UserId::new(1),
             name: "Alice".to_string(),
             primary_email_id: 1,
             status: UserStatus::Active,
+            role: UserRole::User,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -199,6 +221,24 @@ mod tests {
         let deserialized: User = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(user.id, deserialized.id);
         assert_eq!(user.name, deserialized.name);
+        assert_eq!(deserialized.role, UserRole::User);
+    }
+
+    #[test]
+    fn test_user_admin_serialization() {
+        let user = User {
+            id: UserId::new(2),
+            name: "Bob".to_string(),
+            primary_email_id: 2,
+            status: UserStatus::Active,
+            role: UserRole::Admin,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let bytes = postcard::to_allocvec(&user).unwrap();
+        let deserialized: User = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.role, UserRole::Admin);
     }
 
     #[test]

@@ -61,6 +61,14 @@ enum UserStatus {
   USER_STATUS_DELETED = 5;     // Tombstone for audit
 }
 
+// User role for global service authorization.
+// Organization-level permissions are separate (derived from membership records).
+enum UserRole {
+  USER_ROLE_UNSPECIFIED = 0;  // Treated as USER (regular user)
+  USER_ROLE_USER = 1;         // Regular user
+  USER_ROLE_ADMIN = 2;        // Global service administrator
+}
+
 // User record (stored in _system organization as Entity with key "user:{id}")
 // Users can have multiple email addresses via separate UserEmail entities.
 // Organization access is derived from membership records (member:{id} in each org).
@@ -72,6 +80,7 @@ message User {
   UserStatus status = 4;        // Lifecycle state
   google.protobuf.Timestamp created_at = 5;
   google.protobuf.Timestamp updated_at = 6;
+  UserRole role = 7;            // Authorization role (default: USER)
 }
 
 // User email address (stored in _system organization as Entity with key "user_email:{id}")

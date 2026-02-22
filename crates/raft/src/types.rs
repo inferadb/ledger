@@ -176,6 +176,8 @@ pub enum SystemRequest {
         name: String,
         /// User's email address.
         email: String,
+        /// Whether this user is a global service administrator.
+        admin: bool,
     },
 
     /// Adds a node to the cluster.
@@ -459,15 +461,17 @@ mod tests {
         let request = SystemRequest::CreateUser {
             name: "Alice".to_string(),
             email: "alice@example.com".to_string(),
+            admin: false,
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            SystemRequest::CreateUser { name, email } => {
+            SystemRequest::CreateUser { name, email, admin } => {
                 assert_eq!(name, "Alice");
                 assert_eq!(email, "alice@example.com");
+                assert!(!admin);
             },
             _ => panic!("unexpected variant"),
         }

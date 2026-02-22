@@ -685,7 +685,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::System(system_request) => {
                 let response = match system_request {
-                    SystemRequest::CreateUser { name: _, email: _ } => {
+                    SystemRequest::CreateUser { name: _, email: _, admin: _ } => {
                         let user_id = state.sequences.next_user();
                         LedgerResponse::UserCreated { user_id }
                     },

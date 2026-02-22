@@ -62,6 +62,9 @@ pub struct User {
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(message, optional, tag = "6")]
     pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Authorization role (default: USER)
+    #[prost(enumeration = "UserRole", tag = "7")]
+    pub role: i32,
 }
 /// User email address (stored in \_system organization as Entity with key "user_email:{id}")
 /// Each user can have multiple emails; primary is tracked by UserEmail.primary field.
@@ -1746,6 +1749,40 @@ impl UserStatus {
             "USER_STATUS_SUSPENDED" => Some(Self::Suspended),
             "USER_STATUS_DELETING" => Some(Self::Deleting),
             "USER_STATUS_DELETED" => Some(Self::Deleted),
+            _ => None,
+        }
+    }
+}
+/// User role for global service authorization.
+/// Organization-level permissions are separate (derived from membership records).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum UserRole {
+    /// Treated as USER (regular user)
+    Unspecified = 0,
+    /// Regular user
+    User = 1,
+    /// Global service administrator
+    Admin = 2,
+}
+impl UserRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "USER_ROLE_UNSPECIFIED",
+            Self::User => "USER_ROLE_USER",
+            Self::Admin => "USER_ROLE_ADMIN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "USER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+            "USER_ROLE_USER" => Some(Self::User),
+            "USER_ROLE_ADMIN" => Some(Self::Admin),
             _ => None,
         }
     }

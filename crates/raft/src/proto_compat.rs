@@ -8,7 +8,7 @@
 //! prevents implementing foreign traits between two external types.
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_state::system::OrganizationStatus;
+use inferadb_ledger_state::system::{OrganizationStatus, UserRole};
 
 /// Converts a domain `OrganizationStatus` to its proto representation.
 pub(crate) fn organization_status_to_proto(
@@ -20,5 +20,14 @@ pub(crate) fn organization_status_to_proto(
         OrganizationStatus::Suspended => proto::OrganizationStatus::Suspended,
         OrganizationStatus::Deleting => proto::OrganizationStatus::Deleting,
         OrganizationStatus::Deleted => proto::OrganizationStatus::Deleted,
+    }
+}
+
+/// Converts a domain `UserRole` to its proto representation.
+#[allow(dead_code)] // Will be used when admin service exposes user management RPCs.
+pub(crate) fn user_role_to_proto(role: UserRole) -> proto::UserRole {
+    match role {
+        UserRole::User => proto::UserRole::User,
+        UserRole::Admin => proto::UserRole::Admin,
     }
 }
