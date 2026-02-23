@@ -14,8 +14,54 @@ mod common;
 
 use std::time::Duration;
 
-use common::TestCluster;
+use common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 use serial_test::serial;
+
+// ============================================================================
+// Test Helpers
+// ============================================================================
+
+/// Creates an organization and returns its slug.
+async fn create_organization(
+    addr: std::net::SocketAddr,
+    name: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut client = create_admin_client(addr).await?;
+    let response = client
+        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
+            name: name.to_string(),
+            shard_id: None,
+            quota: None,
+        })
+        .await?;
+
+    let slug =
+        response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug in response")?;
+
+    Ok(slug)
+}
+
+/// Creates a vault in an organization and returns its slug.
+async fn create_vault(
+    addr: std::net::SocketAddr,
+    org_slug: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut client = create_admin_client(addr).await?;
+    let response = client
+        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+            replication_factor: 0,
+            initial_nodes: vec![],
+            retention_policy: None,
+        })
+        .await?;
+    let slug = response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug in response")?;
+    Ok(slug)
+}
+
+// ============================================================================
+// Cluster Formation Tests
+// ============================================================================
 
 /// Tests single-node cluster bootstrap and leader election.
 #[serial]
@@ -33,108 +79,6 @@ async fn test_single_node_bootstrap() {
     // Verify leader state
     let leader = cluster.leader().expect("should have leader");
     assert!(leader.is_leader(), "node should report itself as leader");
-}
-
-/// Tests single-node write and read cycle.
-#[serial]
-#[tokio::test]
-async fn test_single_node_write_read() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
-
-    let leader = cluster.leader().expect("should have leader");
-
-    // Create a write client
-    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
-
-    // Submit a write request using SetEntity operation
-    let request = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "test-client".to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "test-key".to_string(),
-                    value: b"test-value".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
-        }],
-        include_tx_proof: false,
-    };
-
-    let response = client.write(request).await;
-    assert!(response.is_ok(), "write should succeed: {:?}", response.err());
-
-    let response = response.unwrap().into_inner();
-    match response.result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(success)) => {
-            assert!(success.tx_id.is_some(), "should have tx_id");
-            assert!(success.block_height > 0, "should have non-zero block height");
-        },
-        Some(inferadb_ledger_proto::proto::write_response::Result::Error(err)) => {
-            panic!("write failed: {:?}", err);
-        },
-        None => {
-            panic!("no result in response");
-        },
-    }
-}
-
-/// Tests write idempotency - same client_id + idempotency_key should return cached result.
-#[serial]
-#[tokio::test]
-async fn test_write_idempotency() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
-
-    let leader = cluster.leader().expect("should have leader");
-    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
-
-    // Use a fixed idempotency key for both writes to test deduplication
-    let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
-
-    let request = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "idempotent-client".to_string(),
-        }),
-        idempotency_key: idempotency_key.clone(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "idempotent-key".to_string(),
-                    value: b"idempotent-value".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
-        }],
-        include_tx_proof: false,
-    };
-
-    // First write
-    let response1 =
-        client.write(request.clone()).await.expect("first write should succeed").into_inner();
-
-    // Second write with same client_id + idempotency_key
-    let response2 = client.write(request).await.expect("second write should succeed").into_inner();
-
-    // Both should return the same result
-    match (response1.result, response2.result) {
-        (
-            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s1)),
-            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s2)),
-        ) => {
-            assert_eq!(s1.tx_id, s2.tx_id, "tx_id should match");
-            assert_eq!(s1.block_height, s2.block_height, "block_height should match");
-        },
-        _ => panic!("both writes should succeed"),
-    }
 }
 
 /// Tests two-node cluster formation.
@@ -189,6 +133,123 @@ async fn test_three_node_cluster_formation() {
     assert_eq!(followers.len(), 2, "should have two followers");
 }
 
+// ============================================================================
+// Write/Read Tests
+// ============================================================================
+
+/// Tests single-node write and read cycle.
+#[serial]
+#[tokio::test]
+async fn test_single_node_write_read() {
+    let cluster = TestCluster::new(1).await;
+    let _leader_id = cluster.wait_for_leader().await;
+
+    let leader = cluster.leader().expect("should have leader");
+
+    // Create organization and vault
+    let org_slug =
+        create_organization(leader.addr, "write-read-ns").await.expect("create organization");
+    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+
+    // Create a write client
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+
+    // Submit a write request using SetEntity operation
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "test-client".to_string() }),
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
+                    key: "test-key".to_string(),
+                    value: b"test-value".to_vec(),
+                    expires_at: None,
+                    condition: None,
+                },
+            )),
+        }],
+        include_tx_proof: false,
+    };
+
+    let response = client.write(request).await;
+    assert!(response.is_ok(), "write should succeed: {:?}", response.err());
+
+    let response = response.unwrap().into_inner();
+    match response.result {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(success)) => {
+            assert!(success.tx_id.is_some(), "should have tx_id");
+            assert!(success.block_height > 0, "should have non-zero block height");
+        },
+        Some(inferadb_ledger_proto::proto::write_response::Result::Error(err)) => {
+            panic!("write failed: {:?}", err);
+        },
+        None => {
+            panic!("no result in response");
+        },
+    }
+}
+
+/// Tests write idempotency - same client_id + idempotency_key should return cached result.
+#[serial]
+#[tokio::test]
+async fn test_write_idempotency() {
+    let cluster = TestCluster::new(1).await;
+    let _leader_id = cluster.wait_for_leader().await;
+
+    let leader = cluster.leader().expect("should have leader");
+
+    // Create organization and vault
+    let org_slug =
+        create_organization(leader.addr, "idempotency-ns").await.expect("create organization");
+    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+
+    // Use a fixed idempotency key for both writes to test deduplication
+    let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
+
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
+            id: "idempotent-client".to_string(),
+        }),
+        idempotency_key: idempotency_key.clone(),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
+                    key: "idempotent-key".to_string(),
+                    value: b"idempotent-value".to_vec(),
+                    expires_at: None,
+                    condition: None,
+                },
+            )),
+        }],
+        include_tx_proof: false,
+    };
+
+    // First write
+    let response1 =
+        client.write(request.clone()).await.expect("first write should succeed").into_inner();
+
+    // Second write with same client_id + idempotency_key
+    let response2 = client.write(request).await.expect("second write should succeed").into_inner();
+
+    // Both should return the same result
+    match (response1.result, response2.result) {
+        (
+            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s1)),
+            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s2)),
+        ) => {
+            assert_eq!(s1.tx_id, s2.tx_id, "tx_id should match");
+            assert_eq!(s1.block_height, s2.block_height, "block_height should match");
+        },
+        _ => panic!("both writes should succeed"),
+    }
+}
+
 /// Tests that writes create blocks that can be retrieved via GetBlock.
 ///
 /// DESIGN.md §3.2.1: State root is computed after applying transactions.
@@ -201,18 +262,22 @@ async fn test_write_creates_retrievable_block() {
 
     let leader = cluster.leader().expect("should have leader");
 
+    // Create organization and vault
+    let org_slug =
+        create_organization(leader.addr, "block-test-ns").await.expect("create organization");
+    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+
     // Create write and read clients
-    let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
+    let mut write_client = create_write_client(leader.addr).await.expect("connect to leader");
     let mut read_client =
-        common::create_read_client(leader.addr).await.expect("connect to leader for reads");
+        create_read_client(leader.addr).await.expect("connect to leader for reads");
 
     // Submit a write
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "block-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -237,8 +302,8 @@ async fn test_write_creates_retrievable_block() {
 
     // Retrieve the block via GetBlock
     let get_block_request = inferadb_ledger_proto::proto::GetBlockRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         height: block_height,
     };
 
@@ -277,7 +342,13 @@ async fn test_three_node_write_replication() {
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
+
+    // Create organization and vault
+    let org_slug =
+        create_organization(leader.addr, "replication-ns").await.expect("create organization");
+    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+
+    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     // Submit a write
     let request = inferadb_ledger_proto::proto::WriteRequest {
@@ -285,8 +356,8 @@ async fn test_three_node_write_replication() {
             id: "replication-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: 1 }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: 1 }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {

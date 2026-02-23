@@ -39,6 +39,10 @@ pub struct TestNode {
     _temp_dir: TestDir,
     /// Server task handle for cleanup.
     _server_handle: tokio::task::JoinHandle<()>,
+    /// Shutdown sender — kept alive so the server doesn't immediately exit.
+    /// When dropped, the watch receiver in `serve_with_shutdown` resolves,
+    /// triggering graceful shutdown.
+    _shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl TestNode {
@@ -91,19 +95,27 @@ impl TestCluster {
 
         // Bootstrap node: no discovery configured → no peers found → bootstraps.
         // Uses auto-generated Snowflake ID for realistic testing.
+        let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
+            .destination(data_dir.join("backups").to_string_lossy().to_string())
+            .build()
+            .expect("valid backup config");
+
         let config = inferadb_ledger_server::config::Config {
             listen_addr: addr,
             metrics_addr: None,
             data_dir: Some(data_dir.clone()),
             single: true, // Single-node mode for immediate bootstrap
+            backup: Some(backup_config),
             ..inferadb_ledger_server::config::Config::default()
         };
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
             &config,
             &data_dir,
             inferadb_ledger_raft::HealthState::new(),
-            tokio::sync::watch::channel(false).1,
+            shutdown_rx,
         )
         .await
         .expect("bootstrap node");
@@ -118,6 +130,17 @@ impl TestCluster {
             }
         });
 
+        // Wait for the gRPC server to accept TCP connections before proceeding.
+        // Leader election (via in-memory Raft metrics) can complete before the TCP
+        // listener is bound, causing ConnectionRefused in subsequent gRPC calls.
+        let tcp_start = tokio::time::Instant::now();
+        while tcp_start.elapsed() < Duration::from_secs(5) {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         let leader_raft = bootstrapped.raft.clone();
         let leader_addr = addr;
         nodes.push(TestNode {
@@ -127,6 +150,7 @@ impl TestCluster {
             state: bootstrapped.state,
             _temp_dir: temp_dir,
             _server_handle: server_handle,
+            _shutdown_tx: shutdown_tx,
         });
 
         // Wait for the bootstrap node to become leader
@@ -159,22 +183,30 @@ impl TestCluster {
             // This bypasses bootstrap entirely - no Raft cluster initialized, waiting
             // to be added via AdminService's JoinCluster RPC.
             // Uses auto-generated Snowflake ID for realistic testing.
+            let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
+                .destination(data_dir.join("backups").to_string_lossy().to_string())
+                .build()
+                .expect("valid backup config");
+
             let config = inferadb_ledger_server::config::Config {
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: Some(data_dir.clone()),
                 join: true, // Join mode: wait to be added to existing cluster
+                backup: Some(backup_config),
                 ..inferadb_ledger_server::config::Config::default()
             };
 
             // Create the node - with bootstrap_expect=0, it won't initialize its own
             // Raft cluster. It just starts the gRPC server and waits to be added via
             // AdminService's JoinCluster RPC.
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
             let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
                 &config,
                 &data_dir,
                 inferadb_ledger_raft::HealthState::new(),
-                tokio::sync::watch::channel(false).1,
+                shutdown_rx,
             )
             .await
             .expect("bootstrap node");
@@ -190,9 +222,14 @@ impl TestCluster {
                 }
             });
 
-            // Give server time to start accepting Raft replication connections
-            // The leader's add_learner call will try to replicate to this node
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Wait for the gRPC server to accept TCP connections before joining.
+            let tcp_start = tokio::time::Instant::now();
+            while tcp_start.elapsed() < Duration::from_secs(5) {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
 
             // Join the cluster via the leader's AdminService with retry.
             // We use more attempts with exponential backoff since membership changes
@@ -256,6 +293,7 @@ impl TestCluster {
                 state: bootstrapped.state,
                 _temp_dir: temp_dir,
                 _server_handle: server_handle,
+                _shutdown_tx: shutdown_tx,
             });
 
             // Wait for the new node to see itself as a voter and sync with the cluster

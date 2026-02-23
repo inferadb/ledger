@@ -165,11 +165,11 @@ struct StressMetrics {
 
 /// Setup organization and vault for stress testing.
 ///
-/// For organization_id=0 (system organization), the organization already exists,
-/// so we only create the vault. For other organizations, we create both.
+/// Creates an organization and vault, returning the actual Snowflake slugs
+/// assigned by the server (which differ from the sequential config values).
 async fn setup_organization_and_vault(
     leader_addr: SocketAddr,
-    config: &StressConfig,
+    config: &mut StressConfig,
 ) -> Result<(), String> {
     let endpoint = format!("http://{}", leader_addr);
     let mut admin_client =
@@ -179,32 +179,34 @@ async fn setup_organization_and_vault(
         .await
         .map_err(|e| format!("Failed to connect admin client: {}", e))?;
 
-    // Create organization (skip for system organization 0)
-    if config.organization_id != 0 {
-        let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: format!("stress-ns-{}", config.organization_id),
-            shard_id: None,
-            quota: None,
-        };
-        admin_client
-            .create_organization(ns_request)
-            .await
-            .map_err(|e| format!("Failed to create organization: {}", e))?;
-    }
+    // Create organization and capture the actual Snowflake slug
+    let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
+        name: format!("stress-ns-{}", config.organization_id),
+        shard_id: None,
+        quota: None,
+    };
+    let ns_response = admin_client
+        .create_organization(ns_request)
+        .await
+        .map_err(|e| format!("Failed to create organization: {}", e))?;
+    let org_slug =
+        ns_response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug in response")?;
+    config.organization_id = org_slug as i64;
 
-    // Create vault (replication_factor=1 for test simplicity)
+    // Create vault using the actual organization slug
     let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: config.organization_id as u64,
-        }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
         replication_factor: 1,
         initial_nodes: vec![],
         retention_policy: None,
     };
-    admin_client
+    let vault_response = admin_client
         .create_vault(vault_request)
         .await
         .map_err(|e| format!("Failed to create vault: {}", e))?;
+    let vault_slug =
+        vault_response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug in response")?;
+    config.vault_slug = vault_slug;
 
     Ok(())
 }
@@ -241,10 +243,10 @@ async fn setup_multi_shard_organizations(
     for shard_id in 1..=num_shards {
         let shard_id_u32 = shard_id as u32;
 
-        // Create organization explicitly assigned to this shard
+        // Create organization (automatic shard assignment)
         let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: format!("stress-shard-{}-ns", shard_id),
-            shard_id: Some(inferadb_ledger_proto::proto::ShardId { id: shard_id_u32 }),
+            shard_id: None,
             quota: None,
         };
 
@@ -1039,7 +1041,7 @@ async fn run_stress_test(config: StressConfig) {
 }
 
 /// Run the full stress test with configurable cluster size.
-async fn run_stress_test_with_cluster_size(cluster_size: usize, config: StressConfig) {
+async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: StressConfig) {
     println!("\n🚀 Starting Stress Test");
     println!("   Cluster size: {} node(s)", cluster_size);
     println!("   Write workers: {}", config.write_workers);
@@ -1066,15 +1068,13 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, config: StressCo
     // Setup: Create organization and vault for the stress test
     // This ensures the write operations don't fail due to missing entities
     println!("🔧 Setting up organization and vault...");
-    if let Err(e) = setup_organization_and_vault(leader_addr, &config).await {
-        eprintln!("   ⚠️ Setup failed (may already exist): {}", e);
-        // Continue anyway - they might already exist
-    } else {
-        println!(
-            "   ✅ Organization {} and vault {} created",
-            config.organization_id, config.vault_slug
-        );
-    }
+    setup_organization_and_vault(leader_addr, &mut config)
+        .await
+        .expect("setup organization and vault");
+    println!(
+        "   ✅ Organization (slug={}) and vault (slug={}) created",
+        config.organization_id, config.vault_slug
+    );
 
     // Metrics and control
     let metrics = Arc::new(StressMetrics::new());

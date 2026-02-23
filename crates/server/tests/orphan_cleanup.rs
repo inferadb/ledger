@@ -42,6 +42,26 @@ async fn create_organization(
     Ok(organization_id)
 }
 
+/// Creates a vault in an organization and returns its slug.
+async fn create_vault(
+    addr: std::net::SocketAddr,
+    org_id: i64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut client = create_admin_client(addr).await?;
+    let response = client
+        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: org_id as u64,
+            }),
+            replication_factor: 0,
+            initial_nodes: vec![],
+            retention_policy: None,
+        })
+        .await?;
+    let slug = response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug in response")?;
+    Ok(slug)
+}
+
 /// Writes an entity to a specific organization.
 async fn write_entity(
     addr: std::net::SocketAddr,
@@ -159,6 +179,11 @@ async fn test_deleted_user_detection() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
+    // Create organization and vault for test data
+    let ns_id =
+        create_organization(leader.addr, "deleted-user-ns").await.expect("create organization");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+
     // Create a user with deleted_at timestamp
     let deleted_user_id = 1001i64;
     let deleted_user_key = format!("user:{}", deleted_user_id);
@@ -169,9 +194,16 @@ async fn test_deleted_user_detection() {
         "deleted_at": "2024-01-15T10:00:00Z",
     });
 
-    write_entity(leader.addr, 0, 0, &deleted_user_key, &deleted_user_value, "orphan-test")
-        .await
-        .expect("create deleted user");
+    write_entity(
+        leader.addr,
+        ns_id,
+        vault_id,
+        &deleted_user_key,
+        &deleted_user_value,
+        "orphan-test",
+    )
+    .await
+    .expect("create deleted user");
 
     // Create a user with DELETED status
     let deleted_status_user_id = 1002i64;
@@ -185,8 +217,8 @@ async fn test_deleted_user_detection() {
 
     write_entity(
         leader.addr,
-        0,
-        0,
+        ns_id,
+        vault_id,
         &deleted_status_user_key,
         &deleted_status_user_value,
         "orphan-test",
@@ -204,12 +236,12 @@ async fn test_deleted_user_detection() {
         "status": "ACTIVE",
     });
 
-    write_entity(leader.addr, 0, 0, &active_user_key, &active_user_value, "orphan-test")
+    write_entity(leader.addr, ns_id, vault_id, &active_user_key, &active_user_value, "orphan-test")
         .await
         .expect("create active user");
 
     // Verify all users were written
-    let deleted_bytes = read_entity(leader.addr, 0, 0, &deleted_user_key)
+    let deleted_bytes = read_entity(leader.addr, ns_id, vault_id, &deleted_user_key)
         .await
         .expect("read deleted user")
         .expect("deleted user should exist");
@@ -217,7 +249,7 @@ async fn test_deleted_user_detection() {
     let deleted_user: serde_json::Value = serde_json::from_slice(&deleted_bytes).unwrap();
     assert!(deleted_user.get("deleted_at").is_some(), "User should have deleted_at");
 
-    let status_bytes = read_entity(leader.addr, 0, 0, &deleted_status_user_key)
+    let status_bytes = read_entity(leader.addr, ns_id, vault_id, &deleted_status_user_key)
         .await
         .expect("read status-deleted user")
         .expect("status-deleted user should exist");
@@ -225,7 +257,7 @@ async fn test_deleted_user_detection() {
     let status_user: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
     assert_eq!(status_user.get("status").and_then(|s| s.as_str()), Some("DELETED"));
 
-    let active_bytes = read_entity(leader.addr, 0, 0, &active_user_key)
+    let active_bytes = read_entity(leader.addr, ns_id, vault_id, &active_user_key)
         .await
         .expect("read active user")
         .expect("active user should exist");
@@ -243,9 +275,10 @@ async fn test_membership_data_format() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Create a organization
+    // Create a organization and vault
     let ns_id =
         create_organization(leader.addr, "membership-test-ns").await.expect("create organization");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Create a membership record
     let user_id = 2001i64;
@@ -256,12 +289,12 @@ async fn test_membership_data_format() {
         "created_at": "2024-01-01T00:00:00Z",
     });
 
-    write_entity(leader.addr, ns_id, 0, &member_key, &member_value, "membership-test")
+    write_entity(leader.addr, ns_id, vault_id, &member_key, &member_value, "membership-test")
         .await
         .expect("create membership");
 
     // Verify membership was written
-    let member_bytes = read_entity(leader.addr, ns_id, 0, &member_key)
+    let member_bytes = read_entity(leader.addr, ns_id, vault_id, &member_key)
         .await
         .expect("read membership")
         .expect("membership should exist");
@@ -271,36 +304,41 @@ async fn test_membership_data_format() {
     assert_eq!(membership.get("role").and_then(|r| r.as_str()), Some("member"));
 }
 
-/// Tests that orphan cleanup respects system organization boundaries.
+/// Tests that orphan cleanup does not remove non-orphaned records.
 ///
-/// Cleanup should skip the _system organization (organization_id = 0).
+/// Records that belong to active users should survive cleanup cycles.
 #[serial]
 #[tokio::test]
-async fn test_orphan_cleanup_skips_system_organization() {
+async fn test_orphan_cleanup_skips_active_records() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // Write a "member" record directly to _system (which shouldn't be cleaned up)
-    let system_member_key = "member:9999";
-    let system_member_value = serde_json::json!({
+    // Create organization and vault
+    let ns_id =
+        create_organization(leader.addr, "skip-active-ns").await.expect("create organization");
+    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+
+    // Write a "member" record that should not be cleaned up
+    let member_key = "member:9999";
+    let member_value = serde_json::json!({
         "user_id": 9999,
         "role": "admin",
-        "note": "This is in _system and should not be cleaned",
+        "note": "This active member should not be cleaned",
     });
 
-    write_entity(leader.addr, 0, 0, system_member_key, &system_member_value, "system-member-test")
+    write_entity(leader.addr, ns_id, vault_id, member_key, &member_value, "skip-active-test")
         .await
-        .expect("create system member");
+        .expect("create member");
 
     // Give cleanup time to run
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // The system member should still exist (cleanup skips _system)
-    let member_bytes = read_entity(leader.addr, 0, 0, system_member_key)
+    // The member should still exist (not orphaned)
+    let member_bytes = read_entity(leader.addr, ns_id, vault_id, member_key)
         .await
-        .expect("read system member")
-        .expect("system member should still exist");
+        .expect("read member")
+        .expect("active member should still exist");
 
     let member: serde_json::Value = serde_json::from_slice(&member_bytes).unwrap();
     assert_eq!(member.get("user_id").and_then(|v| v.as_i64()), Some(9999));

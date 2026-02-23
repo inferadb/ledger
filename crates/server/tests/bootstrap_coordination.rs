@@ -42,13 +42,10 @@ async fn test_single_node_bootstrap() {
     };
 
     // Bootstrap should succeed
-    let result = bootstrap_node(
-        &config,
-        &data_dir,
-        inferadb_ledger_raft::HealthState::new(),
-        tokio::sync::watch::channel(false).1,
-    )
-    .await;
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let result =
+        bootstrap_node(&config, &data_dir, inferadb_ledger_raft::HealthState::new(), shutdown_rx)
+            .await;
     assert!(result.is_ok(), "single-node bootstrap should succeed: {:?}", result.err());
 
     let bootstrapped = result.unwrap();
@@ -59,8 +56,14 @@ async fn test_single_node_bootstrap() {
         let _ = server.serve().await;
     });
 
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for server to accept TCP connections
+    let tcp_start = tokio::time::Instant::now();
+    while tcp_start.elapsed() < Duration::from_secs(5) {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Verify node is a cluster member via GetNodeInfo
     let mut client = create_admin_client(addr).await.expect("connect to admin service");
@@ -104,11 +107,12 @@ async fn test_node_restart_preserves_id() {
 
     // First startup - bootstrap fresh node
     let first_id = {
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let bootstrapped = bootstrap_node(
             &config,
             &data_dir,
             inferadb_ledger_raft::HealthState::new(),
-            tokio::sync::watch::channel(false).1,
+            shutdown_rx,
         )
         .await
         .expect("first bootstrap should succeed");
@@ -149,11 +153,12 @@ async fn test_node_restart_preserves_id() {
             ..Config::default()
         };
 
+        let (_shutdown_tx2, shutdown_rx2) = tokio::sync::watch::channel(false);
         let bootstrapped = bootstrap_node(
             &config2,
             &data_dir,
             inferadb_ledger_raft::HealthState::new(),
-            tokio::sync::watch::channel(false).1,
+            shutdown_rx2,
         )
         .await
         .expect("restart should succeed");
@@ -166,7 +171,15 @@ async fn test_node_restart_preserves_id() {
         let handle = tokio::spawn(async move {
             let _ = server.serve().await;
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Wait for server to accept TCP connections
+        let tcp_start = tokio::time::Instant::now();
+        while tcp_start.elapsed() < Duration::from_secs(5) {
+            if tokio::net::TcpStream::connect(addr2).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         // Verify cluster membership
         let mut client = create_admin_client(addr2).await.expect("connect");
@@ -267,11 +280,12 @@ async fn test_late_joiner_finds_existing_cluster() {
         ..Config::default()
     };
 
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let leader = bootstrap_node(
         &leader_config,
         &leader_data_dir,
         inferadb_ledger_raft::HealthState::new(),
-        tokio::sync::watch::channel(false).1,
+        shutdown_rx,
     )
     .await
     .expect("leader bootstrap");
@@ -282,8 +296,14 @@ async fn test_late_joiner_finds_existing_cluster() {
         let _ = leader_server.serve().await;
     });
 
-    // Wait for server to start accepting connections (retry loop)
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for server to accept TCP connections
+    let tcp_start = tokio::time::Instant::now();
+    while tcp_start.elapsed() < Duration::from_secs(5) {
+        if tokio::net::TcpStream::connect(leader_addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Wait for leader to become leader
     let start = tokio::time::Instant::now();
@@ -346,13 +366,10 @@ async fn test_join_mode_does_not_bootstrap() {
     };
 
     // Bootstrap should succeed (node starts but doesn't initialize cluster)
-    let result = bootstrap_node(
-        &config,
-        &data_dir,
-        inferadb_ledger_raft::HealthState::new(),
-        tokio::sync::watch::channel(false).1,
-    )
-    .await;
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let result =
+        bootstrap_node(&config, &data_dir, inferadb_ledger_raft::HealthState::new(), shutdown_rx)
+            .await;
     assert!(result.is_ok(), "join mode should start successfully: {:?}", result.err());
 
     let bootstrapped = result.unwrap();
@@ -363,7 +380,14 @@ async fn test_join_mode_does_not_bootstrap() {
         let _ = server.serve().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for server to accept TCP connections
+    let tcp_start = tokio::time::Instant::now();
+    while tcp_start.elapsed() < Duration::from_secs(5) {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Verify node is NOT a cluster member (hasn't bootstrapped)
     let mut client = create_admin_client(addr).await.expect("connect to admin service");

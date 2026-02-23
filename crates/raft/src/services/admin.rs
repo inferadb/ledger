@@ -2475,25 +2475,66 @@ impl AdminService for AdminServiceImpl {
 
             meta
         } else {
-            // Full snapshot-based backup (existing behavior)
-            let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
-                Status::failed_precondition("Snapshot manager is not available on this node")
-            })?;
+            // Full snapshot-based backup: build a state snapshot directly from
+            // the current StateLayer + AppliedState rather than going through
+            // openraft's snapshot mechanism (which produces an in-memory Raft
+            // snapshot, not a file-based state::Snapshot).
+            use std::collections::HashMap;
 
-            // Trigger Raft snapshot for consistent state
-            ctx.start_raft_timer();
-            let _ = self.raft.trigger().snapshot().await.map_err(|e| {
-                ctx.end_raft_timer();
+            use inferadb_ledger_state::{
+                NUM_BUCKETS, Snapshot, SnapshotChainParams, SnapshotStateData, VaultSnapshotMeta,
+            };
+            use inferadb_ledger_types::EMPTY_HASH;
+
+            let shard_height = self.applied_state.shard_height();
+            let all_vaults = self.applied_state.all_vaults();
+            let vault_heights = self.applied_state.all_vault_heights();
+
+            let mut vault_states = Vec::new();
+            let mut vault_entities = HashMap::new();
+
+            for (org_id, vault_id) in all_vaults.keys() {
+                let height = vault_heights.get(&(*org_id, *vault_id)).copied().unwrap_or(0);
+
+                let bucket_roots =
+                    self.state.get_bucket_roots(*vault_id).unwrap_or([EMPTY_HASH; NUM_BUCKETS]);
+
+                let entities =
+                    self.state.list_entities(*vault_id, None, None, usize::MAX).map_err(|e| {
+                        Status::internal(format!(
+                            "Failed to list entities for vault {vault_id}: {e}"
+                        ))
+                    })?;
+
+                let state_root = self.state.compute_state_root(*vault_id).map_err(|e| {
+                    Status::internal(format!(
+                        "Failed to compute state root for vault {vault_id}: {e}"
+                    ))
+                })?;
+
+                vault_states.push(VaultSnapshotMeta::new(
+                    *vault_id,
+                    height,
+                    state_root,
+                    bucket_roots,
+                    entities.len() as u64,
+                ));
+
+                vault_entities.insert(*vault_id, entities);
+            }
+
+            let state_data = SnapshotStateData { vault_entities };
+            let snapshot = Snapshot::new(
+                inferadb_ledger_types::ShardId::new(0),
+                shard_height,
+                vault_states,
+                state_data,
+                SnapshotChainParams::default(),
+            )
+            .map_err(|e: inferadb_ledger_state::SnapshotError| {
                 ctx.set_error("SnapshotError", &e.to_string());
-                Status::failed_precondition(format!("Failed to trigger snapshot: {e}"))
+                Status::internal(format!("Failed to create snapshot: {e}"))
             })?;
-            ctx.end_raft_timer();
-
-            // Load the latest snapshot
-            let snapshot = snapshot_manager
-                .load_latest()
-                .map_err(|e| Status::internal(format!("Failed to load snapshot: {e}")))?
-                .ok_or_else(|| Status::failed_precondition("No snapshot available for backup"))?;
 
             backup_manager.create_backup(&snapshot, &tag).map_err(|e| {
                 ctx.set_error("BackupError", &e.to_string());

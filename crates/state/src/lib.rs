@@ -36,7 +36,7 @@ mod tiered_storage;
 mod time_travel;
 
 pub use block_archive::{BlockArchive, BlockArchiveError};
-pub use bucket::VaultCommitment;
+pub use bucket::{NUM_BUCKETS, VaultCommitment};
 pub use engine::{InMemoryStorageEngine, StorageEngine};
 pub use entity::EntityStore;
 pub use events::{
