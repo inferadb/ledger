@@ -39,7 +39,7 @@ use crate::{
     error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
     log_storage::AppliedStateAccessor,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
+    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload},
 };
 
 /// Key prefix for saga records in _system organization.
@@ -147,10 +147,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             transactions: vec![transaction],
         };
 
-        self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
-            message: format!("{:?}", e),
-            backtrace: snafu::Backtrace::generate(),
-        })?;
+        self.raft
+            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+            .await
+            .map_err(|e| SagaError::SagaRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(())
     }
@@ -424,10 +427,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             transactions: vec![transaction],
         };
 
-        self.raft.client_write(request).await.map_err(|e| SagaError::SequenceAllocation {
-            message: format!("{:?}", e),
-            backtrace: snafu::Backtrace::generate(),
-        })?;
+        self.raft
+            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+            .await
+            .map_err(|e| SagaError::SequenceAllocation {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(next_id)
     }
@@ -464,10 +470,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let request =
             LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
-        self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
-            message: format!("{:?}", e),
-            backtrace: snafu::Backtrace::generate(),
-        })?;
+        self.raft
+            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+            .await
+            .map_err(|e| SagaError::SagaRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(())
     }
@@ -496,10 +505,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let request =
             LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
-        self.raft.client_write(request).await.map_err(|e| SagaError::SagaRaftWrite {
-            message: format!("{:?}", e),
-            backtrace: snafu::Backtrace::generate(),
-        })?;
+        self.raft
+            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+            .await
+            .map_err(|e| SagaError::SagaRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         Ok(())
     }

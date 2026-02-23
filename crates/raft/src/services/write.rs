@@ -33,7 +33,7 @@ use crate::{
     rate_limit::RateLimiter,
     services::slug_resolver::SlugResolver,
     trace_context,
-    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
+    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload},
 };
 
 /// Classifies a batch writer error into the appropriate `tonic::Status`.
@@ -132,7 +132,12 @@ impl WriteServiceImpl {
 
                 // Acquire mutex and submit to Raft
                 let _guard = mutex.lock().await;
-                let result = raft.client_write(batch_request).await;
+                let result = raft
+                    .client_write(RaftPayload {
+                        request: batch_request,
+                        proposed_at: chrono::Utc::now(),
+                    })
+                    .await;
                 drop(_guard);
 
                 match result {
@@ -744,7 +749,15 @@ impl WriteService for WriteServiceImpl {
             ctx.set_batch_info(false, 1);
             // Fallback: direct Raft proposal with mutex serialization
             let _guard = self.proposal_mutex.lock().await;
-            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
+            match tokio::time::timeout(
+                timeout,
+                self.raft.client_write(RaftPayload {
+                    request: ledger_request,
+                    proposed_at: chrono::Utc::now(),
+                }),
+            )
+            .await
+            {
                 Ok(Ok(result)) => {
                     drop(_guard);
                     result.data
@@ -1141,39 +1154,46 @@ impl WriteService for WriteServiceImpl {
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
         let _guard = self.proposal_mutex.lock().await;
-        let response =
-            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
-                Ok(Ok(result)) => {
-                    drop(_guard);
-                    result.data
-                },
-                Ok(Err(e)) => {
-                    drop(_guard);
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-                    return Err(status_with_correlation(
-                        classify_raft_error(&e.to_string()),
-                        &ctx.request_id(),
-                        &trace_ctx.trace_id,
-                    ));
-                },
-                Err(_elapsed) => {
-                    drop(_guard);
-                    ctx.end_raft_timer();
-                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-                    metrics::record_raft_proposal_timeout();
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &ctx.request_id(),
-                        &trace_ctx.trace_id,
-                    ));
-                },
-            };
+        let response = match tokio::time::timeout(
+            timeout,
+            self.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                drop(_guard);
+                result.data
+            },
+            Ok(Err(e)) => {
+                drop(_guard);
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+                return Err(status_with_correlation(
+                    classify_raft_error(&e.to_string()),
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ));
+            },
+            Err(_elapsed) => {
+                drop(_guard);
+                ctx.end_raft_timer();
+                ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+                metrics::record_raft_proposal_timeout();
+                return Err(status_with_correlation(
+                    Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )),
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ));
+            },
+        };
         ctx.end_raft_timer();
 
         match response {

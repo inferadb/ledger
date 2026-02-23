@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::{
     log_storage::AppliedStateAccessor,
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
+    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload},
 };
 
 /// Default interval between GC cycles.
@@ -129,7 +129,10 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         let request =
             LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
-        self.raft.client_write(request).await.map_err(|e| format!("Raft write failed: {}", e))?;
+        self.raft
+            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+            .await
+            .map_err(|e| format!("Raft write failed: {}", e))?;
 
         info!(
             organization_id = organization_id.value(),

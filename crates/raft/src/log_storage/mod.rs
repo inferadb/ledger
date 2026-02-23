@@ -81,13 +81,18 @@ mod tests {
     use super::{types::estimate_write_storage_delta, *};
     use crate::types::{
         BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
-        SystemRequest,
+        RaftPayload, SystemRequest,
     };
 
     /// Helper to create log IDs for tests.
     #[cfg(test)]
     fn make_log_id(term: u64, index: u64) -> LogId<LedgerNodeId> {
         LogId::new(CommittedLeaderId::new(term, 0), index)
+    }
+
+    /// Wraps a `LedgerRequest` into a `RaftPayload` with `Utc::now()` for test entries.
+    fn wrap_payload(request: LedgerRequest) -> RaftPayload {
+        RaftPayload { request, proposed_at: Utc::now() }
     }
 
     #[tokio::test]
@@ -3127,12 +3132,12 @@ mod tests {
         let entries: Vec<Entry<LedgerTypeConfig>> = (1..=100u64)
             .map(|i| Entry {
                 log_id: make_log_id(1, i),
-                payload: EntryPayload::Normal(LedgerRequest::CreateOrganization {
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
                     name: format!("ns-{}", i),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     shard_id: None,
                     quota: None,
-                }),
+                })),
             })
             .collect();
 
@@ -3221,8 +3226,10 @@ mod tests {
             transactions: vec![], // Empty transactions still create a block
         };
 
-        let entry =
-            Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(write_request) };
+        let entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(write_request)),
+        };
 
         let start = Instant::now();
         let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
@@ -3299,14 +3306,219 @@ mod tests {
             transactions: vec![],
         };
 
-        let entry =
-            Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(write_request) };
+        let entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(write_request)),
+        };
 
         let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             LedgerResponse::Write { .. } => {},
             other => panic!("expected WriteCompleted, got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Deterministic Timestamp Tests
+    // ========================================================================
+    //
+    // These tests verify that all replicas produce byte-identical event storage
+    // when applying the same Raft log entries, by using leader-assigned
+    // timestamps from `RaftPayload.proposed_at` instead of local `Utc::now()`.
+
+    #[tokio::test]
+    async fn test_apply_uses_proposed_at_not_utc_now() {
+        // Critical test: apply with proposed_at set to year 2099 — if any code
+        // path still calls Utc::now(), timestamps will be ~2026 instead of 2099.
+        use chrono::{Datelike, TimeZone};
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let mut store = store_with_events(dir.path());
+
+        // Set up org and vault
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        let far_future = Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap();
+
+        let write_request = LedgerRequest::Write {
+            organization_id: OrganizationId::new(1),
+            vault_id: VaultId::new(1),
+            transactions: vec![Transaction {
+                id: [42u8; 16],
+                client_id: "test".to_string(),
+                sequence: 0,
+                actor: "test-actor".to_string(),
+                operations: vec![Operation::SetEntity {
+                    key: "k1".to_string(),
+                    value: b"v1".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                timestamp: far_future,
+            }],
+        };
+
+        let payload = RaftPayload { request: write_request, proposed_at: far_future };
+
+        let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
+
+        let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
+        assert_eq!(responses.len(), 1);
+
+        // Read events from the events DB
+        let ew = store.event_writer().expect("event writer");
+        let events_db = ew.events_db();
+        let txn = events_db.read().expect("read txn");
+        let (events, _) = EventStore::list(&txn, OrganizationId::new(1), 0, u64::MAX, 1000, None)
+            .expect("list events");
+
+        // ALL event timestamps must be in 2099 (the proposed_at year)
+        assert!(!events.is_empty(), "should have events");
+        for event in &events {
+            assert_eq!(
+                event.timestamp.year(),
+                2099,
+                "event timestamp should use proposed_at (2099), not Utc::now(). Got year {}",
+                event.timestamp.year()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shard_block_uses_proposed_at_timestamp() {
+        // Verify that ShardBlock timestamp also comes from proposed_at,
+        // not a separate Utc::now() call.
+        use chrono::TimeZone;
+        use inferadb_ledger_proto::proto::BlockAnnouncement;
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let (sender, mut receiver) = broadcast::channel::<BlockAnnouncement>(16);
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_block_announcements(sender);
+
+        // Create org + vault
+        {
+            let mut state = store.applied_state.write();
+            let create_ns = LedgerRequest::CreateOrganization {
+                name: "test-ns".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(99),
+                shard_id: Some(ShardId::new(0)),
+                quota: None,
+            };
+            store.apply_request(&create_ns, &mut state);
+
+            let create_vault = LedgerRequest::CreateVault {
+                organization_id: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            };
+            store.apply_request(&create_vault, &mut state);
+        }
+
+        let far_future = Utc.with_ymd_and_hms(2099, 12, 31, 23, 59, 59).unwrap();
+
+        let write_request = LedgerRequest::Write {
+            organization_id: OrganizationId::new(1),
+            vault_id: VaultId::new(1),
+            transactions: vec![],
+        };
+
+        let payload = RaftPayload { request: write_request, proposed_at: far_future };
+        let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
+
+        store.apply_to_state_machine(&[entry]).await.expect("apply");
+
+        // Check the broadcast announcement timestamp
+        let announcement = receiver.try_recv().expect("should have received block announcement");
+
+        let ts = announcement.timestamp.expect("timestamp should be set");
+        assert_eq!(
+            ts.seconds,
+            far_future.timestamp(),
+            "ShardBlock timestamp should use proposed_at (2099), not Utc::now()"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_two_state_machines_produce_identical_events() {
+        // Apply the same LedgerRequest on two independent state machines.
+        // With deterministic timestamps, resulting EventEntry records must be
+        // byte-identical.
+        use chrono::TimeZone;
+        use openraft::RaftStorage;
+
+        let far_future = Utc.with_ymd_and_hms(2099, 3, 14, 15, 9, 26).unwrap();
+
+        let write_request = LedgerRequest::Write {
+            organization_id: OrganizationId::new(1),
+            vault_id: VaultId::new(1),
+            transactions: vec![Transaction {
+                id: [7u8; 16],
+                client_id: "client".to_string(),
+                sequence: 0,
+                actor: "actor".to_string(),
+                operations: vec![Operation::SetEntity {
+                    key: "key".to_string(),
+                    value: b"value".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                timestamp: far_future,
+            }],
+        };
+
+        // Helper to create a store, set up state, and apply
+        let apply_on_fresh_store = |dir: &std::path::Path| {
+            let store = store_with_events(dir);
+            {
+                let mut state = store.applied_state.write();
+                setup_org_and_vault(&mut state);
+            }
+            let payload = RaftPayload { request: write_request.clone(), proposed_at: far_future };
+            let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
+            (store, entry)
+        };
+
+        let dir1 = tempdir().expect("dir1");
+        let dir2 = tempdir().expect("dir2");
+
+        let (mut store1, entry1) = apply_on_fresh_store(dir1.path());
+        let (mut store2, entry2) = apply_on_fresh_store(dir2.path());
+
+        store1.apply_to_state_machine(&[entry1]).await.expect("apply1");
+        store2.apply_to_state_machine(&[entry2]).await.expect("apply2");
+
+        // Read events from both stores
+        let read_events = |store: &RaftLogStore<FileBackend>| {
+            let ew = store.event_writer().expect("event writer");
+            let db = ew.events_db();
+            let txn = db.read().expect("read");
+            EventStore::list(&txn, OrganizationId::new(1), 0, u64::MAX, 1000, None).expect("list").0
+        };
+
+        let events1 = read_events(&store1);
+        let events2 = read_events(&store2);
+
+        assert_eq!(events1.len(), events2.len(), "event count should match");
+        assert!(!events1.is_empty(), "should have events");
+
+        for (e1, e2) in events1.iter().zip(events2.iter()) {
+            assert_eq!(e1.event_id, e2.event_id, "event IDs should match");
+            assert_eq!(e1.timestamp, e2.timestamp, "timestamps should match");
+            // Byte-identical serialization
+            let bytes1 = inferadb_ledger_types::encode(e1).expect("encode1");
+            let bytes2 = inferadb_ledger_types::encode(e2).expect("encode2");
+            assert_eq!(bytes1, bytes2, "serialized events should be byte-identical");
         }
     }
 

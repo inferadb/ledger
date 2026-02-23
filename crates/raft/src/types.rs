@@ -8,6 +8,7 @@
 
 use std::{fmt, io::Cursor};
 
+use chrono::{DateTime, Utc};
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
 use inferadb_ledger_types::{
@@ -28,10 +29,27 @@ use serde::{Deserialize, Serialize};
 // - `SnapshotData`: Snapshot format (in-memory cursor for MVP)
 // - `AsyncRuntime`: Tokio runtime
 // - `Responder`: One-shot channel responder
+// ============================================================================
+// Raft Payload Wrapper
+// ============================================================================
+
+/// Wraps a [`LedgerRequest`] with a leader-assigned wall-clock timestamp.
+///
+/// The leader stamps `proposed_at` at proposal time (`client_write`), and all
+/// replicas use this value during apply — guaranteeing byte-identical event
+/// timestamps, B+ tree keys, and pagination cursors across the cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaftPayload {
+    /// The application-level request.
+    pub request: LedgerRequest,
+    /// Leader-assigned wall-clock timestamp at proposal time.
+    pub proposed_at: DateTime<Utc>,
+}
+
 openraft::declare_raft_types!(
     /// Ledger Raft type configuration.
     pub LedgerTypeConfig:
-        D = LedgerRequest,
+        D = RaftPayload,
         R = LedgerResponse,
         NodeId = LedgerNodeId,
         Node = BasicNode,
@@ -479,6 +497,55 @@ mod tests {
             },
             _ => panic!("unexpected variant"),
         }
+    }
+
+    #[test]
+    fn test_raft_payload_serde_roundtrip() {
+        use chrono::TimeZone;
+
+        let payload = RaftPayload {
+            request: LedgerRequest::CreateOrganization {
+                name: "test-org".to_string(),
+                slug: OrganizationSlug::new(999),
+                shard_id: Some(ShardId::new(1)),
+                quota: None,
+            },
+            proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
+        };
+
+        let bytes = postcard::to_allocvec(&payload).expect("serialize");
+        let deserialized: RaftPayload = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(payload, deserialized);
+        assert_eq!(deserialized.proposed_at, Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap());
+        match &deserialized.request {
+            LedgerRequest::CreateOrganization { name, slug, .. } => {
+                assert_eq!(name, "test-org");
+                assert_eq!(*slug, OrganizationSlug::new(999));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_raft_payload_preserves_proposed_at_across_reserialize() {
+        use chrono::TimeZone;
+
+        let ts = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        let payload = RaftPayload {
+            request: LedgerRequest::Write {
+                organization_id: OrganizationId::new(1),
+                vault_id: VaultId::new(1),
+                transactions: vec![],
+            },
+            proposed_at: ts,
+        };
+
+        let bytes1 = postcard::to_allocvec(&payload).expect("serialize");
+        let decoded: RaftPayload = postcard::from_bytes(&bytes1).expect("deserialize");
+        let bytes2 = postcard::to_allocvec(&decoded).expect("re-serialize");
+
+        assert_eq!(bytes1, bytes2, "re-serialization should produce identical bytes");
     }
 
     // ============================================

@@ -30,7 +30,7 @@ use tracing::{debug, info, warn};
 use crate::{
     error::OrphanCleanupError,
     log_storage::AppliedStateAccessor,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
+    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload},
 };
 
 /// Default interval between cleanup cycles (1 hour).
@@ -201,10 +201,13 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             transactions: vec![transaction],
         };
 
-        self.raft.client_write(request).await.map_err(|e| OrphanCleanupError::OrphanRaftWrite {
-            message: format!("{:?}", e),
-            backtrace: snafu::Backtrace::generate(),
-        })?;
+        self.raft
+            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+            .await
+            .map_err(|e| OrphanCleanupError::OrphanRaftWrite {
+                message: format!("{:?}", e),
+                backtrace: snafu::Backtrace::generate(),
+            })?;
 
         info!(organization_id = organization_id.value(), count, "Removed orphaned memberships");
 

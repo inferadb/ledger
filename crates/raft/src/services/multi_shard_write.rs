@@ -30,7 +30,7 @@ use crate::{
         slug_resolver::SlugResolver,
     },
     trace_context,
-    types::{LedgerRequest, LedgerResponse},
+    types::{LedgerRequest, LedgerResponse, RaftPayload},
 };
 
 // Note: SetCondition conversion is internal to convert_set_condition
@@ -357,31 +357,38 @@ impl WriteService for MultiShardWriteService {
 
         // Submit to the resolved shard's Raft
         metrics::record_raft_proposal();
-        let result =
-            match tokio::time::timeout(timeout, ctx.raft.client_write(ledger_request)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => {
-                    warn!(error = %e, "Raft write failed");
-                    metrics::record_write(false, start.elapsed().as_secs_f64());
-                    return Err(status_with_correlation(
-                        classify_raft_error(&e.to_string()),
-                        &request_id,
-                        &trace_ctx.trace_id,
-                    ));
-                },
-                Err(_elapsed) => {
-                    metrics::record_raft_proposal_timeout();
-                    metrics::record_write(false, start.elapsed().as_secs_f64());
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &request_id,
-                        &trace_ctx.trace_id,
-                    ));
-                },
-            };
+        let result = match tokio::time::timeout(
+            timeout,
+            ctx.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                warn!(error = %e, "Raft write failed");
+                metrics::record_write(false, start.elapsed().as_secs_f64());
+                return Err(status_with_correlation(
+                    classify_raft_error(&e.to_string()),
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ));
+            },
+            Err(_elapsed) => {
+                metrics::record_raft_proposal_timeout();
+                metrics::record_write(false, start.elapsed().as_secs_f64());
+                return Err(status_with_correlation(
+                    Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )),
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ));
+            },
+        };
 
         let response = result.data;
         let latency = start.elapsed().as_secs_f64();
@@ -624,31 +631,38 @@ impl WriteService for MultiShardWriteService {
 
         // Submit to Raft
         metrics::record_raft_proposal();
-        let result =
-            match tokio::time::timeout(timeout, ctx.raft.client_write(ledger_request)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => {
-                    warn!(error = %e, "Raft batch write failed");
-                    metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
-                    return Err(status_with_correlation(
-                        classify_raft_error(&e.to_string()),
-                        &request_id,
-                        &trace_ctx.trace_id,
-                    ));
-                },
-                Err(_elapsed) => {
-                    metrics::record_raft_proposal_timeout();
-                    metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &request_id,
-                        &trace_ctx.trace_id,
-                    ));
-                },
-            };
+        let result = match tokio::time::timeout(
+            timeout,
+            ctx.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                warn!(error = %e, "Raft batch write failed");
+                metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
+                return Err(status_with_correlation(
+                    classify_raft_error(&e.to_string()),
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ));
+            },
+            Err(_elapsed) => {
+                metrics::record_raft_proposal_timeout();
+                metrics::record_batch_write(false, batch_size, start.elapsed().as_secs_f64());
+                return Err(status_with_correlation(
+                    Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )),
+                    &request_id,
+                    &trace_ctx.trace_id,
+                ));
+            },
+        };
 
         let response = result.data;
         let latency = start.elapsed().as_secs_f64();

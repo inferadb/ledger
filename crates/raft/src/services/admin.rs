@@ -43,6 +43,7 @@ use crate::{
     trace_context,
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
+        RaftPayload,
     },
 };
 
@@ -231,27 +232,34 @@ impl AdminService for AdminServiceImpl {
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
-        let result =
-            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
-                Ok(Ok(result)) => {
-                    ctx.end_raft_timer();
-                    result
-                },
-                Ok(Err(e)) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    return Err(ServiceError::raft(e).into());
-                },
-                Err(_elapsed) => {
-                    ctx.end_raft_timer();
-                    crate::metrics::record_raft_proposal_timeout();
-                    ctx.set_error("Timeout", "Raft proposal timed out");
-                    return Err(Status::deadline_exceeded(format!(
-                        "Raft proposal timed out after {}ms",
-                        timeout.as_millis()
-                    )));
-                },
-            };
+        let result = match tokio::time::timeout(
+            timeout,
+            self.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                ctx.end_raft_timer();
+                result
+            },
+            Ok(Err(e)) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(ServiceError::raft(e).into());
+            },
+            Err(_elapsed) => {
+                ctx.end_raft_timer();
+                crate::metrics::record_raft_proposal_timeout();
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded(format!(
+                    "Raft proposal timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            },
+        };
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         match result.data {
@@ -330,27 +338,34 @@ impl AdminService for AdminServiceImpl {
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
-        let result =
-            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
-                Ok(Ok(result)) => {
-                    ctx.end_raft_timer();
-                    result
-                },
-                Ok(Err(e)) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    return Err(ServiceError::raft(e).into());
-                },
-                Err(_elapsed) => {
-                    ctx.end_raft_timer();
-                    crate::metrics::record_raft_proposal_timeout();
-                    ctx.set_error("Timeout", "Raft proposal timed out");
-                    return Err(Status::deadline_exceeded(format!(
-                        "Raft proposal timed out after {}ms",
-                        timeout.as_millis()
-                    )));
-                },
-            };
+        let result = match tokio::time::timeout(
+            timeout,
+            self.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                ctx.end_raft_timer();
+                result
+            },
+            Ok(Err(e)) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(ServiceError::raft(e).into());
+            },
+            Err(_elapsed) => {
+                ctx.end_raft_timer();
+                crate::metrics::record_raft_proposal_timeout();
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded(format!(
+                    "Raft proposal timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            },
+        };
 
         match result.data {
             LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
@@ -586,27 +601,34 @@ impl AdminService for AdminServiceImpl {
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
-        let result =
-            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
-                Ok(Ok(result)) => {
-                    ctx.end_raft_timer();
-                    result
-                },
-                Ok(Err(e)) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    return Err(classify_raft_error(&e.to_string()));
-                },
-                Err(_elapsed) => {
-                    ctx.end_raft_timer();
-                    crate::metrics::record_raft_proposal_timeout();
-                    ctx.set_error("Timeout", "Raft proposal timed out");
-                    return Err(Status::deadline_exceeded(format!(
-                        "Raft proposal timed out after {}ms",
-                        timeout.as_millis()
-                    )));
-                },
-            };
+        let result = match tokio::time::timeout(
+            timeout,
+            self.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                ctx.end_raft_timer();
+                result
+            },
+            Ok(Err(e)) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(classify_raft_error(&e.to_string()));
+            },
+            Err(_elapsed) => {
+                ctx.end_raft_timer();
+                crate::metrics::record_raft_proposal_timeout();
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded(format!(
+                    "Raft proposal timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            },
+        };
 
         match result.data {
             LedgerResponse::VaultCreated { vault_id, slug } => {
@@ -718,27 +740,34 @@ impl AdminService for AdminServiceImpl {
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
-        let result =
-            match tokio::time::timeout(timeout, self.raft.client_write(ledger_request)).await {
-                Ok(Ok(result)) => {
-                    ctx.end_raft_timer();
-                    result
-                },
-                Ok(Err(e)) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    return Err(classify_raft_error(&e.to_string()));
-                },
-                Err(_elapsed) => {
-                    ctx.end_raft_timer();
-                    crate::metrics::record_raft_proposal_timeout();
-                    ctx.set_error("Timeout", "Raft proposal timed out");
-                    return Err(Status::deadline_exceeded(format!(
-                        "Raft proposal timed out after {}ms",
-                        timeout.as_millis()
-                    )));
-                },
-            };
+        let result = match tokio::time::timeout(
+            timeout,
+            self.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                ctx.end_raft_timer();
+                result
+            },
+            Ok(Err(e)) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(classify_raft_error(&e.to_string()));
+            },
+            Err(_elapsed) => {
+                ctx.end_raft_timer();
+                crate::metrics::record_raft_proposal_timeout();
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded(format!(
+                    "Raft proposal timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            },
+        };
 
         match result.data {
             LedgerResponse::VaultDeleted { success } => {
@@ -1928,7 +1957,14 @@ impl AdminService for AdminServiceImpl {
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self.raft.client_write(health_request).await {
+            if let Err(e) = self
+                .raft
+                .client_write(RaftPayload {
+                    request: health_request,
+                    proposed_at: chrono::Utc::now(),
+                })
+                .await
+            {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // Continue with response - the local state will be inconsistent but
                 // the next recovery attempt can retry
@@ -1979,7 +2015,14 @@ impl AdminService for AdminServiceImpl {
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self.raft.client_write(health_request).await {
+            if let Err(e) = self
+                .raft
+                .client_write(RaftPayload {
+                    request: health_request,
+                    proposed_at: chrono::Utc::now(),
+                })
+                .await
+            {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // The vault was successfully recovered locally - log error but return success
             }
@@ -2105,7 +2148,11 @@ impl AdminService for AdminServiceImpl {
         };
 
         ctx.start_raft_timer();
-        match self.raft.client_write(health_request).await {
+        match self
+            .raft
+            .client_write(RaftPayload { request: health_request, proposed_at: chrono::Utc::now() })
+            .await
+        {
             Ok(_) => {
                 ctx.end_raft_timer();
                 ctx.set_success();
@@ -2252,7 +2299,11 @@ impl AdminService for AdminServiceImpl {
             let gc_request =
                 LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
 
-            match self.raft.client_write(gc_request).await {
+            match self
+                .raft
+                .client_write(RaftPayload { request: gc_request, proposed_at: chrono::Utc::now() })
+                .await
+            {
                 Ok(_) => {
                     total_expired += count as u64;
                 },

@@ -381,8 +381,16 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let mut vault_entries = Vec::new();
         let mut state = self.applied_state.write();
 
-        // Event accumulation — deterministic timestamp shared across the batch
-        let block_timestamp = chrono::Utc::now();
+        // Event accumulation — deterministic timestamp from leader's proposal.
+        // All replicas apply with the same timestamp, guaranteeing byte-identical
+        // event storage, B+ tree keys, and pagination cursors across the cluster.
+        let block_timestamp = entries
+            .last()
+            .and_then(|e| match &e.payload {
+                EntryPayload::Normal(payload) => Some(payload.proposed_at),
+                _ => None,
+            })
+            .unwrap_or_else(chrono::Utc::now);
         let mut events = Vec::new();
         let mut op_index = 0u32;
         let ttl_days = self.event_writer.as_ref().map_or(0, |ew| ew.config().default_ttl_days);
@@ -397,8 +405,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             let (response, vault_entry) = match &entry.payload {
                 EntryPayload::Blank => (crate::types::LedgerResponse::Empty, None),
-                EntryPayload::Normal(request) => self.apply_request_with_events(
-                    request,
+                EntryPayload::Normal(payload) => self.apply_request_with_events(
+                    &payload.request,
                     &mut state,
                     block_timestamp,
                     &mut op_index,
@@ -422,7 +430,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         // Create and store ShardBlock if we have vault entries
         if !vault_entries.is_empty() {
-            let timestamp = chrono::Utc::now();
+            let timestamp = block_timestamp;
 
             // Read shard chain state (single lock acquisition)
             let chain_state = *self.shard_chain.read();
