@@ -109,6 +109,32 @@ impl SlugResolver {
         }
     }
 
+    // --- System organization bypass for events ---
+
+    /// Extracts and resolves an organization slug, with special handling for the
+    /// system organization (slug = 0).
+    ///
+    /// Unlike [`extract_and_resolve`](Self::extract_and_resolve), this method
+    /// allows slug = 0 and maps it directly to `SYSTEM_ORGANIZATION_ID` (0)
+    /// without an index lookup. This is needed because the system organization
+    /// is hardcoded and never created via `CreateOrganization`.
+    ///
+    /// Returns `INVALID_ARGUMENT` if the slug field is missing.
+    pub fn extract_and_resolve_for_events(
+        &self,
+        proto_slug: &Option<proto::OrganizationSlug>,
+    ) -> Result<OrganizationId, Status> {
+        let slug =
+            proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing organization"))?;
+
+        // System organization: slug=0 maps to OrganizationId(0) directly
+        if slug.slug == 0 {
+            return Ok(OrganizationId::new(0));
+        }
+
+        self.resolve(OrganizationSlug::new(slug.slug))
+    }
+
     // --- Vault slug resolution ---
 
     /// Extracts and validates a vault slug from a proto message.
@@ -354,6 +380,39 @@ mod tests {
             resolver.resolve(OrganizationSlug::new(1)).unwrap(),
             cloned.resolve(OrganizationSlug::new(1)).unwrap()
         );
+    }
+
+    // --- System organization bypass tests ---
+
+    #[test]
+    fn extract_and_resolve_for_events_system_slug() {
+        let resolver = make_resolver(&[]);
+        let proto = Some(proto::OrganizationSlug { slug: 0 });
+        let org_id = resolver.extract_and_resolve_for_events(&proto).unwrap();
+        assert_eq!(org_id, OrganizationId::new(0));
+    }
+
+    #[test]
+    fn extract_and_resolve_for_events_regular_slug() {
+        let resolver = make_resolver(&[(42, 7)]);
+        let proto = Some(proto::OrganizationSlug { slug: 42 });
+        let org_id = resolver.extract_and_resolve_for_events(&proto).unwrap();
+        assert_eq!(org_id, OrganizationId::new(7));
+    }
+
+    #[test]
+    fn extract_and_resolve_for_events_missing_slug() {
+        let resolver = make_resolver(&[]);
+        let result = resolver.extract_and_resolve_for_events(&None);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn extract_and_resolve_for_events_unknown_slug() {
+        let resolver = make_resolver(&[(100, 1)]);
+        let proto = Some(proto::OrganizationSlug { slug: 999 });
+        let result = resolver.extract_and_resolve_for_events(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
     }
 
     // --- Vault slug tests ---

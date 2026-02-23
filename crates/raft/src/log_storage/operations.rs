@@ -2,6 +2,7 @@
 //!
 //! Transforms committed log entries into state mutations via the storage engine.
 
+use chrono::{DateTime, Utc};
 use inferadb_ledger_state::{
     StateError,
     system::{OrganizationRegistry, OrganizationStatus, SYSTEM_VAULT_ID, SystemKeys},
@@ -9,6 +10,7 @@ use inferadb_ledger_state::{
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     Hash, Operation, OrganizationId, VaultEntry, VaultId, compute_tx_merkle_root, encode,
+    events::{EventAction, EventEntry, EventOutcome},
 };
 
 use super::{
@@ -18,7 +20,10 @@ use super::{
         select_least_loaded_shard,
     },
 };
-use crate::types::{LedgerRequest, LedgerResponse, SystemRequest};
+use crate::{
+    event_writer::ApplyPhaseEmitter,
+    types::{LedgerRequest, LedgerResponse, SystemRequest},
+};
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
@@ -27,11 +32,39 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// For Write requests, this also returns a VaultEntry that should be included
     /// in the ShardBlock. The caller is responsible for collecting these entries
     /// and creating the ShardBlock.
+    ///
+    /// This is the backward-compatible entry point used by tests. Events are
+    /// discarded. For event-aware apply, use [`apply_request_with_events`].
+    #[cfg(test)]
     pub(super) fn apply_request(
         &self,
         request: &LedgerRequest,
         state: &mut AppliedState,
     ) -> (LedgerResponse, Option<VaultEntry>) {
+        let mut events = Vec::new();
+        let mut op_index = 0u32;
+        self.apply_request_with_events(request, state, Utc::now(), &mut op_index, &mut events, 0)
+    }
+
+    /// Applies a single request with event emission support.
+    ///
+    /// Like [`apply_request`], but additionally accumulates deterministic
+    /// apply-phase events into `events`. The `op_index` counter is incremented
+    /// for each event emitted, ensuring unique UUID v5 event IDs across a batch.
+    ///
+    /// `ttl_days` controls event expiry (from [`EventConfig::default_ttl_days`]).
+    pub(super) fn apply_request_with_events(
+        &self,
+        request: &LedgerRequest,
+        state: &mut AppliedState,
+        block_timestamp: DateTime<Utc>,
+        op_index: &mut u32,
+        events: &mut Vec<EventEntry>,
+        ttl_days: u32,
+    ) -> (LedgerResponse, Option<VaultEntry>) {
+        // Block height for event emission (from shard chain state)
+        let block_height = self.shard_chain.read().height + 1;
+
         match request {
             LedgerRequest::Write { organization_id, vault_id, transactions } => {
                 // Check organization status before processing write
@@ -212,6 +245,48 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // We temporarily build a BlockHeader to compute the hash
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
 
+                // Emit WriteCommitted event
+                let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
+                let vault_slug_val = state.vault_id_to_slug.get(vault_id).map(|s| s.value());
+                let ops_count: u32 = transactions.iter().map(|tx| tx.operations.len() as u32).sum();
+                let mut emitter = ApplyPhaseEmitter::for_organization(
+                    EventAction::WriteCommitted,
+                    *organization_id,
+                    org_slug,
+                )
+                .outcome(EventOutcome::Success)
+                .operations_count(ops_count);
+                if let Some(vs) = vault_slug_val {
+                    emitter = emitter.vault_slug(vs);
+                }
+                events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
+                *op_index += 1;
+
+                // Emit individual EntityExpired events for each ExpireEntity operation
+                for tx in transactions {
+                    for op in &tx.operations {
+                        if let Operation::ExpireEntity { key, .. } = op {
+                            let mut exp_emitter = ApplyPhaseEmitter::for_organization(
+                                EventAction::EntityExpired,
+                                *organization_id,
+                                org_slug,
+                            )
+                            .detail("key", key)
+                            .outcome(EventOutcome::Success);
+                            if let Some(vs) = vault_slug_val {
+                                exp_emitter = exp_emitter.vault_slug(vs);
+                            }
+                            events.push(exp_emitter.build(
+                                block_height,
+                                *op_index,
+                                block_timestamp,
+                                ttl_days,
+                            ));
+                            *op_index += 1;
+                        }
+                    }
+                }
+
                 (
                     LedgerResponse::Write {
                         block_height: new_height,
@@ -286,6 +361,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 }
 
+                // Emit OrganizationCreated event
+                events.push(
+                    ApplyPhaseEmitter::for_system(EventAction::OrganizationCreated)
+                        .detail("organization_name", name)
+                        .detail("organization_id", &organization_id.to_string())
+                        .detail("organization_slug", &slug.value().to_string())
+                        .detail("shard_id", &assigned_shard.to_string())
+                        .outcome(EventOutcome::Success)
+                        .build(block_height, *op_index, block_timestamp, ttl_days),
+                );
+                *op_index += 1;
+
                 (
                     LedgerResponse::OrganizationCreated {
                         organization_id,
@@ -357,10 +444,33 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 state.vault_slug_index.insert(*slug, vault_id);
                 state.vault_id_to_slug.insert(vault_id, *slug);
 
+                // Emit VaultCreated event
+                let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
+                events.push(
+                    ApplyPhaseEmitter::for_organization(
+                        EventAction::VaultCreated,
+                        *organization_id,
+                        org_slug,
+                    )
+                    .vault_slug(slug.value())
+                    .detail("vault_name", name.as_deref().unwrap_or(""))
+                    .outcome(EventOutcome::Success)
+                    .build(block_height, *op_index, block_timestamp, ttl_days),
+                );
+                *op_index += 1;
+
                 (LedgerResponse::VaultCreated { vault_id, slug: *slug }, None)
             },
 
             LedgerRequest::DeleteOrganization { organization_id } => {
+                // Capture slug before deletion (may be removed from index)
+                let org_slug_val = state.id_to_slug.get(organization_id).map(|s| s.value());
+                // Count active vaults at deletion time (for audit context)
+                let active_vault_count = state
+                    .vaults
+                    .iter()
+                    .filter(|((org, _), v)| *org == *organization_id && !v.deleted)
+                    .count();
                 // Collect active (non-deleted) vault IDs for this organization
                 let blocking_vault_ids: Vec<VaultId> = state
                     .vaults
@@ -423,6 +533,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         message: format!("Organization {} not found", organization_id),
                     }
                 };
+
+                // Emit OrganizationDeleted event on successful deletion
+                if matches!(response, LedgerResponse::OrganizationDeleted { success: true, .. }) {
+                    let mut emitter =
+                        ApplyPhaseEmitter::for_system(EventAction::OrganizationDeleted)
+                            .detail("organization_id", &organization_id.to_string())
+                            .detail("vault_count", &active_vault_count.to_string())
+                            .outcome(EventOutcome::Success);
+                    if let Some(slug) = org_slug_val {
+                        emitter = emitter.detail("organization_slug", &slug.to_string());
+                    }
+                    events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
+                    *op_index += 1;
+                }
+
                 (response, None)
             },
 
@@ -467,10 +592,33 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         message: format!("Vault {}:{} not found", organization_id, vault_id),
                     }
                 };
+
+                // Emit VaultDeleted event on successful deletion
+                if matches!(response, LedgerResponse::VaultDeleted { success: true }) {
+                    let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
+                    events.push(
+                        ApplyPhaseEmitter::for_organization(
+                            EventAction::VaultDeleted,
+                            *organization_id,
+                            org_slug,
+                        )
+                        .detail("vault_id", &vault_id.to_string())
+                        .outcome(EventOutcome::Success)
+                        .build(
+                            block_height,
+                            *op_index,
+                            block_timestamp,
+                            ttl_days,
+                        ),
+                    );
+                    *op_index += 1;
+                }
+
                 (response, None)
             },
 
-            LedgerRequest::SuspendOrganization { organization_id, reason: _ } => {
+            LedgerRequest::SuspendOrganization { organization_id, reason } => {
+                let org_slug_val = state.id_to_slug.get(organization_id).map(|s| s.value());
                 let response = if let Some(org) = state.organizations.get_mut(organization_id) {
                     match org.status {
                         OrganizationStatus::Deleted => LedgerResponse::Error {
@@ -497,10 +645,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         message: format!("Organization {} not found", organization_id),
                     }
                 };
+
+                // Emit OrganizationSuspended event on success
+                if matches!(response, LedgerResponse::OrganizationSuspended { .. }) {
+                    let mut emitter =
+                        ApplyPhaseEmitter::for_system(EventAction::OrganizationSuspended)
+                            .detail("organization_id", &organization_id.to_string())
+                            .outcome(EventOutcome::Success);
+                    if let Some(slug) = org_slug_val {
+                        emitter = emitter.detail("organization_slug", &slug.to_string());
+                    }
+                    if let Some(r) = reason {
+                        emitter = emitter.detail("reason", r);
+                    }
+                    events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
+                    *op_index += 1;
+                }
+
                 (response, None)
             },
 
             LedgerRequest::ResumeOrganization { organization_id } => {
+                let org_slug_val = state.id_to_slug.get(organization_id).map(|s| s.value());
                 let response = if let Some(org) = state.organizations.get_mut(organization_id) {
                     match org.status {
                         OrganizationStatus::Suspended => {
@@ -530,6 +696,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         message: format!("Organization {} not found", organization_id),
                     }
                 };
+
+                // Emit OrganizationResumed event on success
+                if matches!(response, LedgerResponse::OrganizationResumed { .. }) {
+                    let mut emitter =
+                        ApplyPhaseEmitter::for_system(EventAction::OrganizationResumed)
+                            .detail("organization_id", &organization_id.to_string())
+                            .outcome(EventOutcome::Success);
+                    if let Some(slug) = org_slug_val {
+                        emitter = emitter.detail("organization_slug", &slug.to_string());
+                    }
+                    events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
+                    *op_index += 1;
+                }
+
                 (response, None)
             },
 
@@ -580,6 +760,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         message: format!("Organization {} not found", organization_id),
                     }
                 };
+
+                // Emit MigrationStarted event on success
+                if matches!(response, LedgerResponse::MigrationStarted { .. }) {
+                    events.push(
+                        ApplyPhaseEmitter::for_system(EventAction::MigrationStarted)
+                            .detail("organization_id", &organization_id.to_string())
+                            .detail("target_shard_id", &target_shard_id.to_string())
+                            .outcome(EventOutcome::Success)
+                            .build(block_height, *op_index, block_timestamp, ttl_days),
+                    );
+                    *op_index += 1;
+                }
+
                 (response, None)
             },
 
@@ -622,6 +815,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         message: format!("Organization {} not found", organization_id),
                     }
                 };
+
+                // Emit MigrationCompleted event on success
+                if let LedgerResponse::MigrationCompleted { new_shard_id, .. } = &response {
+                    events.push(
+                        ApplyPhaseEmitter::for_system(EventAction::MigrationCompleted)
+                            .detail("organization_id", &organization_id.to_string())
+                            .detail("shard_id", &new_shard_id.to_string())
+                            .outcome(EventOutcome::Success)
+                            .build(block_height, *op_index, block_timestamp, ttl_days),
+                    );
+                    *op_index += 1;
+                }
+
                 (response, None)
             },
 
@@ -691,12 +897,35 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         "Vault health updated to Diverged via Raft"
                     );
                 }
+                // Emit VaultHealthUpdated event
+                let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
+                let vault_slug_val = state.vault_id_to_slug.get(vault_id).map(|s| s.value());
+                let health_status = if *healthy {
+                    "healthy"
+                } else if recovery_attempt.is_some() && recovery_started_at.is_some() {
+                    "recovering"
+                } else {
+                    "diverged"
+                };
+                let mut emitter = ApplyPhaseEmitter::for_organization(
+                    EventAction::VaultHealthUpdated,
+                    *organization_id,
+                    org_slug,
+                )
+                .detail("health_status", health_status)
+                .outcome(EventOutcome::Success);
+                if let Some(vs) = vault_slug_val {
+                    emitter = emitter.vault_slug(vs);
+                }
+                events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
+                *op_index += 1;
+
                 (LedgerResponse::VaultHealthUpdated { success: true }, None)
             },
 
             LedgerRequest::System(system_request) => {
                 let response = match system_request {
-                    SystemRequest::CreateUser { name: _, email: _, admin: _ } => {
+                    SystemRequest::CreateUser { .. } => {
                         let user_id = state.sequences.next_user();
                         LedgerResponse::UserCreated { user_id }
                     },
@@ -740,6 +969,62 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     },
                 };
+
+                // Emit events for system request variants
+                match (&response, system_request) {
+                    (
+                        LedgerResponse::UserCreated { user_id },
+                        SystemRequest::CreateUser { name, email, admin },
+                    ) => {
+                        events.push(
+                            ApplyPhaseEmitter::for_system(EventAction::UserCreated)
+                                .principal("system")
+                                .detail("user_id", &user_id.to_string())
+                                .detail("name", name)
+                                .detail("email", email)
+                                .detail("admin", &admin.to_string())
+                                .outcome(EventOutcome::Success)
+                                .build(block_height, *op_index, block_timestamp, ttl_days),
+                        );
+                        *op_index += 1;
+                    },
+                    (LedgerResponse::Empty, SystemRequest::AddNode { node_id, address }) => {
+                        events.push(
+                            ApplyPhaseEmitter::for_system(EventAction::NodeJoinedCluster)
+                                .principal("system")
+                                .detail("node_id", &node_id.to_string())
+                                .detail("address", address)
+                                .outcome(EventOutcome::Success)
+                                .build(block_height, *op_index, block_timestamp, ttl_days),
+                        );
+                        *op_index += 1;
+                    },
+                    (LedgerResponse::Empty, SystemRequest::RemoveNode { node_id }) => {
+                        events.push(
+                            ApplyPhaseEmitter::for_system(EventAction::NodeLeftCluster)
+                                .principal("system")
+                                .detail("node_id", &node_id.to_string())
+                                .outcome(EventOutcome::Success)
+                                .build(block_height, *op_index, block_timestamp, ttl_days),
+                        );
+                        *op_index += 1;
+                    },
+                    (
+                        LedgerResponse::OrganizationMigrated { new_shard_id, .. },
+                        SystemRequest::UpdateOrganizationRouting { organization_id, .. },
+                    ) => {
+                        events.push(
+                            ApplyPhaseEmitter::for_system(EventAction::RoutingUpdated)
+                                .detail("organization_id", &organization_id.to_string())
+                                .detail("shard_id", &new_shard_id.to_string())
+                                .outcome(EventOutcome::Success)
+                                .build(block_height, *op_index, block_timestamp, ttl_days),
+                        );
+                        *op_index += 1;
+                    },
+                    _ => {},
+                }
+
                 (response, None)
             },
 
@@ -751,11 +1036,37 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let mut last_vault_entry = None;
 
                 for inner_request in requests {
-                    let (response, vault_entry) = self.apply_request(inner_request, state);
+                    let (response, vault_entry) = self.apply_request_with_events(
+                        inner_request,
+                        state,
+                        block_timestamp,
+                        op_index,
+                        events,
+                        ttl_days,
+                    );
                     responses.push(response);
                     if vault_entry.is_some() {
                         last_vault_entry = vault_entry;
                     }
+                }
+
+                // Emit BatchWriteCommitted event for the batch itself
+                if let Some(ref ve) = last_vault_entry {
+                    let org_slug = state.id_to_slug.get(&ve.organization_id).map(|s| s.value());
+                    let vault_slug_val =
+                        state.vault_id_to_slug.get(&ve.vault_id).map(|s| s.value());
+                    let mut emitter = ApplyPhaseEmitter::for_organization(
+                        EventAction::BatchWriteCommitted,
+                        ve.organization_id,
+                        org_slug,
+                    )
+                    .outcome(EventOutcome::Success)
+                    .operations_count(requests.len() as u32);
+                    if let Some(vs) = vault_slug_val {
+                        emitter = emitter.vault_slug(vs);
+                    }
+                    events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
+                    *op_index += 1;
                 }
 
                 (LedgerResponse::BatchWrite { responses }, last_vault_entry)

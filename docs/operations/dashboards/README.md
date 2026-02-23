@@ -363,11 +363,12 @@ Pre-built dashboard templates for visualizing InferaDB Ledger request logs acros
 
 ## Available Templates
 
-| Platform               | File                   | Datasource                              |
-| ---------------------- | ---------------------- | --------------------------------------- |
-| Grafana (Loki)         | `grafana-loki-v1.json` | Loki                                    |
-| Kibana (Elasticsearch) | `kibana-v1.ndjson`     | Elasticsearch index `inferadb-ledger-*` |
-| Datadog                | `datadog-v1.json`      | Datadog Logs                            |
+| Platform               | File                     | Datasource                              |
+| ---------------------- | ------------------------ | --------------------------------------- |
+| Grafana (Loki)         | `grafana-loki-v1.json`   | Loki                                    |
+| Grafana (Events)       | `grafana-events-v1.json` | Prometheus                              |
+| Kibana (Elasticsearch) | `kibana-v1.ndjson`       | Elasticsearch index `inferadb-ledger-*` |
+| Datadog                | `datadog-v1.json`        | Datadog Logs                            |
 
 ## Grafana (Loki)
 
@@ -408,13 +409,13 @@ Alternatively, use Loki's JSON parser in queries (already configured in the dash
 
 ### Variables
 
-| Variable     | Description                                                      |
-| ------------ | ---------------------------------------------------------------- |
-| `datasource` | Loki datasource to query                                         |
-| `service`    | Filter by gRPC service (WriteService, ReadService, AdminService) |
-| `method`     | Filter by gRPC method                                            |
-| `organization`  | Filter by organization ID                                           |
-| `outcome`    | Filter by request outcome                                        |
+| Variable       | Description                                                      |
+| -------------- | ---------------------------------------------------------------- |
+| `datasource`   | Loki datasource to query                                         |
+| `service`      | Filter by gRPC service (WriteService, ReadService, AdminService) |
+| `method`       | Filter by gRPC method                                            |
+| `organization` | Filter by organization ID                                        |
+| `outcome`      | Filter by request outcome                                        |
 
 ## Kibana (Elasticsearch)
 
@@ -508,26 +509,26 @@ curl -X POST "https://api.datadoghq.com/api/v1/dashboard" \
 
 Create facets for efficient filtering. In Datadog Logs → Configuration → Facets:
 
-| Facet        | Path            | Type    |
-| ------------ | --------------- | ------- |
-| Service      | `@service`      | String  |
-| Method       | `@method`       | String  |
-| Outcome      | `@outcome`      | String  |
-| Client ID    | `@client_id`    | String  |
+| Facet           | Path                 | Type    |
+| --------------- | -------------------- | ------- |
+| Service         | `@service`           | String  |
+| Method          | `@method`            | String  |
+| Outcome         | `@outcome`           | String  |
+| Client ID       | `@client_id`         | String  |
 | Organization ID | `@organization_slug` | Integer |
-| Duration     | `@duration_ms`  | Double  |
-| Error Code   | `@error_code`   | String  |
-| Trace ID     | `@trace_id`     | String  |
+| Duration        | `@duration_ms`       | Double  |
+| Error Code      | `@error_code`        | String  |
+| Trace ID        | `@trace_id`          | String  |
 
 ### Template Variables
 
-| Variable    | Description                    |
-| ----------- | ------------------------------ |
-| `service`   | Filter by gRPC service         |
-| `method`    | Filter by gRPC method          |
-| `organization` | Filter by organization ID         |
-| `outcome`   | Filter by request outcome      |
-| `trace_id`  | Filter by distributed trace ID |
+| Variable       | Description                    |
+| -------------- | ------------------------------ |
+| `service`      | Filter by gRPC service         |
+| `method`       | Filter by gRPC method          |
+| `organization` | Filter by organization ID      |
+| `outcome`      | Filter by request outcome      |
+| `trace_id`     | Filter by distributed trace ID |
 
 ## Dashboard Panels
 
@@ -540,7 +541,7 @@ All templates include equivalent panels:
 | Latency Percentiles by Method  | p50/p95/p99 latency over time     |
 | Latency Heatmap                | Distribution of request durations |
 | Top 10 Clients                 | Highest-volume clients            |
-| Top 10 Organizations by Errors    | Problem organizations                |
+| Top 10 Organizations by Errors | Problem organizations             |
 | Sampling/Outcomes              | Pie chart of request outcomes     |
 | Batch Coalescing Efficiency    | Average batch size over time      |
 | Idempotency Cache Hit Rate     | Cache effectiveness metric        |
@@ -615,9 +616,9 @@ inferadb-ledger --version
 
 ### Compatibility Matrix
 
-| Dashboard Schema | Min Ledger Version | Changes                           |
-| ---------------- | ------------------ | --------------------------------- |
-| 1                | 0.5.0              | Initial logging release           |
+| Dashboard Schema | Min Ledger Version | Changes                 |
+| ---------------- | ------------------ | ----------------------- |
+| 1                | 0.5.0              | Initial logging release |
 
 **Future breaking changes will increment the schema version.**
 
@@ -625,12 +626,12 @@ Operators can run dashboards with `schema_version` higher than their ledger vers
 
 ### Field Evolution Policy
 
-| Change Type        | Compatibility                    | Dashboard Action |
-| ------------------ | -------------------------------- | ---------------- |
-| New field added    | Backward compatible              | No update needed |
-| Field renamed      | Breaking (increments schema)     | Update queries   |
-| Field type changed | Breaking (increments schema)     | Update queries   |
-| Field removed      | Breaking (increments schema)     | Remove from queries |
+| Change Type        | Compatibility                | Dashboard Action    |
+| ------------------ | ---------------------------- | ------------------- |
+| New field added    | Backward compatible          | No update needed    |
+| Field renamed      | Breaking (increments schema) | Update queries      |
+| Field type changed | Breaking (increments schema) | Update queries      |
+| Field removed      | Breaking (increments schema) | Remove from queries |
 
 ## Upgrading Dashboards
 

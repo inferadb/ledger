@@ -16,11 +16,12 @@ use inferadb_ledger_proto::proto::{
     BlockAnnouncement, JoinClusterRequest, admin_service_client::AdminServiceClient,
 };
 use inferadb_ledger_raft::{
-    AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, GrpcRaftNetworkFactory,
-    LearnerRefreshJob, LedgerNodeId, LedgerServer, LedgerTypeConfig, RaftLogStore,
-    ResourceMetricsCollector, RuntimeConfigHandle, TtlGarbageCollector,
+    AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
+    GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId, LedgerServer, LedgerTypeConfig,
+    RaftLogStore, ResourceMetricsCollector, RuntimeConfigHandle, TtlGarbageCollector,
+    event_writer::{EventHandle, EventWriter},
 };
-use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
+use inferadb_ledger_state::{BlockArchive, EventsDatabase, SnapshotManager, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use tokio::sync::broadcast;
@@ -104,6 +105,9 @@ pub struct BootstrappedNode {
     /// Automated backup background task handle (only active when backup is configured).
     #[allow(dead_code)] // retained to keep background task alive
     pub backup_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Events garbage collector background task handle.
+    #[allow(dead_code)] // retained to keep background task alive
+    pub events_gc_handle: Option<tokio::task::JoinHandle<()>>,
     /// Runtime configuration handle for hot-reloadable settings.
     pub runtime_config: RuntimeConfigHandle,
 }
@@ -158,9 +162,23 @@ pub async fn bootstrap_node(
     );
     let block_archive = Arc::new(BlockArchive::new(blocks_db));
 
+    // Open events database for audit event persistence (separate from state.db).
+    // events.db uses an independent write lock to avoid contention with Raft
+    // state mutations. The same Arc is shared across EventWriter (apply-phase),
+    // EventHandle (handler-phase), EventsGarbageCollector, and EventsServiceImpl.
+    let events_db = Arc::new(
+        EventsDatabase::<FileBackend>::open(data_dir)
+            .map_err(|e| BootstrapError::Database(format!("failed to open events db: {e}")))?,
+    );
+
     // Create block announcements broadcast channel for real-time notifications.
     // Buffer size of 1024 allows for burst handling during high commit rates.
     let (block_announcements, _) = broadcast::channel::<BlockAnnouncement>(1024);
+
+    // Create EventWriter for apply-phase event persistence.
+    // The writer filters events by scope (system/organization) based on EventConfig
+    // and is called during Raft apply_to_state_machine().
+    let event_writer = EventWriter::new(Arc::clone(&events_db), config.events.clone());
 
     let log_path = data_dir.join("raft.db");
     let log_store = RaftLogStore::open(&log_path)
@@ -168,7 +186,8 @@ pub async fn bootstrap_node(
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
         .with_shard_config(inferadb_ledger_types::ShardId::new(0), node_id.to_string()) // Default shard 0
-        .with_block_announcements(block_announcements.clone());
+        .with_block_announcements(block_announcements.clone())
+        .with_event_writer(event_writer);
 
     // Determine bootstrap behavior before log_store is consumed by Adaptor
     let is_initialized = log_store.is_initialized();
@@ -289,6 +308,11 @@ pub async fn bootstrap_node(
         })
         .transpose()?;
 
+    // Create handler-phase event handle for gRPC service denial recording.
+    // Shared across WriteService, AdminService, and SagaOrchestrator via Clone.
+    let event_config = Arc::new(config.events.clone());
+    let event_handle = EventHandle::new(Arc::clone(&events_db), event_config, node_id);
+
     let server = LedgerServer::builder()
         .raft(raft.clone())
         .state(state.clone())
@@ -302,6 +326,8 @@ pub async fn bootstrap_node(
         .shutdown_rx(Some(shutdown_rx))
         .runtime_config(Some(runtime_config.clone()))
         .data_dir(Some(data_dir.to_path_buf()))
+        .events_db(Some((*events_db).clone()))
+        .event_handle(Some(event_handle))
         .build();
     // Wire backup support into server if configured.
     // Done post-construction because bon type-state builders don't support
@@ -401,6 +427,21 @@ pub async fn bootstrap_node(
             None
         };
 
+    // Start events garbage collector for TTL-based event expiry.
+    // Runs on ALL nodes (not leader-only) because events.db is node-local.
+    let events_gc_handle = if config.events.enabled {
+        let gc = EventsGarbageCollector::builder()
+            .events_db(events_db)
+            .config(config.events.clone())
+            .watchdog_handle(watchdog.map(|w| w.register("events_gc", 300)))
+            .build();
+        let handle = gc.start();
+        tracing::info!("Started events garbage collector");
+        Some(handle)
+    } else {
+        None
+    };
+
     Ok(BootstrappedNode {
         raft,
         state,
@@ -411,6 +452,7 @@ pub async fn bootstrap_node(
         learner_refresh_handle,
         resource_metrics_handle,
         backup_handle,
+        events_gc_handle,
         runtime_config,
     })
 }
@@ -645,5 +687,50 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let result = bootstrap_node(&config, &data_dir, health, rx).await;
         assert!(result.is_ok(), "bootstrap should succeed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_creates_events_db() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+        let config = Config::for_test(1, 50052, data_dir.clone());
+
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let node =
+            bootstrap_node(&config, &data_dir, health, rx).await.expect("bootstrap should succeed");
+
+        // events.db should be created alongside state.db
+        assert!(data_dir.join("events.db").exists(), "events.db should be created in data_dir");
+        assert!(data_dir.join("state.db").exists(), "state.db should be created in data_dir");
+
+        // Events GC should be running (default config has events.enabled = true)
+        assert!(
+            node.events_gc_handle.is_some(),
+            "events GC should be started when events are enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_events_disabled_skips_gc() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+        let mut config = Config::for_test(1, 50053, data_dir.clone());
+        config.events.enabled = false;
+
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let node =
+            bootstrap_node(&config, &data_dir, health, rx).await.expect("bootstrap should succeed");
+
+        // events.db is still created (needed for snapshot restore), but GC is not started
+        assert!(
+            data_dir.join("events.db").exists(),
+            "events.db should still be created even when disabled"
+        );
+        assert!(
+            node.events_gc_handle.is_none(),
+            "events GC should not be started when events are disabled"
+        );
     }
 }

@@ -731,6 +731,16 @@ pub struct Config {
     #[arg(skip)]
     #[serde(default)]
     pub backup: Option<inferadb_ledger_types::config::BackupConfig>,
+
+    // === Events ===
+    /// Event logging configuration for organization-scoped audit trails.
+    ///
+    /// Controls retention TTL, detail size limits, per-scope enable flags,
+    /// snapshot limits, and external ingestion settings.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub events: inferadb_ledger_types::events::EventConfig,
 }
 
 // Default value functions
@@ -785,6 +795,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             config_file: None,
             backup: None,
+            events: inferadb_ledger_types::events::EventConfig::default(),
         }
     }
 }
@@ -926,6 +937,7 @@ impl Config {
             });
         }
         self.logging.validate()?;
+        self.events.validate()?;
         Ok(())
     }
 
@@ -979,6 +991,12 @@ pub enum ConfigError {
         /// Error description.
         message: String,
     },
+}
+
+impl From<inferadb_ledger_types::config::ConfigError> for ConfigError {
+    fn from(e: inferadb_ledger_types::config::ConfigError) -> Self {
+        Self::Validation { message: e.to_string() }
+    }
 }
 
 /// Command-line arguments for the ledger server.
@@ -1192,6 +1210,17 @@ pub fn generate_runtime_config_example() -> String {
         "max_cardinality = {}    # Drop observations above this cardinality\n",
         mc.max_cardinality
     ));
+    output.push('\n');
+
+    output.push_str("# Event logging configuration (hot-reloadable subset).\n");
+    output.push_str("# Controls event audit trail behavior at runtime.\n");
+    output.push_str("[events]\n");
+    output.push_str("enabled = true              # Master switch for event logging\n");
+    output.push_str("default_ttl_days = 90       # Default TTL for event entries (1..=3650)\n");
+    output.push_str("system_log_enabled = true    # Enable system-level events\n");
+    output.push_str("organization_log_enabled = true # Enable org-level events\n");
+    output.push_str("ingest_enabled = true        # Master switch for external ingestion\n");
+    output.push_str("ingest_rate_limit_per_source = 10000 # Events/sec per source service\n");
 
     output
 }

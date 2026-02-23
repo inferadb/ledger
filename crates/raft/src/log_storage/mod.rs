@@ -63,11 +63,15 @@ pub struct ShardChainState {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
-    use inferadb_ledger_state::system::OrganizationStatus;
+    use chrono::{DateTime, Utc};
+    use inferadb_ledger_state::{EventStore, EventsDatabase, system::OrganizationStatus};
     use inferadb_ledger_store::{FileBackend, tables};
-    use inferadb_ledger_types::{OrganizationId, ShardId, VaultId, VaultSlug};
+    use inferadb_ledger_types::{
+        Operation, OrganizationId, ShardId, Transaction, VaultId, VaultSlug,
+        events::{EventAction, EventConfig, EventEntry, EventScope},
+    };
     use openraft::{
         CommittedLeaderId, Entry, EntryPayload, LogId, RaftStorage, Vote, storage::RaftLogReader,
     };
@@ -2916,7 +2920,11 @@ mod tests {
             },
         );
 
-        let combined = CombinedSnapshot { applied_state, vault_entities: HashMap::new() };
+        let combined = CombinedSnapshot {
+            applied_state,
+            vault_entities: HashMap::new(),
+            event_entries: Vec::new(),
+        };
 
         let snapshot_data = postcard::to_allocvec(&combined).expect("serialize snapshot");
 
@@ -3027,6 +3035,7 @@ mod tests {
                 vault_id_to_slug: HashMap::new(),
             },
             vault_entities: HashMap::new(),
+            event_entries: Vec::new(),
         };
 
         let snapshot_data = postcard::to_allocvec(&combined).expect("serialize snapshot");
@@ -4246,5 +4255,1248 @@ mod tests {
             assert_eq!(usage.storage_bytes, 11);
             assert_eq!(usage.vault_count, 1);
         }
+    }
+
+    // =========================================================================
+    // Apply-phase event integration tests
+    // =========================================================================
+
+    /// Helper: creates a RaftLogStore with an EventWriter attached.
+    fn store_with_events(dir: &std::path::Path) -> RaftLogStore<FileBackend> {
+        let store = RaftLogStore::<FileBackend>::open(dir.join("raft_log.db")).expect("open store");
+        let events_db = EventsDatabase::open(dir).expect("open events db");
+        let config = EventConfig::default();
+        let writer = crate::event_writer::EventWriter::new(Arc::new(events_db), config);
+        store.with_event_writer(writer)
+    }
+
+    /// Helper: fixed timestamp for deterministic event tests.
+    fn fixed_timestamp() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2025-01-15T12:00:00Z").expect("parse timestamp").to_utc()
+    }
+
+    /// Helper: creates a simple Write request with one set operation.
+    fn simple_write_request(org_id: OrganizationId, vault_id: VaultId) -> LedgerRequest {
+        LedgerRequest::Write {
+            organization_id: org_id,
+            vault_id,
+            transactions: vec![Transaction {
+                id: [1u8; 16],
+                client_id: "test-client".to_string(),
+                sequence: 0,
+                actor: "test-actor".to_string(),
+                operations: vec![Operation::SetEntity {
+                    key: "key1".to_string(),
+                    value: b"value1".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                timestamp: fixed_timestamp(),
+            }],
+        }
+    }
+
+    /// Helper: sets up an organization and vault in applied state.
+    fn setup_org_and_vault(state: &mut AppliedState) -> (OrganizationId, VaultId) {
+        let org_id = state.sequences.next_organization();
+        let vault_id = state.sequences.next_vault();
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
+        let vault_slug = VaultSlug::new(2000);
+
+        state.organizations.insert(
+            org_id,
+            OrganizationMeta {
+                organization_id: org_id,
+                slug: org_slug,
+                name: "test-org".to_string(),
+                shard_id: ShardId::new(0),
+                status: OrganizationStatus::Active,
+                pending_shard_id: None,
+                quota: None,
+            },
+        );
+        state.slug_index.insert(org_slug, org_id);
+        state.id_to_slug.insert(org_id, org_slug);
+
+        let key = (org_id, vault_id);
+        state.vault_heights.insert(key, 0);
+        state.vaults.insert(
+            key,
+            VaultMeta {
+                organization_id: org_id,
+                vault_id,
+                slug: vault_slug,
+                name: Some("test-vault".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: BlockRetentionPolicy::default(),
+            },
+        );
+        state.vault_slug_index.insert(vault_slug, vault_id);
+        state.vault_id_to_slug.insert(vault_id, vault_slug);
+        state.vault_health.insert(key, VaultHealthStatus::Healthy);
+
+        (org_id, vault_id)
+    }
+
+    #[test]
+    fn event_write_committed_has_correct_block_height() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        let request = simple_write_request(org_id, vault_id);
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        let (response, _) = store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+
+        // Verify response is a successful write
+        match &response {
+            LedgerResponse::Write { block_height, .. } => {
+                assert_eq!(*block_height, 1, "first write should be block 1");
+            },
+            other => panic!("expected Write response, got {:?}", other),
+        }
+
+        // Verify WriteCommitted event
+        let write_event = events
+            .iter()
+            .find(|e| e.action == EventAction::WriteCommitted)
+            .expect("WriteCommitted event should be emitted");
+
+        assert_eq!(
+            write_event.block_height,
+            Some(1),
+            "event block_height should match shard chain height + 1"
+        );
+        assert_eq!(write_event.organization_id, org_id);
+        assert!(
+            write_event.operations_count.is_some(),
+            "WriteCommitted should include operations_count"
+        );
+    }
+
+    #[test]
+    fn event_determinism_across_stores() {
+        // Create two independent stores with events
+        let dir_a = tempdir().expect("create temp dir a");
+        let dir_b = tempdir().expect("create temp dir b");
+        let store_a = store_with_events(dir_a.path());
+        let store_b = store_with_events(dir_b.path());
+
+        // Set up identical state in both
+        let mut state_a = store_a.applied_state.write();
+        let (org_id_a, vault_id_a) = setup_org_and_vault(&mut state_a);
+
+        let mut state_b = store_b.applied_state.write();
+        let (org_id_b, vault_id_b) = setup_org_and_vault(&mut state_b);
+
+        // Both should have assigned the same IDs (sequential from zero)
+        assert_eq!(org_id_a, org_id_b);
+        assert_eq!(vault_id_a, vault_id_b);
+
+        let ts = fixed_timestamp();
+
+        // Apply identical sequences to both: CreateOrganization + Write
+        let write_request = simple_write_request(org_id_a, vault_id_a);
+
+        let mut events_a: Vec<EventEntry> = Vec::new();
+        let mut events_b: Vec<EventEntry> = Vec::new();
+        let mut idx_a = 0u32;
+        let mut idx_b = 0u32;
+
+        store_a.apply_request_with_events(
+            &write_request,
+            &mut state_a,
+            ts,
+            &mut idx_a,
+            &mut events_a,
+            90,
+        );
+        store_b.apply_request_with_events(
+            &write_request,
+            &mut state_b,
+            ts,
+            &mut idx_b,
+            &mut events_b,
+            90,
+        );
+
+        // Both must produce the same number of events
+        assert_eq!(events_a.len(), events_b.len(), "event count must match across replicas");
+
+        // Each event must have identical IDs and content
+        for (a, b) in events_a.iter().zip(events_b.iter()) {
+            assert_eq!(a.event_id, b.event_id, "event IDs must be deterministic");
+            assert_eq!(a.action, b.action);
+            assert_eq!(a.block_height, b.block_height);
+            assert_eq!(a.timestamp, b.timestamp);
+            assert_eq!(a.details, b.details);
+        }
+    }
+
+    #[test]
+    fn event_entity_expired_emits_per_key() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        // Write request with two ExpireEntity operations
+        let request = LedgerRequest::Write {
+            organization_id: org_id,
+            vault_id,
+            transactions: vec![Transaction {
+                id: [2u8; 16],
+                client_id: "gc-client".to_string(),
+                sequence: 0,
+                actor: "gc-actor".to_string(),
+                operations: vec![
+                    Operation::ExpireEntity { key: "expired-key-1".to_string(), expired_at: 100 },
+                    Operation::ExpireEntity { key: "expired-key-2".to_string(), expired_at: 200 },
+                ],
+                timestamp: fixed_timestamp(),
+            }],
+        };
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+
+        // Should have: 1 WriteCommitted + 2 EntityExpired = 3 events
+        let expired_events: Vec<&EventEntry> =
+            events.iter().filter(|e| e.action == EventAction::EntityExpired).collect();
+
+        assert_eq!(expired_events.len(), 2, "should emit one EntityExpired per ExpireEntity op");
+
+        // Verify each has the correct key in details
+        let keys: Vec<&str> = expired_events
+            .iter()
+            .map(|e| e.details.get("key").expect("key detail").as_str())
+            .collect();
+        assert!(keys.contains(&"expired-key-1"));
+        assert!(keys.contains(&"expired-key-2"));
+
+        // Verify each has a distinct event_id (different op_index)
+        assert_ne!(
+            expired_events[0].event_id, expired_events[1].event_id,
+            "each EntityExpired must have a unique event_id"
+        );
+    }
+
+    #[test]
+    fn event_writer_integration_persists_to_events_db() {
+        let dir = tempdir().expect("create temp dir");
+        let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+        let events_db_arc = Arc::new(events_db);
+        let config = EventConfig::default();
+        let writer = crate::event_writer::EventWriter::new(Arc::clone(&events_db_arc), config);
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_event_writer(writer);
+
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        let request = simple_write_request(org_id, vault_id);
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+
+        // Write events through the EventWriter (simulating what apply_to_state_machine does)
+        let ew = store.event_writer().expect("event writer configured");
+        let written = ew.write_events(&events).expect("write events");
+        assert!(written > 0, "at least one event should be written");
+
+        // Read back from events_db and verify
+        let read_txn = events_db_arc.read().expect("read txn");
+        let (stored, _cursor) =
+            EventStore::list(&read_txn, org_id, 0, u64::MAX, 100, None).expect("list events");
+
+        // System-scoped events (OrganizationCreated etc.) won't appear under org_id query,
+        // but WriteCommitted is organization-scoped so it should be there
+        let write_committed: Vec<_> =
+            stored.iter().filter(|e| e.action == EventAction::WriteCommitted).collect();
+        assert_eq!(
+            write_committed.len(),
+            1,
+            "WriteCommitted event should be persisted in events.db"
+        );
+        assert_eq!(write_committed[0].organization_id, org_id);
+    }
+
+    // ── Task 5: System-Level Event Hook Tests ──────────────────────
+
+    #[test]
+    fn event_organization_created_has_slug_detail() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+
+        let request = LedgerRequest::CreateOrganization {
+            name: "slug-test-org".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(42_000),
+            shard_id: None,
+            quota: None,
+        };
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+
+        let org_event = events
+            .iter()
+            .find(|e| e.action == EventAction::OrganizationCreated)
+            .expect("OrganizationCreated event should be emitted");
+
+        assert_eq!(
+            org_event.details.get("organization_slug").map(|s| s.as_str()),
+            Some("42000"),
+            "OrganizationCreated should include slug in details"
+        );
+        assert_eq!(org_event.organization_id, OrganizationId::new(0), "system events use org_id 0");
+    }
+
+    #[test]
+    fn event_organization_deleted_captures_vault_count() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        // Mark the vault as deleted so DeleteOrganization goes straight to Deleted
+        let key = (org_id, vault_id);
+        state.vaults.get_mut(&key).expect("vault exists").deleted = true;
+
+        let request = LedgerRequest::DeleteOrganization { organization_id: org_id };
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+
+        let del_event = events
+            .iter()
+            .find(|e| e.action == EventAction::OrganizationDeleted)
+            .expect("OrganizationDeleted event should be emitted");
+
+        // vault_count captures active (non-deleted) vaults at deletion time
+        assert_eq!(
+            del_event.details.get("vault_count").map(|s| s.as_str()),
+            Some("0"),
+            "OrganizationDeleted should count active vaults (deleted ones excluded)"
+        );
+        assert_eq!(
+            del_event.details.get("organization_slug").map(|s| s.as_str()),
+            Some("1000"),
+            "OrganizationDeleted should capture slug before deletion"
+        );
+    }
+
+    #[test]
+    fn event_node_joined_cluster_emitted() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+
+        let request = LedgerRequest::System(SystemRequest::AddNode {
+            node_id: 7,
+            address: "10.0.0.7:9090".to_string(),
+        });
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+
+        let join_event = events
+            .iter()
+            .find(|e| e.action == EventAction::NodeJoinedCluster)
+            .expect("NodeJoinedCluster event should be emitted");
+
+        assert_eq!(join_event.details.get("node_id").map(|s| s.as_str()), Some("7"));
+        assert_eq!(join_event.details.get("address").map(|s| s.as_str()), Some("10.0.0.7:9090"));
+        assert_eq!(
+            join_event.organization_id,
+            OrganizationId::new(0),
+            "NodeJoinedCluster is system-scoped"
+        );
+    }
+
+    #[test]
+    fn event_node_left_cluster_emitted() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+
+        let request = LedgerRequest::System(SystemRequest::RemoveNode { node_id: 3 });
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+
+        let leave_event = events
+            .iter()
+            .find(|e| e.action == EventAction::NodeLeftCluster)
+            .expect("NodeLeftCluster event should be emitted");
+
+        assert_eq!(leave_event.details.get("node_id").map(|s| s.as_str()), Some("3"));
+        assert_eq!(leave_event.organization_id, OrganizationId::new(0));
+    }
+
+    #[test]
+    fn event_user_created_has_details() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+
+        let request = LedgerRequest::System(SystemRequest::CreateUser {
+            name: "Alice Admin".to_string(),
+            email: "alice@example.com".to_string(),
+            admin: true,
+        });
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+
+        let user_event = events
+            .iter()
+            .find(|e| e.action == EventAction::UserCreated)
+            .expect("UserCreated event should be emitted");
+
+        assert!(
+            user_event.details.contains_key("user_id"),
+            "UserCreated should have user_id detail"
+        );
+        assert_eq!(user_event.details.get("name").map(|s| s.as_str()), Some("Alice Admin"));
+        assert_eq!(user_event.details.get("email").map(|s| s.as_str()), Some("alice@example.com"));
+        assert_eq!(user_event.details.get("admin").map(|s| s.as_str()), Some("true"));
+        assert_eq!(user_event.organization_id, OrganizationId::new(0));
+    }
+
+    #[test]
+    fn event_suspend_resume_org_has_details() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, _vault_id) = setup_org_and_vault(&mut state);
+
+        // Suspend with reason
+        let suspend = LedgerRequest::SuspendOrganization {
+            organization_id: org_id,
+            reason: Some("billing overdue".to_string()),
+        };
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(&suspend, &mut state, ts, &mut op_index, &mut events, 90);
+
+        let suspend_event = events
+            .iter()
+            .find(|e| e.action == EventAction::OrganizationSuspended)
+            .expect("OrganizationSuspended event should be emitted");
+
+        assert_eq!(
+            suspend_event.details.get("organization_slug").map(|s| s.as_str()),
+            Some("1000")
+        );
+        assert_eq!(
+            suspend_event.details.get("reason").map(|s| s.as_str()),
+            Some("billing overdue")
+        );
+
+        // Resume
+        let resume = LedgerRequest::ResumeOrganization { organization_id: org_id };
+        let mut resume_events: Vec<EventEntry> = Vec::new();
+        let mut resume_op_index = 0u32;
+
+        store.apply_request_with_events(
+            &resume,
+            &mut state,
+            ts,
+            &mut resume_op_index,
+            &mut resume_events,
+            90,
+        );
+
+        let resume_event = resume_events
+            .iter()
+            .find(|e| e.action == EventAction::OrganizationResumed)
+            .expect("OrganizationResumed event should be emitted");
+
+        assert_eq!(resume_event.details.get("organization_slug").map(|s| s.as_str()), Some("1000"));
+    }
+
+    #[test]
+    fn event_system_scope_not_in_org_query() {
+        let dir = tempdir().expect("create temp dir");
+        let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+        let events_db_arc = Arc::new(events_db);
+        let config = EventConfig::default();
+        let writer = crate::event_writer::EventWriter::new(Arc::clone(&events_db_arc), config);
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_event_writer(writer);
+
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        // Emit a system event (OrganizationCreated via CreateOrganization)
+        let create_org = LedgerRequest::CreateOrganization {
+            name: "second-org".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(9999),
+            shard_id: None,
+            quota: None,
+        };
+        let mut all_events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        store.apply_request_with_events(
+            &create_org,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut all_events,
+            90,
+        );
+
+        // Emit an org-scoped event (WriteCommitted)
+        let write_req = simple_write_request(org_id, vault_id);
+        store.apply_request_with_events(
+            &write_req,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut all_events,
+            90,
+        );
+
+        // Persist all events
+        let ew = store.event_writer().expect("event writer configured");
+        let written = ew.write_events(&all_events).expect("write events");
+        assert!(written >= 2, "at least system + org events written");
+
+        // Query under org_id — should NOT find the system event
+        let read_txn = events_db_arc.read().expect("read txn");
+        let (org_events, _) =
+            EventStore::list(&read_txn, org_id, 0, u64::MAX, 100, None).expect("list org events");
+
+        let system_in_org: Vec<_> =
+            org_events.iter().filter(|e| e.action == EventAction::OrganizationCreated).collect();
+        assert!(
+            system_in_org.is_empty(),
+            "system events (org_id=0) must not appear in org-scoped queries"
+        );
+
+        // Query under org_id=0 — system events should be there
+        let (sys_events, _) =
+            EventStore::list(&read_txn, OrganizationId::new(0), 0, u64::MAX, 100, None)
+                .expect("list system events");
+
+        let org_created: Vec<_> =
+            sys_events.iter().filter(|e| e.action == EventAction::OrganizationCreated).collect();
+        assert!(!org_created.is_empty(), "system events should be found under org_id=0");
+    }
+
+    #[test]
+    fn event_node_join_leave_determinism() {
+        // Two independent stores applying the same AddNode should produce identical events
+        let dir_a = tempdir().expect("create temp dir a");
+        let dir_b = tempdir().expect("create temp dir b");
+        let store_a = store_with_events(dir_a.path());
+        let store_b = store_with_events(dir_b.path());
+
+        let mut state_a = store_a.applied_state.write();
+        let mut state_b = store_b.applied_state.write();
+
+        let request = LedgerRequest::System(SystemRequest::AddNode {
+            node_id: 5,
+            address: "10.0.0.5:8080".to_string(),
+        });
+
+        let ts = fixed_timestamp();
+        let mut events_a: Vec<EventEntry> = Vec::new();
+        let mut events_b: Vec<EventEntry> = Vec::new();
+        let mut idx_a = 0u32;
+        let mut idx_b = 0u32;
+
+        store_a.apply_request_with_events(
+            &request,
+            &mut state_a,
+            ts,
+            &mut idx_a,
+            &mut events_a,
+            90,
+        );
+        store_b.apply_request_with_events(
+            &request,
+            &mut state_b,
+            ts,
+            &mut idx_b,
+            &mut events_b,
+            90,
+        );
+
+        assert_eq!(events_a.len(), events_b.len());
+        for (a, b) in events_a.iter().zip(events_b.iter()) {
+            assert_eq!(a.event_id, b.event_id, "node join events must be deterministic");
+            assert_eq!(a.action, b.action);
+            assert_eq!(a.details, b.details);
+        }
+    }
+
+    #[test]
+    fn event_vault_created_has_org_scope() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+
+        // Create an organization first
+        let create_org = LedgerRequest::CreateOrganization {
+            name: "events-test-org".to_string(),
+            slug: inferadb_ledger_types::OrganizationSlug::new(5000),
+            shard_id: None,
+            quota: None,
+        };
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        let (resp, _) = store.apply_request_with_events(
+            &create_org,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+        let org_id = match resp {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            other => panic!("expected OrganizationCreated, got {:?}", other),
+        };
+        events.clear();
+        op_index = 0;
+
+        // Create a vault
+        let create_vault = LedgerRequest::CreateVault {
+            organization_id: org_id,
+            slug: VaultSlug::new(6000),
+            name: Some("audit-vault".to_string()),
+            retention_policy: None,
+        };
+        let (resp, _) = store.apply_request_with_events(
+            &create_vault,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+        assert!(
+            matches!(resp, LedgerResponse::VaultCreated { .. }),
+            "expected VaultCreated response"
+        );
+
+        let vault_event = events
+            .iter()
+            .find(|e| e.action == EventAction::VaultCreated)
+            .expect("VaultCreated event should be emitted");
+
+        assert_eq!(vault_event.scope, EventScope::Organization);
+        assert_eq!(vault_event.organization_id, org_id);
+        assert_eq!(vault_event.vault_slug, Some(6000));
+        assert_eq!(vault_event.details.get("vault_name").map(|s| s.as_str()), Some("audit-vault"));
+    }
+
+    #[test]
+    fn event_vault_deleted_has_org_scope() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        let delete_vault = LedgerRequest::DeleteVault { organization_id: org_id, vault_id };
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        let (resp, _) = store.apply_request_with_events(
+            &delete_vault,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+        assert!(
+            matches!(resp, LedgerResponse::VaultDeleted { success: true }),
+            "expected VaultDeleted response"
+        );
+
+        let delete_event = events
+            .iter()
+            .find(|e| e.action == EventAction::VaultDeleted)
+            .expect("VaultDeleted event should be emitted");
+
+        assert_eq!(delete_event.scope, EventScope::Organization);
+        assert_eq!(delete_event.organization_id, org_id);
+        assert_eq!(
+            delete_event.details.get("vault_id").map(|s| s.as_str()),
+            Some(&vault_id.to_string() as &str)
+        );
+    }
+
+    #[test]
+    fn event_batch_write_committed_emitted() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        // Create a batch of two writes
+        let batch = LedgerRequest::BatchWrite {
+            requests: vec![
+                simple_write_request(org_id, vault_id),
+                LedgerRequest::Write {
+                    organization_id: org_id,
+                    vault_id,
+                    transactions: vec![Transaction {
+                        id: [2u8; 16],
+                        client_id: "test-client".to_string(),
+                        sequence: 0,
+                        actor: "test-actor".to_string(),
+                        operations: vec![Operation::SetEntity {
+                            key: "key2".to_string(),
+                            value: b"value2".to_vec(),
+                            condition: None,
+                            expires_at: None,
+                        }],
+                        timestamp: fixed_timestamp(),
+                    }],
+                },
+            ],
+        };
+
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        let (resp, _) =
+            store.apply_request_with_events(&batch, &mut state, ts, &mut op_index, &mut events, 90);
+        assert!(matches!(resp, LedgerResponse::BatchWrite { .. }), "expected BatchWrite response");
+
+        // Should have: two WriteCommitted events (one per inner write) + one BatchWriteCommitted
+        let write_events: Vec<_> =
+            events.iter().filter(|e| e.action == EventAction::WriteCommitted).collect();
+        assert_eq!(write_events.len(), 2, "each inner write should emit WriteCommitted");
+
+        let batch_event = events
+            .iter()
+            .find(|e| e.action == EventAction::BatchWriteCommitted)
+            .expect("BatchWriteCommitted event should be emitted");
+
+        assert_eq!(batch_event.scope, EventScope::Organization);
+        assert_eq!(batch_event.organization_id, org_id);
+        assert_eq!(batch_event.operations_count, Some(2), "batch has 2 requests");
+    }
+
+    #[test]
+    fn event_vault_health_updated_emitted() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        // Mark vault as diverged
+        let health_request = LedgerRequest::UpdateVaultHealth {
+            organization_id: org_id,
+            vault_id,
+            healthy: false,
+            expected_root: None,
+            computed_root: None,
+            diverged_at_height: Some(5),
+            recovery_attempt: None,
+            recovery_started_at: None,
+        };
+
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        store.apply_request_with_events(
+            &health_request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+
+        let health_event = events
+            .iter()
+            .find(|e| e.action == EventAction::VaultHealthUpdated)
+            .expect("VaultHealthUpdated event should be emitted");
+
+        assert_eq!(health_event.scope, EventScope::Organization);
+        assert_eq!(health_event.organization_id, org_id);
+        assert_eq!(health_event.details.get("health_status").map(|s| s.as_str()), Some("diverged"));
+    }
+
+    #[test]
+    fn event_org_isolation_across_organizations() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+
+        // Create two organizations with vaults
+        let (org_a, vault_a) = setup_org_and_vault(&mut state);
+
+        // Create second org manually
+        let org_b = state.sequences.next_organization();
+        let vault_b = state.sequences.next_vault();
+        let org_b_slug = inferadb_ledger_types::OrganizationSlug::new(3000);
+        let vault_b_slug = VaultSlug::new(4000);
+        state.organizations.insert(
+            org_b,
+            OrganizationMeta {
+                organization_id: org_b,
+                slug: org_b_slug,
+                name: "org-b".to_string(),
+                shard_id: ShardId::new(0),
+                status: OrganizationStatus::Active,
+                pending_shard_id: None,
+                quota: None,
+            },
+        );
+        state.slug_index.insert(org_b_slug, org_b);
+        state.id_to_slug.insert(org_b, org_b_slug);
+        let key_b = (org_b, vault_b);
+        state.vault_heights.insert(key_b, 0);
+        state.vaults.insert(
+            key_b,
+            VaultMeta {
+                organization_id: org_b,
+                vault_id: vault_b,
+                slug: vault_b_slug,
+                name: Some("vault-b".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: BlockRetentionPolicy::default(),
+            },
+        );
+        state.vault_slug_index.insert(vault_b_slug, vault_b);
+        state.vault_id_to_slug.insert(vault_b, vault_b_slug);
+        state.vault_health.insert(key_b, VaultHealthStatus::Healthy);
+
+        let ts = fixed_timestamp();
+        let mut all_events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        // Write to org A
+        store.apply_request_with_events(
+            &simple_write_request(org_a, vault_a),
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut all_events,
+            90,
+        );
+
+        // Write to org B
+        store.apply_request_with_events(
+            &LedgerRequest::Write {
+                organization_id: org_b,
+                vault_id: vault_b,
+                transactions: vec![Transaction {
+                    id: [9u8; 16],
+                    client_id: "client-b".to_string(),
+                    sequence: 0,
+                    actor: "actor-b".to_string(),
+                    operations: vec![Operation::SetEntity {
+                        key: "key-b".to_string(),
+                        value: b"value-b".to_vec(),
+                        condition: None,
+                        expires_at: None,
+                    }],
+                    timestamp: ts,
+                }],
+            },
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut all_events,
+            90,
+        );
+
+        // Verify org isolation: filter events by org_id
+        let org_a_events: Vec<_> =
+            all_events.iter().filter(|e| e.organization_id == org_a).collect();
+        let org_b_events: Vec<_> =
+            all_events.iter().filter(|e| e.organization_id == org_b).collect();
+
+        assert!(!org_a_events.is_empty(), "org A should have events");
+        assert!(!org_b_events.is_empty(), "org B should have events");
+
+        // No cross-contamination
+        for event in &org_a_events {
+            assert_eq!(event.organization_id, org_a, "org A event should belong to org A");
+        }
+        for event in &org_b_events {
+            assert_eq!(event.organization_id, org_b, "org B event should belong to org B");
+        }
+    }
+
+    #[test]
+    fn event_org_log_disabled_suppresses_org_events() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+        let config = EventConfig {
+            enabled: true,
+            organization_log_enabled: false, // Suppress org events
+            ..EventConfig::default()
+        };
+        let events_db_arc = Arc::new(events_db);
+        let writer = crate::event_writer::EventWriter::new(Arc::clone(&events_db_arc), config);
+        let store = store.with_event_writer(writer);
+
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        // Write to vault — should produce WriteCommitted event in the accumulator
+        store.apply_request_with_events(
+            &simple_write_request(org_id, vault_id),
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+
+        // Events are accumulated but the writer will filter org events on write.
+        // The apply path emits events into the vector regardless of config;
+        // filtering happens in EventWriter::write_events().
+        assert!(
+            events.iter().any(|e| e.action == EventAction::WriteCommitted),
+            "apply path accumulates events regardless of config"
+        );
+
+        // Write via EventWriter — org events should be filtered out
+        let event_writer = store.event_writer().expect("event writer configured");
+        let written = event_writer.write_events(&events).expect("write events");
+        assert_eq!(
+            written, 0,
+            "org events should be filtered by write_events when organization_log_enabled=false"
+        );
+
+        // Verify nothing persisted
+        let rtxn = events_db_arc.read().expect("begin read");
+        let count = EventStore::count(&rtxn, org_id).expect("count");
+        assert_eq!(count, 0, "no org events persisted when org log disabled");
+    }
+
+    #[test]
+    fn event_write_committed_includes_block_height_reference() {
+        let dir = tempdir().expect("create temp dir");
+        let store = store_with_events(dir.path());
+        let mut state = store.applied_state.write();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        // First write — block_height should reference the shard chain height + 1
+        store.apply_request_with_events(
+            &simple_write_request(org_id, vault_id),
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+
+        let write_event = events
+            .iter()
+            .find(|e| e.action == EventAction::WriteCommitted)
+            .expect("WriteCommitted event emitted");
+
+        assert_eq!(
+            write_event.block_height,
+            Some(1),
+            "WriteCommitted event should reference block_height for blockchain drill-down"
+        );
+
+        // Second write to same vault
+        events.clear();
+        op_index = 0;
+        store.apply_request_with_events(
+            &LedgerRequest::Write {
+                organization_id: org_id,
+                vault_id,
+                transactions: vec![Transaction {
+                    id: [3u8; 16],
+                    client_id: "test-client".to_string(),
+                    sequence: 0,
+                    actor: "test-actor".to_string(),
+                    operations: vec![Operation::SetEntity {
+                        key: "key2".to_string(),
+                        value: b"value2".to_vec(),
+                        condition: None,
+                        expires_at: None,
+                    }],
+                    timestamp: ts,
+                }],
+            },
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+        );
+
+        let second_write = events
+            .iter()
+            .find(|e| e.action == EventAction::WriteCommitted)
+            .expect("second WriteCommitted event emitted");
+
+        // block_height references the shard chain height, which is still 1
+        // (shard chain only increments on actual block archival)
+        assert!(
+            second_write.block_height.is_some(),
+            "second WriteCommitted should also have block_height reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_snapshot_includes_apply_phase_entries() {
+        use std::{collections::BTreeMap, io::Cursor};
+
+        use chrono::{TimeZone, Utc};
+        use inferadb_ledger_types::events::{EventEmission, EventOutcome};
+        use openraft::SnapshotMeta;
+
+        let source_dir = tempdir().expect("create source dir");
+        let target_dir = tempdir().expect("create target dir");
+
+        // Create source store with events and minimal Raft state
+        let mut source_store = store_with_events(source_dir.path());
+        {
+            let mut state = source_store.applied_state.write();
+            state.last_applied = Some(make_log_id(1, 10));
+        }
+
+        // Write apply-phase events directly to the events database
+        let events_db_arc =
+            source_store.event_writer().expect("should have event_writer").events_db().clone();
+        {
+            let mut txn = events_db_arc.write().expect("write txn");
+            let apply_entry = EventEntry {
+                expires_at: 0,
+                event_id: [1u8; 16],
+                source_service: "ledger".to_string(),
+                event_type: "ledger.vault.created".to_string(),
+                timestamp: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                scope: EventScope::Organization,
+                action: EventAction::VaultCreated,
+                emission: EventEmission::ApplyPhase,
+                principal: "admin".to_string(),
+                organization_id: OrganizationId::new(1),
+                organization_slug: None,
+                vault_slug: None,
+                outcome: EventOutcome::Success,
+                details: BTreeMap::new(),
+                block_height: Some(1),
+                trace_id: None,
+                correlation_id: None,
+                operations_count: None,
+            };
+            EventStore::write(&mut txn, &apply_entry).expect("write apply event");
+            txn.commit().expect("commit");
+        }
+
+        // Get snapshot from source
+        let mut snapshot = source_store
+            .get_current_snapshot()
+            .await
+            .expect("get snapshot")
+            .expect("snapshot should exist");
+        let snapshot_data = {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut *snapshot.snapshot, &mut buf)
+                .expect("read snapshot data");
+            buf
+        };
+
+        // Install snapshot on target
+        let mut target_store = store_with_events(target_dir.path());
+        let meta = SnapshotMeta {
+            last_log_id: snapshot.meta.last_log_id,
+            last_membership: snapshot.meta.last_membership,
+            snapshot_id: "test-snapshot".to_string(),
+        };
+        target_store
+            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
+            .await
+            .expect("install snapshot");
+
+        // Verify apply-phase events are present on target
+        let target_events_db = target_store
+            .event_writer()
+            .expect("target should have event_writer")
+            .events_db()
+            .clone();
+        let txn = target_events_db.read().expect("read txn");
+        let events = EventStore::scan_apply_phase(&txn, 1000).expect("scan events");
+        assert!(!events.is_empty(), "apply-phase events should be transferred via snapshot");
+        assert_eq!(events[0].event_id, [1u8; 16]);
+        assert!(matches!(events[0].emission, EventEmission::ApplyPhase));
+    }
+
+    #[tokio::test]
+    async fn event_snapshot_excludes_handler_phase_entries() {
+        use std::{collections::BTreeMap, io::Cursor};
+
+        use chrono::{TimeZone, Utc};
+        use inferadb_ledger_types::events::{EventEmission, EventOutcome};
+        use openraft::SnapshotMeta;
+
+        let source_dir = tempdir().expect("create source dir");
+        let target_dir = tempdir().expect("create target dir");
+
+        let mut source_store = store_with_events(source_dir.path());
+        {
+            let mut state = source_store.applied_state.write();
+            state.last_applied = Some(make_log_id(1, 10));
+        }
+
+        // Write both apply-phase and handler-phase events
+        let events_db_arc =
+            source_store.event_writer().expect("should have event_writer").events_db().clone();
+        {
+            let mut txn = events_db_arc.write().expect("write txn");
+
+            // Apply-phase event (should be included)
+            let apply_entry = EventEntry {
+                expires_at: 0,
+                event_id: [1u8; 16],
+                source_service: "ledger".to_string(),
+                event_type: "ledger.vault.created".to_string(),
+                timestamp: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                scope: EventScope::Organization,
+                action: EventAction::VaultCreated,
+                emission: EventEmission::ApplyPhase,
+                principal: "admin".to_string(),
+                organization_id: OrganizationId::new(1),
+                organization_slug: None,
+                vault_slug: None,
+                outcome: EventOutcome::Success,
+                details: BTreeMap::new(),
+                block_height: Some(1),
+                trace_id: None,
+                correlation_id: None,
+                operations_count: None,
+            };
+            // Handler-phase event (should NOT be included in snapshot)
+            let handler_entry = EventEntry {
+                expires_at: 0,
+                event_id: [2u8; 16],
+                source_service: "ledger".to_string(),
+                event_type: "ledger.request.rate_limited".to_string(),
+                timestamp: Utc.timestamp_opt(1_700_000_001, 0).unwrap(),
+                scope: EventScope::Organization,
+                action: EventAction::RequestRateLimited,
+                emission: EventEmission::HandlerPhase { node_id: 42 },
+                principal: "test-user".to_string(),
+                organization_id: OrganizationId::new(1),
+                organization_slug: None,
+                vault_slug: None,
+                outcome: EventOutcome::Denied { reason: "rate limit exceeded".to_string() },
+                details: BTreeMap::new(),
+                block_height: None,
+                trace_id: None,
+                correlation_id: None,
+                operations_count: None,
+            };
+            EventStore::write(&mut txn, &apply_entry).expect("write apply event");
+            EventStore::write(&mut txn, &handler_entry).expect("write handler event");
+            txn.commit().expect("commit");
+        }
+
+        // Get snapshot — should only contain apply-phase events
+        let mut snapshot = source_store
+            .get_current_snapshot()
+            .await
+            .expect("get snapshot")
+            .expect("snapshot should exist");
+        let snapshot_data = {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut *snapshot.snapshot, &mut buf)
+                .expect("read snapshot data");
+            buf
+        };
+
+        // Install snapshot on target
+        let mut target_store = store_with_events(target_dir.path());
+        let meta = SnapshotMeta {
+            last_log_id: snapshot.meta.last_log_id,
+            last_membership: snapshot.meta.last_membership,
+            snapshot_id: "test-snapshot".to_string(),
+        };
+        target_store
+            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
+            .await
+            .expect("install snapshot");
+
+        // Verify only apply-phase events transferred
+        let target_events_db = target_store
+            .event_writer()
+            .expect("target should have event_writer")
+            .events_db()
+            .clone();
+        let txn = target_events_db.read().expect("read txn");
+        let events = EventStore::scan_apply_phase(&txn, 1000).expect("scan events");
+        assert_eq!(events.len(), 1, "only apply-phase event should be transferred");
+        assert_eq!(events[0].event_id, [1u8; 16]);
+
+        // List ALL events on target — handler-phase should not be present
+        let (all_events, _cursor) =
+            EventStore::list(&txn, OrganizationId::new(1), 0, u64::MAX, 100, None)
+                .expect("list all events");
+        assert_eq!(
+            all_events.len(),
+            1,
+            "handler-phase event should not be transferred via snapshot"
+        );
     }
 }

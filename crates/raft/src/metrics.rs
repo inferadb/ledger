@@ -535,23 +535,6 @@ pub fn record_serialization_bytes(bytes: usize, direction: &str, entry_type: &st
     .record(bytes as f64);
 }
 
-// Audit logging metrics
-const AUDIT_EVENTS_TOTAL: &str = "ledger_audit_events_total";
-
-/// Records an audit event for Prometheus tracking.
-///
-/// Tracks the total number of audit events by action and outcome.
-/// This is called by the audit integration layer after each operation.
-#[inline]
-pub fn record_audit_event(action: &str, outcome: &str) {
-    counter!(
-        AUDIT_EVENTS_TOTAL,
-        "action" => action.to_string(),
-        "outcome" => outcome.to_string()
-    )
-    .increment(1);
-}
-
 // B+ tree compaction metrics
 const BTREE_COMPACTION_RUNS_TOTAL: &str = "ledger_btree_compaction_runs_total";
 const BTREE_COMPACTION_PAGES_MERGED: &str = "ledger_btree_compaction_pages_merged";
@@ -919,6 +902,89 @@ pub fn record_cardinality_overflow(metric_name: &str) {
     .increment(1);
 }
 
+// ─── Events Ingestion Metrics ─────────────────────────────────
+
+/// Total ingested events (counter).
+///
+/// Labels: `source_service` = engine | control, `outcome` = accepted | rejected.
+const EVENTS_INGEST_TOTAL: &str = "ledger_events_ingest_total";
+
+/// Ingested batch size (histogram).
+///
+/// Labels: `source_service` = engine | control.
+const EVENTS_INGEST_BATCH_SIZE: &str = "ledger_events_ingest_batch_size";
+
+/// Total ingestion requests rejected by rate limiter (counter).
+///
+/// Labels: `source_service` = engine | control.
+const EVENTS_INGEST_RATE_LIMITED_TOTAL: &str = "ledger_events_ingest_rate_limited_total";
+
+/// Ingestion request duration (histogram, seconds).
+const EVENTS_INGEST_DURATION_SECONDS: &str = "ledger_events_ingest_duration_seconds";
+
+/// Records ingested events by outcome.
+///
+/// Called by `IngestEvents` handler after processing a batch.
+#[inline]
+pub fn record_events_ingest(source_service: &str, outcome: &str, count: u32) {
+    counter!(
+        EVENTS_INGEST_TOTAL,
+        "source_service" => source_service.to_string(),
+        "outcome" => outcome.to_string()
+    )
+    .increment(u64::from(count));
+}
+
+/// Records the batch size of an ingestion request.
+#[inline]
+pub fn record_events_ingest_batch_size(source_service: &str, size: usize) {
+    histogram!(
+        EVENTS_INGEST_BATCH_SIZE,
+        "source_service" => source_service.to_string()
+    )
+    .record(size as f64);
+}
+
+/// Records an ingestion rate limit rejection.
+#[inline]
+pub fn record_events_ingest_rate_limited(source_service: &str) {
+    counter!(
+        EVENTS_INGEST_RATE_LIMITED_TOTAL,
+        "source_service" => source_service.to_string()
+    )
+    .increment(1);
+}
+
+/// Records the duration of an ingestion request.
+#[inline]
+pub fn record_events_ingest_duration(duration_secs: f64) {
+    histogram!(EVENTS_INGEST_DURATION_SECONDS).record(duration_secs);
+}
+
+// ─── Event Write Metrics ──────────────────────────────────────
+
+/// Total event entries written to the events database (counter).
+///
+/// Labels: `scope` = system | organization, `action` = snake_case action string.
+const EVENT_WRITES_TOTAL: &str = "ledger_event_writes_total";
+
+/// Records an event write to Prometheus.
+///
+/// Called by [`EventWriter`](crate::event_writer::EventWriter) and
+/// [`EventHandle`](crate::event_writer::EventHandle) after each successful
+/// event persist. Labels: `emission` (apply_phase | handler_phase),
+/// `scope` (system | organization), `action` (snake_case action string).
+#[inline]
+pub fn record_event_write(emission: &str, scope: &str, action: &str) {
+    counter!(
+        EVENT_WRITES_TOTAL,
+        "emission" => emission.to_string(),
+        "scope" => scope.to_string(),
+        "action" => action.to_string()
+    )
+    .increment(1);
+}
+
 /// Creates a timer for write operations.
 pub fn write_timer() -> Timer {
     Timer::new(|secs| record_write(true, secs))
@@ -932,6 +998,41 @@ pub fn read_timer() -> Timer {
 /// Creates a timer for Raft apply operations.
 pub fn raft_apply_timer() -> Timer {
     Timer::new(record_raft_apply_latency)
+}
+
+// ─── Events GC Metrics ──────────────────────────────────────
+
+/// Total event entries deleted by garbage collection (counter).
+const EVENTS_GC_ENTRIES_DELETED_TOTAL: &str = "ledger_events_gc_entries_deleted_total";
+
+/// Duration of each GC cycle in seconds (histogram).
+const EVENTS_GC_CYCLE_DURATION_SECONDS: &str = "ledger_events_gc_cycle_duration_seconds";
+
+/// Total GC cycles executed (counter).
+///
+/// Labels: `result` = success | failure.
+const EVENTS_GC_CYCLES_TOTAL: &str = "ledger_events_gc_cycles_total";
+
+/// Records the number of expired event entries deleted in a GC cycle.
+#[inline]
+pub fn record_events_gc_entries_deleted(count: u64) {
+    counter!(EVENTS_GC_ENTRIES_DELETED_TOTAL).increment(count);
+}
+
+/// Records the duration of an events GC cycle.
+#[inline]
+pub fn record_events_gc_cycle_duration(duration_secs: f64) {
+    histogram!(EVENTS_GC_CYCLE_DURATION_SECONDS).record(duration_secs);
+}
+
+/// Records a completed events GC cycle.
+#[inline]
+pub fn record_events_gc_cycle(result: &str) {
+    counter!(
+        EVENTS_GC_CYCLES_TOTAL,
+        "result" => result.to_string()
+    )
+    .increment(1);
 }
 
 #[cfg(test)]

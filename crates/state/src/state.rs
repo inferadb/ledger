@@ -10,7 +10,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use inferadb_ledger_store::{CompactionStats, Database, DatabaseStats, StorageBackend, tables};
+use inferadb_ledger_store::{
+    CompactionStats, Database, DatabaseStats, StorageBackend, WriteTransaction, tables,
+};
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
@@ -145,32 +147,23 @@ impl<B: StorageBackend> StateLayer<B> {
         f(commitment)
     }
 
-    /// Applies a batch of operations to a vault's state.
+    /// Opens a write transaction on the underlying database.
     ///
-    /// Executes all operations atomically within a single write transaction.
-    /// Returns a `WriteStatus` for each operation indicating whether it was
-    /// created, updated, deleted, or failed a precondition check.
+    /// Use with [`apply_operations_in_txn`](Self::apply_operations_in_txn)
+    /// for caller-controlled transaction lifecycle.
     ///
-    /// # Example
+    /// # Errors
     ///
-    /// ```no_run
-    /// # use std::sync::Arc;
-    /// # use inferadb_ledger_store::Database;
-    /// # use inferadb_ledger_state::StateLayer;
-    /// use inferadb_ledger_types::types::{Operation, VaultId};
+    /// Returns [`StateError::Store`] if the database write lock cannot be acquired.
+    pub fn begin_write(&self) -> Result<WriteTransaction<'_, B>> {
+        self.db.write().context(StoreSnafu)
+    }
+
+    /// Applies a batch of operations using an externally-provided transaction.
     ///
-    /// # let db = Arc::new(Database::open_in_memory()?);
-    /// # let state = StateLayer::new(db);
-    /// let ops = vec![Operation::SetEntity {
-    ///     key: "user:alice".into(),
-    ///     value: b"data".to_vec(),
-    ///     condition: None,
-    ///     expires_at: None,
-    /// }];
-    ///
-    /// let statuses = state.apply_operations(VaultId::new(1), &ops, 1)?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
+    /// Does **not** commit the transaction or mark dirty buckets — the caller
+    /// is responsible for calling [`WriteTransaction::commit`] and then
+    /// [`mark_dirty_keys`](Self::mark_dirty_keys).
     ///
     /// # Errors
     ///
@@ -178,16 +171,14 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
     /// Returns [`StateError::Index`] if a relationship index update fails.
     /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
-    pub fn apply_operations(
+    pub fn apply_operations_in_txn(
         &self,
+        txn: &mut WriteTransaction<'_, B>,
         vault_id: VaultId,
         operations: &[Operation],
         block_height: u64,
-    ) -> Result<Vec<WriteStatus>> {
-        let mut txn = self.db.write().context(StoreSnafu)?;
+    ) -> Result<(Vec<WriteStatus>, Vec<Vec<u8>>)> {
         let mut statuses = Vec::with_capacity(operations.len());
-
-        // Track which local keys are modified for dirty bucket marking
         let mut dirty_keys: Vec<Vec<u8>> = Vec::new();
 
         for op in operations {
@@ -196,7 +187,6 @@ impl<B: StorageBackend> StateLayer<B> {
                     let local_key = key.as_bytes();
                     let storage_key = encode_storage_key(vault_id, local_key);
 
-                    // Check condition - get existing entity
                     let existing = txn.get::<tables::Entities>(&storage_key).context(StoreSnafu)?;
 
                     let is_update = existing.is_some();
@@ -216,7 +206,6 @@ impl<B: StorageBackend> StateLayer<B> {
                     };
 
                     if !condition_met {
-                        // All-or-nothing: if ANY condition fails, entire batch fails
                         return Err(StateError::PreconditionFailed {
                             key: key.clone(),
                             current_version: entity_data.as_ref().map(|e| e.version),
@@ -233,9 +222,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     };
 
                     let encoded = encode(&entity).context(CodecSnafu)?;
-
                     txn.insert::<tables::Entities>(&storage_key, &encoded).context(StoreSnafu)?;
-
                     dirty_keys.push(local_key.to_vec());
 
                     if is_update { WriteStatus::Updated } else { WriteStatus::Created }
@@ -277,7 +264,6 @@ impl<B: StorageBackend> StateLayer<B> {
                     let local_key = rel_key.as_bytes();
                     let storage_key = encode_storage_key(vault_id, local_key);
 
-                    // Check existence
                     let already_exists = txn
                         .get::<tables::Relationships>(&storage_key)
                         .context(StoreSnafu)?
@@ -287,17 +273,15 @@ impl<B: StorageBackend> StateLayer<B> {
                         WriteStatus::AlreadyExists
                     } else {
                         let encoded = encode(&rel).context(CodecSnafu)?;
-
                         txn.insert::<tables::Relationships>(&storage_key, &encoded)
                             .context(StoreSnafu)?;
 
-                        // Update indexes
                         IndexManager::add_to_obj_index(
-                            &mut txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault_id, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
                         IndexManager::add_to_subj_index(
-                            &mut txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault_id, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
 
@@ -316,13 +300,12 @@ impl<B: StorageBackend> StateLayer<B> {
                         txn.delete::<tables::Relationships>(&storage_key).context(StoreSnafu)?;
 
                     if existed {
-                        // Update indexes
                         IndexManager::remove_from_obj_index(
-                            &mut txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault_id, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
                         IndexManager::remove_from_subj_index(
-                            &mut txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault_id, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
 
@@ -337,15 +320,65 @@ impl<B: StorageBackend> StateLayer<B> {
             statuses.push(status);
         }
 
-        txn.commit().context(StoreSnafu)?;
+        Ok((statuses, dirty_keys))
+    }
 
-        // Mark dirty buckets
+    /// Marks dirty buckets for state root computation after a transaction commits.
+    ///
+    /// Call this after committing a [`WriteTransaction`] that was used with
+    /// [`apply_operations_in_txn`](Self::apply_operations_in_txn).
+    pub fn mark_dirty_keys(&self, vault_id: VaultId, dirty_keys: &[Vec<u8>]) {
         self.with_commitment(vault_id, |commitment| {
-            for key in &dirty_keys {
+            for key in dirty_keys {
                 commitment.mark_dirty_by_key(key);
             }
         });
+    }
 
+    /// Applies a batch of operations to a vault's state.
+    ///
+    /// Executes all operations atomically within a single write transaction.
+    /// Returns a `WriteStatus` for each operation indicating whether it was
+    /// created, updated, deleted, or failed a precondition check.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use inferadb_ledger_store::Database;
+    /// # use inferadb_ledger_state::StateLayer;
+    /// use inferadb_ledger_types::types::{Operation, VaultId};
+    ///
+    /// # let db = Arc::new(Database::open_in_memory()?);
+    /// # let state = StateLayer::new(db);
+    /// let ops = vec![Operation::SetEntity {
+    ///     key: "user:alice".into(),
+    ///     value: b"data".to_vec(),
+    ///     condition: None,
+    ///     expires_at: None,
+    /// }];
+    ///
+    /// let statuses = state.apply_operations(VaultId::new(1), &ops, 1)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if any storage operation fails.
+    /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
+    /// Returns [`StateError::Index`] if a relationship index update fails.
+    /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
+    pub fn apply_operations(
+        &self,
+        vault_id: VaultId,
+        operations: &[Operation],
+        block_height: u64,
+    ) -> Result<Vec<WriteStatus>> {
+        let mut txn = self.begin_write()?;
+        let (statuses, dirty_keys) =
+            self.apply_operations_in_txn(&mut txn, vault_id, operations, block_height)?;
+        txn.commit().context(StoreSnafu)?;
+        self.mark_dirty_keys(vault_id, &dirty_keys);
         Ok(statuses)
     }
 

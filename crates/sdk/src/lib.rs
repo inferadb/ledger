@@ -82,10 +82,12 @@ mod tracing;
 pub use builders::{BatchReadBuilder, RelationshipQueryBuilder, WriteBuilder};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{
-    BlockAnnouncement, BlockHeader, ChainProof, Direction, Entity, HealthCheckResult, HealthStatus,
-    LedgerClient, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof,
-    MerkleSibling, Operation, OrganizationInfo, OrganizationStatus, PagedResult, ReadConsistency,
-    Relationship, SetCondition, VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
+    BlockAnnouncement, BlockHeader, ChainProof, Direction, Entity, EventEmissionPath, EventFilter,
+    EventOutcome, EventPage, EventScope, HealthCheckResult, HealthStatus, IngestRejection,
+    IngestResult, LedgerClient, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts,
+    MerkleProof, MerkleSibling, Operation, OrganizationInfo, OrganizationStatus, PagedResult,
+    ReadConsistency, Relationship, SdkEventEntry, SdkIngestEventEntry, SetCondition, VaultInfo,
+    VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
 };
 pub use config::{
     CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, TlsConfig,

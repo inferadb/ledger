@@ -57,6 +57,7 @@ chrono = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
+prost-types = { workspace = true }
 
 # Internal crates
 inferadb-ledger-types = { workspace = true }
@@ -67,7 +68,6 @@ inferadb-ledger-raft = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio-test = "0.4"
-prost-types = { workspace = true }
 inferadb-ledger-server = { workspace = true }
 inferadb-ledger-test-utils = { workspace = true }
 openraft = { workspace = true }

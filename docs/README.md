@@ -18,6 +18,10 @@ Blockchain database for cryptographically verifiable authorization.
 - [SystemDiscoveryService](client/discovery.md) - Peer discovery and bootstrap
 - [Error Reference](client/errors.md) - Error codes and handling patterns
 
+## Architecture
+
+- [Audit Protocol](architecture/audit-protocol.md) - Centralized audit architecture and event protocol
+
 ## Operations
 
 ### Deployment
@@ -31,6 +35,7 @@ Blockchain database for cryptographically verifiable authorization.
 
 ### Monitoring
 
+- [Events](operations/events.md) - Audit event system, event catalog, configuration
 - [Logging](operations/logging.md) - Request-level JSON logging with 50+ fields
 - [Dashboard Templates](operations/dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
 - [Metrics Reference](operations/metrics-reference.md) - All Prometheus metrics
@@ -58,18 +63,19 @@ Implementation details for contributors and advanced operators.
 - [Architecture](development/architecture.md) - Crate structure and code organization
 - [Testing Guide](development/testing.md) - Test categories and commands
 - [Debugging Guide](development/debugging.md) - Logging, profiling, common issues
+- [Events](development/events.md) - Audit events SDK guide, query patterns, ingestion
 - [Logging](development/logging.md) - Adding request logging to new services
 - [Release Process](development/release.md) - Versioning and publishing
 - [Contributing](CONTRIBUTING.md) - Development workflow
 
 ## Quick Reference
 
-| Task              | Command                                                                    |
-| ----------------- | -------------------------------------------------------------------------- |
-| Start single node | `inferadb-ledger --single --data /tmp/ledger`                              |
-| Health check      | `grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check`         |
-| List organizations   | `grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations` |
-| View metrics      | `curl localhost:9090/metrics`                                              |
+| Task               | Command                                                                       |
+| ------------------ | ----------------------------------------------------------------------------- |
+| Start single node  | `inferadb-ledger --single --data /tmp/ledger`                                 |
+| Health check       | `grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check`            |
+| List organizations | `grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations` |
+| View metrics       | `curl localhost:9090/metrics`                                                 |
 
 ## gRPC Services
 
@@ -78,5 +84,6 @@ Implementation details for contributors and advanced operators.
 | `HealthService`          | Liveness and readiness checks            |
 | `ReadService`            | Query entities, relationships, state     |
 | `WriteService`           | Create/update entities and relationships |
-| `AdminService`           | Organization, vault, cluster management     |
+| `AdminService`           | Organization, vault, cluster management  |
+| `EventsService`          | Audit event queries and ingestion        |
 | `SystemDiscoveryService` | Peer discovery and cluster bootstrap     |

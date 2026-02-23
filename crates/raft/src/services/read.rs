@@ -75,6 +75,14 @@ pub struct ReadServiceImpl {
     /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
+    /// Handler-phase event handle for recording denial events.
+    ///
+    /// Currently unused — reserved for future read-path denial events
+    /// (e.g., rate limiting on reads). Present for API consistency with
+    /// `WriteServiceImpl` and `AdminServiceImpl`.
+    #[builder(default)]
+    #[allow(dead_code)]
+    event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
 }
 
 impl ReadServiceImpl {

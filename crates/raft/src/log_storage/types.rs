@@ -75,6 +75,7 @@ pub struct AppliedState {
 /// This is the complete snapshot format that includes:
 /// - AppliedState: Raft state machine metadata (vault heights, membership, etc.)
 /// - vault_entities: Actual entity data per vault for StateLayer restoration
+/// - event_entries: Apply-phase event entries for audit trail continuity
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CombinedSnapshot {
     /// Raft state machine metadata.
@@ -82,6 +83,12 @@ pub struct CombinedSnapshot {
     /// Entity data per vault for StateLayer restoration.
     /// Key: vault_id, Value: list of entities
     pub vault_entities: HashMap<VaultId, Vec<inferadb_ledger_types::Entity>>,
+    /// Apply-phase event entries included in snapshot for audit trail continuity.
+    ///
+    /// Only deterministic apply-phase events are included — handler-phase events
+    /// are node-local and excluded. Capped by `EventConfig::max_snapshot_events`.
+    #[serde(default)]
+    pub event_entries: Vec<inferadb_ledger_types::events::EventEntry>,
 }
 
 /// Metadata for an organization.

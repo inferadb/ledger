@@ -29,8 +29,10 @@
 //! The `OrganizationStatus` conversion lives in the `raft` crate because it
 //! depends on `inferadb_ledger_state::system::OrganizationStatus`.
 
+use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, VaultSlug,
+    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, OrganizationId, VaultSlug,
+    events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
 };
 use openraft::Vote;
@@ -490,12 +492,244 @@ pub fn vault_entry_to_proto_block(
 }
 
 // =============================================================================
+// Timestamp conversions (chrono::DateTime<Utc> <-> prost_types::Timestamp)
+// =============================================================================
+
+/// Converts a chrono [`DateTime<Utc>`] to a [`prost_types::Timestamp`].
+fn datetime_to_proto_timestamp(dt: &DateTime<Utc>) -> prost_types::Timestamp {
+    prost_types::Timestamp { seconds: dt.timestamp(), nanos: dt.timestamp_subsec_nanos() as i32 }
+}
+
+/// Converts a [`prost_types::Timestamp`] to a chrono [`DateTime<Utc>`].
+///
+/// Falls back to Unix epoch if the timestamp is invalid.
+fn proto_timestamp_to_datetime(ts: &prost_types::Timestamp) -> DateTime<Utc> {
+    DateTime::from_timestamp(ts.seconds, ts.nanos as u32).unwrap_or(DateTime::UNIX_EPOCH)
+}
+
+// =============================================================================
+// EventScope conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`EventScope`] to its protobuf representation.
+impl From<EventScope> for proto::EventScope {
+    fn from(scope: EventScope) -> Self {
+        match scope {
+            EventScope::System => proto::EventScope::System,
+            EventScope::Organization => proto::EventScope::Organization,
+        }
+    }
+}
+
+/// Converts a protobuf [`EventScope`](proto::EventScope) to the domain type.
+///
+/// Unspecified defaults to `Organization`.
+impl From<proto::EventScope> for EventScope {
+    fn from(proto: proto::EventScope) -> Self {
+        match proto {
+            proto::EventScope::System => EventScope::System,
+            proto::EventScope::Organization | proto::EventScope::Unspecified => {
+                EventScope::Organization
+            },
+        }
+    }
+}
+
+// =============================================================================
+// EventOutcome conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`EventOutcome`] to its protobuf enum value.
+impl From<&EventOutcome> for proto::EventOutcome {
+    fn from(outcome: &EventOutcome) -> Self {
+        match outcome {
+            EventOutcome::Success => proto::EventOutcome::Success,
+            EventOutcome::Failed { .. } => proto::EventOutcome::Failed,
+            EventOutcome::Denied { .. } => proto::EventOutcome::Denied,
+        }
+    }
+}
+
+// =============================================================================
+// EventEmissionPath conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`EventEmission`] to its protobuf enum value.
+impl From<&EventEmission> for proto::EventEmissionPath {
+    fn from(emission: &EventEmission) -> Self {
+        match emission {
+            EventEmission::ApplyPhase => proto::EventEmissionPath::EmissionPathApplyPhase,
+            EventEmission::HandlerPhase { .. } => {
+                proto::EventEmissionPath::EmissionPathHandlerPhase
+            },
+        }
+    }
+}
+
+// =============================================================================
+// EventEntry conversions (domain -> proto)
+// =============================================================================
+
+/// Converts a domain [`EventEntry`] reference to its protobuf representation.
+///
+/// The domain type's rich enums (`EventOutcome`, `EventEmission`) are flattened
+/// into separate fields in the proto message:
+/// - `EventOutcome::Failed { code, detail }` → `outcome=FAILED` + `error_code` + `error_detail`
+/// - `EventOutcome::Denied { reason }` → `outcome=DENIED` + `denial_reason`
+/// - `EventEmission::HandlerPhase { node_id }` → `emission_path=HANDLER_PHASE` + `node_id`
+impl From<&EventEntry> for proto::EventEntry {
+    fn from(entry: &EventEntry) -> Self {
+        let (error_code, error_detail, denial_reason) = match &entry.outcome {
+            EventOutcome::Success => (None, None, None),
+            EventOutcome::Failed { code, detail } => {
+                (Some(code.clone()), Some(detail.clone()), None)
+            },
+            EventOutcome::Denied { reason } => (None, None, Some(reason.clone())),
+        };
+
+        let node_id = match &entry.emission {
+            EventEmission::ApplyPhase => None,
+            EventEmission::HandlerPhase { node_id } => Some(*node_id),
+        };
+
+        proto::EventEntry {
+            event_id: entry.event_id.to_vec(),
+            source_service: entry.source_service.clone(),
+            event_type: entry.event_type.clone(),
+            timestamp: Some(datetime_to_proto_timestamp(&entry.timestamp)),
+            scope: proto::EventScope::from(entry.scope).into(),
+            action: entry.action.as_str().to_string(),
+            emission_path: proto::EventEmissionPath::from(&entry.emission).into(),
+            principal: entry.principal.clone(),
+            organization: Some(proto::OrganizationSlug {
+                slug: entry.organization_slug.unwrap_or(entry.organization_id.value() as u64),
+            }),
+            vault: entry.vault_slug.map(|s| proto::VaultSlug { slug: s }),
+            outcome: proto::EventOutcome::from(&entry.outcome).into(),
+            error_code,
+            error_detail,
+            denial_reason,
+            details: entry.details.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            block_height: entry.block_height,
+            node_id,
+            trace_id: entry.trace_id.clone(),
+            correlation_id: entry.correlation_id.clone(),
+            operations_count: entry.operations_count,
+            expires_at: entry.expires_at,
+        }
+    }
+}
+
+/// Converts an owned domain [`EventEntry`] to its protobuf representation.
+impl From<EventEntry> for proto::EventEntry {
+    fn from(entry: EventEntry) -> Self {
+        (&entry).into()
+    }
+}
+
+// =============================================================================
+// EventEntry conversions (proto -> domain)
+// =============================================================================
+
+/// Converts a protobuf [`EventEntry`](proto::EventEntry) reference to the domain type.
+///
+/// Reconstructs rich enums from flattened proto fields:
+/// - `outcome=FAILED` + `error_code` + `error_detail` → `EventOutcome::Failed { code, detail }`
+/// - `outcome=DENIED` + `denial_reason` → `EventOutcome::Denied { reason }`
+/// - `emission_path=HANDLER_PHASE` + `node_id` → `EventEmission::HandlerPhase { node_id }`
+impl TryFrom<&proto::EventEntry> for EventEntry {
+    type Error = Status;
+
+    fn try_from(proto_entry: &proto::EventEntry) -> Result<Self, Self::Error> {
+        let event_id: [u8; 16] = proto_entry
+            .event_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("event_id must be exactly 16 bytes"))?;
+
+        let timestamp = proto_entry
+            .timestamp
+            .as_ref()
+            .map(proto_timestamp_to_datetime)
+            .unwrap_or(DateTime::UNIX_EPOCH);
+
+        let scope = proto::EventScope::try_from(proto_entry.scope)
+            .unwrap_or(proto::EventScope::Unspecified)
+            .into();
+
+        let action: EventAction = proto_entry.action.parse().map_err(|_: String| {
+            Status::invalid_argument(format!("unknown action: {}", proto_entry.action))
+        })?;
+
+        let outcome = match proto::EventOutcome::try_from(proto_entry.outcome)
+            .unwrap_or(proto::EventOutcome::Unspecified)
+        {
+            proto::EventOutcome::Success | proto::EventOutcome::Unspecified => {
+                EventOutcome::Success
+            },
+            proto::EventOutcome::Failed => EventOutcome::Failed {
+                code: proto_entry.error_code.clone().unwrap_or_default(),
+                detail: proto_entry.error_detail.clone().unwrap_or_default(),
+            },
+            proto::EventOutcome::Denied => EventOutcome::Denied {
+                reason: proto_entry.denial_reason.clone().unwrap_or_default(),
+            },
+        };
+
+        let emission = match proto::EventEmissionPath::try_from(proto_entry.emission_path)
+            .unwrap_or(proto::EventEmissionPath::EmissionPathUnspecified)
+        {
+            proto::EventEmissionPath::EmissionPathApplyPhase
+            | proto::EventEmissionPath::EmissionPathUnspecified => EventEmission::ApplyPhase,
+            proto::EventEmissionPath::EmissionPathHandlerPhase => {
+                EventEmission::HandlerPhase { node_id: proto_entry.node_id.unwrap_or(0) }
+            },
+        };
+
+        let organization_slug = proto_entry.organization.as_ref().map(|o| o.slug);
+        let organization_id = OrganizationId::new(organization_slug.unwrap_or(0) as i64);
+
+        Ok(EventEntry {
+            expires_at: proto_entry.expires_at,
+            event_id,
+            source_service: proto_entry.source_service.clone(),
+            event_type: proto_entry.event_type.clone(),
+            timestamp,
+            scope,
+            action,
+            emission,
+            principal: proto_entry.principal.clone(),
+            organization_id,
+            organization_slug,
+            vault_slug: proto_entry.vault.as_ref().map(|v| v.slug),
+            outcome,
+            details: proto_entry.details.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            block_height: proto_entry.block_height,
+            trace_id: proto_entry.trace_id.clone(),
+            correlation_id: proto_entry.correlation_id.clone(),
+            operations_count: proto_entry.operations_count,
+        })
+    }
+}
+
+/// Converts an owned protobuf [`EventEntry`](proto::EventEntry) to the domain type.
+impl TryFrom<proto::EventEntry> for EventEntry {
+    type Error = Status;
+
+    fn try_from(proto_entry: proto::EventEntry) -> Result<Self, Self::Error> {
+        Self::try_from(&proto_entry)
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
+
+    use std::collections::BTreeMap;
 
     use inferadb_ledger_types::hash::Hash;
 
@@ -1195,6 +1429,334 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // EventScope conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_event_scope_system_to_proto() {
+        let proto_scope = proto::EventScope::from(EventScope::System);
+        assert_eq!(proto_scope, proto::EventScope::System);
+    }
+
+    #[test]
+    fn test_event_scope_organization_to_proto() {
+        let proto_scope = proto::EventScope::from(EventScope::Organization);
+        assert_eq!(proto_scope, proto::EventScope::Organization);
+    }
+
+    #[test]
+    fn test_event_scope_proto_to_domain() {
+        assert_eq!(EventScope::from(proto::EventScope::System), EventScope::System);
+        assert_eq!(EventScope::from(proto::EventScope::Organization), EventScope::Organization);
+    }
+
+    #[test]
+    fn test_event_scope_unspecified_defaults_to_organization() {
+        assert_eq!(EventScope::from(proto::EventScope::Unspecified), EventScope::Organization);
+    }
+
+    // -------------------------------------------------------------------------
+    // EventOutcome conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_event_outcome_success_to_proto() {
+        let proto_outcome = proto::EventOutcome::from(&EventOutcome::Success);
+        assert_eq!(proto_outcome, proto::EventOutcome::Success);
+    }
+
+    #[test]
+    fn test_event_outcome_failed_to_proto() {
+        let outcome =
+            EventOutcome::Failed { code: "E1001".to_string(), detail: "disk full".to_string() };
+        let proto_outcome = proto::EventOutcome::from(&outcome);
+        assert_eq!(proto_outcome, proto::EventOutcome::Failed);
+    }
+
+    #[test]
+    fn test_event_outcome_denied_to_proto() {
+        let outcome = EventOutcome::Denied { reason: "rate limited".to_string() };
+        let proto_outcome = proto::EventOutcome::from(&outcome);
+        assert_eq!(proto_outcome, proto::EventOutcome::Denied);
+    }
+
+    // -------------------------------------------------------------------------
+    // EventEmissionPath conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_event_emission_apply_phase_to_proto() {
+        let proto_ep = proto::EventEmissionPath::from(&EventEmission::ApplyPhase);
+        assert_eq!(proto_ep, proto::EventEmissionPath::EmissionPathApplyPhase);
+    }
+
+    #[test]
+    fn test_event_emission_handler_phase_to_proto() {
+        let proto_ep = proto::EventEmissionPath::from(&EventEmission::HandlerPhase { node_id: 42 });
+        assert_eq!(proto_ep, proto::EventEmissionPath::EmissionPathHandlerPhase);
+    }
+
+    // -------------------------------------------------------------------------
+    // EventEntry domain -> proto -> domain roundtrip tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_event_entry_success_roundtrip() {
+        use std::collections::BTreeMap;
+
+        use chrono::Utc;
+
+        let entry = EventEntry {
+            expires_at: 1_700_000_000,
+            event_id: [1u8; 16],
+            source_service: "ledger".to_string(),
+            event_type: "ledger.vault.created".to_string(),
+            timestamp: Utc::now(),
+            scope: EventScope::Organization,
+            action: EventAction::VaultCreated,
+            emission: EventEmission::ApplyPhase,
+            principal: "system".to_string(),
+            organization_id: OrganizationId::new(42),
+            organization_slug: Some(12345),
+            vault_slug: Some(67890),
+            outcome: EventOutcome::Success,
+            details: BTreeMap::from([("key".to_string(), "val".to_string())]),
+            block_height: Some(100),
+            trace_id: Some("abc-123".to_string()),
+            correlation_id: Some("corr-456".to_string()),
+            operations_count: Some(5),
+        };
+
+        let proto_entry: proto::EventEntry = (&entry).into();
+        let recovered = EventEntry::try_from(&proto_entry).unwrap();
+
+        assert_eq!(recovered.event_id, entry.event_id);
+        assert_eq!(recovered.source_service, entry.source_service);
+        assert_eq!(recovered.event_type, entry.event_type);
+        assert_eq!(recovered.scope, entry.scope);
+        assert_eq!(recovered.action, entry.action);
+        assert_eq!(recovered.emission, entry.emission);
+        assert_eq!(recovered.principal, entry.principal);
+        assert_eq!(recovered.organization_slug, entry.organization_slug);
+        assert_eq!(recovered.vault_slug, entry.vault_slug);
+        assert_eq!(recovered.outcome, entry.outcome);
+        assert_eq!(recovered.details, entry.details);
+        assert_eq!(recovered.block_height, entry.block_height);
+        assert_eq!(recovered.trace_id, entry.trace_id);
+        assert_eq!(recovered.correlation_id, entry.correlation_id);
+        assert_eq!(recovered.operations_count, entry.operations_count);
+        assert_eq!(recovered.expires_at, entry.expires_at);
+    }
+
+    #[test]
+    fn test_event_entry_failed_outcome_roundtrip() {
+        use chrono::Utc;
+
+        let entry = EventEntry {
+            expires_at: 0,
+            event_id: [2u8; 16],
+            source_service: "ledger".to_string(),
+            event_type: "ledger.write.committed".to_string(),
+            timestamp: Utc::now(),
+            scope: EventScope::Organization,
+            action: EventAction::WriteCommitted,
+            emission: EventEmission::ApplyPhase,
+            principal: "user:1".to_string(),
+            organization_id: OrganizationId::new(1),
+            organization_slug: Some(100),
+            vault_slug: None,
+            outcome: EventOutcome::Failed {
+                code: "E2001".to_string(),
+                detail: "constraint violation".to_string(),
+            },
+            details: BTreeMap::new(),
+            block_height: None,
+            trace_id: None,
+            correlation_id: None,
+            operations_count: None,
+        };
+
+        let proto_entry: proto::EventEntry = (&entry).into();
+        assert_eq!(proto_entry.error_code, Some("E2001".to_string()));
+        assert_eq!(proto_entry.error_detail, Some("constraint violation".to_string()));
+        assert!(proto_entry.denial_reason.is_none());
+
+        let recovered = EventEntry::try_from(&proto_entry).unwrap();
+        assert_eq!(recovered.outcome, entry.outcome);
+    }
+
+    #[test]
+    fn test_event_entry_denied_outcome_roundtrip() {
+        use chrono::Utc;
+
+        let entry = EventEntry {
+            expires_at: 1_800_000_000,
+            event_id: [3u8; 16],
+            source_service: "ledger".to_string(),
+            event_type: "ledger.request.rate_limited".to_string(),
+            timestamp: Utc::now(),
+            scope: EventScope::Organization,
+            action: EventAction::RequestRateLimited,
+            emission: EventEmission::HandlerPhase { node_id: 7 },
+            principal: "client:abc".to_string(),
+            organization_id: OrganizationId::new(5),
+            organization_slug: Some(555),
+            vault_slug: None,
+            outcome: EventOutcome::Denied { reason: "rate limit exceeded".to_string() },
+            details: BTreeMap::new(),
+            block_height: None,
+            trace_id: None,
+            correlation_id: None,
+            operations_count: None,
+        };
+
+        let proto_entry: proto::EventEntry = (&entry).into();
+        assert!(proto_entry.error_code.is_none());
+        assert!(proto_entry.error_detail.is_none());
+        assert_eq!(proto_entry.denial_reason, Some("rate limit exceeded".to_string()));
+        assert_eq!(proto_entry.node_id, Some(7));
+
+        let recovered = EventEntry::try_from(&proto_entry).unwrap();
+        assert_eq!(recovered.outcome, entry.outcome);
+        assert_eq!(recovered.emission, entry.emission);
+    }
+
+    #[test]
+    fn test_event_entry_handler_phase_preserves_node_id() {
+        use chrono::Utc;
+
+        let entry = EventEntry {
+            expires_at: 0,
+            event_id: [4u8; 16],
+            source_service: "ledger".to_string(),
+            event_type: "ledger.request.quota_exceeded".to_string(),
+            timestamp: Utc::now(),
+            scope: EventScope::Organization,
+            action: EventAction::QuotaExceeded,
+            emission: EventEmission::HandlerPhase { node_id: 42 },
+            principal: "system".to_string(),
+            organization_id: OrganizationId::new(1),
+            organization_slug: None,
+            vault_slug: None,
+            outcome: EventOutcome::Success,
+            details: BTreeMap::new(),
+            block_height: None,
+            trace_id: None,
+            correlation_id: None,
+            operations_count: None,
+        };
+
+        let proto_entry: proto::EventEntry = (&entry).into();
+        assert_eq!(
+            proto_entry.emission_path,
+            proto::EventEmissionPath::EmissionPathHandlerPhase as i32,
+        );
+        assert_eq!(proto_entry.node_id, Some(42));
+
+        let recovered = EventEntry::try_from(&proto_entry).unwrap();
+        assert_eq!(recovered.emission, EventEmission::HandlerPhase { node_id: 42 });
+    }
+
+    #[test]
+    fn test_event_entry_system_scope_roundtrip() {
+        use chrono::Utc;
+
+        let entry = EventEntry {
+            expires_at: 1_700_000_000,
+            event_id: [5u8; 16],
+            source_service: "ledger".to_string(),
+            event_type: "ledger.organization.created".to_string(),
+            timestamp: Utc::now(),
+            scope: EventScope::System,
+            action: EventAction::OrganizationCreated,
+            emission: EventEmission::ApplyPhase,
+            principal: "system".to_string(),
+            organization_id: OrganizationId::new(0),
+            organization_slug: Some(0),
+            vault_slug: None,
+            outcome: EventOutcome::Success,
+            details: BTreeMap::new(),
+            block_height: Some(50),
+            trace_id: None,
+            correlation_id: None,
+            operations_count: None,
+        };
+
+        let proto_entry: proto::EventEntry = (&entry).into();
+        assert_eq!(proto_entry.scope, proto::EventScope::System as i32);
+
+        let recovered = EventEntry::try_from(&proto_entry).unwrap();
+        assert_eq!(recovered.scope, EventScope::System);
+        assert_eq!(recovered.action, EventAction::OrganizationCreated);
+    }
+
+    #[test]
+    fn test_event_entry_invalid_event_id_length() {
+        let proto_entry = proto::EventEntry {
+            event_id: vec![1, 2, 3], // Only 3 bytes, need 16
+            source_service: "ledger".to_string(),
+            event_type: "ledger.vault.created".to_string(),
+            action: "vault_created".to_string(),
+            ..Default::default()
+        };
+
+        let result = EventEntry::try_from(&proto_entry);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_event_entry_unknown_action() {
+        let proto_entry = proto::EventEntry {
+            event_id: vec![0u8; 16],
+            source_service: "ledger".to_string(),
+            event_type: "ledger.unknown.action".to_string(),
+            action: "totally_unknown_action".to_string(),
+            ..Default::default()
+        };
+
+        let result = EventEntry::try_from(&proto_entry);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_event_entry_all_actions_roundtrip() {
+        use chrono::Utc;
+
+        for action in EventAction::ALL {
+            let entry = EventEntry {
+                expires_at: 0,
+                event_id: [0u8; 16],
+                source_service: "ledger".to_string(),
+                event_type: action.event_type().to_string(),
+                timestamp: Utc::now(),
+                scope: action.scope(),
+                action: *action,
+                emission: EventEmission::ApplyPhase,
+                principal: "test".to_string(),
+                organization_id: OrganizationId::new(0),
+                organization_slug: None,
+                vault_slug: None,
+                outcome: EventOutcome::Success,
+                details: BTreeMap::new(),
+                block_height: None,
+                trace_id: None,
+                correlation_id: None,
+                operations_count: None,
+            };
+
+            let proto_entry: proto::EventEntry = (&entry).into();
+            assert_eq!(proto_entry.action, action.as_str());
+
+            let recovered = EventEntry::try_from(&proto_entry).unwrap();
+            assert_eq!(recovered.action, *action, "failed for {:?}", action);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Property-based roundtrip tests
     // -------------------------------------------------------------------------
 
@@ -1207,7 +1769,8 @@ mod tests {
         )]
 
         use inferadb_ledger_test_utils::strategies::{
-            arb_entity, arb_operation, arb_relationship, arb_set_condition, arb_vault_slug,
+            arb_entity, arb_event_entry, arb_operation, arb_relationship, arb_set_condition,
+            arb_vault_slug,
         };
         use proptest::prelude::*;
 
@@ -1262,6 +1825,32 @@ mod tests {
                 let proto: proto::VaultSlug = slug.into();
                 let recovered = VaultSlug::from(proto);
                 prop_assert_eq!(slug, recovered);
+            }
+
+            /// EventEntry roundtrip: domain -> proto -> domain preserves all fields.
+            ///
+            /// Verifies that all `EventAction` variants, all `EventOutcome` variants,
+            /// and all `EventEmission` variants survive the conversion.
+            #[test]
+            fn event_entry_proto_roundtrip(entry in arb_event_entry()) {
+                let proto_entry: proto::EventEntry = (&entry).into();
+                let recovered = EventEntry::try_from(&proto_entry).unwrap();
+
+                prop_assert_eq!(&entry.event_id, &recovered.event_id);
+                prop_assert_eq!(&entry.source_service, &recovered.source_service);
+                prop_assert_eq!(&entry.event_type, &recovered.event_type);
+                prop_assert_eq!(entry.scope, recovered.scope);
+                prop_assert_eq!(entry.action, recovered.action);
+                prop_assert_eq!(&entry.emission, &recovered.emission);
+                prop_assert_eq!(&entry.principal, &recovered.principal);
+                prop_assert_eq!(entry.vault_slug, recovered.vault_slug);
+                prop_assert_eq!(&entry.outcome, &recovered.outcome);
+                prop_assert_eq!(&entry.details, &recovered.details);
+                prop_assert_eq!(entry.block_height, recovered.block_height);
+                prop_assert_eq!(&entry.trace_id, &recovered.trace_id);
+                prop_assert_eq!(&entry.correlation_id, &recovered.correlation_id);
+                prop_assert_eq!(entry.operations_count, recovered.operations_count);
+                prop_assert_eq!(entry.expires_at, recovered.expires_at);
             }
         }
     }

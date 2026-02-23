@@ -1,4 +1,4 @@
-//! Shared service helpers for audit logging, rate limiting, validation, and hot key detection.
+//! Shared service helpers for rate limiting, validation, and hot key detection.
 //!
 //! These functions consolidate logic that was previously duplicated across
 //! `WriteServiceImpl`, `AdminServiceImpl`, and `MultiShardWriteService`.
@@ -6,70 +6,11 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{
-    OrganizationId, VaultId,
-    audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
-    config::ValidationConfig,
-    validation,
-};
+use inferadb_ledger_types::{OrganizationId, VaultId, config::ValidationConfig, validation};
 use tonic::Status;
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::{metrics, rate_limit::RateLimiter};
-
-/// Emits an audit event and records the corresponding Prometheus metric.
-///
-/// If the audit logger is not configured, this is a no-op (only metrics recorded).
-/// If the audit log write fails, logs a warning but does not propagate the error —
-/// the primary operation's durability takes precedence over audit logging.
-pub(crate) fn emit_audit_event(
-    audit_logger: Option<&Arc<dyn crate::audit::AuditLogger>>,
-    event: &AuditEvent,
-) {
-    let outcome_str = match &event.outcome {
-        AuditOutcome::Success => "success",
-        AuditOutcome::Failed { .. } => "failed",
-        AuditOutcome::Denied { .. } => "denied",
-    };
-    metrics::record_audit_event(event.action.as_str(), outcome_str);
-
-    if let Some(logger) = audit_logger
-        && let Err(e) = logger.log(event)
-    {
-        warn!(
-            event_id = %event.event_id,
-            action = %event.action.as_str(),
-            error = %e,
-            "Failed to write audit log event"
-        );
-    }
-}
-
-/// Builds an audit event with standard fields.
-///
-/// The `operations_count` field is set for write-path events and `None` for admin events.
-pub(crate) fn build_audit_event(
-    action: AuditAction,
-    principal: &str,
-    resource: AuditResource,
-    outcome: AuditOutcome,
-    node_id: Option<u64>,
-    trace_id: Option<&str>,
-    operations_count: Option<usize>,
-) -> AuditEvent {
-    AuditEvent {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        event_id: Uuid::new_v4().to_string(),
-        principal: principal.to_string(),
-        action,
-        resource,
-        outcome,
-        node_id,
-        trace_id: trace_id.map(String::from),
-        operations_count,
-    }
-}
 
 /// Checks all rate limit tiers (backpressure, organization, client).
 ///

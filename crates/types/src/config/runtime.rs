@@ -174,6 +174,61 @@ pub struct RuntimeConfig {
     /// Metric cardinality budgets. `None` disables cardinality tracking.
     #[serde(default)]
     pub metrics_cardinality: Option<MetricsCardinalityConfig>,
+    /// Event logging configuration (hot-reloadable subset).
+    #[serde(default)]
+    pub events: Option<RuntimeEventsConfig>,
+}
+
+/// Runtime-reconfigurable subset of event logging configuration.
+///
+/// Contains only the event parameters that can be safely changed without
+/// restart. Structural parameters (`max_snapshot_events`, `max_details_size_bytes`,
+/// `allowed_sources`, `max_ingest_batch_size`) require restart.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeEventsConfig {
+    /// Master switch for event logging.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Default TTL in days for new event entries.
+    #[serde(default)]
+    pub default_ttl_days: Option<u32>,
+    /// Enable system-level event logging.
+    #[serde(default)]
+    pub system_log_enabled: Option<bool>,
+    /// Enable organization-level event logging.
+    #[serde(default)]
+    pub organization_log_enabled: Option<bool>,
+    /// Master switch for external event ingestion.
+    #[serde(default)]
+    pub ingest_enabled: Option<bool>,
+    /// Events per second per source service.
+    #[serde(default)]
+    pub ingest_rate_limit_per_source: Option<u32>,
+}
+
+impl RuntimeEventsConfig {
+    /// Validates the runtime events configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(ttl) = self.default_ttl_days
+            && !(1..=3650).contains(&ttl)
+        {
+            return Err(ConfigError::Validation {
+                message: format!("events.default_ttl_days must be 1..=3650, got {ttl}"),
+            });
+        }
+        if let Some(rate) = self.ingest_rate_limit_per_source
+            && rate == 0
+        {
+            return Err(ConfigError::Validation {
+                message: "events.ingest_rate_limit_per_source must be at least 1".to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Identifies a non-reconfigurable parameter that was included in an update request.
@@ -277,6 +332,9 @@ impl RuntimeConfig {
         if let Some(ref mc) = self.metrics_cardinality {
             mc.validate()?;
         }
+        if let Some(ref ev) = self.events {
+            ev.validate()?;
+        }
         Ok(())
     }
 
@@ -335,6 +393,9 @@ impl RuntimeConfig {
         }
         if self.metrics_cardinality != other.metrics_cardinality {
             changes.push("metrics_cardinality".to_string());
+        }
+        if self.events != other.events {
+            changes.push("events".to_string());
         }
         changes
     }

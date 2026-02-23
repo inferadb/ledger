@@ -322,6 +322,454 @@ impl HealthCheckResult {
 }
 
 // =============================================================================
+// Events Types
+// =============================================================================
+
+/// Scope of an event (system-wide or organization-scoped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventScope {
+    /// Cluster-wide administrative event.
+    System,
+    /// Per-organization tenant event.
+    Organization,
+}
+
+impl EventScope {
+    fn from_proto(value: i32) -> Self {
+        match proto::EventScope::try_from(value) {
+            Ok(proto::EventScope::System) => Self::System,
+            Ok(proto::EventScope::Organization) => Self::Organization,
+            _ => Self::System,
+        }
+    }
+}
+
+/// Outcome of an audited operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventOutcome {
+    /// Operation completed successfully.
+    Success,
+    /// Operation failed with an error.
+    Failed {
+        /// Error code.
+        code: String,
+        /// Error details.
+        detail: String,
+    },
+    /// Operation was denied (rate limited, unauthorized, etc.).
+    Denied {
+        /// Denial reason.
+        reason: String,
+    },
+}
+
+impl EventOutcome {
+    fn from_proto(
+        value: i32,
+        error_code: Option<String>,
+        error_detail: Option<String>,
+        denial_reason: Option<String>,
+    ) -> Self {
+        match proto::EventOutcome::try_from(value) {
+            Ok(proto::EventOutcome::Success) => Self::Success,
+            Ok(proto::EventOutcome::Failed) => Self::Failed {
+                code: error_code.unwrap_or_default(),
+                detail: error_detail.unwrap_or_default(),
+            },
+            Ok(proto::EventOutcome::Denied) => {
+                Self::Denied { reason: denial_reason.unwrap_or_default() }
+            },
+            _ => Self::Success,
+        }
+    }
+
+    fn to_proto(&self) -> (i32, Option<String>, Option<String>, Option<String>) {
+        match self {
+            Self::Success => (proto::EventOutcome::Success as i32, None, None, None),
+            Self::Failed { code, detail } => {
+                (proto::EventOutcome::Failed as i32, Some(code.clone()), Some(detail.clone()), None)
+            },
+            Self::Denied { reason } => {
+                (proto::EventOutcome::Denied as i32, None, None, Some(reason.clone()))
+            },
+        }
+    }
+}
+
+/// Emission path of an event (how it was generated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventEmissionPath {
+    /// Deterministic, Raft-replicated — identical on all nodes.
+    ApplyPhase,
+    /// Node-local, best-effort — exists only on the handling node.
+    HandlerPhase,
+}
+
+impl EventEmissionPath {
+    fn from_proto(value: i32) -> Self {
+        match proto::EventEmissionPath::try_from(value) {
+            Ok(proto::EventEmissionPath::EmissionPathApplyPhase) => Self::ApplyPhase,
+            Ok(proto::EventEmissionPath::EmissionPathHandlerPhase) => Self::HandlerPhase,
+            _ => Self::ApplyPhase,
+        }
+    }
+}
+
+/// An audit event entry from the events system.
+///
+/// Represents a single auditable action — a write, admin operation, denial,
+/// or system event. Events follow the canonical log line pattern with rich
+/// contextual fields for compliance and debugging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdkEventEntry {
+    /// Unique event identifier (UUID, 16 bytes).
+    pub event_id: Vec<u8>,
+    /// Originating service (`"ledger"`, `"engine"`, or `"control"`).
+    pub source_service: String,
+    /// Hierarchical dot-separated type (e.g., `"ledger.vault.created"`).
+    pub event_type: String,
+    /// When the event occurred.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Event scope (system or organization).
+    pub scope: EventScope,
+    /// Action name (snake_case, e.g., `"vault_created"`).
+    pub action: String,
+    /// Emission path (apply-phase or handler-phase).
+    pub emission_path: EventEmissionPath,
+    /// Who performed the action.
+    pub principal: String,
+    /// Owning organization slug (0 for system events).
+    pub organization_slug: u64,
+    /// Vault context (when applicable).
+    pub vault_slug: Option<u64>,
+    /// Outcome of the operation.
+    pub outcome: EventOutcome,
+    /// Action-specific key-value context.
+    pub details: std::collections::HashMap<String, String>,
+    /// Reference to blockchain block (for committed writes).
+    pub block_height: Option<u64>,
+    /// Node that generated the event (for handler-phase events).
+    pub node_id: Option<u64>,
+    /// Distributed tracing correlation (W3C Trace Context).
+    pub trace_id: Option<String>,
+    /// Business-level correlation for multi-step operations.
+    pub correlation_id: Option<String>,
+    /// Number of operations (for write actions).
+    pub operations_count: Option<u32>,
+}
+
+impl SdkEventEntry {
+    /// Creates from protobuf response.
+    pub fn from_proto(proto: proto::EventEntry) -> Self {
+        let timestamp = proto
+            .timestamp
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
+                    .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+            })
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+
+        Self {
+            event_id: proto.event_id,
+            source_service: proto.source_service,
+            event_type: proto.event_type,
+            timestamp,
+            scope: EventScope::from_proto(proto.scope),
+            action: proto.action,
+            emission_path: EventEmissionPath::from_proto(proto.emission_path),
+            principal: proto.principal,
+            organization_slug: proto.organization.map_or(0, |o| o.slug),
+            vault_slug: proto.vault.map(|v| v.slug),
+            outcome: EventOutcome::from_proto(
+                proto.outcome,
+                proto.error_code,
+                proto.error_detail,
+                proto.denial_reason,
+            ),
+            details: proto.details,
+            block_height: proto.block_height,
+            node_id: proto.node_id,
+            trace_id: proto.trace_id,
+            correlation_id: proto.correlation_id,
+            operations_count: proto.operations_count,
+        }
+    }
+
+    /// Returns the event ID formatted as a UUID string.
+    ///
+    /// Falls back to hex encoding if the ID is not exactly 16 bytes.
+    pub fn event_id_string(&self) -> String {
+        if let Ok(bytes) = <[u8; 16]>::try_from(self.event_id.as_slice()) {
+            uuid::Uuid::from_bytes(bytes).to_string()
+        } else {
+            self.event_id.iter().fold(String::new(), |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{b:02x}");
+                s
+            })
+        }
+    }
+}
+
+/// Paginated result from event queries.
+#[derive(Debug, Clone)]
+pub struct EventPage {
+    /// Matching events in chronological order.
+    pub entries: Vec<SdkEventEntry>,
+    /// Opaque cursor for next page; `None` if no more results.
+    pub next_page_token: Option<String>,
+    /// Estimated total count (may be approximate for large datasets).
+    pub total_estimate: Option<u64>,
+}
+
+impl EventPage {
+    /// Returns `true` if there are more pages available.
+    pub fn has_next_page(&self) -> bool {
+        self.next_page_token.is_some()
+    }
+}
+
+/// Filter criteria for event queries.
+///
+/// Use the builder methods to construct a filter. An empty filter matches
+/// all events in the organization.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_sdk::EventFilter;
+/// let filter = EventFilter::new()
+///     .event_type_prefix("ledger.vault")
+///     .outcome_success();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct EventFilter {
+    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    end_time: Option<chrono::DateTime<chrono::Utc>>,
+    actions: Vec<String>,
+    event_type_prefix: Option<String>,
+    principal: Option<String>,
+    outcome: Option<proto::EventOutcome>,
+    emission_path: Option<proto::EventEmissionPath>,
+    correlation_id: Option<String>,
+}
+
+impl EventFilter {
+    /// Creates an empty filter that matches all events.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Filters events from this time forward (inclusive).
+    pub fn start_time(mut self, time: chrono::DateTime<chrono::Utc>) -> Self {
+        self.start_time = Some(time);
+        self
+    }
+
+    /// Filters events before this time (exclusive).
+    pub fn end_time(mut self, time: chrono::DateTime<chrono::Utc>) -> Self {
+        self.end_time = Some(time);
+        self
+    }
+
+    /// Filters by action names (snake_case). Multiple actions are OR'd.
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.actions = actions.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Filters by event type prefix (e.g., `"ledger.vault"` matches `"ledger.vault.created"`).
+    pub fn event_type_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.event_type_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Filters by principal (who performed the action).
+    pub fn principal(mut self, principal: impl Into<String>) -> Self {
+        self.principal = Some(principal.into());
+        self
+    }
+
+    /// Filters to successful events only.
+    pub fn outcome_success(mut self) -> Self {
+        self.outcome = Some(proto::EventOutcome::Success);
+        self
+    }
+
+    /// Filters to failed events only.
+    pub fn outcome_failed(mut self) -> Self {
+        self.outcome = Some(proto::EventOutcome::Failed);
+        self
+    }
+
+    /// Filters to denied events only.
+    pub fn outcome_denied(mut self) -> Self {
+        self.outcome = Some(proto::EventOutcome::Denied);
+        self
+    }
+
+    /// Filters to apply-phase events only (deterministic, replicated).
+    pub fn apply_phase_only(mut self) -> Self {
+        self.emission_path = Some(proto::EventEmissionPath::EmissionPathApplyPhase);
+        self
+    }
+
+    /// Filters to handler-phase events only (node-local).
+    pub fn handler_phase_only(mut self) -> Self {
+        self.emission_path = Some(proto::EventEmissionPath::EmissionPathHandlerPhase);
+        self
+    }
+
+    /// Filters by business-level correlation ID.
+    pub fn correlation_id(mut self, id: impl Into<String>) -> Self {
+        self.correlation_id = Some(id.into());
+        self
+    }
+
+    fn to_proto(&self) -> proto::EventFilter {
+        proto::EventFilter {
+            start_time: self.start_time.map(|dt| prost_types::Timestamp {
+                seconds: dt.timestamp(),
+                nanos: dt.timestamp_subsec_nanos() as i32,
+            }),
+            end_time: self.end_time.map(|dt| prost_types::Timestamp {
+                seconds: dt.timestamp(),
+                nanos: dt.timestamp_subsec_nanos() as i32,
+            }),
+            actions: self.actions.clone(),
+            event_type_prefix: self.event_type_prefix.clone(),
+            principal: self.principal.clone(),
+            outcome: self.outcome.map_or(0, |o| o as i32),
+            emission_path: self.emission_path.map_or(0, |e| e as i32),
+            correlation_id: self.correlation_id.clone(),
+        }
+    }
+}
+
+/// A single event for external ingestion (from Engine or Control).
+///
+/// Use the builder methods to construct an event entry for ingestion.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_sdk::SdkIngestEventEntry;
+/// let event = SdkIngestEventEntry::new(
+///     "engine.authorization.checked",
+///     "user:alice",
+///     inferadb_ledger_sdk::EventOutcome::Success,
+/// )
+/// .correlation_id("batch-job-42");
+/// ```
+#[derive(Debug, Clone)]
+pub struct SdkIngestEventEntry {
+    event_type: String,
+    principal: String,
+    outcome: EventOutcome,
+    details: std::collections::HashMap<String, String>,
+    trace_id: Option<String>,
+    correlation_id: Option<String>,
+    vault_slug: Option<u64>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl SdkIngestEventEntry {
+    /// Creates a new event entry with required fields.
+    pub fn new(
+        event_type: impl Into<String>,
+        principal: impl Into<String>,
+        outcome: EventOutcome,
+    ) -> Self {
+        Self {
+            event_type: event_type.into(),
+            principal: principal.into(),
+            outcome,
+            details: std::collections::HashMap::new(),
+            trace_id: None,
+            correlation_id: None,
+            vault_slug: None,
+            timestamp: None,
+        }
+    }
+
+    /// Adds action-specific key-value context.
+    pub fn details(mut self, details: std::collections::HashMap<String, String>) -> Self {
+        self.details = details;
+        self
+    }
+
+    /// Adds a single detail key-value pair.
+    pub fn detail(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.details.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets the distributed tracing correlation ID.
+    pub fn trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Sets the business-level correlation ID.
+    pub fn correlation_id(mut self, id: impl Into<String>) -> Self {
+        self.correlation_id = Some(id.into());
+        self
+    }
+
+    /// Sets the vault context.
+    pub fn vault_slug(mut self, slug: u64) -> Self {
+        self.vault_slug = Some(slug);
+        self
+    }
+
+    /// Sets a custom timestamp (defaults to server receive time if omitted).
+    pub fn timestamp(mut self, timestamp: chrono::DateTime<chrono::Utc>) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    fn into_proto(self) -> proto::IngestEventEntry {
+        let (outcome, error_code, error_detail, denial_reason) = self.outcome.to_proto();
+        proto::IngestEventEntry {
+            event_type: self.event_type,
+            principal: self.principal,
+            outcome,
+            details: self.details,
+            trace_id: self.trace_id,
+            correlation_id: self.correlation_id,
+            vault: self.vault_slug.map(|slug| proto::VaultSlug { slug }),
+            timestamp: self.timestamp.map(|dt| prost_types::Timestamp {
+                seconds: dt.timestamp(),
+                nanos: dt.timestamp_subsec_nanos() as i32,
+            }),
+            error_code,
+            error_detail,
+            denial_reason,
+        }
+    }
+}
+
+/// Result of an event ingestion request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestResult {
+    /// Number of events accepted and written.
+    pub accepted_count: u32,
+    /// Number of events rejected.
+    pub rejected_count: u32,
+    /// Per-event rejection details.
+    pub rejections: Vec<IngestRejection>,
+}
+
+/// A single rejected event from an ingestion batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestRejection {
+    /// Zero-based index into the request's entries array.
+    pub index: u32,
+    /// Human-readable rejection reason.
+    pub reason: String,
+}
+
+// =============================================================================
 // Verified Read Types
 // =============================================================================
 
@@ -3202,6 +3650,366 @@ impl LedgerClient {
     }
 
     // =========================================================================
+    // Events Operations
+    // =========================================================================
+
+    /// Lists audit events for an organization with optional filtering.
+    ///
+    /// Returns a paginated list of events matching the filter criteria.
+    /// Pass `org_slug = 0` to query system-level events.
+    ///
+    /// # Arguments
+    ///
+    /// * `org_slug` - Organization slug (0 for system events).
+    /// * `filter` - Filter criteria (empty filter matches all events).
+    /// * `limit` - Maximum results per page (0 = server default, max 1000).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, EventFilter};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// let filter = EventFilter::new()
+    ///     .event_type_prefix("ledger.vault")
+    ///     .outcome_success();
+    /// let page = client.list_events(12345, filter, 100).await?;
+    /// for event in &page.entries {
+    ///     println!("{}: {}", event.event_type, event.principal);
+    /// }
+    /// if page.has_next_page() {
+    ///     let next = client.list_events_next(12345, page.next_page_token.as_deref().unwrap_or_default()).await?;
+    ///     println!("Next page: {} events", next.entries.len());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn list_events(
+        &self,
+        org_slug: u64,
+        filter: EventFilter,
+        limit: u32,
+    ) -> Result<EventPage> {
+        self.list_events_inner(org_slug, filter, limit, String::new()).await
+    }
+
+    /// Continues paginating audit events from a previous response.
+    ///
+    /// # Arguments
+    ///
+    /// * `org_slug` - Organization slug (must match the original query).
+    /// * `page_token` - Opaque cursor from the previous response's `next_page_token`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, EventFilter};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let page_token = "abc".to_string();
+    /// let next_page = client.list_events_next(12345, &page_token).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn list_events_next(&self, org_slug: u64, page_token: &str) -> Result<EventPage> {
+        self.list_events_inner(org_slug, EventFilter::new(), 0, page_token.to_owned()).await
+    }
+
+    /// Internal list_events implementation shared by `list_events` and `list_events_next`.
+    async fn list_events_inner(
+        &self,
+        org_slug: u64,
+        filter: EventFilter,
+        limit: u32,
+        page_token: String,
+    ) -> Result<EventPage> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "list_events",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_events",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_events_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::ListEventsRequest {
+                        organization: Some(proto::OrganizationSlug { slug: org_slug }),
+                        filter: Some(filter.to_proto()),
+                        limit,
+                        page_token: page_token.clone(),
+                    };
+
+                    let response =
+                        client.list_events(tonic::Request::new(request)).await?.into_inner();
+
+                    let entries =
+                        response.entries.into_iter().map(SdkEventEntry::from_proto).collect();
+
+                    let next_page_token = if response.next_page_token.is_empty() {
+                        None
+                    } else {
+                        Some(response.next_page_token)
+                    };
+
+                    Ok(EventPage {
+                        entries,
+                        next_page_token,
+                        total_estimate: response.total_estimate,
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Retrieves a single audit event by ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `org_slug` - Organization that owns the event.
+    /// * `event_id` - Event identifier (UUID string, e.g., from `event_id_string()`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Rpc` with `NOT_FOUND` if the event does not exist.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// let event = client.get_event(12345, "550e8400-e29b-41d4-a716-446655440000").await?;
+    /// println!("Event: {} by {}", event.event_type, event.principal);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_event(&self, org_slug: u64, event_id: &str) -> Result<SdkEventEntry> {
+        self.check_shutdown(None)?;
+
+        let event_id_bytes =
+            uuid::Uuid::parse_str(event_id).map(|u| u.into_bytes().to_vec()).map_err(|e| {
+                error::SdkError::Validation { message: format!("invalid event_id: {e}") }
+            })?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_event",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "get_event",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_events_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::GetEventRequest {
+                        organization: Some(proto::OrganizationSlug { slug: org_slug }),
+                        event_id: event_id_bytes.clone(),
+                    };
+
+                    let response =
+                        client.get_event(tonic::Request::new(request)).await?.into_inner();
+
+                    let entry = response
+                        .entry
+                        .ok_or_else(|| tonic::Status::not_found("event not found in response"))?;
+
+                    Ok(SdkEventEntry::from_proto(entry))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Counts audit events matching a filter.
+    ///
+    /// # Arguments
+    ///
+    /// * `org_slug` - Organization slug (0 for system events).
+    /// * `filter` - Filter criteria (empty filter counts all events).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, EventFilter};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// let denied_count = client.count_events(12345, EventFilter::new().outcome_denied()).await?;
+    /// println!("Denied events: {}", denied_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn count_events(&self, org_slug: u64, filter: EventFilter) -> Result<u64> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "count_events",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "count_events",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_events_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::CountEventsRequest {
+                        organization: Some(proto::OrganizationSlug { slug: org_slug }),
+                        filter: Some(filter.to_proto()),
+                    };
+
+                    let response =
+                        client.count_events(tonic::Request::new(request)).await?.into_inner();
+
+                    Ok(response.count)
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Ingests external audit events from Engine or Control services.
+    ///
+    /// Writes a batch of events into the organization's audit trail. Events
+    /// are stored as handler-phase entries (node-local, not Raft-replicated).
+    ///
+    /// # Arguments
+    ///
+    /// * `org_slug` - Organization receiving the events.
+    /// * `source_service` - Originating service (e.g., `"engine"`, `"control"`).
+    /// * `events` - Batch of events to ingest.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Rpc` if ingestion fails. Individual events may be
+    /// rejected; check `IngestResult::rejections` for per-event details.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, SdkIngestEventEntry, EventOutcome};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// let events = vec![
+    ///     SdkIngestEventEntry::new(
+    ///         "engine.authorization.checked",
+    ///         "user:alice",
+    ///         EventOutcome::Success,
+    ///     )
+    ///     .detail("resource", "document:123")
+    ///     .detail("relation", "viewer"),
+    /// ];
+    /// let result = client.ingest_events(12345, "engine", events).await?;
+    /// println!("Accepted: {}, Rejected: {}", result.accepted_count, result.rejected_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ingest_events(
+        &self,
+        org_slug: u64,
+        source_service: &str,
+        events: Vec<SdkIngestEventEntry>,
+    ) -> Result<IngestResult> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+        let source_service = source_service.to_owned();
+
+        self.with_metrics(
+            "ingest_events",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "ingest_events",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_events_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::IngestEventsRequest {
+                        source_service: source_service.clone(),
+                        organization: Some(proto::OrganizationSlug { slug: org_slug }),
+                        entries: events
+                            .clone()
+                            .into_iter()
+                            .map(SdkIngestEventEntry::into_proto)
+                            .collect(),
+                    };
+
+                    let response =
+                        client.ingest_events(tonic::Request::new(request)).await?.into_inner();
+
+                    Ok(IngestResult {
+                        accepted_count: response.accepted_count,
+                        rejected_count: response.rejected_count,
+                        rejections: response
+                            .rejections
+                            .into_iter()
+                            .map(|r| IngestRejection { index: r.index, reason: r.reason })
+                            .collect(),
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    // =========================================================================
     // Health Operations
     // =========================================================================
 
@@ -3781,6 +4589,27 @@ impl LedgerClient {
     > {
         let client =
             proto::admin_service_client::AdminServiceClient::with_interceptor(channel, interceptor);
+        if compression_enabled {
+            client
+                .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+        } else {
+            client
+        }
+    }
+
+    /// Creates an EventsService client with compression and tracing settings.
+    fn create_events_client(
+        channel: tonic::transport::Channel,
+        compression_enabled: bool,
+        interceptor: TraceContextInterceptor,
+    ) -> proto::events_service_client::EventsServiceClient<
+        InterceptedService<tonic::transport::Channel, TraceContextInterceptor>,
+    > {
+        let client = proto::events_service_client::EventsServiceClient::with_interceptor(
+            channel,
+            interceptor,
+        );
         if compression_enabled {
             client
                 .send_compressed(tonic::codec::CompressionEncoding::Gzip)
@@ -6669,5 +7498,353 @@ mod tests {
     fn test_sdk_validation_error_display() {
         let err = crate::error::SdkError::Validation { message: "key too long".to_string() };
         assert!(err.to_string().contains("key too long"));
+    }
+
+    // =========================================================================
+    // Events type conversion tests
+    // =========================================================================
+
+    fn make_proto_event_entry() -> proto::EventEntry {
+        proto::EventEntry {
+            event_id: uuid::Uuid::nil().into_bytes().to_vec(),
+            source_service: "ledger".to_string(),
+            event_type: "ledger.vault.created".to_string(),
+            timestamp: Some(prost_types::Timestamp { seconds: 1_700_000_000, nanos: 500_000 }),
+            scope: proto::EventScope::Organization as i32,
+            action: "vault_created".to_string(),
+            emission_path: proto::EventEmissionPath::EmissionPathApplyPhase as i32,
+            principal: "user:alice".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 12345 }),
+            vault: Some(proto::VaultSlug { slug: 67890 }),
+            outcome: proto::EventOutcome::Success as i32,
+            error_code: None,
+            error_detail: None,
+            denial_reason: None,
+            details: [("vault_name".to_string(), "my-vault".to_string())].into_iter().collect(),
+            block_height: Some(42),
+            node_id: None,
+            trace_id: Some("abc-trace".to_string()),
+            correlation_id: Some("batch-123".to_string()),
+            operations_count: None,
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn test_sdk_event_entry_from_proto_success() {
+        let proto = make_proto_event_entry();
+        let entry = SdkEventEntry::from_proto(proto);
+
+        assert_eq!(entry.source_service, "ledger");
+        assert_eq!(entry.event_type, "ledger.vault.created");
+        assert_eq!(entry.action, "vault_created");
+        assert_eq!(entry.principal, "user:alice");
+        assert_eq!(entry.organization_slug, 12345);
+        assert_eq!(entry.vault_slug, Some(67890));
+        assert_eq!(entry.scope, EventScope::Organization);
+        assert_eq!(entry.emission_path, EventEmissionPath::ApplyPhase);
+        assert!(matches!(entry.outcome, EventOutcome::Success));
+        assert_eq!(entry.details.get("vault_name").unwrap(), "my-vault");
+        assert_eq!(entry.block_height, Some(42));
+        assert_eq!(entry.trace_id.as_deref(), Some("abc-trace"));
+        assert_eq!(entry.correlation_id.as_deref(), Some("batch-123"));
+        assert_eq!(entry.timestamp.timestamp(), 1_700_000_000);
+    }
+
+    #[test]
+    fn test_sdk_event_entry_from_proto_failed_outcome() {
+        let mut proto = make_proto_event_entry();
+        proto.outcome = proto::EventOutcome::Failed as i32;
+        proto.error_code = Some("STORAGE_FULL".to_string());
+        proto.error_detail = Some("disk quota exceeded".to_string());
+
+        let entry = SdkEventEntry::from_proto(proto);
+        match &entry.outcome {
+            EventOutcome::Failed { code, detail } => {
+                assert_eq!(code, "STORAGE_FULL");
+                assert_eq!(detail, "disk quota exceeded");
+            },
+            _ => panic!("expected Failed outcome"),
+        }
+    }
+
+    #[test]
+    fn test_sdk_event_entry_from_proto_denied_outcome() {
+        let mut proto = make_proto_event_entry();
+        proto.outcome = proto::EventOutcome::Denied as i32;
+        proto.denial_reason = Some("rate limit exceeded".to_string());
+
+        let entry = SdkEventEntry::from_proto(proto);
+        match &entry.outcome {
+            EventOutcome::Denied { reason } => {
+                assert_eq!(reason, "rate limit exceeded");
+            },
+            _ => panic!("expected Denied outcome"),
+        }
+    }
+
+    #[test]
+    fn test_sdk_event_entry_from_proto_handler_phase() {
+        let mut proto = make_proto_event_entry();
+        proto.emission_path = proto::EventEmissionPath::EmissionPathHandlerPhase as i32;
+        proto.node_id = Some(7);
+
+        let entry = SdkEventEntry::from_proto(proto);
+        assert_eq!(entry.emission_path, EventEmissionPath::HandlerPhase);
+        assert_eq!(entry.node_id, Some(7));
+    }
+
+    #[test]
+    fn test_sdk_event_entry_from_proto_system_scope() {
+        let mut proto = make_proto_event_entry();
+        proto.scope = proto::EventScope::System as i32;
+        proto.organization = Some(proto::OrganizationSlug { slug: 0 });
+
+        let entry = SdkEventEntry::from_proto(proto);
+        assert_eq!(entry.scope, EventScope::System);
+        assert_eq!(entry.organization_slug, 0);
+    }
+
+    #[test]
+    fn test_sdk_event_entry_event_id_string_uuid() {
+        let entry = SdkEventEntry::from_proto(make_proto_event_entry());
+        assert_eq!(entry.event_id_string(), "00000000-0000-0000-0000-000000000000");
+    }
+
+    #[test]
+    fn test_sdk_event_entry_event_id_string_non_uuid() {
+        let mut proto = make_proto_event_entry();
+        proto.event_id = vec![0xab, 0xcd, 0xef];
+        let entry = SdkEventEntry::from_proto(proto);
+        assert_eq!(entry.event_id_string(), "abcdef");
+    }
+
+    #[test]
+    fn test_event_filter_default_is_all_pass() {
+        let filter = EventFilter::new();
+        let proto = filter.to_proto();
+
+        assert!(proto.actions.is_empty());
+        assert!(proto.start_time.is_none());
+        assert!(proto.end_time.is_none());
+        assert!(proto.event_type_prefix.is_none());
+        assert!(proto.principal.is_none());
+        assert_eq!(proto.outcome, 0);
+        assert_eq!(proto.emission_path, 0);
+        assert!(proto.correlation_id.is_none());
+    }
+
+    #[test]
+    fn test_event_filter_with_all_options() {
+        let start = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let end = chrono::DateTime::from_timestamp(2_000_000, 0).unwrap();
+
+        let filter = EventFilter::new()
+            .start_time(start)
+            .end_time(end)
+            .actions(["vault_created", "vault_deleted"])
+            .event_type_prefix("ledger.vault")
+            .principal("user:bob")
+            .outcome_denied()
+            .apply_phase_only()
+            .correlation_id("job-99");
+
+        let proto = filter.to_proto();
+        assert_eq!(proto.start_time.unwrap().seconds, 1_000_000);
+        assert_eq!(proto.end_time.unwrap().seconds, 2_000_000);
+        assert_eq!(proto.actions, vec!["vault_created", "vault_deleted"]);
+        assert_eq!(proto.event_type_prefix.as_deref(), Some("ledger.vault"));
+        assert_eq!(proto.principal.as_deref(), Some("user:bob"));
+        assert_eq!(proto.outcome, proto::EventOutcome::Denied as i32);
+        assert_eq!(proto.emission_path, proto::EventEmissionPath::EmissionPathApplyPhase as i32);
+        assert_eq!(proto.correlation_id.as_deref(), Some("job-99"));
+    }
+
+    #[test]
+    fn test_event_filter_outcome_variants() {
+        assert_eq!(
+            EventFilter::new().outcome_success().to_proto().outcome,
+            proto::EventOutcome::Success as i32,
+        );
+        assert_eq!(
+            EventFilter::new().outcome_failed().to_proto().outcome,
+            proto::EventOutcome::Failed as i32,
+        );
+        assert_eq!(
+            EventFilter::new().outcome_denied().to_proto().outcome,
+            proto::EventOutcome::Denied as i32,
+        );
+    }
+
+    #[test]
+    fn test_event_filter_emission_path_variants() {
+        assert_eq!(
+            EventFilter::new().apply_phase_only().to_proto().emission_path,
+            proto::EventEmissionPath::EmissionPathApplyPhase as i32,
+        );
+        assert_eq!(
+            EventFilter::new().handler_phase_only().to_proto().emission_path,
+            proto::EventEmissionPath::EmissionPathHandlerPhase as i32,
+        );
+    }
+
+    #[test]
+    fn test_ingest_event_entry_required_fields() {
+        let entry = SdkIngestEventEntry::new(
+            "engine.authorization.checked",
+            "user:alice",
+            EventOutcome::Success,
+        );
+        let proto = entry.into_proto();
+
+        assert_eq!(proto.event_type, "engine.authorization.checked");
+        assert_eq!(proto.principal, "user:alice");
+        assert_eq!(proto.outcome, proto::EventOutcome::Success as i32);
+        assert!(proto.details.is_empty());
+        assert!(proto.trace_id.is_none());
+        assert!(proto.correlation_id.is_none());
+        assert!(proto.vault.is_none());
+        assert!(proto.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_ingest_event_entry_with_all_optional_fields() {
+        let ts = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let entry = SdkIngestEventEntry::new(
+            "control.member.invited",
+            "admin:bob",
+            EventOutcome::Failed { code: "LIMIT".to_string(), detail: "max members".to_string() },
+        )
+        .detail("email", "new@example.com")
+        .trace_id("trace-xyz")
+        .correlation_id("import-batch-7")
+        .vault_slug(999)
+        .timestamp(ts);
+
+        let proto = entry.into_proto();
+        assert_eq!(proto.event_type, "control.member.invited");
+        assert_eq!(proto.principal, "admin:bob");
+        assert_eq!(proto.outcome, proto::EventOutcome::Failed as i32);
+        assert_eq!(proto.error_code.as_deref(), Some("LIMIT"));
+        assert_eq!(proto.error_detail.as_deref(), Some("max members"));
+        assert_eq!(proto.details.get("email").unwrap(), "new@example.com");
+        assert_eq!(proto.trace_id.as_deref(), Some("trace-xyz"));
+        assert_eq!(proto.correlation_id.as_deref(), Some("import-batch-7"));
+        assert_eq!(proto.vault.unwrap().slug, 999);
+        assert_eq!(proto.timestamp.unwrap().seconds, 1_700_000_000);
+    }
+
+    #[test]
+    fn test_ingest_event_entry_denied_outcome() {
+        let entry = SdkIngestEventEntry::new(
+            "engine.authorization.checked",
+            "user:charlie",
+            EventOutcome::Denied { reason: "no permission".to_string() },
+        );
+        let proto = entry.into_proto();
+        assert_eq!(proto.outcome, proto::EventOutcome::Denied as i32);
+        assert_eq!(proto.denial_reason.as_deref(), Some("no permission"));
+        assert!(proto.error_code.is_none());
+    }
+
+    #[test]
+    fn test_event_page_has_next_page() {
+        let page = EventPage {
+            entries: vec![],
+            next_page_token: Some("cursor-abc".to_string()),
+            total_estimate: None,
+        };
+        assert!(page.has_next_page());
+
+        let page = EventPage { entries: vec![], next_page_token: None, total_estimate: None };
+        assert!(!page.has_next_page());
+    }
+
+    #[test]
+    fn test_event_outcome_roundtrip_success() {
+        let outcome = EventOutcome::Success;
+        let (value, code, detail, reason) = outcome.to_proto();
+        let restored = EventOutcome::from_proto(value, code, detail, reason);
+        assert!(matches!(restored, EventOutcome::Success));
+    }
+
+    #[test]
+    fn test_event_outcome_roundtrip_failed() {
+        let outcome = EventOutcome::Failed {
+            code: "ERR_001".to_string(),
+            detail: "something broke".to_string(),
+        };
+        let (value, code, detail, reason) = outcome.to_proto();
+        let restored = EventOutcome::from_proto(value, code, detail, reason);
+        match restored {
+            EventOutcome::Failed { code, detail } => {
+                assert_eq!(code, "ERR_001");
+                assert_eq!(detail, "something broke");
+            },
+            _ => panic!("expected Failed"),
+        }
+    }
+
+    #[test]
+    fn test_event_outcome_roundtrip_denied() {
+        let outcome = EventOutcome::Denied { reason: "rate limited".to_string() };
+        let (value, code, detail, reason) = outcome.to_proto();
+        let restored = EventOutcome::from_proto(value, code, detail, reason);
+        match restored {
+            EventOutcome::Denied { reason } => {
+                assert_eq!(reason, "rate limited");
+            },
+            _ => panic!("expected Denied"),
+        }
+    }
+
+    #[test]
+    fn test_event_scope_from_proto() {
+        assert_eq!(EventScope::from_proto(proto::EventScope::System as i32), EventScope::System);
+        assert_eq!(
+            EventScope::from_proto(proto::EventScope::Organization as i32),
+            EventScope::Organization,
+        );
+        // Unknown falls back to System
+        assert_eq!(EventScope::from_proto(99), EventScope::System);
+    }
+
+    #[test]
+    fn test_event_emission_path_from_proto() {
+        assert_eq!(
+            EventEmissionPath::from_proto(proto::EventEmissionPath::EmissionPathApplyPhase as i32),
+            EventEmissionPath::ApplyPhase,
+        );
+        assert_eq!(
+            EventEmissionPath::from_proto(
+                proto::EventEmissionPath::EmissionPathHandlerPhase as i32,
+            ),
+            EventEmissionPath::HandlerPhase,
+        );
+        // Unknown falls back to ApplyPhase
+        assert_eq!(EventEmissionPath::from_proto(99), EventEmissionPath::ApplyPhase);
+    }
+
+    #[test]
+    fn test_ingest_event_entry_detail_builder() {
+        let entry = SdkIngestEventEntry::new("test.event", "user:x", EventOutcome::Success)
+            .detail("key1", "val1")
+            .detail("key2", "val2");
+        let proto = entry.into_proto();
+        assert_eq!(proto.details.len(), 2);
+        assert_eq!(proto.details.get("key1").unwrap(), "val1");
+        assert_eq!(proto.details.get("key2").unwrap(), "val2");
+    }
+
+    #[test]
+    fn test_ingest_event_entry_details_bulk() {
+        let map: std::collections::HashMap<String, String> =
+            [("a".to_string(), "1".to_string()), ("b".to_string(), "2".to_string())]
+                .into_iter()
+                .collect();
+        let entry =
+            SdkIngestEventEntry::new("test.event", "user:x", EventOutcome::Success).details(map);
+        let proto = entry.into_proto();
+        assert_eq!(proto.details.len(), 2);
     }
 }

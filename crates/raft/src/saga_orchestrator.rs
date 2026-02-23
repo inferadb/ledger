@@ -26,7 +26,10 @@ use inferadb_ledger_state::{
     },
 };
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, OrganizationId, Transaction, UserId, VaultId};
+use inferadb_ledger_types::{
+    Operation, OrganizationId, Transaction, UserId, VaultId,
+    events::{EventAction, EventOutcome},
+};
 use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
@@ -34,6 +37,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu},
+    event_writer::{EventHandle, HandlerPhaseEmitter},
     log_storage::AppliedStateAccessor,
     types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig},
 };
@@ -67,6 +71,9 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     /// Reserved for future saga state queries.
     #[allow(dead_code)] // retained for state access in saga operations
     applied_state: AppliedStateAccessor,
+    /// Event handle for handler-phase event emission (best-effort).
+    #[builder(default)]
+    event_handle: Option<EventHandle<B>>,
     /// Poll interval.
     #[builder(default = SAGA_POLL_INTERVAL)]
     interval: Duration,
@@ -351,6 +358,20 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 // For now, we leave the index cleanup to the orphan cleanup job
 
                 saga.transition(DeleteUserSagaState::Completed { user_id: *user_id });
+
+                // Emit UserDeleted handler-phase event
+                let memberships_removed = saga.input.organization_ids.len();
+                if let Some(ref handle) = self.event_handle {
+                    let entry =
+                        HandlerPhaseEmitter::for_system(EventAction::UserDeleted, self.node_id)
+                            .principal("system")
+                            .detail("user_id", &user_id.to_string())
+                            .detail("memberships_removed", &memberships_removed.to_string())
+                            .outcome(EventOutcome::Success)
+                            .build(handle.config().default_ttl_days);
+                    handle.record_handler_event(entry);
+                }
+
                 info!(saga_id = %saga.id, user_id = user_id.value(), "DeleteUser: saga completed");
                 Ok(())
             },

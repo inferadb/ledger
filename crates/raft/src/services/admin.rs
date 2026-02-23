@@ -24,8 +24,8 @@ use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
     OrganizationId as DomainOrganizationId, ShardId as DomainShardId, VaultEntry,
     VaultId as DomainVaultId, ZERO_HASH,
-    audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
     config::ValidationConfig,
+    events::{EventAction, EventOutcome as EventOutcomeType},
     validation,
 };
 use openraft::{BasicNode, Raft};
@@ -35,6 +35,7 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     error::{ServiceError, classify_raft_error},
+    event_writer::HandlerPhaseEmitter,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
     metrics,
@@ -67,9 +68,6 @@ pub struct AdminServiceImpl {
     /// Node ID for logging system context.
     #[builder(default)]
     node_id: Option<u64>,
-    /// Audit logger for compliance-ready event tracking.
-    #[builder(default)]
-    audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
     /// Input validation configuration for request field limits.
     #[builder(default = Arc::new(ValidationConfig::default()))]
     validation_config: Arc<ValidationConfig>,
@@ -96,16 +94,12 @@ pub struct AdminServiceImpl {
     /// Per-organization resource quota checker.
     #[builder(default)]
     quota_checker: Option<crate::quota::QuotaChecker>,
+    /// Handler-phase event handle for recording denial events.
+    #[builder(default)]
+    event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
 }
 
 impl AdminServiceImpl {
-    /// Adds audit logger for compliance event tracking.
-    #[must_use]
-    pub fn with_audit_logger(mut self, logger: Arc<dyn crate::audit::AuditLogger>) -> Self {
-        self.audit_logger = Some(logger);
-        self
-    }
-
     /// Sets input validation configuration for request field limits.
     #[must_use]
     pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
@@ -153,29 +147,21 @@ impl AdminServiceImpl {
         self
     }
 
-    /// Builds an audit event for an admin operation.
-    fn build_audit_event(
-        &self,
-        action: AuditAction,
-        principal: &str,
-        resource: AuditResource,
-        outcome: AuditOutcome,
-        trace_id: Option<&str>,
-    ) -> AuditEvent {
-        super::helpers::build_audit_event(
-            action,
-            principal,
-            resource,
-            outcome,
-            self.node_id,
-            trace_id,
-            None,
-        )
+    /// Sets the handler-phase event handle for recording denial events.
+    #[must_use]
+    pub fn with_event_handle(
+        mut self,
+        handle: crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>,
+    ) -> Self {
+        self.event_handle = Some(handle);
+        self
     }
 
-    /// Emits an audit event and records the corresponding Prometheus metric.
-    fn emit_audit_event(&self, event: &AuditEvent) {
-        super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
+    /// Records a handler-phase event (best-effort).
+    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
+        if let Some(ref handle) = self.event_handle {
+            handle.record_handler_event(entry);
+        }
     }
 }
 
@@ -278,16 +264,6 @@ impl AdminService for AdminServiceImpl {
                     "admin",
                     ctx.elapsed_secs(),
                 );
-                self.emit_audit_event(
-                    &self.build_audit_event(
-                        AuditAction::CreateOrganization,
-                        "system",
-                        AuditResource::organization(organization_id)
-                            .with_detail(format!("shard:{}", shard_id.value())),
-                        AuditOutcome::Success,
-                        Some(&trace_ctx.trace_id),
-                    ),
-                );
                 let org_slug = slug_resolver.resolve_slug(organization_id)?;
                 Ok(Response::new(CreateOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: org_slug.value() }),
@@ -296,16 +272,6 @@ impl AdminService for AdminServiceImpl {
             },
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::CreateOrganization,
-                    "system",
-                    AuditResource::cluster(),
-                    AuditOutcome::Failed {
-                        code: "Unspecified".to_string(),
-                        detail: message.clone(),
-                    },
-                    Some(&trace_ctx.trace_id),
-                ));
                 Err(Status::internal(message))
             },
             _ => {
@@ -396,13 +362,6 @@ impl AdminService for AdminServiceImpl {
                         "admin",
                         ctx.elapsed_secs(),
                     );
-                    self.emit_audit_event(&self.build_audit_event(
-                        AuditAction::DeleteOrganization,
-                        "system",
-                        AuditResource::organization(organization_id),
-                        AuditOutcome::Success,
-                        Some(&trace_ctx.trace_id),
-                    ));
                     Ok(Response::new(DeleteOrganizationResponse {
                         deleted_at: Some(
                             prost_types::Timestamp::from(std::time::SystemTime::now()),
@@ -412,16 +371,6 @@ impl AdminService for AdminServiceImpl {
                     let vault_ids: Vec<String> =
                         blocking_vault_ids.iter().map(|id| id.value().to_string()).collect();
                     ctx.set_error("PreconditionFailed", "Organization has active vaults");
-                    self.emit_audit_event(&self.build_audit_event(
-                        AuditAction::DeleteOrganization,
-                        "system",
-                        AuditResource::organization(organization_id),
-                        AuditOutcome::Failed {
-                            code: "PreconditionFailed".to_string(),
-                            detail: "Organization has active vaults".to_string(),
-                        },
-                        Some(&trace_ctx.trace_id),
-                    ));
                     Err(ServiceError::precondition(format!(
                         "Organization has active vaults that must be deleted first: [{}]",
                         vault_ids.join(", ")
@@ -431,16 +380,6 @@ impl AdminService for AdminServiceImpl {
             },
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::DeleteOrganization,
-                    "system",
-                    AuditResource::organization(organization_id),
-                    AuditOutcome::Failed {
-                        code: "Unspecified".to_string(),
-                        detail: message.clone(),
-                    },
-                    Some(&trace_ctx.trace_id),
-                ));
                 Err(Status::internal(message))
             },
             _ => {
@@ -600,6 +539,19 @@ impl AdminService for AdminServiceImpl {
         // Check vault count quota before submitting to Raft
         super::helpers::check_vault_quota(self.quota_checker.as_ref(), organization_id).map_err(
             |status| {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::QuotaExceeded,
+                        organization_id,
+                        req.organization.as_ref().map(|n| n.slug),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: "vault_quota_exceeded".to_string(),
+                    })
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
                 super::metadata::status_with_correlation(
                     status,
                     &ctx.request_id(),
@@ -666,14 +618,6 @@ impl AdminService for AdminServiceImpl {
                     "admin",
                     ctx.elapsed_secs(),
                 );
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::CreateVault,
-                    "system",
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Success,
-                    Some(&trace_ctx.trace_id),
-                ));
-
                 // Get Raft metrics for leader_id and term
                 let metrics = self.raft.metrics().borrow().clone();
                 let leader_id = metrics.current_leader.unwrap_or(metrics.id);
@@ -806,13 +750,6 @@ impl AdminService for AdminServiceImpl {
                         "admin",
                         ctx.elapsed_secs(),
                     );
-                    self.emit_audit_event(&self.build_audit_event(
-                        AuditAction::DeleteVault,
-                        "system",
-                        AuditResource::vault(organization_id, vault_id),
-                        AuditOutcome::Success,
-                        Some(&trace_ctx.trace_id),
-                    ));
                     Ok(Response::new(DeleteVaultResponse {
                         deleted_at: Some(
                             prost_types::Timestamp::from(std::time::SystemTime::now()),
@@ -820,31 +757,11 @@ impl AdminService for AdminServiceImpl {
                     }))
                 } else {
                     ctx.set_error("DeleteFailed", "Failed to delete vault");
-                    self.emit_audit_event(&self.build_audit_event(
-                        AuditAction::DeleteVault,
-                        "system",
-                        AuditResource::vault(organization_id, vault_id),
-                        AuditOutcome::Failed {
-                            code: "DeleteFailed".to_string(),
-                            detail: "Failed to delete vault".to_string(),
-                        },
-                        Some(&trace_ctx.trace_id),
-                    ));
                     Err(Status::internal("Failed to delete vault"))
                 }
             },
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::DeleteVault,
-                    "system",
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Failed {
-                        code: "Unspecified".to_string(),
-                        detail: message.clone(),
-                    },
-                    Some(&trace_ctx.trace_id),
-                ));
                 Err(Status::internal(message))
             },
             _ => {
@@ -1014,13 +931,17 @@ impl AdminService for AdminServiceImpl {
         ctx.set_block_height(block_height);
         ctx.set_success();
 
-        self.emit_audit_event(&self.build_audit_event(
-            AuditAction::CreateSnapshot,
-            "system",
-            AuditResource::cluster().with_detail(format!("height:{block_height}")),
-            AuditOutcome::Success,
-            Some(&trace_ctx.trace_id),
-        ));
+        // Emit SnapshotCreated handler-phase event
+        if let Some(node_id) = self.node_id {
+            self.record_handler_event(
+                HandlerPhaseEmitter::for_system(EventAction::SnapshotCreated, node_id)
+                    .principal("system")
+                    .detail("height", &block_height.to_string())
+                    .trace_id(&trace_ctx.trace_id)
+                    .outcome(EventOutcomeType::Success)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+        }
 
         Ok(Response::new(CreateSnapshotResponse {
             block_height,
@@ -1295,6 +1216,35 @@ impl AdminService for AdminServiceImpl {
             ctx.set_error("IntegrityIssues", &format!("{} issues found", issues.len()));
         }
 
+        // Emit IntegrityChecked handler-phase event (org-scoped when org is specified)
+        if let (Some(org_id), Some(node_id)) = (organization_id, self.node_id) {
+            let outcome = if issues.is_empty() {
+                EventOutcomeType::Success
+            } else {
+                EventOutcomeType::Failed {
+                    code: "integrity_issues".to_string(),
+                    detail: format!("{} issues found", issues.len()),
+                }
+            };
+            let mut emitter = crate::event_writer::HandlerPhaseEmitter::for_organization(
+                EventAction::IntegrityChecked,
+                org_id,
+                org_slug_val,
+                node_id,
+            )
+            .detail("issues_found", &issues.len().to_string())
+            .detail("full_check", &req.full_check.to_string())
+            .trace_id(&trace_ctx.trace_id)
+            .outcome(outcome);
+            if let Some(ref v) = req.vault {
+                emitter = emitter.vault_slug(v.slug);
+            }
+            self.record_handler_event(
+                emitter
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+        }
+
         Ok(Response::new(CheckIntegrityResponse { healthy: issues.is_empty(), issues }))
     }
 
@@ -1467,13 +1417,6 @@ impl AdminService for AdminServiceImpl {
                 Ok(_) => {
                     ctx.end_raft_timer();
                     ctx.set_success();
-                    self.emit_audit_event(&self.build_audit_event(
-                        AuditAction::JoinCluster,
-                        "system",
-                        AuditResource::cluster().with_detail(format!("node:{}", req.node_id)),
-                        AuditOutcome::Success,
-                        Some(&trace_ctx.trace_id),
-                    ));
                     return Ok(Response::new(JoinClusterResponse {
                         success: true,
                         message: "Node joined cluster successfully".to_string(),
@@ -1575,13 +1518,6 @@ impl AdminService for AdminServiceImpl {
             Ok(_) => {
                 ctx.end_raft_timer();
                 ctx.set_success();
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::LeaveCluster,
-                    "system",
-                    AuditResource::cluster().with_detail(format!("node:{}", req.node_id)),
-                    AuditOutcome::Success,
-                    Some(&trace_ctx.trace_id),
-                ));
                 Ok(Response::new(LeaveClusterResponse {
                     success: true,
                     message: "Node left cluster successfully".to_string(),
@@ -1590,16 +1526,6 @@ impl AdminService for AdminServiceImpl {
             Err(e) => {
                 ctx.end_raft_timer();
                 ctx.set_error("MembershipChangeFailed", &e.to_string());
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::LeaveCluster,
-                    "system",
-                    AuditResource::cluster().with_detail(format!("node:{}", req.node_id)),
-                    AuditOutcome::Failed {
-                        code: "MembershipChangeFailed".to_string(),
-                        detail: e.to_string(),
-                    },
-                    Some(&trace_ctx.trace_id),
-                ));
                 Ok(Response::new(LeaveClusterResponse {
                     success: false,
                     message: format!("Failed to remove node: {}", e),
@@ -2011,19 +1937,26 @@ impl AdminService for AdminServiceImpl {
 
             ctx.set_block_height(expected_height);
             ctx.set_error("DivergenceReproduced", "Recovery reproduced divergence");
-            self.emit_audit_event(
-                &self.build_audit_event(
-                    AuditAction::RecoverVault,
-                    "system",
-                    AuditResource::vault(organization_id, vault_id)
-                        .with_detail(format!("height:{expected_height},divergence_reproduced")),
-                    AuditOutcome::Failed {
-                        code: "DivergenceReproduced".to_string(),
+            // Emit VaultRecovered handler-phase event (failed recovery)
+            if let Some(node_id) = self.node_id {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        EventAction::VaultRecovered,
+                        organization_id,
+                        Some(org_slug_val),
+                        node_id,
+                    )
+                    .vault_slug(vault_slug_val)
+                    .detail("recovery_method", "replay")
+                    .detail("final_height", &expected_height.to_string())
+                    .trace_id(&trace_ctx.trace_id)
+                    .outcome(EventOutcomeType::Failed {
+                        code: "divergence_reproduced".to_string(),
                         detail: "Recovery reproduced divergence".to_string(),
-                    },
-                    Some(&trace_ctx.trace_id),
-                ),
-            );
+                    })
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+            }
             Ok(Response::new(RecoverVaultResponse {
                 success: false,
                 message: "Recovery reproduced divergence - possible determinism bug. Manual investigation required.".to_string(),
@@ -2054,16 +1987,23 @@ impl AdminService for AdminServiceImpl {
 
             ctx.set_block_height(expected_height);
             ctx.set_success();
-            self.emit_audit_event(
-                &self.build_audit_event(
-                    AuditAction::RecoverVault,
-                    "system",
-                    AuditResource::vault(organization_id, vault_id)
-                        .with_detail(format!("height:{expected_height}")),
-                    AuditOutcome::Success,
-                    Some(&trace_ctx.trace_id),
-                ),
-            );
+            // Emit VaultRecovered handler-phase event (successful recovery)
+            if let Some(node_id) = self.node_id {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        EventAction::VaultRecovered,
+                        organization_id,
+                        Some(org_slug_val),
+                        node_id,
+                    )
+                    .vault_slug(vault_slug_val)
+                    .detail("recovery_method", "replay")
+                    .detail("final_height", &expected_height.to_string())
+                    .trace_id(&trace_ctx.trace_id)
+                    .outcome(EventOutcomeType::Success)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+            }
             Ok(Response::new(RecoverVaultResponse {
                 success: true,
                 message: "Vault recovered successfully".to_string(),
@@ -2233,16 +2173,6 @@ impl AdminService for AdminServiceImpl {
 
         if metrics.current_leader != Some(node_id) {
             ctx.set_error("NotLeader", "Only the leader can run garbage collection");
-            self.emit_audit_event(&self.build_audit_event(
-                AuditAction::ForceGc,
-                "system",
-                AuditResource::cluster(),
-                AuditOutcome::Failed {
-                    code: "NotLeader".to_string(),
-                    detail: "Only the leader can run garbage collection".to_string(),
-                },
-                Some(&trace_ctx.trace_id),
-            ));
             return Err(Status::failed_precondition("Only the leader can run garbage collection"));
         }
 
@@ -2338,18 +2268,6 @@ impl AdminService for AdminServiceImpl {
         ctx.set_operations_count(total_expired as usize);
         ctx.set_success();
 
-        self.emit_audit_event(
-            &self.build_audit_event(
-                AuditAction::ForceGc,
-                "system",
-                AuditResource::cluster().with_detail(format!(
-                    "expired:{total_expired},vaults_scanned:{vaults_scanned}"
-                )),
-                AuditOutcome::Success,
-                Some(&trace_ctx.trace_id),
-            ),
-        );
-
         Ok(Response::new(inferadb_ledger_proto::proto::ForceGcResponse {
             success: true,
             message: format!(
@@ -2381,7 +2299,7 @@ impl AdminService for AdminServiceImpl {
             .validate()
             .map_err(|e| Status::invalid_argument(format!("Config validation failed: {e}")))?;
 
-        // Compute diff for audit and response.
+        // Compute diff for response.
         let current = runtime_config.load();
         let changed = current.diff(&new_config);
 
@@ -2410,14 +2328,16 @@ impl AdminService for AdminServiceImpl {
             .update(new_config, self.rate_limiter.as_ref(), self.hot_key_detector.as_ref())
             .map_err(|e| Status::invalid_argument(format!("Config update failed: {e}")))?;
 
-        // Audit the config change.
-        self.emit_audit_event(&self.build_audit_event(
-            AuditAction::UpdateConfig,
-            "admin",
-            AuditResource::cluster().with_detail(format!("changed:{}", changed.join(","))),
-            AuditOutcome::Success,
-            None,
-        ));
+        // Emit ConfigurationChanged handler-phase event
+        if let Some(node_id) = self.node_id {
+            self.record_handler_event(
+                HandlerPhaseEmitter::for_system(EventAction::ConfigurationChanged, node_id)
+                    .principal("admin")
+                    .detail("changed_fields", &changed.join(", "))
+                    .outcome(EventOutcomeType::Success)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+        }
 
         let updated = runtime_config.load();
         let updated_json = serde_json::to_string_pretty(&*updated).unwrap_or_default();
@@ -2535,16 +2455,18 @@ impl AdminService for AdminServiceImpl {
 
         crate::backup::record_backup_created(meta.shard_height, meta.size_bytes);
 
-        self.emit_audit_event(
-            &self.build_audit_event(
-                AuditAction::CreateSnapshot,
-                "system",
-                AuditResource::cluster()
-                    .with_detail(format!("backup:{},height:{}", meta.backup_id, meta.shard_height)),
-                AuditOutcome::Success,
-                Some(&trace_ctx.trace_id),
-            ),
-        );
+        // Emit BackupCreated handler-phase event
+        if let Some(node_id) = self.node_id {
+            self.record_handler_event(
+                HandlerPhaseEmitter::for_system(EventAction::BackupCreated, node_id)
+                    .principal("system")
+                    .detail("backup_id", &meta.backup_id)
+                    .detail("tag", &tag)
+                    .trace_id(&trace_ctx.trace_id)
+                    .outcome(EventOutcomeType::Success)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+        }
 
         Ok(Response::new(CreateBackupResponse {
             backup_id: meta.backup_id,
@@ -2712,16 +2634,17 @@ impl AdminService for AdminServiceImpl {
         ctx.set_block_height(restored_height);
         ctx.set_success();
 
-        self.emit_audit_event(
-            &self.build_audit_event(
-                AuditAction::CreateSnapshot,
-                "system",
-                AuditResource::cluster()
-                    .with_detail(format!("restore:{},height:{}", meta.backup_id, restored_height)),
-                AuditOutcome::Success,
-                Some(&trace_ctx.trace_id),
-            ),
-        );
+        // Emit BackupRestored handler-phase event
+        if let Some(node_id) = self.node_id {
+            self.record_handler_event(
+                HandlerPhaseEmitter::for_system(EventAction::BackupRestored, node_id)
+                    .principal("system")
+                    .detail("backup_id", &meta.backup_id)
+                    .trace_id(&trace_ctx.trace_id)
+                    .outcome(EventOutcomeType::Success)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+        }
 
         Ok(Response::new(RestoreBackupResponse { success: true, message, restored_height }))
     }

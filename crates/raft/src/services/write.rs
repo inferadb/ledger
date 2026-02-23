@@ -14,11 +14,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{
-    OrganizationId, SetCondition, VaultId,
-    audit::{AuditAction, AuditEvent, AuditOutcome, AuditResource},
-    config::ValidationConfig,
-};
+use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};
 use openraft::Raft;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -88,9 +84,6 @@ pub struct WriteServiceImpl {
     /// Node ID for logging system context.
     #[builder(default)]
     node_id: Option<u64>,
-    /// Audit logger for compliance-ready event tracking.
-    #[builder(default)]
-    audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
     /// Hot key detector for identifying frequently accessed keys.
     #[builder(default)]
     hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
@@ -105,6 +98,9 @@ pub struct WriteServiceImpl {
     /// Per-organization resource quota checker.
     #[builder(default)]
     quota_checker: Option<crate::quota::QuotaChecker>,
+    /// Handler-phase event handle for recording denial events.
+    #[builder(default)]
+    event_handle: Option<crate::event_writer::EventHandle<FileBackend>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -170,11 +166,11 @@ impl WriteServiceImpl {
             proposal_mutex,
             sampler: None,
             node_id: None,
-            audit_logger: None,
             hot_key_detector: None,
             validation_config: Arc::new(ValidationConfig::default()),
             proposal_timeout: Duration::from_secs(30),
             quota_checker: None,
+            event_handle: None,
         };
 
         (service, run_future)
@@ -203,13 +199,6 @@ impl WriteServiceImpl {
     #[must_use]
     pub fn with_applied_state(mut self, applied_state: AppliedStateAccessor) -> Self {
         self.applied_state = Some(applied_state);
-        self
-    }
-
-    /// Adds audit logger for compliance event tracking.
-    #[must_use]
-    pub fn with_audit_logger(mut self, logger: Arc<dyn crate::audit::AuditLogger>) -> Self {
-        self.audit_logger = Some(logger);
         self
     }
 
@@ -244,38 +233,22 @@ impl WriteServiceImpl {
         self
     }
 
+    /// Sets the handler-phase event handle for recording denial events.
+    #[must_use]
+    pub fn with_event_handle(
+        mut self,
+        handle: crate::event_writer::EventHandle<FileBackend>,
+    ) -> Self {
+        self.event_handle = Some(handle);
+        self
+    }
+
     /// Validates all operations in a proto operation list.
     fn validate_operations(
         &self,
         operations: &[inferadb_ledger_proto::proto::Operation],
     ) -> Result<(), Status> {
         super::helpers::validate_operations(operations, &self.validation_config)
-    }
-
-    /// Emits an audit event and records the corresponding Prometheus metric.
-    fn emit_audit_event(&self, event: &AuditEvent) {
-        super::helpers::emit_audit_event(self.audit_logger.as_ref(), event);
-    }
-
-    /// Builds an audit event for a write-path operation.
-    fn build_audit_event(
-        &self,
-        action: AuditAction,
-        principal: &str,
-        resource: AuditResource,
-        outcome: AuditOutcome,
-        trace_id: Option<&str>,
-        operations_count: Option<usize>,
-    ) -> AuditEvent {
-        super::helpers::build_audit_event(
-            action,
-            principal,
-            resource,
-            outcome,
-            self.node_id,
-            trace_id,
-            operations_count,
-        )
     }
 
     /// Checks all rate limit tiers (backpressure, organization, client).
@@ -285,6 +258,13 @@ impl WriteServiceImpl {
         organization_id: OrganizationId,
     ) -> Result<(), Status> {
         super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization_id)
+    }
+
+    /// Records a handler-phase event (best-effort).
+    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
+        if let Some(ref handle) = self.event_handle {
+            handle.record_handler_event(entry);
+        }
     }
 
     /// Records key accesses from operations for hot key detection.
@@ -557,7 +537,23 @@ impl WriteService for WriteServiceImpl {
             })?;
 
         // Validate all operations before any processing
-        self.validate_operations(&req.operations)?;
+        if let Err(status) = self.validate_operations(&req.operations) {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: status.message().to_string(),
+                })
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            return Err(status);
+        }
 
         // Compute request hash for payload comparison (detects key reuse with different payload)
         let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
@@ -638,14 +634,21 @@ impl WriteService for WriteServiceImpl {
         // Check rate limits (backpressure, organization, client)
         if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
-            self.emit_audit_event(&self.build_audit_event(
-                AuditAction::Write,
-                &client_id,
-                AuditResource::vault(organization_id, vault_id),
-                AuditOutcome::Denied { reason: "rate_limited".to_string() },
-                Some(&trace_ctx.trace_id),
-                Some(req.operations.len()),
-            ));
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .vault_slug(vault_slug_val)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "rate_limited".to_string(),
+                })
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
             return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
 
@@ -657,6 +660,22 @@ impl WriteService for WriteServiceImpl {
             estimated_bytes,
         )
         .map_err(|status| {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .vault_slug(vault_slug_val)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "storage_quota_exceeded".to_string(),
+                })
+                .detail("estimated_bytes", &estimated_bytes.to_string())
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
             status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id)
         })?;
 
@@ -802,15 +821,6 @@ impl WriteService for WriteServiceImpl {
                 metrics::record_write(true, elapsed);
                 metrics::record_organization_latency(organization_id.value(), "write", elapsed);
 
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::Write,
-                    &client_id,
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Success,
-                    Some(&trace_ctx.trace_id),
-                    Some(req.operations.len()),
-                ));
-
                 Ok(response_with_correlation(
                     WriteResponse {
                         result: Some(
@@ -824,18 +834,6 @@ impl WriteService for WriteServiceImpl {
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
                 metrics::record_write(false, ctx.elapsed_secs());
-
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::Write,
-                    &client_id,
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Failed {
-                        code: "Unspecified".to_string(),
-                        detail: message.clone(),
-                    },
-                    Some(&trace_ctx.trace_id),
-                    Some(req.operations.len()),
-                ));
 
                 Ok(response_with_correlation(
                     WriteResponse {
@@ -871,18 +869,6 @@ impl WriteService for WriteServiceImpl {
 
                 ctx.set_precondition_failed(Some(&key));
                 metrics::record_write(false, ctx.elapsed_secs());
-
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::Write,
-                    &client_id,
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Failed {
-                        code: "PreconditionFailed".to_string(),
-                        detail: format!("key: {key}"),
-                    },
-                    Some(&trace_ctx.trace_id),
-                    Some(req.operations.len()),
-                ));
 
                 Ok(response_with_correlation(
                     WriteResponse {
@@ -989,7 +975,24 @@ impl WriteService for WriteServiceImpl {
             req.operations.iter().flat_map(|group| group.operations.clone()).collect();
 
         // Validate all operations before any processing
-        self.validate_operations(&all_operations)?;
+        if let Err(status) = self.validate_operations(&all_operations) {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .vault_slug(vault_slug_val)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: status.message().to_string(),
+                })
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            return Err(status);
+        }
 
         let batch_size = all_operations.len();
 
@@ -1071,14 +1074,22 @@ impl WriteService for WriteServiceImpl {
         // Check rate limits (backpressure, organization, client)
         if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
-            self.emit_audit_event(&self.build_audit_event(
-                AuditAction::BatchWrite,
-                &client_id,
-                AuditResource::vault(organization_id, vault_id),
-                AuditOutcome::Denied { reason: "rate_limited".to_string() },
-                Some(&trace_ctx.trace_id),
-                Some(batch_size),
-            ));
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .vault_slug(vault_slug_val)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "rate_limited".to_string(),
+                })
+                .operations_count(batch_size as u32)
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
             return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
 
@@ -1090,6 +1101,22 @@ impl WriteService for WriteServiceImpl {
             estimated_bytes,
         )
         .map_err(|status| {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .vault_slug(vault_slug_val)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "storage_quota_exceeded".to_string(),
+                })
+                .detail("estimated_bytes", &estimated_bytes.to_string())
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
             status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id)
         })?;
 
@@ -1191,15 +1218,6 @@ impl WriteService for WriteServiceImpl {
                 metrics::record_batch_write(true, batch_size, elapsed);
                 metrics::record_organization_latency(organization_id.value(), "write", elapsed);
 
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::BatchWrite,
-                    &client_id,
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Success,
-                    Some(&trace_ctx.trace_id),
-                    Some(batch_size),
-                ));
-
                 Ok(response_with_correlation(
                     BatchWriteResponse {
                         result: Some(
@@ -1221,18 +1239,6 @@ impl WriteService for WriteServiceImpl {
             LedgerResponse::Error { message } => {
                 ctx.set_error("Unspecified", &message);
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::BatchWrite,
-                    &client_id,
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Failed {
-                        code: "Unspecified".to_string(),
-                        detail: message.clone(),
-                    },
-                    Some(&trace_ctx.trace_id),
-                    Some(batch_size),
-                ));
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {
@@ -1270,18 +1276,6 @@ impl WriteService for WriteServiceImpl {
 
                 ctx.set_precondition_failed(Some(&key));
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-
-                self.emit_audit_event(&self.build_audit_event(
-                    AuditAction::BatchWrite,
-                    &client_id,
-                    AuditResource::vault(organization_id, vault_id),
-                    AuditOutcome::Failed {
-                        code: "PreconditionFailed".to_string(),
-                        detail: format!("key: {key}"),
-                    },
-                    Some(&trace_ctx.trace_id),
-                    Some(batch_size),
-                ));
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {

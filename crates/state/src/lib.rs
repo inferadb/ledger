@@ -18,6 +18,8 @@ mod block_archive;
 mod bucket;
 mod engine;
 mod entity;
+mod events;
+mod events_keys;
 mod indexes;
 mod keys;
 mod relationship;
@@ -37,6 +39,10 @@ pub use block_archive::{BlockArchive, BlockArchiveError};
 pub use bucket::VaultCommitment;
 pub use engine::{InMemoryStorageEngine, StorageEngine};
 pub use entity::EntityStore;
+pub use events::{EventStore, EventStoreError, Events, EventsDatabase, EventsDatabaseError};
+pub use events_keys::{
+    DecodedEventKey, EVENT_KEY_LEN, decode_event_key, encode_event_key, org_prefix, org_time_prefix,
+};
 pub use indexes::IndexManager;
 // Re-export inferadb-ledger-store's tables for convenience
 pub use inferadb_ledger_store::tables;

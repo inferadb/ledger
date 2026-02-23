@@ -18,10 +18,13 @@
 //! ```
 
 use chrono::{DateTime, TimeZone, Utc};
-use inferadb_ledger_types::types::{
-    BlockHeader, ChainCommitment, Entity, Operation, OrganizationId, OrganizationSlug,
-    Relationship, SetCondition, ShardBlock, ShardId, Transaction, VaultBlock, VaultEntry, VaultId,
-    VaultSlug,
+use inferadb_ledger_types::{
+    events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
+    types::{
+        BlockHeader, ChainCommitment, Entity, Operation, OrganizationId, OrganizationSlug,
+        Relationship, SetCondition, ShardBlock, ShardId, Transaction, VaultBlock, VaultEntry,
+        VaultId, VaultSlug,
+    },
 };
 use proptest::prelude::*;
 
@@ -332,6 +335,107 @@ pub fn arb_chain_commitment() -> impl Strategy<Value = ChainCommitment> {
     )
 }
 
+/// Generates an arbitrary [`EventScope`].
+pub fn arb_event_scope() -> impl Strategy<Value = EventScope> {
+    prop_oneof![Just(EventScope::System), Just(EventScope::Organization)]
+}
+
+/// Generates an arbitrary [`EventAction`].
+pub fn arb_event_action() -> impl Strategy<Value = EventAction> {
+    prop::sample::select(EventAction::ALL)
+}
+
+/// Generates an arbitrary [`EventOutcome`].
+pub fn arb_event_outcome() -> impl Strategy<Value = EventOutcome> {
+    prop_oneof![
+        Just(EventOutcome::Success),
+        ("[a-z_]{3,10}", "[a-z ]{5,30}")
+            .prop_map(|(code, detail)| EventOutcome::Failed { code, detail }),
+        "[a-z ]{5,30}".prop_map(|reason| EventOutcome::Denied { reason }),
+    ]
+}
+
+/// Generates an arbitrary [`EventEmission`].
+pub fn arb_event_emission() -> impl Strategy<Value = EventEmission> {
+    prop_oneof![
+        Just(EventEmission::ApplyPhase),
+        (0u64..1000).prop_map(|node_id| EventEmission::HandlerPhase { node_id }),
+    ]
+}
+
+/// Generates an arbitrary [`EventEntry`] for property-based testing.
+///
+/// Produces well-formed entries with valid scope-action alignment and
+/// realistic field values. Reusable across Tasks 2–9.
+pub fn arb_event_entry() -> impl Strategy<Value = EventEntry> {
+    // Split into two groups of <= 12 elements each (proptest tuple limit).
+    let core = (
+        any::<u64>(),          // expires_at
+        any::<[u8; 16]>(),     // event_id
+        arb_event_action(),    // action (scope derived from this)
+        arb_event_outcome(),   // outcome
+        arb_event_emission(),  // emission
+        arb_timestamp(),       // timestamp
+        arb_organization_id(), // organization_id
+        "[a-z]{3,10}",         // principal
+    );
+    let optional = (
+        proptest::option::of(0u64..100_000),     // organization_slug
+        proptest::option::of(0u64..100_000),     // vault_slug
+        proptest::option::of(0u64..1_000_000),   // block_height
+        proptest::option::of("[a-f0-9]{16}"),    // trace_id
+        proptest::option::of("[a-z0-9-]{8,20}"), // correlation_id
+        proptest::option::of(0u32..10_000),      // operations_count
+        proptest::collection::btree_map("[a-z_]{3,10}", "[a-z0-9 ]{1,20}", 0..3), // details
+    );
+    (core, optional).prop_map(
+        |(
+            (
+                expires_at,
+                event_id,
+                action,
+                outcome,
+                emission,
+                timestamp,
+                organization_id,
+                principal,
+            ),
+            (
+                organization_slug,
+                vault_slug,
+                block_height,
+                trace_id,
+                correlation_id,
+                operations_count,
+                details,
+            ),
+        )| {
+            let scope = action.scope();
+            let event_type = action.event_type().to_string();
+            EventEntry {
+                expires_at,
+                event_id,
+                source_service: "ledger".to_string(),
+                event_type,
+                timestamp,
+                scope,
+                action,
+                emission,
+                principal,
+                organization_id,
+                organization_slug,
+                vault_slug,
+                outcome,
+                details,
+                block_height,
+                trace_id,
+                correlation_id,
+                operations_count,
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -375,6 +479,28 @@ mod tests {
         #[test]
         fn strategy_produces_valid_chain_commitments(cc in arb_chain_commitment()) {
             prop_assert!(cc.from_height <= cc.to_height);
+        }
+
+        #[test]
+        fn event_action_scope_never_panics(action in arb_event_action()) {
+            let _scope = action.scope();
+        }
+
+        #[test]
+        fn event_entry_postcard_roundtrip(entry in arb_event_entry()) {
+            let bytes = postcard::to_allocvec(&entry).unwrap();
+            let back: EventEntry = postcard::from_bytes(&bytes).unwrap();
+            prop_assert_eq!(entry, back);
+        }
+
+        #[test]
+        fn event_entry_scope_matches_action(entry in arb_event_entry()) {
+            prop_assert_eq!(entry.scope, entry.action.scope());
+        }
+
+        #[test]
+        fn event_entry_event_type_matches_action(entry in arb_event_entry()) {
+            prop_assert_eq!(entry.event_type.as_str(), entry.action.event_type());
         }
     }
 }

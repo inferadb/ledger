@@ -4,22 +4,22 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 
 ## Quick Reference
 
-| Variable                           | CLI               | Default           | Description                            |
-| ---------------------------------- | ----------------- | ----------------- | -------------------------------------- |
-| `INFERADB__LEDGER__LISTEN`         | `--listen`        | `127.0.0.1:50051` | gRPC listen address                    |
-| `INFERADB__LEDGER__METRICS`        | `--metrics`       | (disabled)        | Prometheus metrics address             |
-| `INFERADB__LEDGER__DATA`           | `--data`          | (ephemeral)       | Data directory                         |
-| `INFERADB__LEDGER__CLUSTER`        | `--cluster`       | `3`               | Cluster size for coordinated bootstrap |
-| `INFERADB__LEDGER__PEERS`          | `--peers`         | (none)            | Peer discovery (DNS or file)           |
-| `INFERADB__LEDGER__PEERS_TTL`      | `--peers-ttl`     | `3600`            | Peer cache TTL (seconds)               |
-| `INFERADB__LEDGER__PEERS_TIMEOUT`  | `--peers-timeout` | `60`              | Peer discovery timeout (seconds)       |
-| `INFERADB__LEDGER__PEERS_POLL`     | `--peers-poll`    | `2`               | Peer discovery poll interval (seconds) |
-| `INFERADB__LEDGER__BATCH_SIZE`     | `--batch-size`    | `100`             | Max transactions per batch             |
-| `INFERADB__LEDGER__BATCH_DELAY`    | `--batch-delay`   | `0.01`            | Max batch wait time (seconds)          |
-| `INFERADB__LEDGER__MAX_CONCURRENT` | `--concurrent`    | `100`             | Max concurrent requests                |
-| `INFERADB__LEDGER__TIMEOUT`        | `--timeout`       | `30`              | Request timeout (seconds)              |
-| `INFERADB__LEDGER__LOG_FORMAT`     | -                 | `auto`            | Log format (text/json/auto)            |
-| `INFERADB__LEDGER__LOGGING__ENABLED` | -           | `true`            | Enable request logging                 |
+| Variable                             | CLI               | Default           | Description                            |
+| ------------------------------------ | ----------------- | ----------------- | -------------------------------------- |
+| `INFERADB__LEDGER__LISTEN`           | `--listen`        | `127.0.0.1:50051` | gRPC listen address                    |
+| `INFERADB__LEDGER__METRICS`          | `--metrics`       | (disabled)        | Prometheus metrics address             |
+| `INFERADB__LEDGER__DATA`             | `--data`          | (ephemeral)       | Data directory                         |
+| `INFERADB__LEDGER__CLUSTER`          | `--cluster`       | `3`               | Cluster size for coordinated bootstrap |
+| `INFERADB__LEDGER__PEERS`            | `--peers`         | (none)            | Peer discovery (DNS or file)           |
+| `INFERADB__LEDGER__PEERS_TTL`        | `--peers-ttl`     | `3600`            | Peer cache TTL (seconds)               |
+| `INFERADB__LEDGER__PEERS_TIMEOUT`    | `--peers-timeout` | `60`              | Peer discovery timeout (seconds)       |
+| `INFERADB__LEDGER__PEERS_POLL`       | `--peers-poll`    | `2`               | Peer discovery poll interval (seconds) |
+| `INFERADB__LEDGER__BATCH_SIZE`       | `--batch-size`    | `100`             | Max transactions per batch             |
+| `INFERADB__LEDGER__BATCH_DELAY`      | `--batch-delay`   | `0.01`            | Max batch wait time (seconds)          |
+| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent`    | `100`             | Max concurrent requests                |
+| `INFERADB__LEDGER__TIMEOUT`          | `--timeout`       | `30`              | Request timeout (seconds)              |
+| `INFERADB__LEDGER__LOG_FORMAT`       | -                 | `auto`            | Log format (text/json/auto)            |
+| `INFERADB__LEDGER__LOGGING__ENABLED` | -                 | `true`            | Enable request logging                 |
 
 CLI arguments take precedence over environment variables.
 
@@ -227,51 +227,51 @@ INFERADB__LEDGER__LOG_FORMAT=auto
 
 ### Core Settings
 
-| Variable                                 | Type | Default | Description                    |
-| ---------------------------------------- | ---- | ------- | ------------------------------ |
-| `INFERADB__LEDGER__LOG_FORMAT`           | str  | `auto`  | Log format: `text`/`json`/`auto` |
-| `INFERADB__LEDGER__LOGGING__ENABLED`     | bool | `true`  | Enable request log emission    |
+| Variable                             | Type | Default | Description                      |
+| ------------------------------------ | ---- | ------- | -------------------------------- |
+| `INFERADB__LEDGER__LOG_FORMAT`       | str  | `auto`  | Log format: `text`/`json`/`auto` |
+| `INFERADB__LEDGER__LOGGING__ENABLED` | bool | `true`  | Enable request log emission      |
 
 ### Sampling Configuration
 
 Control log volume while retaining critical events. Errors and slow requests are always logged (100%).
 
-| Variable                                                         | Type | Default  | Description                     |
-| ---------------------------------------------------------------- | ---- | -------- | ------------------------------- |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__ERROR_RATE`            | f64  | `1.0`    | Sample rate for errors (0.0-1.0) |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_RATE`             | f64  | `1.0`    | Sample rate for slow requests   |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__VIP_RATE`              | f64  | `0.5`    | Sample rate for VIP organizations  |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__WRITE_RATE`            | f64  | `0.1`    | Sample rate for normal writes   |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__READ_RATE`             | f64  | `0.01`   | Sample rate for normal reads    |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_THRESHOLD_READ_MS`  | f64  | `10.0`   | Slow threshold for reads (ms)   |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_THRESHOLD_WRITE_MS` | f64  | `100.0`  | Slow threshold for writes (ms)  |
-| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_THRESHOLD_ADMIN_MS` | f64  | `1000.0` | Slow threshold for admin (ms)   |
+| Variable                                                       | Type | Default  | Description                       |
+| -------------------------------------------------------------- | ---- | -------- | --------------------------------- |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__ERROR_RATE`              | f64  | `1.0`    | Sample rate for errors (0.0-1.0)  |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_RATE`               | f64  | `1.0`    | Sample rate for slow requests     |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__VIP_RATE`                | f64  | `0.5`    | Sample rate for VIP organizations |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__WRITE_RATE`              | f64  | `0.1`    | Sample rate for normal writes     |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__READ_RATE`               | f64  | `0.01`   | Sample rate for normal reads      |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_THRESHOLD_READ_MS`  | f64  | `10.0`   | Slow threshold for reads (ms)     |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_THRESHOLD_WRITE_MS` | f64  | `100.0`  | Slow threshold for writes (ms)    |
+| `INFERADB__LEDGER__LOGGING__SAMPLING__SLOW_THRESHOLD_ADMIN_MS` | f64  | `1000.0` | Slow threshold for admin (ms)     |
 
 ### VIP Organizations
 
 VIP organizations receive elevated sampling rates (50% vs 10%/1% default).
 
-| Variable                                               | Type      | Default | Description                              |
-| ------------------------------------------------------ | --------- | ------- | ---------------------------------------- |
-| `INFERADB__LEDGER__LOGGING__VIP_ORGANIZATIONS`        | Vec<i64>  | `[]`    | Static VIP organization IDs                 |
-| `INFERADB__LEDGER__LOGGING__VIP__DISCOVERY_ENABLED` | bool      | `true`  | Enable dynamic VIP discovery from `_system` |
-| `INFERADB__LEDGER__LOGGING__VIP__CACHE_TTL_SECS`   | u64       | `60`    | VIP cache refresh interval               |
-| `INFERADB__LEDGER__LOGGING__VIP__TAG_NAME`         | str       | `"vip"` | Metadata tag name for VIP status         |
+| Variable                                            | Type     | Default | Description                                 |
+| --------------------------------------------------- | -------- | ------- | ------------------------------------------- |
+| `INFERADB__LEDGER__LOGGING__VIP_ORGANIZATIONS`      | Vec<i64> | `[]`    | Static VIP organization IDs                 |
+| `INFERADB__LEDGER__LOGGING__VIP__DISCOVERY_ENABLED` | bool     | `true`  | Enable dynamic VIP discovery from `_system` |
+| `INFERADB__LEDGER__LOGGING__VIP__CACHE_TTL_SECS`    | u64      | `60`    | VIP cache refresh interval                  |
+| `INFERADB__LEDGER__LOGGING__VIP__TAG_NAME`          | str      | `"vip"` | Metadata tag name for VIP status            |
 
 ### OpenTelemetry Export
 
 Export request logs as OTLP traces for visualization in Jaeger, Tempo, or Honeycomb.
 
-| Variable                                                   | Type  | Default | Description                           |
-| ---------------------------------------------------------- | ----- | ------- | ------------------------------------- |
-| `INFERADB__LEDGER__LOGGING__OTEL__ENABLED`             | bool  | `false` | Enable OTLP trace export              |
-| `INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT`            | str   | -       | OTLP collector endpoint URL           |
-| `INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT`           | str   | `grpc`  | Transport: `grpc` or `http`           |
-| `INFERADB__LEDGER__LOGGING__OTEL__BATCH_SIZE`          | usize | `512`   | Spans to batch before flush           |
-| `INFERADB__LEDGER__LOGGING__OTEL__BATCH_INTERVAL_MS`   | u64   | `5000`  | Max time between flushes (ms)         |
-| `INFERADB__LEDGER__LOGGING__OTEL__TIMEOUT_MS`          | u64   | `10000` | Per-export timeout (ms)               |
-| `INFERADB__LEDGER__LOGGING__OTEL__SHUTDOWN_TIMEOUT_MS` | u64   | `15000` | Graceful shutdown timeout (ms)        |
-| `INFERADB__LEDGER__LOGGING__OTEL__TRACE_RAFT_RPCS`     | bool  | `true`  | Propagate trace context in Raft RPCs  |
+| Variable                                               | Type  | Default | Description                          |
+| ------------------------------------------------------ | ----- | ------- | ------------------------------------ |
+| `INFERADB__LEDGER__LOGGING__OTEL__ENABLED`             | bool  | `false` | Enable OTLP trace export             |
+| `INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT`            | str   | -       | OTLP collector endpoint URL          |
+| `INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT`           | str   | `grpc`  | Transport: `grpc` or `http`          |
+| `INFERADB__LEDGER__LOGGING__OTEL__BATCH_SIZE`          | usize | `512`   | Spans to batch before flush          |
+| `INFERADB__LEDGER__LOGGING__OTEL__BATCH_INTERVAL_MS`   | u64   | `5000`  | Max time between flushes (ms)        |
+| `INFERADB__LEDGER__LOGGING__OTEL__TIMEOUT_MS`          | u64   | `10000` | Per-export timeout (ms)              |
+| `INFERADB__LEDGER__LOGGING__OTEL__SHUTDOWN_TIMEOUT_MS` | u64   | `15000` | Graceful shutdown timeout (ms)       |
+| `INFERADB__LEDGER__LOGGING__OTEL__TRACE_RAFT_RPCS`     | bool  | `true`  | Propagate trace context in Raft RPCs |
 
 ### Logging Example
 
@@ -345,3 +345,43 @@ inferadb-ledger \
   --concurrent 100 \
   --timeout 30
 ```
+
+## Events Configuration
+
+Audit event logging and external ingestion. See [Events Operations Guide](events.md) for architecture and event catalog.
+
+### Event Logging
+
+| Variable                                             | Type | Default  | Description                         |
+| ---------------------------------------------------- | ---- | -------- | ----------------------------------- |
+| `INFERADB__LEDGER__EVENTS__ENABLED`                  | bool | `true`   | Master switch for event logging     |
+| `INFERADB__LEDGER__EVENTS__DEFAULT_TTL_DAYS`         | u32  | `90`     | TTL in days (1–3650)                |
+| `INFERADB__LEDGER__EVENTS__MAX_DETAILS_SIZE_BYTES`   | u32  | `4096`   | Max details map size (256–65536)    |
+| `INFERADB__LEDGER__EVENTS__SYSTEM_LOG_ENABLED`       | bool | `true`   | Enable system-scope event logging   |
+| `INFERADB__LEDGER__EVENTS__ORGANIZATION_LOG_ENABLED` | bool | `true`   | Enable org-scope event logging      |
+| `INFERADB__LEDGER__EVENTS__MAX_SNAPSHOT_EVENTS`      | u64  | `100000` | Max apply-phase events in snapshots |
+
+### Ingestion
+
+| Variable                                                            | Type | Default                | Description                       |
+| ------------------------------------------------------------------- | ---- | ---------------------- | --------------------------------- |
+| `INFERADB__LEDGER__EVENTS__INGESTION__INGEST_ENABLED`               | bool | `true`                 | Master switch for external ingest |
+| `INFERADB__LEDGER__EVENTS__INGESTION__ALLOWED_SOURCES`              | Vec  | `["engine","control"]` | Allow-list of source services     |
+| `INFERADB__LEDGER__EVENTS__INGESTION__MAX_INGEST_BATCH_SIZE`        | u32  | `500`                  | Max events per IngestEvents call  |
+| `INFERADB__LEDGER__EVENTS__INGESTION__INGEST_RATE_LIMIT_PER_SOURCE` | u32  | `10000`                | Events/sec per source service     |
+
+### TOML Example
+
+```toml
+[events]
+enabled = true
+default_ttl_days = 90
+max_details_size_bytes = 4096
+
+[events.ingestion]
+ingest_enabled = true
+allowed_sources = ["engine", "control"]
+max_ingest_batch_size = 500
+```
+
+Runtime-updatable fields (via `UpdateConfig` RPC or SIGHUP): `enabled`, `default_ttl_days`, `system_log_enabled`, `organization_log_enabled`, `ingest_enabled`, `ingest_rate_limit_per_source`.

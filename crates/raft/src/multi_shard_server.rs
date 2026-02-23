@@ -21,8 +21,9 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
-    admin_service_server::AdminServiceServer, health_service_server::HealthServiceServer,
-    raft_service_server::RaftServiceServer, read_service_server::ReadServiceServer,
+    admin_service_server::AdminServiceServer, events_service_server::EventsServiceServer,
+    health_service_server::HealthServiceServer, raft_service_server::RaftServiceServer,
+    read_service_server::ReadServiceServer,
     system_discovery_service_server::SystemDiscoveryServiceServer,
     write_service_server::WriteServiceServer,
 };
@@ -36,8 +37,8 @@ use crate::{
     multi_raft::MultiRaftManager,
     rate_limit::RateLimiter,
     services::{
-        AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, MultiShardRaftService,
-        MultiShardReadService, MultiShardResolver, MultiShardWriteService,
+        AdminServiceImpl, DiscoveryServiceImpl, EventsServiceImpl, HealthServiceImpl,
+        MultiShardRaftService, MultiShardReadService, MultiShardResolver, MultiShardWriteService,
     },
 };
 
@@ -80,6 +81,9 @@ pub struct MultiShardLedgerServer {
     /// is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
     proposal_timeout: Duration,
+    /// Events database for the events query service (optional).
+    #[builder(default)]
+    events_db: Option<inferadb_ledger_state::EventsDatabase<inferadb_ledger_store::FileBackend>>,
 }
 
 impl MultiShardLedgerServer {
@@ -163,7 +167,7 @@ impl MultiShardLedgerServer {
             "Starting multi-shard Ledger gRPC server"
         );
 
-        let router = Server::builder()
+        let mut router = Server::builder()
             // Track in-flight requests for connection draining during shutdown
             .layer(ConnectionTrackingLayer::new(connection_tracker))
             .layer(layer)
@@ -184,6 +188,19 @@ impl MultiShardLedgerServer {
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service));
+
+        // EventsService is optional — only registered when events_db is provided.
+        if let Some(events_db) = self.events_db {
+            let events_service = EventsServiceImpl::builder()
+                .events_db(events_db)
+                .applied_state(system_shard.applied_state().clone())
+                .page_token_codec(crate::pagination::PageTokenCodec::with_random_key())
+                .build();
+            router = router.add_service(EventsServiceServer::with_interceptor(
+                events_service,
+                api_version_interceptor,
+            ));
+        }
 
         if let Some(mut shutdown_rx) = self.shutdown_rx {
             router

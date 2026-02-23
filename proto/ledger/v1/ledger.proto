@@ -1255,6 +1255,233 @@ enum ClusterMemberRole {
 }
 
 // =============================================================================
+// Events Service
+// =============================================================================
+
+// Unified audit event query and ingestion API.
+//
+// Events come from three sources:
+// - Ledger apply-phase (deterministic, Raft-replicated): committed writes, vault/org lifecycle
+// - Ledger handler-phase (node-local): denials, admin operations
+// - External services (Engine/Control via IngestEvents): authorization decisions, management ops
+//
+// All events share the same EventEntry format and live in the same Events table.
+// System events are accessible via SYSTEM_ORGANIZATION_SLUG (slug = 0).
+service EventsService {
+  // List events for an organization with filtering and pagination.
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+
+  // Get a single event by ID.
+  rpc GetEvent(GetEventRequest) returns (GetEventResponse);
+
+  // Count events matching a filter.
+  rpc CountEvents(CountEventsRequest) returns (CountEventsResponse);
+
+  // Ingest events from external services (Engine, Control).
+  // Uses handler-phase semantics (node-local, no Raft).
+  rpc IngestEvents(IngestEventsRequest) returns (IngestEventsResponse);
+}
+
+// Scope of an audit event.
+enum EventScope {
+  EVENT_SCOPE_UNSPECIFIED = 0;
+  // Cluster-wide administrative events (org_id = 0).
+  EVENT_SCOPE_SYSTEM = 1;
+  // Per-organization tenant events.
+  EVENT_SCOPE_ORGANIZATION = 2;
+}
+
+// Outcome of an audited operation.
+enum EventOutcome {
+  EVENT_OUTCOME_UNSPECIFIED = 0;
+  // Operation completed successfully.
+  EVENT_OUTCOME_SUCCESS = 1;
+  // Operation failed with an error.
+  EVENT_OUTCOME_FAILED = 2;
+  // Operation was denied (rate limited, unauthorized, etc.).
+  EVENT_OUTCOME_DENIED = 3;
+}
+
+// Emission path indicating the consistency model of an event.
+enum EventEmissionPath {
+  EMISSION_PATH_UNSPECIFIED = 0;
+  // Deterministic, Raft-replicated — identical on all nodes.
+  EMISSION_PATH_APPLY_PHASE = 1;
+  // Node-local, best-effort — exists only on the handling node.
+  EMISSION_PATH_HANDLER_PHASE = 2;
+}
+
+// Structured audit event record.
+//
+// Follows the canonical log line ("wide event") pattern — a single structured
+// record with rich contextual fields. Queryable via ListEvents.
+message EventEntry {
+  // Unique event identifier (UUID, 16 bytes).
+  bytes event_id = 1;
+  // Originating service ("ledger", "engine", or "control").
+  string source_service = 2;
+  // Hierarchical dot-separated type (e.g., "ledger.vault.created").
+  string event_type = 3;
+  // Block timestamp (apply-phase) or wall clock (handler-phase).
+  google.protobuf.Timestamp timestamp = 4;
+  // System or organization scope.
+  EventScope scope = 5;
+  // What happened (snake_case action name, e.g., "vault_created").
+  string action = 6;
+  // Consistency model of this event.
+  EventEmissionPath emission_path = 7;
+  // Who performed the action (server-assigned actor).
+  string principal = 8;
+  // Owning organization (slug = 0 for system events).
+  OrganizationSlug organization = 9;
+  // Vault context (when applicable).
+  optional VaultSlug vault = 10;
+  // Success, failure, or denial.
+  EventOutcome outcome = 11;
+  // Error code (present when outcome = FAILED).
+  optional string error_code = 12;
+  // Error description (present when outcome = FAILED).
+  optional string error_detail = 13;
+  // Denial reason (present when outcome = DENIED).
+  optional string denial_reason = 14;
+  // Action-specific key-value context.
+  map<string, string> details = 15;
+  // Reference to blockchain block (for committed writes).
+  optional uint64 block_height = 16;
+  // Node that generated this event (present for handler-phase events).
+  optional uint64 node_id = 17;
+  // Distributed tracing correlation (W3C Trace Context).
+  optional string trace_id = 18;
+  // Business-level correlation for multi-step operations.
+  optional string correlation_id = 19;
+  // Number of operations (for write actions).
+  optional uint32 operations_count = 20;
+  // Unix timestamp for TTL expiry (0 = no expiry).
+  uint64 expires_at = 21;
+}
+
+// Filter criteria for event queries.
+message EventFilter {
+  // Start of time range (inclusive). Omit for unbounded start.
+  optional google.protobuf.Timestamp start_time = 1;
+  // End of time range (exclusive). Omit for unbounded end.
+  optional google.protobuf.Timestamp end_time = 2;
+  // Filter by action names (snake_case). Empty = all actions.
+  repeated string actions = 3;
+  // Filter by event type prefix (e.g., "ledger.vault" matches "ledger.vault.created").
+  // Case-sensitive starts_with matching. Empty = all types.
+  optional string event_type_prefix = 4;
+  // Filter by principal. Empty = all principals.
+  optional string principal = 5;
+  // Filter by outcome. UNSPECIFIED = all outcomes.
+  EventOutcome outcome = 6;
+  // Filter by emission path. UNSPECIFIED = all paths.
+  EventEmissionPath emission_path = 7;
+  // Filter by business correlation ID.
+  optional string correlation_id = 8;
+}
+
+// List events for an organization with filtering and pagination.
+message ListEventsRequest {
+  // Organization to query (slug = 0 for system events).
+  OrganizationSlug organization = 1;
+  // Optional filter criteria.
+  EventFilter filter = 2;
+  // Max results per page (0 = default, max 1000).
+  uint32 limit = 3;
+  // Opaque pagination cursor from previous response.
+  string page_token = 4;
+}
+
+message ListEventsResponse {
+  // Matching events in chronological order.
+  repeated EventEntry entries = 1;
+  // Opaque cursor for next page; empty if no more results.
+  string next_page_token = 2;
+  // Estimated total count (may be approximate for large datasets).
+  optional uint64 total_estimate = 3;
+}
+
+// Get a single event by ID.
+message GetEventRequest {
+  // Organization that owns the event.
+  OrganizationSlug organization = 1;
+  // Event identifier (UUID bytes).
+  bytes event_id = 2;
+}
+
+message GetEventResponse {
+  // The requested event.
+  EventEntry entry = 1;
+}
+
+// Count events matching a filter.
+message CountEventsRequest {
+  // Organization to query (slug = 0 for system events).
+  OrganizationSlug organization = 1;
+  // Optional filter criteria.
+  EventFilter filter = 2;
+}
+
+message CountEventsResponse {
+  // Number of matching events.
+  uint64 count = 1;
+}
+
+// A single event for external ingestion (from Engine or Control).
+message IngestEventEntry {
+  // Hierarchical dot-separated type (must start with source_service prefix).
+  string event_type = 1;
+  // Who performed the action.
+  string principal = 2;
+  // Outcome of the operation.
+  EventOutcome outcome = 3;
+  // Action-specific key-value context.
+  map<string, string> details = 4;
+  // Distributed tracing correlation.
+  optional string trace_id = 5;
+  // Business-level correlation ID.
+  optional string correlation_id = 6;
+  // Vault context (when applicable).
+  optional VaultSlug vault = 7;
+  // Event timestamp (defaults to server receive time if omitted).
+  optional google.protobuf.Timestamp timestamp = 8;
+  // Error code (when outcome = FAILED).
+  optional string error_code = 9;
+  // Error description (when outcome = FAILED).
+  optional string error_detail = 10;
+  // Denial reason (when outcome = DENIED).
+  optional string denial_reason = 11;
+}
+
+// Ingest events from an external service.
+message IngestEventsRequest {
+  // Source service identifier (validated against allow-list).
+  string source_service = 1;
+  // Organization that owns these events.
+  OrganizationSlug organization = 2;
+  // Events to ingest (max batch size enforced by server config).
+  repeated IngestEventEntry entries = 3;
+}
+
+// Reason an individual event was rejected during ingestion.
+message RejectedEvent {
+  // Zero-based index into the request's entries array.
+  uint32 index = 1;
+  // Human-readable rejection reason.
+  string reason = 2;
+}
+
+message IngestEventsResponse {
+  // Number of events accepted and written.
+  uint32 accepted_count = 1;
+  // Number of events rejected.
+  uint32 rejected_count = 2;
+  // Per-event rejection details.
+  repeated RejectedEvent rejections = 3;
+}
+
+// =============================================================================
 // Health Service
 // =============================================================================
 

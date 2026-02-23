@@ -11,8 +11,8 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
     BlockAnnouncement, admin_service_server::AdminServiceServer,
-    health_service_server::HealthServiceServer, raft_service_server::RaftServiceServer,
-    read_service_server::ReadServiceServer,
+    events_service_server::EventsServiceServer, health_service_server::HealthServiceServer,
+    raft_service_server::RaftServiceServer, read_service_server::ReadServiceServer,
     system_discovery_service_server::SystemDiscoveryServiceServer,
     write_service_server::WriteServiceServer,
 };
@@ -31,8 +31,8 @@ use crate::{
     log_storage::AppliedStateAccessor,
     rate_limit::RateLimiter,
     services::{
-        AdminServiceImpl, DiscoveryServiceImpl, HealthServiceImpl, RaftServiceImpl,
-        ReadServiceImpl, WriteServiceImpl,
+        AdminServiceImpl, DiscoveryServiceImpl, EventsServiceImpl, HealthServiceImpl,
+        RaftServiceImpl, ReadServiceImpl, WriteServiceImpl,
     },
     types::LedgerTypeConfig,
 };
@@ -107,6 +107,12 @@ pub struct LedgerServer {
     /// Health check configuration for dependency validation.
     #[builder(default)]
     health_check_config: Option<inferadb_ledger_types::config::HealthCheckConfig>,
+    /// Events database for the events query service (optional).
+    #[builder(default)]
+    events_db: Option<inferadb_ledger_state::EventsDatabase<FileBackend>>,
+    /// Handler-phase event handle for recording denial and admin events.
+    #[builder(default)]
+    event_handle: Option<crate::event_writer::EventHandle<FileBackend>>,
 }
 
 impl LedgerServer {
@@ -185,6 +191,12 @@ impl LedgerServer {
         };
         // Wire proposal_timeout into write service
         let write_service = write_service.with_proposal_timeout(self.proposal_timeout);
+        // Wire handler-phase event handle for denial event recording
+        let write_service = if let Some(ref handle) = self.event_handle {
+            write_service.with_event_handle(handle.clone())
+        } else {
+            write_service
+        };
         let admin_service = AdminServiceImpl::builder()
             .raft(self.raft.clone())
             .state(self.state.clone())
@@ -201,6 +213,12 @@ impl LedgerServer {
                 self.organization_rate_limiter.clone(),
                 self.hot_key_detector.clone(),
             )
+        } else {
+            admin_service
+        };
+        // Wire handler-phase event handle for admin event recording
+        let admin_service = if let Some(ref handle) = self.event_handle {
+            admin_service.with_event_handle(handle.clone())
         } else {
             admin_service
         };
@@ -243,7 +261,7 @@ impl LedgerServer {
 
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 
-        let router = Server::builder()
+        let mut router = Server::builder()
             // Track in-flight requests for connection draining during shutdown.
             // Outermost layer so it counts every request, including those rejected
             // by concurrency limits or load shedding.
@@ -266,6 +284,38 @@ impl LedgerServer {
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service));
+
+        // EventsService is optional — only registered when events_db is provided.
+        // The bootstrap code (Task 11) provides the EventsDatabase at server start.
+        if let Some(events_db) = self.events_db {
+            // Extract ingestion fields from EventHandle when available.
+            // The EventHandle carries the event config and node_id needed
+            // for IngestEvents validation and handler-phase event emission.
+            let (event_config, node_id, ingestion_rate_limiter) =
+                if let Some(ref handle) = self.event_handle {
+                    let rate_limit = handle.config().ingestion.ingest_rate_limit_per_source;
+                    (
+                        Some(Arc::clone(handle.config_arc())),
+                        Some(handle.node_id()),
+                        Some(Arc::new(crate::event_writer::IngestionRateLimiter::new(rate_limit))),
+                    )
+                } else {
+                    (None, None, None)
+                };
+
+            let events_service = EventsServiceImpl::builder()
+                .events_db(events_db)
+                .applied_state(self.applied_state.clone())
+                .page_token_codec(crate::pagination::PageTokenCodec::with_random_key())
+                .maybe_event_config(event_config)
+                .maybe_node_id(node_id)
+                .maybe_ingestion_rate_limiter(ingestion_rate_limiter)
+                .build();
+            router = router.add_service(EventsServiceServer::with_interceptor(
+                events_service,
+                api_version_interceptor,
+            ));
+        }
 
         if let Some(mut shutdown_rx) = self.shutdown_rx {
             router

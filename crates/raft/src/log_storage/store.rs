@@ -16,7 +16,10 @@ use super::{
     raft_impl::{to_serde_error, to_storage_error},
     types::{AppliedState, SequenceCounters},
 };
-use crate::types::{LedgerNodeId, LedgerTypeConfig};
+use crate::{
+    event_writer::EventWriter,
+    types::{LedgerNodeId, LedgerTypeConfig},
+};
 
 /// Combined Raft storage.
 ///
@@ -59,6 +62,11 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// When set, announcements are broadcast after each successful block commit.
     /// Receivers subscribe via `WatchBlocks` gRPC streaming endpoint.
     pub(super) block_announcements: Option<broadcast::Sender<BlockAnnouncement>>,
+    /// Event writer for persisting apply-phase audit events to `events.db`.
+    ///
+    /// When set, the state machine apply path emits deterministic events
+    /// for each committed operation.
+    pub(super) event_writer: Option<EventWriter<B>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -107,6 +115,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
             }),
             block_announcements: None,
+            event_writer: None,
         };
 
         // Load cached values
@@ -144,6 +153,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ) -> Self {
         self.block_announcements = Some(sender);
         self
+    }
+
+    /// Configures the event writer for apply-phase audit events.
+    ///
+    /// When set, the apply path emits deterministic events for each committed
+    /// operation to the dedicated `events.db`.
+    pub fn with_event_writer(mut self, event_writer: EventWriter<B>) -> Self {
+        self.event_writer = Some(event_writer);
+        self
+    }
+
+    /// Returns a reference to the event writer (if configured).
+    pub fn event_writer(&self) -> Option<&EventWriter<B>> {
+        self.event_writer.as_ref()
     }
 
     /// Returns a reference to the block announcements sender (if configured).

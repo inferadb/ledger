@@ -60,6 +60,12 @@ pub struct MultiShardWriteService {
     /// Per-organization resource quota checker.
     #[builder(default)]
     quota_checker: Option<crate::quota::QuotaChecker>,
+    /// Handler-phase event handle for recording denial events.
+    #[builder(default)]
+    event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
+    /// Node ID for handler-phase event attribution.
+    #[builder(default)]
+    node_id: Option<u64>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -71,6 +77,13 @@ impl MultiShardWriteService {
         organization_id: inferadb_ledger_types::OrganizationId,
     ) -> Result<(), Status> {
         super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization_id)
+    }
+
+    /// Records a handler-phase event (best-effort).
+    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
+        if let Some(ref handle) = self.event_handle {
+            handle.record_handler_event(entry);
+        }
     }
 
     /// Sets input validation configuration for request field limits.
@@ -209,7 +222,23 @@ impl WriteService for MultiShardWriteService {
             })?;
 
         // Validate all operations before any processing
-        self.validate_operations(&req.operations)?;
+        if let Err(status) = self.validate_operations(&req.operations) {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: status.message().to_string(),
+                })
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            return Err(status);
+        }
 
         // Compute request hash for payload comparison
         let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
@@ -269,8 +298,23 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(&client_id, organization_id)
-            .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
+        if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "rate_limited".to_string(),
+                })
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+        }
 
         // Check storage quota (estimated from operation payload size)
         let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
@@ -279,7 +323,24 @@ impl WriteService for MultiShardWriteService {
             organization_id,
             estimated_bytes,
         )
-        .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
+        .map_err(|status| {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "storage_quota_exceeded".to_string(),
+                })
+                .detail("estimated_bytes", &estimated_bytes.to_string())
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            status_with_correlation(status, &request_id, &trace_ctx.trace_id)
+        })?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &req.operations);
@@ -422,7 +483,23 @@ impl WriteService for MultiShardWriteService {
             req.operations.iter().flat_map(|group| group.operations.clone()).collect();
 
         // Validate all operations before any processing
-        self.validate_operations(&all_operations)?;
+        if let Err(status) = self.validate_operations(&all_operations) {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: status.message().to_string(),
+                })
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            return Err(status);
+        }
 
         let batch_size = all_operations.len();
 
@@ -489,8 +566,24 @@ impl WriteService for MultiShardWriteService {
         }
 
         // Check rate limit
-        self.check_rate_limit(&client_id, organization_id)
-            .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
+        if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "rate_limited".to_string(),
+                })
+                .operations_count(batch_size as u32)
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+        }
 
         // Check storage quota (estimated from operation payload size)
         let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
@@ -499,7 +592,24 @@ impl WriteService for MultiShardWriteService {
             organization_id,
             estimated_bytes,
         )
-        .map_err(|status| status_with_correlation(status, &request_id, &trace_ctx.trace_id))?;
+        .map_err(|status| {
+            self.record_handler_event(
+                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
+                    organization_id,
+                    req.organization.as_ref().map(|n| n.slug),
+                    self.node_id.unwrap_or(0),
+                )
+                .principal(&client_id)
+                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                    reason: "storage_quota_exceeded".to_string(),
+                })
+                .detail("estimated_bytes", &estimated_bytes.to_string())
+                .trace_id(&trace_ctx.trace_id)
+                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            );
+            status_with_correlation(status, &request_id, &trace_ctx.trace_id)
+        })?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &all_operations);

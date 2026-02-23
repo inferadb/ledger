@@ -17,6 +17,7 @@
 mod admin;
 mod discovery;
 pub(crate) mod error_details;
+mod events;
 mod forward_client;
 mod health;
 pub(crate) mod helpers;
@@ -31,6 +32,7 @@ mod write;
 
 pub use admin::AdminServiceImpl;
 pub use discovery::DiscoveryServiceImpl;
+pub use events::EventsServiceImpl;
 pub use forward_client::ForwardClient;
 pub use health::HealthServiceImpl;
 pub use multi_shard_read::MultiShardReadService;

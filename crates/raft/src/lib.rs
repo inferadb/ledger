@@ -49,8 +49,6 @@ pub mod trace_context;
 #[doc(hidden)]
 pub mod api_version;
 #[doc(hidden)]
-pub mod audit;
-#[doc(hidden)]
 pub mod backup;
 #[doc(hidden)]
 pub mod batching;
@@ -62,6 +60,8 @@ pub mod deadline;
 pub mod dependency_health;
 #[doc(hidden)]
 pub mod error;
+#[doc(hidden)]
+pub mod event_writer;
 #[doc(hidden)]
 pub mod graceful_shutdown;
 #[doc(hidden)]
@@ -108,6 +108,8 @@ pub mod block_compaction;
 #[doc(hidden)]
 pub mod btree_compaction;
 #[doc(hidden)]
+pub mod events_gc;
+#[doc(hidden)]
 pub mod file_lock;
 #[doc(hidden)]
 pub mod learner_refresh;
@@ -149,6 +151,8 @@ pub use backup::{BackupJob, BackupManager};
 pub use block_compaction::BlockCompactor;
 #[doc(hidden)]
 pub use cardinality::CardinalityBudget;
+#[doc(hidden)]
+pub use events_gc::EventsGarbageCollector;
 #[doc(hidden)]
 pub use graceful_shutdown::{BackgroundJobWatchdog, GracefulShutdown, HealthState};
 #[doc(hidden)]

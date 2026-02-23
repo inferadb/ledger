@@ -219,6 +219,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             node_id: self.node_id.clone(),
             shard_chain: RwLock::new(*self.shard_chain.read()),
             block_announcements: self.block_announcements.clone(),
+            event_writer: None,
         }
     }
 
@@ -380,6 +381,12 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let mut vault_entries = Vec::new();
         let mut state = self.applied_state.write();
 
+        // Event accumulation — deterministic timestamp shared across the batch
+        let block_timestamp = chrono::Utc::now();
+        let mut events = Vec::new();
+        let mut op_index = 0u32;
+        let ttl_days = self.event_writer.as_ref().map_or(0, |ew| ew.config().default_ttl_days);
+
         // Get the committed_index from the last entry (for ShardBlock metadata)
         let committed_index = entries.last().map_or(0, |e| e.log_id.index);
         // Term is stored in the leader_id
@@ -390,7 +397,14 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             let (response, vault_entry) = match &entry.payload {
                 EntryPayload::Blank => (crate::types::LedgerResponse::Empty, None),
-                EntryPayload::Normal(request) => self.apply_request(request, &mut state),
+                EntryPayload::Normal(request) => self.apply_request_with_events(
+                    request,
+                    &mut state,
+                    block_timestamp,
+                    &mut op_index,
+                    &mut events,
+                    ttl_days,
+                ),
                 EntryPayload::Membership(membership) => {
                     state.membership =
                         StoredMembership::new(Some(entry.log_id), membership.clone());
@@ -501,6 +515,30 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let state_ref = self.applied_state.read().clone();
         self.save_applied_state(&state_ref)?;
 
+        // Write accumulated events to events.db (best-effort: log failures but
+        // don't fail the Raft apply — events are audit data, not consensus-critical).
+        if !events.is_empty()
+            && let Some(ew) = &self.event_writer
+        {
+            match ew.write_events(&events) {
+                Ok(count) if count > 0 => {
+                    tracing::debug!(
+                        written = count,
+                        total = events.len(),
+                        "Apply-phase events persisted"
+                    );
+                },
+                Ok(_) => {}, // All filtered by config — no-op
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        event_count = events.len(),
+                        "Failed to persist apply-phase events"
+                    );
+                },
+            }
+        }
+
         Ok(responses)
     }
 
@@ -566,6 +604,46 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             );
         }
 
+        // Restore apply-phase events from snapshot (if event_writer is configured)
+        if !combined.event_entries.is_empty()
+            && let Some(ew) = &self.event_writer
+        {
+            match ew.events_db().write() {
+                Ok(mut txn) => {
+                    let mut written = 0usize;
+                    for entry in &combined.event_entries {
+                        if let Err(e) = inferadb_ledger_state::EventStore::write(&mut txn, entry) {
+                            tracing::warn!(
+                                event_id = %uuid::Uuid::from_bytes(entry.event_id),
+                                error = %e,
+                                "Failed to restore event from snapshot"
+                            );
+                        } else {
+                            written += 1;
+                        }
+                    }
+                    if let Err(e) = txn.commit() {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to commit restored events from snapshot"
+                        );
+                    } else {
+                        tracing::info!(
+                            count = written,
+                            total = combined.event_entries.len(),
+                            "Restored apply-phase events from snapshot"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to open write transaction for event snapshot restore"
+                    );
+                },
+            }
+        }
+
         Ok(())
     }
 
@@ -614,8 +692,46 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             HashMap::new()
         };
 
+        // Collect apply-phase events from events.db for snapshot (if available)
+        let event_entries = if let Some(ew) = &self.event_writer {
+            let max_events = ew.config().max_snapshot_events;
+            match ew.events_db().read() {
+                Ok(txn) => {
+                    match inferadb_ledger_state::EventStore::scan_apply_phase(&txn, max_events) {
+                        Ok(entries) => {
+                            if !entries.is_empty() {
+                                tracing::debug!(
+                                    count = entries.len(),
+                                    max = max_events,
+                                    "Collected apply-phase events for snapshot"
+                                );
+                            }
+                            entries
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to scan apply-phase events for snapshot"
+                            );
+                            Vec::new()
+                        },
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to open read transaction for event snapshot"
+                    );
+                    Vec::new()
+                },
+            }
+        } else {
+            Vec::new()
+        };
+
         // Create combined snapshot
-        let combined = CombinedSnapshot { applied_state: state.clone(), vault_entities };
+        let combined =
+            CombinedSnapshot { applied_state: state.clone(), vault_entities, event_entries };
 
         let data = encode(&combined).map_err(|e| to_serde_error(&e))?;
 

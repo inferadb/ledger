@@ -1,0 +1,209 @@
+{
+  "annotations": { "list": [] },
+  "title": "InferaDB Ledger Events",
+  "uid": "inferadb-ledger-events",
+  "version": 1,
+  "schemaVersion": 39,
+  "description": "Audit event monitoring: write rates, GC health, emission paths, denial tracking",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus"
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(ledger_event_writes_total, instance)",
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Event Write Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_event_writes_total{instance=~\"$instance\"}[5m])) by (emission)",
+          "legendFormat": "{{emission}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Event Writes by Scope",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_event_writes_total{instance=~\"$instance\"}[5m])) by (scope)",
+          "legendFormat": "{{scope}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Event Writes by Action (Top 10)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "topk(10, sum(rate(ledger_event_writes_total{instance=~\"$instance\"}[5m])) by (action))",
+          "legendFormat": "{{action}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "Denial Event Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "description": "Rate of denied requests (rate limits, validation failures, quota exceeded)",
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_event_writes_total{instance=~\"$instance\", action=~\"request_rate_limited|request_validation_failed|quota_exceeded\"}[5m])) by (action)",
+          "legendFormat": "{{action}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Apply vs Handler Phase Ratio",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(increase(ledger_event_writes_total{instance=~\"$instance\", emission=\"apply\"}[1h]))",
+          "legendFormat": "Apply Phase"
+        },
+        {
+          "expr": "sum(increase(ledger_event_writes_total{instance=~\"$instance\", emission=\"handler\"}[1h]))",
+          "legendFormat": "Handler Phase"
+        }
+      ]
+    },
+    {
+      "title": "GC Entries Deleted",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_events_gc_entries_deleted_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "deleted/sec"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "GC Cycle Duration",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ledger_events_gc_cycle_duration_seconds_bucket{instance=~\"$instance\"}[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ledger_events_gc_cycle_duration_seconds_bucket{instance=~\"$instance\"}[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "GC Cycle Results",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_events_gc_cycles_total{instance=~\"$instance\"}[5m])) by (result)",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "title": "GC Failures (should be 0)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "expr": "sum(increase(ledger_events_gc_cycles_total{instance=~\"$instance\", result=\"error\"}[15m]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "GC Last Run",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 32 },
+      "description": "Seconds since last successful GC cycle. Alert if > 600.",
+      "targets": [
+        {
+          "expr": "time() - max(timestamp(changes(ledger_events_gc_cycles_total{instance=~\"$instance\", result=\"success\"}[5m]) > 0))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 300 },
+              { "color": "red", "value": 600 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "High Denial Rate Alert",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 32 },
+      "description": "Sustained denial rate > 100/sec warrants investigation.",
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_event_writes_total{instance=~\"$instance\", action=~\"request_rate_limited|request_validation_failed|quota_exceeded\"}[5m]))",
+          "legendFormat": "denials/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

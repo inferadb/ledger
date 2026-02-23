@@ -28,6 +28,9 @@ openraft.workspace = true
 # Error handling (for tonic::Status in TryFrom)
 snafu.workspace = true
 
+# DateTime<Utc> <-> prost_types::Timestamp conversion
+chrono.workspace = true
+
 [build-dependencies]
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
@@ -36,7 +39,6 @@ tonic-prost-build.workspace = true
 inferadb-ledger-test-utils.workspace = true
 proptest.workspace = true
 uuid.workspace = true
-chrono.workspace = true
 
 [lints]
 workspace = true

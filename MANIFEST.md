@@ -5,7 +5,7 @@
 InferaDB Ledger is a blockchain database for cryptographically verifiable authorization, built in Rust with a layered architecture:
 
 ```
-gRPC Services (Admin, Read, Write, Health, Discovery, Raft)
+gRPC Services (Admin, Read, Write, Events, Health, Discovery, Raft)
     ↓
   raft — openraft consensus, batching, rate limiting, multi-shard
     ↓
@@ -23,7 +23,7 @@ Supporting crates:
 - **server**: Binary with bootstrap, config, discovery, integration tests
 - **test-utils**: Shared testing infrastructure (strategies, assertions, crash injection)
 
-The codebase demonstrates production-grade engineering: zero `unsafe` code, comprehensive error handling with snafu, property-based testing with proptest, crash recovery tests, OpenTelemetry tracing, Prometheus metrics, and SOC2/HIPAA audit logging.
+The codebase demonstrates production-grade engineering: zero `unsafe` code, comprehensive error handling with snafu, property-based testing with proptest, crash recovery tests, OpenTelemetry tracing, Prometheus metrics, and organization-scoped event logging with queryable audit trails.
 
 ---
 
@@ -39,19 +39,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports core types, errors, hashing utilities, and codec
 - **Key Types/Functions**:
-  - Public modules: `audit`, `codec`, `config`, `error`, `hash`, `merkle`, `snowflake`, `types`, `validation`
+  - Public modules: `codec`, `config`, `error`, `events`, `hash`, `merkle`, `snowflake`, `types`, `validation`
   - Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, etc.
 - **Insights**: Clean public API surface, excellent organization
-
-#### `audit.rs` (394 lines)
-
-- **Purpose**: SOC2/HIPAA audit logging types for compliance
-- **Key Types/Functions**:
-  - `AuditEvent`: Timestamped audit record with actor, action, resource, outcome
-  - `AuditAction`: 17 variants covering CRUD, admin ops (CreateVault, DeleteEntity, UpdateShardConfig, etc.)
-  - `AuditResource`: Target resource (Organization, Vault, Entity, Relationship, Shard, Node, Config)
-  - `AuditOutcome`: Success vs. Failure with optional error message
-- **Insights**: Comprehensive coverage of auditable operations, ready for regulatory compliance
 
 #### `codec.rs` (562 lines)
 
@@ -67,13 +57,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Configuration types for all subsystems with fallible builders, serde, and JSON Schema
 - **Structure**:
-  - `config/mod.rs` (1516 lines) — `ConfigError` enum, `MIN_AUDIT_FILE_SIZE` constant, re-exports from submodules
+  - `config/mod.rs` (1516 lines) — `ConfigError` enum, re-exports from submodules
   - `config/node.rs` (49 lines) — `NodeConfig`, `PeerConfig`
   - `config/storage.rs` (441 lines) — `StorageConfig`, `BTreeCompactionConfig`, `IntegrityConfig`, `BackupConfig`
   - `config/raft.rs` (285 lines) — `RaftConfig`, `BatchConfig`
   - `config/resilience.rs` (611 lines) — `RateLimitConfig`, `ShutdownConfig`, `HealthCheckConfig`, `ValidationConfig`
-  - `config/observability.rs` (375 lines) — `HotKeyConfig`, `AuditConfig`, `MetricsCardinalityConfig`
-  - `config/runtime.rs` (333 lines) — `RuntimeConfig`, `ConfigChange`, `NonReconfigurableField`, `OrganizationQuota`
+  - `config/observability.rs` — `HotKeyConfig`, `MetricsCardinalityConfig` (note: `AuditConfig` previously here was removed — replaced by `EventConfig` in `events.rs`)
+  - `config/runtime.rs` (333 lines) — `RuntimeConfig`, `RuntimeEventsConfig`, `ConfigChange`, `NonReconfigurableField`, `OrganizationQuota`
 - **Key Types/Functions**:
   - 19 config structs across submodules (was monolithic, now organized by subsystem)
   - All use `#[bon::bon]` fallible builders with validation
@@ -151,6 +141,21 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `validate_transaction_size()`: Enforces request size limits (default 1MB)
   - Character sets: alphanumeric + hyphen/underscore for names, UTF-8 for values
 - **Insights**: Defense-in-depth security. Prevents injection attacks, DoS via large requests. Configurable limits support different deployment environments.
+
+#### `events.rs` (~1205 lines)
+
+- **Purpose**: Core domain types for the organization-scoped event logging system
+- **Key Types/Functions**:
+  - `EventEntry`: Canonical audit record with ~20 fields (`expires_at` first for GC efficiency, `event_id`, `source_service`, `event_type`, `timestamp`, `scope`, `action`, `emission`, `principal`, `organization_id`, `organization_slug`, `vault_slug`, `outcome`, `details`, `block_height`, `trace_id`, `correlation_id`, `operations_count`)
+  - `EventMeta`: Thin GC wrapper — postcard deserializes only `expires_at` (first field) to check expiry without full deserialization
+  - `EventScope`: `System` (org_id=0) or `Organization` — compile-time mapped from `EventAction`
+  - `EventAction`: 26 variants (15 system, 11 org) with exhaustive `scope()`, `event_type()`, `as_str()` — adding a variant without updating all three is a compile error
+  - `EventEmission`: `ApplyPhase` (deterministic, all replicas) or `HandlerPhase { node_id }` (node-local)
+  - `EventOutcome`: `Success`, `Failed { code, detail }`, `Denied { reason }`
+  - `EventConfig`: Master config with `enabled`, `default_ttl_days` (90), `max_details_size_bytes` (4096), `system_log_enabled`, `organization_log_enabled`, `max_snapshot_events` (100,000), `ingestion: IngestionConfig`
+  - `IngestionConfig`: External ingestion config — `ingest_enabled`, `allowed_sources` (default: `["engine", "control"]`), `max_ingest_batch_size` (500), `ingest_rate_limit_per_source` (10,000/sec)
+  - 40+ unit tests covering all enum variants, scope mapping, serialization round-trips, config validation
+- **Insights**: Replaces the deleted `audit.rs`. Events use the canonical log line pattern (wide events) with rich structured context. `EventAction::scope()` enforces no-dual-write at the type level. `expires_at` as first field enables thin postcard deserialization for GC. `source_service` is `String` (not `&'static str`) for postcard round-trip compatibility with external services (Engine, Control).
 
 ---
 
@@ -343,8 +348,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports public API (StateLayer, Entity/Relationship stores, ShardManager)
 - **Key Types/Functions**:
-  - Modules: `block_archive`, `bucket`, `engine`, `entity`, `indexes`, `keys`, `relationship`, `shard`, `snapshot`, `state`, `tiered_storage`, `time_travel`, `system`
-- **Insights**: Rich feature set: snapshots, time travel, tiered storage, multi-shard, saga-based cross-shard transactions. Total crate: 9,442 lines.
+  - Modules: `block_archive`, `bucket`, `engine`, `entity`, `events`, `events_keys`, `indexes`, `keys`, `relationship`, `shard`, `snapshot`, `state`, `tiered_storage`, `time_travel`, `system`
+  - Re-exports from `events`: `EventStore`, `EventsDatabase`, `EventsDatabaseError`, `EventStoreError`
+  - Re-exports from `events_keys`: `encode_event_key`
+- **Insights**: Rich feature set: snapshots, time travel, tiered storage, multi-shard, saga-based cross-shard transactions, and dedicated events storage.
 
 #### `engine.rs` (118 lines)
 
@@ -365,6 +372,35 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `get_entity()`, `relationship_exists()`, `list_entities()`, `list_relationships()`: Read queries
   - `clear_vault()`, `compact_tables()`, `list_subjects()`, `list_resources_for_subject()`: Management operations
 - **Insights**: Bucket hashing enables incremental updates (only recompute dirty buckets). State root is deterministic and verifiable. 1 proptest validates determinism across independent instances.
+
+#### `events.rs` (~947 lines)
+
+- **Purpose**: Events B+ tree table, EventStore operations, and EventsDatabase managed wrapper for `events.db`
+- **Key Types/Functions**:
+  - `Events` table: Uses `TableId::Entities` (value 0) — safe because `events.db` is a separate `Database` instance from `state.db`
+  - `EventStore`: Stateless struct with methods taking transaction references:
+    - `write(txn, entry)`: Serialize via postcard, insert with composite key
+    - `get(txn, org_id, timestamp_ns, event_id)`: Point lookup
+    - `list(txn, org_id, start_ns, end_ns, limit, after_key)` → `(Vec<EventEntry>, Option<Vec<u8>>)`: Cursor-based pagination with time-range scan
+    - `delete_expired(read_txn, write_txn, now_unix, max_batch)`: Thin `EventMeta` deserialization for GC efficiency
+    - `count(txn, org_id)`: Prefix scan count
+    - `scan_apply_phase(txn, max_entries)`: For Raft snapshots — returns most-recent N apply-phase events, newest-first
+  - `EventsDatabase<B>`: Wraps `Arc<Database<B>>`. Opens/creates `{data_dir}/events.db`. Manual `Clone` impl shares the `Arc`.
+  - `EventsDatabaseError`: snafu error with `Open { path, source }` variant
+- **Insights**: Separate `events.db` file avoids write lock contention with `state.db` (independent `Mutex`). `delete_expired` uses collect-then-delete pattern with separate read/write transactions. `scan_apply_phase` filters by `EventEmission::ApplyPhase` for snapshot inclusion.
+
+#### `events_keys.rs` (~198 lines)
+
+- **Purpose**: 24-byte composite B+ tree key encoding for efficient per-organization time-range scans
+- **Key Types/Functions**:
+  - Key layout: `[org_id (8 BE) | timestamp_ns (8 BE) | seahash(event_id) (8 BE)]`
+  - `encode_event_key(org_id, timestamp_ns, event_id) -> Vec<u8>`: Encode composite key
+  - `decode_event_key(key) -> Option<DecodedEventKey>`: Decode back to components
+  - `org_prefix(org_id) -> [u8; 8]`: Prefix for scanning all events in an organization
+  - `org_time_prefix(org_id, timestamp_ns) -> [u8; 16]`: Prefix for time-bounded scans within an org
+  - `increment_key(key) -> Vec<u8>`: Big-endian byte increment for cursor-based pagination (skip cursor entry on resume)
+  - 10 unit tests
+- **Insights**: Big-endian encoding ensures lexicographic ordering matches chronological ordering. 8-byte seahash of event_id provides uniqueness without storing the full 16-byte UUID in the key.
 
 #### `entity.rs` (625 lines)
 
@@ -546,26 +582,30 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Re-exports: `ledger.v1` module with all message types
 - **Insights**: Custom cfg flag (not a feature flag) set by build.rs controls compilation mode.
 
-#### `convert.rs` (1114 lines)
+#### `convert.rs` (~1400 lines)
 
 - **Purpose**: From/TryFrom trait implementations for domain↔proto conversions
 - **Key Types/Functions**:
   - `impl From<types::Entity> for proto::Entity`: Infallible domain→proto
   - `impl TryFrom<proto::Entity> for types::Entity`: Fallible proto→domain (validation)
   - `vault_entry_to_proto_block()`: Accepts explicit `VaultSlug` parameter (not derived from internal `VaultId`)
-  - Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, etc.
-  - 43 unit tests + 4 proptests validating round-trip conversions
-- **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Comprehensive test coverage prevents serialization bugs.
+  - Events conversions: `From<EventScope>`, `From<&EventOutcome>`, `From<&EventEmission>`, `From<&EventEntry>` (both directions), `TryFrom<proto::EventEntry>` for domain `EventEntry`, datetime↔Timestamp helpers
+  - `impl std::str::FromStr for EventAction`: Iterates `EventAction::ALL` array, matches via `as_str()`
+  - Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, EventEntry, etc.
+  - 58+ unit tests + 5 proptests validating round-trip conversions (including events)
+- **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums (`EventOutcome::Failed { code, detail }`) into separate proto fields (outcome enum + optional error_code + error_detail). Comprehensive test coverage prevents serialization bugs.
 
 #### `generated/ledger.v1.rs` (6914 lines)
 
 - **Purpose**: prost-generated Rust code from proto definitions
 - **Key Types/Functions**:
   - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, VaultSlug, etc.
-  - Service traits: ReadService, WriteService, AdminService, HealthService, DiscoveryService, RaftService
+  - Service traits: ReadService, WriteService, AdminService, EventsService, HealthService, DiscoveryService, RaftService
+  - EventsService RPCs: `ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`
+  - Events messages: `EventEntry`, `EventFilter`, `ListEventsRequest/Response`, `GetEventRequest/Response`, `CountEventsRequest/Response`, `IngestEventEntry`, `IngestEventsRequest/Response`, `RejectedEvent`
+  - Events enums: `EventScope`, `EventOutcome`, `EventEmissionPath`
   - Proto `VaultSlug { uint64 slug }` replaces former `VaultId { int64 id }` in all external-facing RPCs
-  - 258 struct/enum types, 159 functions
-- **Insights**: Large generated file. Regular updates needed when .proto changes. Consider splitting .proto into smaller files if this grows further.
+- **Insights**: Large generated file. Regular updates needed when .proto changes. EventsService is the newest addition (4 RPCs).
 
 ---
 
@@ -581,9 +621,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Public API surface (2 stable modules: `metrics`, `trace_context`; remaining modules are `#[doc(hidden)]`)
 - **Key Types/Functions**:
-  - Re-exports: `LedgerServer`, `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, etc.
+  - Re-exports: `LedgerServer`, `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `EventsGarbageCollector`, etc.
   - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`)
-  - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure
+  - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`)
 - **Insights**: Phase 2 Task 2 cleaned up public API. 2 stable modules + many doc-hidden modules. Excellent encapsulation.
 
 #### `log_storage/` (6135 lines across 6 submodules)
@@ -591,11 +631,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: openraft LogStore and StateMachine implementation, log storage, snapshot building
 - **Structure**:
   - `log_storage/mod.rs` (4061 lines) — Metadata constants, `ShardChainState`, re-exports, test suite
-  - `log_storage/types.rs` (293 lines) — `AppliedState`, `CombinedSnapshot`, `OrganizationMeta`, `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations (`slug_index`, `id_to_slug`) and vaults (`vault_slug_index`, `vault_id_to_slug`). `VaultMeta` includes `slug: VaultSlug` for denormalized access.
+  - `log_storage/types.rs` (293 lines) — `AppliedState`, `CombinedSnapshot` (includes `event_entries: Vec<EventEntry>` with `#[serde(default)]`), `OrganizationMeta`, `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations (`slug_index`, `id_to_slug`) and vaults (`vault_slug_index`, `vault_id_to_slug`). `VaultMeta` includes `slug: VaultSlug` for denormalized access.
   - `log_storage/accessor.rs` (201 lines) — `AppliedStateAccessor` (19 pub query methods including org slug resolution `resolve_slug_to_id`/`resolve_id_to_slug` and vault slug resolution `resolve_vault_slug_to_id`/`resolve_vault_id_to_slug`)
-  - `log_storage/store.rs` (250 lines) — `RaftLogStore` struct definition, creation/config/accessor methods
-  - `log_storage/operations.rs` (737 lines) — `apply_request()` state machine dispatch logic
-  - `log_storage/raft_impl.rs` (646 lines) — `RaftLogReader`, `RaftSnapshotBuilder`, `RaftStorage` trait impls, error conversion helpers
+  - `log_storage/store.rs` (250 lines) — `RaftLogStore` struct definition, creation/config/accessor methods, optional `event_writer: Option<EventWriter<B>>` with `with_event_writer()` setter
+  - `log_storage/operations.rs` (737 lines) — `apply_request()` and `apply_request_with_events()` state machine dispatch logic. Events variant emits `EventEntry` for all 14 request variants via `ApplyPhaseEmitter`
+  - `log_storage/raft_impl.rs` (646 lines) — `RaftLogReader`, `RaftSnapshotBuilder`, `RaftStorage` trait impls, error conversion helpers. `apply_to_state_machine` accumulates events and writes best-effort after state persist. `get_current_snapshot` includes apply-phase events via `EventStore::scan_apply_phase`. `install_snapshot` restores events to local `events.db`.
 - **Key Types/Functions**:
   - `RaftLogStore`: Implements openraft's `RaftStorage` trait (combined log + state machine)
   - `AppliedState`: State machine with vault heights, organizations, sequences
@@ -610,8 +650,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `LedgerServer::builder()`: bon-based builder with 20+ config options
   - `serve(addr) -> Result<()>`: Start gRPC server with all services
   - `serve_with_shutdown(addr, shutdown_signal) -> Result<()>`: Graceful shutdown support
-  - Integrates: Raft node, all services, metrics, tracing, audit logging, health checks
-- **Insights**: Central wiring point. Excellent builder pattern. Supports graceful shutdown with connection draining.
+  - Optional `events_db: Option<EventsDatabase<FileBackend>>` for EventsService registration
+  - Optional `event_handle: Option<EventHandle<FileBackend>>` for handler-phase event recording in services
+  - Integrates: Raft node, all services, metrics, tracing, event logging, health checks
+- **Insights**: Central wiring point. Excellent builder pattern. Supports graceful shutdown with connection draining. When `events_db` is present, `EventsServiceServer` is registered on the router with `api_version_interceptor`.
 
 #### `types.rs`
 
@@ -635,7 +677,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `is_leadership_error(msg: &str) -> bool`: Detects leadership errors for UNAVAILABLE
 - **Insights**: Comprehensive error classification across multiple domains. Clients can retry UNAVAILABLE (leadership change), not FAILED_PRECONDITION.
 
-### Service Layer (14 files)
+### Service Layer (15 files)
 
 #### `services/admin.rs` (2906 lines)
 
@@ -645,8 +687,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `create_vault()`, `delete_vault()`, `list_vaults()`
   - `update_config()`, `get_config()`: Runtime reconfiguration RPCs
   - `create_backup()`, `list_backups()`, `restore_backup()`: Backup/restore RPCs
-  - Audit logging for all mutations
-- **Insights**: Largest service file — includes admin CRUD, runtime config, backup management, and comprehensive tests. Audit logging for compliance.
+  - `event_handle: Option<EventHandle<B>>` for handler-phase events (ConfigurationChanged, SnapshotCreated, BackupCreated, BackupRestored, IntegrityChecked, VaultRecovered, quota denial)
+- **Insights**: Largest service file — includes admin CRUD, runtime config, backup management, and comprehensive tests. Handler-phase events replace the former `AuditLogger`.
 
 #### `services/write.rs` (1503 lines)
 
@@ -655,6 +697,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `write()`, `batch_write()`: Entity/relationship mutations
   - `create_relationship()`, `delete_relationship()`: Authorization tuple mutations
   - Rate limiting, hot key detection, validation, quota enforcement
+  - `event_handle: Option<EventHandle<B>>` for handler-phase denial events (rate limit, validation, quota)
   - Error classification via `classify_batch_error()`
 - **Insights**: Core data path. Rate limiting + hot key detection protect cluster. Batch writes go through BatchWriter. Includes extensive inline tests.
 
@@ -677,14 +720,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - DependencyHealthChecker: disk writability, Raft lag, peer reachability
 - **Insights**: Three-probe pattern for Kubernetes. Readiness gates traffic, liveness triggers restart, startup delays initial traffic.
 
-#### `services/helpers.rs` (518 lines)
+#### `services/helpers.rs`
 
 - **Purpose**: Shared service utilities (rate limiting, validation, metadata extraction)
 - **Key Types/Functions**:
   - `check_rate_limit()`: Rate limit check with rich ErrorDetails
   - `validation_status()`: Wraps validation errors with gRPC status
   - `extract_organization_from_request()`: Common metadata extraction
-- **Insights**: Phase 2 Task 1 extracted shared code from write/multi-shard/admin services. Reduces duplication.
+- **Insights**: Phase 2 Task 1 extracted shared code from write/multi-shard/admin services. Former `emit_audit_event()` and `build_audit_event()` helpers removed (replaced by `EventHandle::record_handler_event()`).
 
 #### `services/metadata.rs` (219 lines)
 
@@ -702,7 +745,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `services/forward_client.rs`: Leader forwarding
 - `services/multi_shard_read.rs`: Multi-shard read coordination
 - `services/multi_shard_write.rs`: Multi-shard write coordination (2PC + saga)
-- `services/slug_resolver.rs` (280 lines): Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. 33 unit tests (14 org + 19 vault).
+- `services/events.rs` (~1785 lines): `EventsServiceImpl` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. 30+ unit tests.
+- `services/slug_resolver.rs` (280 lines): Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). 37 unit tests (14 org + 19 vault + 4 events).
 - `services/shard_resolver.rs`: Organization→shard routing
 - `services/error_details.rs`: ErrorDetails proto builder
 
@@ -711,11 +755,12 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 #### Core Features
 
 - `batching.rs`: BatchWriter with request coalescing
+- `event_writer.rs` (~1317 lines): Event write infrastructure. `EventWriter<B>` (scope-filtered batch writes to events.db), `ApplyPhaseEmitter` (deterministic UUID v5 builder for apply-phase events), `HandlerPhaseEmitter` (UUID v4 builder for node-local events), `EventHandle<B>` (Arc-shared, cheaply cloneable, best-effort `record_handler_event()`), `IngestionRateLimiter` (per-source token bucket with `AtomicU64` for runtime-updatable rate). 25+ unit tests including 10k stress test.
 - `idempotency.rs`: TTL-based deduplication cache
-- `pagination.rs`: HMAC-signed page tokens
+- `pagination.rs`: HMAC-signed page tokens. Includes `EventPageToken` (version, organization_id, last_key, query_hash) with encode/decode/validate methods on `PageTokenCodec`.
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
-- `metrics.rs`: Prometheus metrics with SLI histograms
+- `metrics.rs`: Prometheus metrics with SLI histograms. Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries*deleted, cycle_duration, cycles), `ledger_events_ingest*\*` (total, batch_size, rate_limited, duration).
 - `otel.rs` (580 lines): OpenTelemetry tracing setup and OTLP exporter configuration. `SpanAttributes` uses `vault_slug` key.
 
 #### Enterprise Features
@@ -727,13 +772,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `api_version.rs`: API version negotiation
 - `deadline.rs`: Request deadline propagation
 - `dependency_health.rs`: Disk/Raft/peer health checks
-- `audit.rs`: File-based audit logging (JSON Lines)
 - `quota.rs`: Per-organization resource quotas
 
 #### Background Jobs
 
 - `block_compaction.rs`: Block archive compaction
 - `btree_compaction.rs`: B+ tree compaction
+- `events_gc.rs` (~376 lines): `EventsGarbageCollector<B>` — TTL-based event expiry background task. Runs on all nodes (not leader-only) since `events.db` is node-local. Default interval 300s, max batch 5,000. Uses thin `EventMeta` deserialization for GC efficiency. Watchdog heartbeat integration. 7 unit tests.
 - `resource_metrics.rs`: Resource saturation metrics
 - `ttl_gc.rs`: Time-to-live garbage collection
 - `integrity_scrubber.rs`: CRC verification
@@ -744,14 +789,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 #### Advanced Features
 
 - `multi_raft.rs`: Multi-Raft orchestration
-- `multi_shard_server.rs`: Multi-shard LedgerServer
+- `multi_shard_server.rs`: Multi-shard LedgerServer (with optional `events_db` for EventsService registration)
 - `raft_network.rs`: gRPC-based Raft transport
 - `proto_compat.rs`: Orphan rule workarounds
 - `trace_context.rs`: W3C Trace Context
 - `logging.rs`: Canonical log lines (vault_slug field, `set_target(organization, vault_slug)`)
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `shard_router.rs`: Dynamic shard routing
-- `saga_orchestrator.rs`: Distributed transaction orchestration
+- `saga_orchestrator.rs`: Distributed transaction orchestration (with optional `event_handle` for UserDeleted handler-phase events)
 - `vip_cache.rs` (524 lines): VIP organization cache with static + dynamic discovery, `u64` organization slugs
 - `cardinality.rs`: HyperLogLog for metrics
 - `file_lock.rs`: Data directory locking
@@ -769,22 +814,26 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `lib.rs`
 
-- **Purpose**: Re-exports public API (LedgerClient, ClientConfig, builders, error types)
+- **Purpose**: Re-exports public API (LedgerClient, ClientConfig, builders, error types, events types)
 - **Key Types/Functions**:
   - Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `tracing`, `builders`, `server`, `idempotency`, `mock`
-- **Insights**: Comprehensive SDK. All features needed for production use.
+  - Events re-exports: `EventEmissionPath`, `EventFilter`, `EventOutcome`, `EventPage`, `EventScope`, `IngestRejection`, `IngestResult`, `SdkEventEntry`, `SdkIngestEventEntry`
+- **Insights**: Comprehensive SDK. All features needed for production use, including events query and ingestion.
 
 #### `client.rs` (6688 lines)
 
-- **Purpose**: LedgerClient with 36 public methods, retry, cancellation, metrics, and comprehensive tests
+- **Purpose**: LedgerClient with 40+ public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
   - `LedgerClient::new(config) -> Result<Self>`: Create client
   - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation) — all accept `vault_slug: u64`
   - Relationship ops: `check_permission()`, `create_relationship()`, `delete_relationship()`
   - Admin ops: `create_organization()`, `create_vault()` (returns `VaultInfo` with `vault_slug: u64`), `list_vaults()`
+  - Events ops: `list_events(org_slug, filter, limit)` → `EventPage`, `list_events_next(org_slug, page_token)`, `get_event(org_slug, event_id)`, `count_events(org_slug, filter)`, `ingest_events(org_slug, source_service, events)` → `IngestResult`
+  - Events types: `EventScope`, `EventOutcome`, `EventEmissionPath` enums, `SdkEventEntry`, `EventPage` (with `has_next_page()`), `EventFilter` (builder with chainable filters: `start_time`, `end_time`, `actions`, `event_type_prefix`, `principal`, `outcome_*`, `*_phase_only`, `correlation_id`), `SdkIngestEventEntry` (builder with `detail`, `details`, `trace_id`, `correlation_id`, `vault_slug`, `timestamp`), `IngestResult`, `IngestRejection`
   - All methods use `with_retry_cancellable()` for retry + cancellation
   - `with_metrics()` wrapper for user-perceived latency
-- **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency.
+  - 22 events unit tests
+- **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency. Events SDK uses `from_proto`/`into_proto` associated functions (not From trait impls).
 
 #### `config.rs` (1157 lines)
 
@@ -930,21 +979,22 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Subcommands: `start`, `export-schema`, `config-diff` (Phase 2 Task 14)
 - **Insights**: Clean CLI. Supports TOML config file + env var overrides. Subcommands for schema export and config diff.
 
-#### `bootstrap.rs` (633 lines)
+#### `bootstrap.rs`
 
-- **Purpose**: Node bootstrap, lifecycle management, background job spawning
+- **Purpose**: Node bootstrap, lifecycle management, background job spawning, events system wiring
 - **Key Types/Functions**:
   - `bootstrap_node(config) -> Result<BootstrappedNode>`: Initialize node
-  - `BootstrappedNode`: Handle to running node (server, Raft, 6 tracked background job handles)
-  - Background job handles: `gc_handle`, `compactor_handle`, `recovery_handle`, `learner_refresh_handle`, `resource_metrics_handle`, `backup_handle` (optional)
+  - `BootstrappedNode`: Handle to running node (server, Raft, 7 tracked background job handles)
+  - Background job handles: `gc_handle`, `compactor_handle`, `recovery_handle`, `learner_refresh_handle`, `resource_metrics_handle`, `backup_handle` (optional), `events_gc_handle` (optional)
+  - Events wiring: Opens `EventsDatabase` (`{data_dir}/events.db`), creates `EventWriter` and injects into `RaftLogStore` via `.with_event_writer()`, creates `EventHandle` (Arc-shared) for gRPC services, starts `EventsGarbageCollector` when `config.events.enabled`, passes `events_db` and `event_handle` to `LedgerServer`
   - Graceful shutdown: 6 phases (health drain, Raft snapshot, job stop, Raft shutdown, connection drain, service stop)
-- **Insights**: Central orchestration point. Spawns background jobs and holds `JoinHandle`s to keep them alive. `#[allow(dead_code)]` on handles — they're kept for Arc reference counting, not polled.
+- **Insights**: Central orchestration point. Spawns background jobs and holds `JoinHandle`s to keep them alive. Events GC runs on all nodes (not leader-only) since `events.db` is node-local.
 
 #### `config.rs` (1863 lines)
 
 - **Purpose**: ServerConfig with all subsystem configs, SIGHUP reload support, and comprehensive tests
 - **Key Types/Functions**:
-  - `ServerConfig`: Root config (raft, storage, batch, rate_limit, validation, tls, otel, audit, etc.)
+  - `ServerConfig`: Root config (raft, storage, batch, rate_limit, validation, tls, otel, events, etc.)
   - `load_config(path) -> Result<ServerConfig>`: Load from TOML file
   - `reload_config(path, handle) -> Result<()>`: Hot-reload via SIGHUP (PRD Task 10)
   - Env var overrides: `INFERADB__LEDGER__<FIELD>` convention
@@ -1080,15 +1130,16 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `strategies.rs` (371 lines)
 
-- **Purpose**: 24 proptest strategy generators for all domain types
+- **Purpose**: 28+ proptest strategy generators for all domain types
 - **Key Types/Functions** (all `pub fn arb_*() -> impl Strategy<Value = T>`):
   - Primitives: `arb_key()`, `arb_value()`, `arb_small_value()`, `arb_hash()`, `arb_tx_id()`, `arb_timestamp()`
   - IDs: `arb_organization_id()`, `arb_organization_slug()`, `arb_vault_id()`, `arb_vault_slug()`, `arb_shard_id()`
   - Relationship components: `arb_resource()`, `arb_relation()`, `arb_subject()`
   - Domain types: `arb_entity()`, `arb_relationship()`, `arb_set_condition()`, `arb_operation()`, `arb_operation_sequence()`
   - Blocks: `arb_transaction()`, `arb_block_header()`, `arb_vault_block()`, `arb_vault_entry()`, `arb_shard_block()`, `arb_chain_commitment()`
-  - 4 proptest functions validate strategy output well-formedness
-- **Insights**: Composable strategy functions (not `Arbitrary` derives) — complex types compose from simpler ones (e.g., `arb_transaction` uses `arb_tx_id`, `arb_operation_sequence`, `arb_timestamp`). 30+ proptests across 4 crates use these strategies.
+  - Events: `arb_event_entry()` (with supporting strategies for scope, action, outcome, emission)
+  - 8 proptest functions validate strategy output well-formedness
+- **Insights**: Composable strategy functions (not `Arbitrary` derives) — complex types compose from simpler ones (e.g., `arb_transaction` uses `arb_tx_id`, `arb_operation_sequence`, `arb_timestamp`). 30+ proptests across multiple crates use these strategies.
 
 #### `test_dir.rs` (61 lines)
 
@@ -1144,7 +1195,7 @@ The codebase follows excellent security practices:
 - **Constant-time comparison**: `Sha256Hash` uses constant-time comparison to prevent timing attacks.
 - **Input validation**: `validation.rs` enforces character whitelists and size limits to prevent injection attacks and DoS.
 - **No `.unwrap()`**: All error handling via snafu `.context()`. No panics in production code.
-- **Audit logging**: SOC2/HIPAA audit logging framework with `AuditEvent`/`AuditLogger`. Tracks all mutations.
+- **Event logging**: Organization-scoped event logging system with queryable audit trails via gRPC `EventsService`. Tracks all mutations, denials, and admin operations. Two emission paths: apply-phase (deterministic, replicated) and handler-phase (node-local, best-effort). TTL-based retention with automatic garbage collection.
 - **TLS support**: Client and server support TLS with optional mTLS (client certificates).
 - **Rate limiting**: 3-tier token bucket rate limiter (client/organization/backpressure) prevents abuse.
 - **Quota enforcement**: Per-organization resource quotas (vault count, storage size, request rate) prevent resource exhaustion.
@@ -1158,7 +1209,7 @@ The codebase has comprehensive observability:
 - **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, organization_slug, vault_slug, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
 - **Structured logging**: Request-level structured logging with tracing crate. Context propagation via spans.
 - **SDK metrics**: Client-side metrics (request latency, retries, circuit state, connection pool) via `SdkMetrics` trait. Noop default for zero overhead.
-- **Audit logging**: File-based audit logger (JSON Lines) with fsync for durability. Prometheus metrics for audit events.
+- **Event logging**: Persistent event system with `EventsService` gRPC API (4 RPCs: ListEvents, GetEvent, CountEvents, IngestEvents). Dual-path emission (apply-phase deterministic + handler-phase node-local). Prometheus metrics for event writes, GC cycles, and ingestion. Events are organization-scoped with configurable TTL and automatic GC. Supports external service ingestion (Engine, Control) via `IngestEvents` RPC with per-source rate limiting.
 
 ### 6. Enterprise Features
 
@@ -1179,6 +1230,7 @@ The codebase includes 40+ production-ready features:
 - **Multi-shard**: Horizontal scaling via multiple Raft groups. Cross-shard queries and transactions via saga pattern.
 - **Resource quotas**: Per-organization limits (vault count, storage size, request rate). 3-tier resolution (organization → tier → global).
 - **B+ tree compaction**: Merge underfull leaves, reclaim dead space. Background job with configurable interval.
+- **Event logging**: Organization-scoped audit trails in dedicated `events.db`. Apply-phase (deterministic) and handler-phase (node-local) emission. GC with TTL. EventsService for queries. IngestEvents for cross-service audit aggregation.
 - **And 25+ more features**...
 
 ### 7. Documentation Quality
@@ -1189,7 +1241,10 @@ The codebase has excellent documentation:
 - **Invariant docs**: `docs/specs/invariants.md` documents critical system invariants.
 - **Module docs**: All crates have module-level documentation with examples.
 - **rustdoc examples**: Many public functions have ` ```no_run ` examples (cargo test skips execution, cargo doc validates syntax).
-- **Operations docs**: `docs/operations/` has 18 .md files covering alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, logging, metrics reference, multi-region, organization metrics, production deployment tutorial, security, shard management, SLO, troubleshooting, vault repair, and a README.
+- **Architecture docs**: `docs/architecture/audit-protocol.md` documents the centralized audit architecture and shared event protocol for all InferaDB services.
+- **Development docs**: `docs/development/events.md` — SDK usage guide for events client methods, EventFilter builder, query patterns, ingestion guide, adding new event types
+- **Operations docs**: `docs/operations/` has 19 .md files covering alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, events, logging, metrics reference, multi-region, organization metrics, production deployment tutorial, security, shard management, SLO, troubleshooting, vault repair, and a README. Includes `events.md` with full EventConfig reference, event catalog (15 system + 11 org events), Prometheus metrics, and troubleshooting.
+- **Grafana dashboards**: `docs/operations/dashboards/grafana-events-v1.json` — 11-panel Grafana dashboard for event monitoring (write rates, emission paths, denial tracking, GC health)
 - **Client docs**: `docs/client/` has 7 guides (admin, API, discovery, errors, health, idempotency, SDK).
 - **Error codes**: `docs/errors.md` documents all 29 error codes with descriptions, causes, and suggested actions.
 
@@ -1219,10 +1274,10 @@ InferaDB Ledger is a **production-grade blockchain database** with exceptional e
 - **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
 - **Raft consensus** via openraft, batching, idempotency, multi-shard horizontal scaling
-- **Enterprise features**: graceful shutdown, circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, time travel, tiered storage, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, audit logging, and 30+ more
-- **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics
+- **Enterprise features**: graceful shutdown, circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, time travel, tiered storage, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, and 30+ more
+- **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
 - **Comprehensive testing**: 1,671 test functions, property-based tests (proptest), crash recovery tests, chaos tests, 18 integration test files, benchmarks with CI tracking
-- **Security practices**: No unsafe, constant-time comparison, input validation, audit logging, TLS/mTLS, rate limiting, quotas
-- **Documentation**: 10 ADRs, invariant specs, module docs, rustdoc examples, 18 operations guides, 7 client guides, error code reference
+- **Security practices**: No unsafe, constant-time comparison, input validation, event logging with audit trails, TLS/mTLS, rate limiting, quotas
+- **Documentation**: 10 ADRs, invariant specs, module docs, rustdoc examples, 19 operations guides, 7 client guides, error code reference, events architecture doc, Grafana dashboard templates
 
 Overall assessment: **★★★★★ Exemplary codebase** ready for production deployment.

@@ -1478,6 +1478,243 @@ pub struct ClusterMember {
     #[prost(bool, tag = "4")]
     pub is_leader: bool,
 }
+/// Structured audit event record.
+///
+/// Follows the canonical log line ("wide event") pattern — a single structured
+/// record with rich contextual fields. Queryable via ListEvents.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EventEntry {
+    /// Unique event identifier (UUID, 16 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub event_id: ::prost::alloc::vec::Vec<u8>,
+    /// Originating service ("ledger", "engine", or "control").
+    #[prost(string, tag = "2")]
+    pub source_service: ::prost::alloc::string::String,
+    /// Hierarchical dot-separated type (e.g., "ledger.vault.created").
+    #[prost(string, tag = "3")]
+    pub event_type: ::prost::alloc::string::String,
+    /// Block timestamp (apply-phase) or wall clock (handler-phase).
+    #[prost(message, optional, tag = "4")]
+    pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
+    /// System or organization scope.
+    #[prost(enumeration = "EventScope", tag = "5")]
+    pub scope: i32,
+    /// What happened (snake_case action name, e.g., "vault_created").
+    #[prost(string, tag = "6")]
+    pub action: ::prost::alloc::string::String,
+    /// Consistency model of this event.
+    #[prost(enumeration = "EventEmissionPath", tag = "7")]
+    pub emission_path: i32,
+    /// Who performed the action (server-assigned actor).
+    #[prost(string, tag = "8")]
+    pub principal: ::prost::alloc::string::String,
+    /// Owning organization (slug = 0 for system events).
+    #[prost(message, optional, tag = "9")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Vault context (when applicable).
+    #[prost(message, optional, tag = "10")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    /// Success, failure, or denial.
+    #[prost(enumeration = "EventOutcome", tag = "11")]
+    pub outcome: i32,
+    /// Error code (present when outcome = FAILED).
+    #[prost(string, optional, tag = "12")]
+    pub error_code: ::core::option::Option<::prost::alloc::string::String>,
+    /// Error description (present when outcome = FAILED).
+    #[prost(string, optional, tag = "13")]
+    pub error_detail: ::core::option::Option<::prost::alloc::string::String>,
+    /// Denial reason (present when outcome = DENIED).
+    #[prost(string, optional, tag = "14")]
+    pub denial_reason: ::core::option::Option<::prost::alloc::string::String>,
+    /// Action-specific key-value context.
+    #[prost(map = "string, string", tag = "15")]
+    pub details: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    /// Reference to blockchain block (for committed writes).
+    #[prost(uint64, optional, tag = "16")]
+    pub block_height: ::core::option::Option<u64>,
+    /// Node that generated this event (present for handler-phase events).
+    #[prost(uint64, optional, tag = "17")]
+    pub node_id: ::core::option::Option<u64>,
+    /// Distributed tracing correlation (W3C Trace Context).
+    #[prost(string, optional, tag = "18")]
+    pub trace_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Business-level correlation for multi-step operations.
+    #[prost(string, optional, tag = "19")]
+    pub correlation_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Number of operations (for write actions).
+    #[prost(uint32, optional, tag = "20")]
+    pub operations_count: ::core::option::Option<u32>,
+    /// Unix timestamp for TTL expiry (0 = no expiry).
+    #[prost(uint64, tag = "21")]
+    pub expires_at: u64,
+}
+/// Filter criteria for event queries.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EventFilter {
+    /// Start of time range (inclusive). Omit for unbounded start.
+    #[prost(message, optional, tag = "1")]
+    pub start_time: ::core::option::Option<::prost_types::Timestamp>,
+    /// End of time range (exclusive). Omit for unbounded end.
+    #[prost(message, optional, tag = "2")]
+    pub end_time: ::core::option::Option<::prost_types::Timestamp>,
+    /// Filter by action names (snake_case). Empty = all actions.
+    #[prost(string, repeated, tag = "3")]
+    pub actions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Filter by event type prefix (e.g., "ledger.vault" matches "ledger.vault.created").
+    /// Case-sensitive starts_with matching. Empty = all types.
+    #[prost(string, optional, tag = "4")]
+    pub event_type_prefix: ::core::option::Option<::prost::alloc::string::String>,
+    /// Filter by principal. Empty = all principals.
+    #[prost(string, optional, tag = "5")]
+    pub principal: ::core::option::Option<::prost::alloc::string::String>,
+    /// Filter by outcome. UNSPECIFIED = all outcomes.
+    #[prost(enumeration = "EventOutcome", tag = "6")]
+    pub outcome: i32,
+    /// Filter by emission path. UNSPECIFIED = all paths.
+    #[prost(enumeration = "EventEmissionPath", tag = "7")]
+    pub emission_path: i32,
+    /// Filter by business correlation ID.
+    #[prost(string, optional, tag = "8")]
+    pub correlation_id: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// List events for an organization with filtering and pagination.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListEventsRequest {
+    /// Organization to query (slug = 0 for system events).
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Optional filter criteria.
+    #[prost(message, optional, tag = "2")]
+    pub filter: ::core::option::Option<EventFilter>,
+    /// Max results per page (0 = default, max 1000).
+    #[prost(uint32, tag = "3")]
+    pub limit: u32,
+    /// Opaque pagination cursor from previous response.
+    #[prost(string, tag = "4")]
+    pub page_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListEventsResponse {
+    /// Matching events in chronological order.
+    #[prost(message, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<EventEntry>,
+    /// Opaque cursor for next page; empty if no more results.
+    #[prost(string, tag = "2")]
+    pub next_page_token: ::prost::alloc::string::String,
+    /// Estimated total count (may be approximate for large datasets).
+    #[prost(uint64, optional, tag = "3")]
+    pub total_estimate: ::core::option::Option<u64>,
+}
+/// Get a single event by ID.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetEventRequest {
+    /// Organization that owns the event.
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Event identifier (UUID bytes).
+    #[prost(bytes = "vec", tag = "2")]
+    pub event_id: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetEventResponse {
+    /// The requested event.
+    #[prost(message, optional, tag = "1")]
+    pub entry: ::core::option::Option<EventEntry>,
+}
+/// Count events matching a filter.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CountEventsRequest {
+    /// Organization to query (slug = 0 for system events).
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Optional filter criteria.
+    #[prost(message, optional, tag = "2")]
+    pub filter: ::core::option::Option<EventFilter>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CountEventsResponse {
+    /// Number of matching events.
+    #[prost(uint64, tag = "1")]
+    pub count: u64,
+}
+/// A single event for external ingestion (from Engine or Control).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct IngestEventEntry {
+    /// Hierarchical dot-separated type (must start with source_service prefix).
+    #[prost(string, tag = "1")]
+    pub event_type: ::prost::alloc::string::String,
+    /// Who performed the action.
+    #[prost(string, tag = "2")]
+    pub principal: ::prost::alloc::string::String,
+    /// Outcome of the operation.
+    #[prost(enumeration = "EventOutcome", tag = "3")]
+    pub outcome: i32,
+    /// Action-specific key-value context.
+    #[prost(map = "string, string", tag = "4")]
+    pub details: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    /// Distributed tracing correlation.
+    #[prost(string, optional, tag = "5")]
+    pub trace_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Business-level correlation ID.
+    #[prost(string, optional, tag = "6")]
+    pub correlation_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Vault context (when applicable).
+    #[prost(message, optional, tag = "7")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    /// Event timestamp (defaults to server receive time if omitted).
+    #[prost(message, optional, tag = "8")]
+    pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
+    /// Error code (when outcome = FAILED).
+    #[prost(string, optional, tag = "9")]
+    pub error_code: ::core::option::Option<::prost::alloc::string::String>,
+    /// Error description (when outcome = FAILED).
+    #[prost(string, optional, tag = "10")]
+    pub error_detail: ::core::option::Option<::prost::alloc::string::String>,
+    /// Denial reason (when outcome = DENIED).
+    #[prost(string, optional, tag = "11")]
+    pub denial_reason: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Ingest events from an external service.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct IngestEventsRequest {
+    /// Source service identifier (validated against allow-list).
+    #[prost(string, tag = "1")]
+    pub source_service: ::prost::alloc::string::String,
+    /// Organization that owns these events.
+    #[prost(message, optional, tag = "2")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Events to ingest (max batch size enforced by server config).
+    #[prost(message, repeated, tag = "3")]
+    pub entries: ::prost::alloc::vec::Vec<IngestEventEntry>,
+}
+/// Reason an individual event was rejected during ingestion.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RejectedEvent {
+    /// Zero-based index into the request's entries array.
+    #[prost(uint32, tag = "1")]
+    pub index: u32,
+    /// Human-readable rejection reason.
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct IngestEventsResponse {
+    /// Number of events accepted and written.
+    #[prost(uint32, tag = "1")]
+    pub accepted_count: u32,
+    /// Number of events rejected.
+    #[prost(uint32, tag = "2")]
+    pub rejected_count: u32,
+    /// Per-event rejection details.
+    #[prost(message, repeated, tag = "3")]
+    pub rejections: ::prost::alloc::vec::Vec<RejectedEvent>,
+}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HealthCheckRequest {
     /// Organization for vault health check
@@ -2133,6 +2370,106 @@ impl ClusterMemberRole {
             "CLUSTER_MEMBER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
             "CLUSTER_MEMBER_ROLE_VOTER" => Some(Self::Voter),
             "CLUSTER_MEMBER_ROLE_LEARNER" => Some(Self::Learner),
+            _ => None,
+        }
+    }
+}
+/// Scope of an audit event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EventScope {
+    Unspecified = 0,
+    /// Cluster-wide administrative events (org_id = 0).
+    System = 1,
+    /// Per-organization tenant events.
+    Organization = 2,
+}
+impl EventScope {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVENT_SCOPE_UNSPECIFIED",
+            Self::System => "EVENT_SCOPE_SYSTEM",
+            Self::Organization => "EVENT_SCOPE_ORGANIZATION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVENT_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "EVENT_SCOPE_SYSTEM" => Some(Self::System),
+            "EVENT_SCOPE_ORGANIZATION" => Some(Self::Organization),
+            _ => None,
+        }
+    }
+}
+/// Outcome of an audited operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EventOutcome {
+    Unspecified = 0,
+    /// Operation completed successfully.
+    Success = 1,
+    /// Operation failed with an error.
+    Failed = 2,
+    /// Operation was denied (rate limited, unauthorized, etc.).
+    Denied = 3,
+}
+impl EventOutcome {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EVENT_OUTCOME_UNSPECIFIED",
+            Self::Success => "EVENT_OUTCOME_SUCCESS",
+            Self::Failed => "EVENT_OUTCOME_FAILED",
+            Self::Denied => "EVENT_OUTCOME_DENIED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EVENT_OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
+            "EVENT_OUTCOME_SUCCESS" => Some(Self::Success),
+            "EVENT_OUTCOME_FAILED" => Some(Self::Failed),
+            "EVENT_OUTCOME_DENIED" => Some(Self::Denied),
+            _ => None,
+        }
+    }
+}
+/// Emission path indicating the consistency model of an event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EventEmissionPath {
+    EmissionPathUnspecified = 0,
+    /// Deterministic, Raft-replicated — identical on all nodes.
+    EmissionPathApplyPhase = 1,
+    /// Node-local, best-effort — exists only on the handling node.
+    EmissionPathHandlerPhase = 2,
+}
+impl EventEmissionPath {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::EmissionPathUnspecified => "EMISSION_PATH_UNSPECIFIED",
+            Self::EmissionPathApplyPhase => "EMISSION_PATH_APPLY_PHASE",
+            Self::EmissionPathHandlerPhase => "EMISSION_PATH_HANDLER_PHASE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EMISSION_PATH_UNSPECIFIED" => Some(Self::EmissionPathUnspecified),
+            "EMISSION_PATH_APPLY_PHASE" => Some(Self::EmissionPathApplyPhase),
+            "EMISSION_PATH_HANDLER_PHASE" => Some(Self::EmissionPathHandlerPhase),
             _ => None,
         }
     }
@@ -5713,6 +6050,563 @@ pub mod admin_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "ledger.v1.AdminService";
     impl<T> tonic::server::NamedService for AdminServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod events_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Unified audit event query and ingestion API.
+    ///
+    /// Events come from three sources:
+    ///
+    /// * Ledger apply-phase (deterministic, Raft-replicated): committed writes, vault/org lifecycle
+    /// * Ledger handler-phase (node-local): denials, admin operations
+    /// * External services (Engine/Control via IngestEvents): authorization decisions, management ops
+    ///
+    /// All events share the same EventEntry format and live in the same Events table.
+    /// System events are accessible via SYSTEM_ORGANIZATION_SLUG (slug = 0).
+    #[derive(Debug, Clone)]
+    pub struct EventsServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl EventsServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> EventsServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> EventsServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            EventsServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// List events for an organization with filtering and pagination.
+        pub async fn list_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListEventsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.EventsService/ListEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.EventsService", "ListEvents"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Get a single event by ID.
+        pub async fn get_event(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetEventRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetEventResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.EventsService/GetEvent",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.EventsService", "GetEvent"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Count events matching a filter.
+        pub async fn count_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CountEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CountEventsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.EventsService/CountEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.EventsService", "CountEvents"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Ingest events from external services (Engine, Control).
+        /// Uses handler-phase semantics (node-local, no Raft).
+        pub async fn ingest_events(
+            &mut self,
+            request: impl tonic::IntoRequest<super::IngestEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::IngestEventsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.EventsService/IngestEvents",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.EventsService", "IngestEvents"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod events_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with EventsServiceServer.
+    #[async_trait]
+    pub trait EventsService: std::marker::Send + std::marker::Sync + 'static {
+        /// List events for an organization with filtering and pagination.
+        async fn list_events(
+            &self,
+            request: tonic::Request<super::ListEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListEventsResponse>,
+            tonic::Status,
+        >;
+        /// Get a single event by ID.
+        async fn get_event(
+            &self,
+            request: tonic::Request<super::GetEventRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetEventResponse>,
+            tonic::Status,
+        >;
+        /// Count events matching a filter.
+        async fn count_events(
+            &self,
+            request: tonic::Request<super::CountEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CountEventsResponse>,
+            tonic::Status,
+        >;
+        /// Ingest events from external services (Engine, Control).
+        /// Uses handler-phase semantics (node-local, no Raft).
+        async fn ingest_events(
+            &self,
+            request: tonic::Request<super::IngestEventsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::IngestEventsResponse>,
+            tonic::Status,
+        >;
+    }
+    /// Unified audit event query and ingestion API.
+    ///
+    /// Events come from three sources:
+    ///
+    /// * Ledger apply-phase (deterministic, Raft-replicated): committed writes, vault/org lifecycle
+    /// * Ledger handler-phase (node-local): denials, admin operations
+    /// * External services (Engine/Control via IngestEvents): authorization decisions, management ops
+    ///
+    /// All events share the same EventEntry format and live in the same Events table.
+    /// System events are accessible via SYSTEM_ORGANIZATION_SLUG (slug = 0).
+    #[derive(Debug)]
+    pub struct EventsServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> EventsServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for EventsServiceServer<T>
+    where
+        T: EventsService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/ledger.v1.EventsService/ListEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListEventsSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::UnaryService<super::ListEventsRequest>
+                    for ListEventsSvc<T> {
+                        type Response = super::ListEventsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::list_events(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListEventsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.EventsService/GetEvent" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetEventSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::UnaryService<super::GetEventRequest>
+                    for GetEventSvc<T> {
+                        type Response = super::GetEventResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetEventRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::get_event(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetEventSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.EventsService/CountEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct CountEventsSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::UnaryService<super::CountEventsRequest>
+                    for CountEventsSvc<T> {
+                        type Response = super::CountEventsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CountEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::count_events(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CountEventsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.EventsService/IngestEvents" => {
+                    #[allow(non_camel_case_types)]
+                    struct IngestEventsSvc<T: EventsService>(pub Arc<T>);
+                    impl<
+                        T: EventsService,
+                    > tonic::server::UnaryService<super::IngestEventsRequest>
+                    for IngestEventsSvc<T> {
+                        type Response = super::IngestEventsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::IngestEventsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as EventsService>::ingest_events(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = IngestEventsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for EventsServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "ledger.v1.EventsService";
+    impl<T> tonic::server::NamedService for EventsServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

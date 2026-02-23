@@ -31,6 +31,7 @@ proptest = { workspace = true }
 [dev-dependencies]
 # For testing the test utilities themselves
 tokio = { workspace = true, features = ["full", "test-util"] }
+postcard.workspace = true
 
 [lints]
 workspace = true
