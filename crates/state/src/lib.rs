@@ -39,9 +39,13 @@ pub use block_archive::{BlockArchive, BlockArchiveError};
 pub use bucket::VaultCommitment;
 pub use engine::{InMemoryStorageEngine, StorageEngine};
 pub use entity::EntityStore;
-pub use events::{EventStore, EventStoreError, Events, EventsDatabase, EventsDatabaseError};
+pub use events::{
+    EventIndex, EventStore, EventStoreError, Events, EventsDatabase, EventsDatabaseError,
+};
 pub use events_keys::{
-    DecodedEventKey, EVENT_KEY_LEN, decode_event_key, encode_event_key, org_prefix, org_time_prefix,
+    DecodedEventKey, EVENT_INDEX_KEY_LEN, EVENT_INDEX_VALUE_LEN, EVENT_KEY_LEN, decode_event_key,
+    encode_event_index_key, encode_event_index_value, encode_event_key, org_prefix,
+    org_time_prefix, primary_key_from_index_value,
 };
 pub use indexes::IndexManager;
 // Re-export inferadb-ledger-store's tables for convenience

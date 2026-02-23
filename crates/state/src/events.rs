@@ -18,7 +18,10 @@ use inferadb_ledger_types::{
 };
 use snafu::{ResultExt, Snafu};
 
-use crate::events_keys::{encode_event_key, org_prefix};
+use crate::events_keys::{
+    encode_event_index_key, encode_event_index_value, encode_event_key, org_prefix,
+    primary_key_from_index_value,
+};
 
 /// Events table: stores audit event entries in a dedicated `events.db` database.
 ///
@@ -28,6 +31,21 @@ pub struct Events;
 
 impl Table for Events {
     const ID: TableId = TableId::Entities;
+    type KeyType = Vec<u8>;
+    type ValueType = Vec<u8>;
+}
+
+/// Secondary index for O(log n) event lookups by ID.
+///
+/// Maps `(org_id, event_id)` → `(timestamp_ns, event_hash)`. Given these
+/// components, the full 24-byte primary key can be reconstructed for a
+/// direct `Events` table lookup. Two B+ tree lookups total: index + primary.
+///
+/// Uses `TableId::Relationships` (value 1) — unused in `events.db`.
+pub struct EventIndex;
+
+impl Table for EventIndex {
+    const ID: TableId = TableId::Relationships;
     type KeyType = Vec<u8>;
     type ValueType = Vec<u8>;
 }
@@ -83,6 +101,12 @@ impl EventStore {
         let key = encode_event_key(entry.organization_id, timestamp_ns, &entry.event_id);
         let value = inferadb_ledger_types::encode(entry).context(CodecSnafu)?;
         txn.insert::<Events>(&key, &value).context(StorageSnafu)?;
+
+        // Maintain secondary index: (org_id, event_id) → (timestamp_ns, event_hash)
+        let idx_key = encode_event_index_key(entry.organization_id, &entry.event_id);
+        let idx_val = encode_event_index_value(timestamp_ns, &entry.event_id);
+        txn.insert::<EventIndex>(&idx_key, &idx_val).context(StorageSnafu)?;
+
         Ok(())
     }
 
@@ -104,6 +128,44 @@ impl EventStore {
                 let entry: EventEntry = inferadb_ledger_types::decode(&data).context(CodecSnafu)?;
                 Ok(Some(entry))
             },
+            None => Ok(None),
+        }
+    }
+
+    /// Retrieves a single event by organization ID and event ID using the
+    /// secondary index for O(log n) lookup.
+    ///
+    /// Performs two B+ tree lookups:
+    /// 1. `EventIndex`: `(org_id, event_id)` → `(timestamp_ns, event_hash)`
+    /// 2. `Events`: reconstructed primary key → `EventEntry`
+    ///
+    /// Returns `None` if the index entry is missing or if the primary entry
+    /// has been GC'd (orphaned index entry).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EventStoreError::Storage` if either read fails.
+    /// Returns `EventStoreError::Codec` if deserialization fails.
+    pub fn get_by_id<B: StorageBackend>(
+        txn: &ReadTransaction<'_, B>,
+        org_id: OrganizationId,
+        event_id: &[u8; 16],
+    ) -> Result<Option<EventEntry>> {
+        // Step 1: Index lookup
+        let idx_key = encode_event_index_key(org_id, event_id);
+        let idx_val = match txn.get::<EventIndex>(&idx_key).context(StorageSnafu)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        // Step 2: Reconstruct primary key and fetch
+        let primary_key = primary_key_from_index_value(org_id, &idx_val);
+        match txn.get::<Events>(&primary_key).context(StorageSnafu)? {
+            Some(data) => {
+                let entry: EventEntry = inferadb_ledger_types::decode(&data).context(CodecSnafu)?;
+                Ok(Some(entry))
+            },
+            // Orphaned index entry — primary was GC'd
             None => Ok(None),
         }
     }
@@ -187,28 +249,28 @@ impl EventStore {
 
     /// Deletes expired event entries using the collect-then-delete pattern.
     ///
-    /// Scans all entries, deserializes only [`EventMeta`] (first two fields) to check
-    /// `expires_at`, collects expired keys, then deletes them in a write
-    /// transaction up to `max_batch`.
+    /// Scans all entries using thin deserialization ([`EventMeta`]) to check
+    /// `expires_at`. Expired entries are fully deserialized to extract
+    /// `event_id` and `organization_id` for secondary index cleanup.
     ///
     /// Returns the number of entries deleted.
     ///
     /// # Errors
     ///
     /// Returns `EventStoreError::Storage` if read/write operations fail.
-    /// Returns `EventStoreError::Codec` if `EventMeta` deserialization fails.
+    /// Returns `EventStoreError::Codec` if deserialization fails.
     pub fn delete_expired<B: StorageBackend>(
         read_txn: &ReadTransaction<'_, B>,
         write_txn: &mut WriteTransaction<'_, B>,
         now_unix: u64,
         max_batch: usize,
     ) -> Result<usize> {
-        let mut expired_keys = Vec::new();
+        let mut expired: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
         let iter = read_txn.iter::<Events>().context(StorageSnafu)?;
 
         for (key_bytes, value_bytes) in iter {
-            if expired_keys.len() >= max_batch {
+            if expired.len() >= max_batch {
                 break;
             }
 
@@ -217,13 +279,21 @@ impl EventStore {
                 inferadb_ledger_types::decode(&value_bytes).context(CodecSnafu)?;
 
             if meta.expires_at > 0 && meta.expires_at < now_unix {
-                expired_keys.push(key_bytes);
+                expired.push((key_bytes, value_bytes));
             }
         }
 
-        let deleted = expired_keys.len();
-        for key in expired_keys {
+        let deleted = expired.len();
+        for (key, value_bytes) in expired {
+            // Full deserialization to get event_id + organization_id for index cleanup
+            let entry: EventEntry =
+                inferadb_ledger_types::decode(&value_bytes).context(CodecSnafu)?;
+
             write_txn.delete::<Events>(&key).context(StorageSnafu)?;
+
+            // Remove secondary index entry
+            let idx_key = encode_event_index_key(entry.organization_id, &entry.event_id);
+            write_txn.delete::<EventIndex>(&idx_key).context(StorageSnafu)?;
         }
 
         Ok(deleted)
@@ -1052,5 +1122,242 @@ mod tests {
                 "truncated entries should be the 5 newest"
             );
         }
+    }
+
+    // ====================================================================
+    // EventIndex / get_by_id tests
+    // ====================================================================
+
+    #[test]
+    fn get_by_id_returns_written_event() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+        let entry = make_entry(1, [10u8; 16], 1_700_000_000, 0);
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+            EventStore::write(&mut txn, &entry).expect("write");
+            txn.commit().expect("commit");
+        }
+
+        let txn = events_db.read().expect("read txn");
+        let found = EventStore::get_by_id(&txn, OrganizationId::new(1), &[10u8; 16])
+            .expect("get_by_id")
+            .expect("should exist");
+
+        assert_eq!(found.event_id, [10u8; 16]);
+        assert_eq!(found.organization_id, OrganizationId::new(1));
+        assert_eq!(found.source_service, "ledger");
+    }
+
+    #[test]
+    fn get_by_id_nonexistent_returns_none() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+        let txn = events_db.read().expect("read txn");
+        let result =
+            EventStore::get_by_id(&txn, OrganizationId::new(1), &[99u8; 16]).expect("get_by_id");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_by_id_wrong_org_returns_none() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+        let entry = make_entry(1, [10u8; 16], 1_700_000_000, 0);
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+            EventStore::write(&mut txn, &entry).expect("write");
+            txn.commit().expect("commit");
+        }
+
+        // Look up with wrong org
+        let txn = events_db.read().expect("read txn");
+        let result =
+            EventStore::get_by_id(&txn, OrganizationId::new(999), &[10u8; 16]).expect("get_by_id");
+        assert!(result.is_none(), "different org should not find the event");
+    }
+
+    #[test]
+    fn get_by_id_finds_all_n_events() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+        let n = 50u8;
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+            for i in 0..n {
+                let entry = make_entry(1, [i; 16], 1_700_000_000 + i64::from(i), 0);
+                EventStore::write(&mut txn, &entry).expect("write");
+            }
+            txn.commit().expect("commit");
+        }
+
+        let txn = events_db.read().expect("read txn");
+        for i in 0..n {
+            let found = EventStore::get_by_id(&txn, OrganizationId::new(1), &[i; 16])
+                .expect("get_by_id")
+                .expect("should exist");
+            assert_eq!(found.event_id, [i; 16]);
+        }
+    }
+
+    #[test]
+    fn gc_removes_index_entries() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+            let e1 = make_entry(1, [1u8; 16], 1_700_000_000, 100); // expired
+            let e2 = make_entry(1, [2u8; 16], 1_700_000_001, 200); // expired
+            let e3 = make_entry(1, [3u8; 16], 1_700_000_002, 0); // no expiry
+            EventStore::write(&mut txn, &e1).expect("write");
+            EventStore::write(&mut txn, &e2).expect("write");
+            EventStore::write(&mut txn, &e3).expect("write");
+            txn.commit().expect("commit");
+        }
+
+        // All three should be findable before GC
+        {
+            let txn = events_db.read().expect("read txn");
+            assert!(
+                EventStore::get_by_id(&txn, OrganizationId::new(1), &[1u8; 16])
+                    .expect("get_by_id")
+                    .is_some()
+            );
+            assert!(
+                EventStore::get_by_id(&txn, OrganizationId::new(1), &[2u8; 16])
+                    .expect("get_by_id")
+                    .is_some()
+            );
+            assert!(
+                EventStore::get_by_id(&txn, OrganizationId::new(1), &[3u8; 16])
+                    .expect("get_by_id")
+                    .is_some()
+            );
+        }
+
+        // GC expired entries
+        {
+            let read_txn = events_db.read().expect("read txn");
+            let mut write_txn = events_db.write().expect("write txn");
+            let deleted =
+                EventStore::delete_expired(&read_txn, &mut write_txn, 300, 100).expect("gc");
+            assert_eq!(deleted, 2);
+            write_txn.commit().expect("commit");
+        }
+
+        // GC'd entries should be gone from index too
+        {
+            let txn = events_db.read().expect("read txn");
+            assert!(
+                EventStore::get_by_id(&txn, OrganizationId::new(1), &[1u8; 16])
+                    .expect("get_by_id")
+                    .is_none(),
+                "GC'd event should not be in index"
+            );
+            assert!(
+                EventStore::get_by_id(&txn, OrganizationId::new(1), &[2u8; 16])
+                    .expect("get_by_id")
+                    .is_none(),
+                "GC'd event should not be in index"
+            );
+            // Non-expired entry survives
+            assert!(
+                EventStore::get_by_id(&txn, OrganizationId::new(1), &[3u8; 16])
+                    .expect("get_by_id")
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_restore_rebuilds_index() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+
+        // Write events to the "source" database
+        let entries: Vec<EventEntry> =
+            (0..10u8).map(|i| make_entry(1, [i; 16], 1_700_000_000 + i64::from(i), 0)).collect();
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+            for entry in &entries {
+                EventStore::write(&mut txn, entry).expect("write");
+            }
+            txn.commit().expect("commit");
+        }
+
+        // Simulate snapshot: collect all entries via scan_apply_phase
+        let snapshot_entries = {
+            let txn = events_db.read().expect("read txn");
+            EventStore::scan_apply_phase(&txn, 100).expect("scan")
+        };
+
+        // "Restore" to a fresh database via write()
+        let restored_db = EventsDatabase::open_in_memory().expect("open");
+        {
+            let mut txn = restored_db.write().expect("write txn");
+            for entry in &snapshot_entries {
+                EventStore::write(&mut txn, entry).expect("write");
+            }
+            txn.commit().expect("commit");
+        }
+
+        // Verify all events are findable via get_by_id on the restored DB
+        let txn = restored_db.read().expect("read txn");
+        for i in 0..10u8 {
+            let found = EventStore::get_by_id(&txn, OrganizationId::new(1), &[i; 16])
+                .expect("get_by_id")
+                .expect("should exist after restore");
+            assert_eq!(found.event_id, [i; 16]);
+        }
+    }
+
+    #[test]
+    fn index_atomicity_with_primary() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+
+        // Write without committing — then drop the transaction
+        {
+            let mut txn = events_db.write().expect("write txn");
+            let entry = make_entry(1, [50u8; 16], 1_700_000_000, 0);
+            EventStore::write(&mut txn, &entry).expect("write");
+            // Drop without commit — implicit abort
+        }
+
+        // Neither primary nor index should contain the entry
+        let txn = events_db.read().expect("read txn");
+        let result =
+            EventStore::get_by_id(&txn, OrganizationId::new(1), &[50u8; 16]).expect("get_by_id");
+        assert!(result.is_none(), "aborted txn should not write index entry");
+
+        let ts_ns =
+            Utc.timestamp_opt(1_700_000_000, 0).unwrap().timestamp_nanos_opt().unwrap() as u64;
+        let primary =
+            EventStore::get(&txn, OrganizationId::new(1), ts_ns, &[50u8; 16]).expect("get");
+        assert!(primary.is_none(), "aborted txn should not write primary entry");
+    }
+
+    #[test]
+    fn get_by_id_multi_org_isolation() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+            // Same event_id in different orgs
+            let e1 = make_entry(1, [99u8; 16], 1_700_000_000, 0);
+            let e2 = make_entry(2, [99u8; 16], 1_700_000_001, 0);
+            EventStore::write(&mut txn, &e1).expect("write");
+            EventStore::write(&mut txn, &e2).expect("write");
+            txn.commit().expect("commit");
+        }
+
+        let txn = events_db.read().expect("read txn");
+        let found1 = EventStore::get_by_id(&txn, OrganizationId::new(1), &[99u8; 16])
+            .expect("get_by_id")
+            .expect("org 1 should find");
+        let found2 = EventStore::get_by_id(&txn, OrganizationId::new(2), &[99u8; 16])
+            .expect("get_by_id")
+            .expect("org 2 should find");
+
+        assert_eq!(found1.organization_id, OrganizationId::new(1));
+        assert_eq!(found2.organization_id, OrganizationId::new(2));
     }
 }

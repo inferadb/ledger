@@ -331,9 +331,7 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
             )));
         }
 
-        // Scan the org's events for the matching event_id.
-        // Events are keyed by (org_id, timestamp_ns, event_hash), but we don't
-        // know the timestamp, so we scan the entire org prefix.
+        // O(log n) index lookup: (org_id, event_id) → primary key → entry.
         let txn = self
             .events_db
             .read()
@@ -342,11 +340,8 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
         let mut event_id_arr = [0u8; 16];
         event_id_arr.copy_from_slice(&req.event_id);
 
-        // Scan org events looking for the matching event_id
-        let (all_events, _) = EventStore::list(&txn, org_id, 0, u64::MAX, COUNT_SCAN_LIMIT, None)
+        let found = EventStore::get_by_id(&txn, org_id, &event_id_arr)
             .map_err(|e| Status::internal(format!("Events query error: {e}")))?;
-
-        let found = all_events.into_iter().find(|e| e.event_id == event_id_arr);
 
         match found {
             Some(entry) => {

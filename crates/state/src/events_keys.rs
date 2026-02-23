@@ -72,6 +72,47 @@ pub fn org_time_prefix(org_id: OrganizationId, timestamp_ns: u64) -> [u8; 16] {
     prefix
 }
 
+// ============================================================================
+// EventIndex key/value encoding
+// ============================================================================
+
+/// Total size of an encoded event index key in bytes: org_id(8) + event_id(16).
+pub const EVENT_INDEX_KEY_LEN: usize = 24;
+
+/// Total size of an encoded event index value in bytes: timestamp_ns(8) + event_hash(8).
+pub const EVENT_INDEX_VALUE_LEN: usize = 16;
+
+/// Encodes the secondary index key: `org_id(8 BE) || event_id(16)`.
+pub fn encode_event_index_key(org_id: OrganizationId, event_id: &[u8; 16]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(EVENT_INDEX_KEY_LEN);
+    key.extend_from_slice(&org_id.value().to_be_bytes());
+    key.extend_from_slice(event_id);
+    key
+}
+
+/// Encodes the secondary index value: `timestamp_ns(8 BE) || event_hash(8 BE)`.
+///
+/// The `event_hash` is `seahash::hash(event_id)` — pre-computed to avoid
+/// redundant hashing on the read path.
+pub fn encode_event_index_value(timestamp_ns: u64, event_id: &[u8; 16]) -> Vec<u8> {
+    let event_hash = seahash::hash(event_id);
+    let mut val = Vec::with_capacity(EVENT_INDEX_VALUE_LEN);
+    val.extend_from_slice(&timestamp_ns.to_be_bytes());
+    val.extend_from_slice(&event_hash.to_be_bytes());
+    val
+}
+
+/// Reconstructs a 24-byte primary Events key from an index value and org_id.
+///
+/// The index value is `timestamp_ns(8 BE) || event_hash(8 BE)`.
+/// Combined with `org_id`, this produces the same key as [`encode_event_key`].
+pub fn primary_key_from_index_value(org_id: OrganizationId, index_value: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(EVENT_KEY_LEN);
+    key.extend_from_slice(&org_id.value().to_be_bytes());
+    key.extend_from_slice(index_value); // timestamp_ns (8) + event_hash (8)
+    key
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -193,5 +234,64 @@ mod tests {
         assert_eq!(key[7], 0);
         // First 6 bytes should be zero
         assert_eq!(&key[..6], &[0u8; 6]);
+    }
+
+    // ====================================================================
+    // EventIndex key/value encoding tests
+    // ====================================================================
+
+    #[test]
+    fn index_key_encodes_org_and_event_id() {
+        let org_id = OrganizationId::new(42);
+        let event_id: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+        let key = encode_event_index_key(org_id, &event_id);
+        assert_eq!(key.len(), EVENT_INDEX_KEY_LEN);
+        assert_eq!(&key[..8], &42i64.to_be_bytes());
+        assert_eq!(&key[8..24], &event_id);
+    }
+
+    #[test]
+    fn index_value_encodes_timestamp_and_hash() {
+        let timestamp_ns = 1_700_000_000_000_000_000u64;
+        let event_id: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+        let val = encode_event_index_value(timestamp_ns, &event_id);
+        assert_eq!(val.len(), EVENT_INDEX_VALUE_LEN);
+        assert_eq!(&val[..8], &timestamp_ns.to_be_bytes());
+        assert_eq!(&val[8..16], &seahash::hash(&event_id).to_be_bytes());
+    }
+
+    #[test]
+    fn primary_key_from_index_roundtrip() {
+        let org_id = OrganizationId::new(42);
+        let timestamp_ns = 1_700_000_000_000_000_000u64;
+        let event_id: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+        // Encode via primary key path
+        let primary_key = encode_event_key(org_id, timestamp_ns, &event_id);
+
+        // Encode via index value path and reconstruct
+        let idx_val = encode_event_index_value(timestamp_ns, &event_id);
+        let reconstructed = primary_key_from_index_value(org_id, &idx_val);
+
+        assert_eq!(primary_key, reconstructed);
+    }
+
+    #[test]
+    fn index_key_ordering_by_org() {
+        let event_id = [5u8; 16];
+        let key_a = encode_event_index_key(OrganizationId::new(1), &event_id);
+        let key_b = encode_event_index_key(OrganizationId::new(2), &event_id);
+        assert!(key_a < key_b, "org 1 index key should sort before org 2");
+    }
+
+    #[test]
+    fn index_key_zero_org() {
+        let event_id = [0u8; 16];
+        let key = encode_event_index_key(OrganizationId::new(0), &event_id);
+        assert_eq!(key.len(), EVENT_INDEX_KEY_LEN);
+        assert_eq!(&key[..8], &0i64.to_be_bytes());
+        assert_eq!(&key[8..24], &event_id);
     }
 }
