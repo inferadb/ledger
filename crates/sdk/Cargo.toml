@@ -71,7 +71,7 @@ prost-types = { workspace = true }
 inferadb-ledger-server = { workspace = true }
 inferadb-ledger-test-utils = { workspace = true }
 openraft = { workspace = true }
-serial_test = "3.2"
+serial_test = "3.4"
 criterion.workspace = true
 
 [[bench]]
