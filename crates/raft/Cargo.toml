@@ -83,7 +83,7 @@ criterion.workspace = true
 proptest.workspace = true
 
 [[bench]]
-name = "wide_events_bench"
+name = "logging_bench"
 harness = false
 
 [lints]

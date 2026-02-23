@@ -1,6 +1,6 @@
 //! Dynamic VIP organization discovery and caching.
 //!
-//! VIP organizations receive elevated sampling rates for wide events logging.
+//! VIP organizations receive elevated sampling rates for request logging.
 //! VIP status can be configured:
 //!
 //! 1. **Statically** - via `vip_organizations` config list (always VIP, override)
@@ -281,7 +281,7 @@ pub struct VipCacheStats {
 /// Creates a VipCache from server configuration.
 ///
 /// This is a convenience function to create a cache from the
-/// `WideEventsConfig` configuration.
+/// `LoggingConfig` configuration.
 pub fn create_vip_cache(
     vip_organizations: Vec<u64>,
     discovery_enabled: bool,

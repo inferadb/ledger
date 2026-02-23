@@ -203,7 +203,7 @@ fn init_logging(config: &Config) {
 /// Creates a tracer provider with batch span processor for exporting traces
 /// to observability backends like Jaeger, Tempo, or Honeycomb.
 fn init_otel(config: &Config) -> Result<(), ServerError> {
-    let otel_config = &config.wide_events.otel;
+    let otel_config = &config.logging.otel;
 
     if !otel_config.enabled {
         return Ok(());

@@ -1,6 +1,6 @@
 # Dashboard Templates
 
-Pre-built dashboard templates for monitoring InferaDB Ledger via Prometheus metrics and wide events logging.
+Pre-built dashboard templates for monitoring InferaDB Ledger via Prometheus metrics and structured request logging.
 
 ## Prometheus/Grafana (Metrics)
 
@@ -350,9 +350,9 @@ receivers:
 
 ---
 
-# Wide Events Dashboard Templates
+# Logging Dashboard Templates
 
-Pre-built dashboard templates for visualizing InferaDB Ledger wide events across common log aggregation platforms.
+Pre-built dashboard templates for visualizing InferaDB Ledger request logs across common log aggregation platforms.
 
 ## Quick Start
 
@@ -375,7 +375,7 @@ Pre-built dashboard templates for visualizing InferaDB Ledger wide events across
 
 - Grafana 10.0+
 - Loki datasource configured
-- Wide events logs ingested with `job="inferadb-ledger"` label
+- Request logs ingested with `job="inferadb-ledger"` label
 
 ### Installation
 
@@ -421,7 +421,7 @@ Alternatively, use Loki's JSON parser in queries (already configured in the dash
 ### Prerequisites
 
 - Kibana 8.0+
-- Elasticsearch cluster with wide events indexed
+- Elasticsearch cluster with request logs indexed
 - Index pattern matching `inferadb-ledger-*`
 
 ### Installation
@@ -430,14 +430,14 @@ Alternatively, use Loki's JSON parser in queries (already configured in the dash
 2. Click Import
 3. Upload `kibana-v1.ndjson`
 4. Resolve any conflicts (usually select "Overwrite")
-5. Open Dashboards → InferaDB Ledger Wide Events
+5. Open Dashboards → InferaDB Ledger Logging
 
 ### Index Configuration
 
 Create an index template for proper field mappings:
 
 ```json
-PUT _index_template/inferadb-wide-events
+PUT _index_template/inferadb-logging
 {
   "index_patterns": ["inferadb-ledger-*"],
   "template": {
@@ -476,7 +476,7 @@ PUT _index_template/inferadb-wide-events
 
 The template includes pre-configured saved searches:
 
-- **All Requests**: All wide events with key fields
+- **All Requests**: All request logs with key fields
 - **Errors**: Error events with context
 - **Slow Requests**: Requests exceeding 100ms with timing breakdown
 
@@ -485,7 +485,7 @@ The template includes pre-configured saved searches:
 ### Prerequisites
 
 - Datadog account with Log Management
-- Wide events forwarded to Datadog
+- Request logs forwarded to Datadog
 - Service tag set to `inferadb-ledger`
 
 ### Installation
@@ -617,7 +617,7 @@ inferadb-ledger --version
 
 | Dashboard Schema | Min Ledger Version | Changes                           |
 | ---------------- | ------------------ | --------------------------------- |
-| 1                | 0.5.0              | Initial wide events release       |
+| 1                | 0.5.0              | Initial logging release           |
 
 **Future breaking changes will increment the schema version.**
 
@@ -647,10 +647,10 @@ New fields are additive; old dashboards continue working with newer Ledger versi
 
 ### No Data Appearing
 
-1. Verify wide events are enabled:
+1. Verify logging is enabled:
 
    ```bash
-   grep WIDE_EVENTS /path/to/config
+   grep LOGGING /path/to/config
    ```
 
 2. Check log output format is JSON:

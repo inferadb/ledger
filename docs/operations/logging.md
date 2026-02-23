@@ -1,13 +1,13 @@
-# Wide Events Logging
+# Logging
 
 InferaDB Ledger emits one comprehensive JSON event per gRPC request containing 50+ contextual fields for queryable observability.
 
 ## Quick Start
 
-Enable wide events in production:
+Enable request logging in production:
 
 ```bash
-export INFERADB__LEDGER__WIDE_EVENTS__ENABLED=true
+export INFERADB__LEDGER__LOGGING__ENABLED=true
 export INFERADB__LEDGER__LOG_FORMAT=json
 ```
 
@@ -17,7 +17,7 @@ Query errors in your log aggregation system:
 outcome:"error" AND service:"WriteService"
 ```
 
-See [Configuration](configuration.md#wide-events-logging) for all options.
+See [Configuration](configuration.md#logging) for all options.
 
 ## Field Reference
 
@@ -556,7 +556,7 @@ service:inferadb-ledger service:AdminService
 
 ## Sampling
 
-Wide events use **tail sampling**: the decision to emit or suppress an event is made at request completion, not at start. This ensures important events are never dropped.
+Request logging uses **tail sampling**: the decision to emit or suppress an event is made at request completion, not at start. This ensures important events are never dropped.
 
 ### Sampling Decision Flow
 
@@ -622,7 +622,7 @@ Dynamic VIP tags can be modified at runtime without restarting the server. Chang
 
 ## Migration from Previous Logging
 
-Wide events replace scattered log statements with a single structured event:
+Canonical log lines replace scattered log statements with a single structured event:
 
 | Before                                 | After                                                               |
 | -------------------------------------- | ------------------------------------------------------------------- |
@@ -644,22 +644,22 @@ RFC3339 with microsecond precision: `2026-01-28T18:30:45.123456Z`
 
 Block hashes and state roots are truncated to 16 hex characters for storage efficiency while maintaining correlation capability.
 
-### Metrics vs Wide Events
+### Metrics vs Request Logging
 
-Wide events **supplement**, not replace, existing Prometheus metrics:
+Request logs **supplement**, not replace, existing Prometheus metrics:
 
-| Metrics                          | Wide Events                              |
+| Metrics                          | Request Logs                             |
 | -------------------------------- | ---------------------------------------- |
 | Aggregated time-series           | Individual request detail                |
 | Low cardinality (method, status) | High cardinality (request_id, client_id) |
 | Real-time dashboards, alerts     | Forensic debugging, auditing             |
 | Prometheus scrape model          | Log streaming model                      |
 
-Both are emitted from the same code paths. Keep existing metrics for alerting; use wide events for debugging.
+Both are emitted from the same code paths. Keep existing metrics for alerting; use request logs for debugging.
 
 ### Schema Versioning
 
-Wide events include a `schema_version` field. See [Dashboard Templates](dashboards/) for version compatibility.
+Request logs include a `schema_version` field. See [Dashboard Templates](dashboards/) for version compatibility.
 
 **Compatibility guarantees:**
 
@@ -671,10 +671,10 @@ Wide events include a `schema_version` field. See [Dashboard Templates](dashboar
 
 ### No Events Appearing
 
-1. Verify wide events are enabled:
+1. Verify logging is enabled:
 
    ```bash
-   echo $INFERADB__LEDGER__WIDE_EVENTS__ENABLED  # Should be true or unset (default true)
+   echo $INFERADB__LEDGER__LOGGING__ENABLED  # Should be true or unset (default true)
    ```
 
 2. Check log format is JSON for production:
@@ -707,7 +707,7 @@ If you're not seeing expected events:
 
 ## Performance
 
-Wide events add minimal overhead:
+Request logging adds minimal overhead:
 
 | Metric                | Measured | Target     |
 | --------------------- | -------- | ---------- |
@@ -719,13 +719,13 @@ Wide events add minimal overhead:
 Run benchmarks:
 
 ```bash
-cargo bench -p inferadb-ledger-raft --bench wide_events_bench
+cargo bench -p inferadb-ledger-raft --bench logging_bench
 ```
 
 ## Related Documentation
 
-- [Configuration Reference](configuration.md#wide-events-logging) - All environment variables
+- [Configuration Reference](configuration.md#logging) - All environment variables
 - [Dashboard Templates](dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
 - [Metrics Reference](metrics-reference.md) - Prometheus metrics (complementary)
 - [Alerting Guide](alerting.md) - Using metrics for alerts
-- [Developer Guide](../development/logging.md) - Adding wide events to new services
+- [Developer Guide](../development/logging.md) - Adding request logging to new services

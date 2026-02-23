@@ -160,7 +160,7 @@ just bench-ci
 | `read_bench`        | `server` | Single/sequential/random reads, multi-vault reads, missing key reads          |
 | `write_bench`       | `server` | Single writes, batch writes, state root computation, concurrent vault writes  |
 | `whitepaper_bench`  | `server` | Whitepaper performance claims: read/write latency percentiles, throughput     |
-| `wide_events_bench` | `raft`   | Wide event context creation, field population, sampling decisions             |
+| `logging_bench`     | `raft`   | Logging context creation, field population, sampling decisions                |
 | `client_bench`      | `sdk`    | SDK client read/write/batch operations against mock server                    |
 
 ### Writing New Benchmarks

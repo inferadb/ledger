@@ -38,12 +38,12 @@ use tracing::{debug, warn};
 
 use crate::{
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    logging::{OperationType, RequestContext, Sampler},
     metrics,
     pagination::{PageToken, PageTokenCodec},
     services::slug_resolver::SlugResolver,
     trace_context,
     types::{LedgerNodeId, LedgerTypeConfig},
-    wide_events::{OperationType, RequestContext, Sampler},
 };
 
 /// Handles read operations including verified reads, entity/relationship listing, and block
@@ -72,7 +72,7 @@ pub struct ReadServiceImpl {
     /// Page token codec for secure pagination (HMAC-protected).
     #[builder(default = PageTokenCodec::with_random_key())]
     page_token_codec: PageTokenCodec,
-    /// Sampler for wide events tail sampling.
+    /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
 }
@@ -440,7 +440,7 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context
+        // Create logging context
         let mut ctx = RequestContext::new("ReadService", "read");
         ctx.set_operation_type(OperationType::Read);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -558,7 +558,7 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context
+        // Create logging context
         let mut ctx = RequestContext::new("ReadService", "batch_read");
         ctx.set_operation_type(OperationType::Read);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -698,7 +698,7 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context
+        // Create logging context
         let mut ctx = RequestContext::new("ReadService", "verified_read");
         ctx.set_operation_type(OperationType::Read);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -832,7 +832,7 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context
+        // Create logging context
         let mut ctx = RequestContext::new("ReadService", "historical_read");
         ctx.set_operation_type(OperationType::Read);
         ctx.extract_transport_metadata(&grpc_metadata);

@@ -1,6 +1,6 @@
-//! OpenTelemetry/OTLP trace export for wide events.
+//! OpenTelemetry/OTLP trace export for canonical log lines.
 //!
-//! This module provides integration between wide events and OpenTelemetry,
+//! This module provides integration between request logging and OpenTelemetry,
 //! enabling export of request spans to observability backends like Jaeger,
 //! Tempo, or Honeycomb.
 //!
@@ -222,12 +222,12 @@ pub fn get_tracer() -> Option<opentelemetry_sdk::trace::Tracer> {
 /// Span attributes extracted from a request context.
 ///
 /// These attributes are attached to OTEL spans to provide the same
-/// contextual information as wide event JSON fields.
+/// contextual information as canonical log line JSON fields.
 ///
-/// Each field corresponds to a wide event field with the same name.
-/// See the wide events PRD for detailed field descriptions.
+/// Each field corresponds to a canonical log line field with the same name.
+/// See the logging documentation for detailed field descriptions.
 #[derive(Debug, Default)]
-#[allow(missing_docs)] // Fields are self-documenting and match wide event field names
+#[allow(missing_docs)] // Fields are self-documenting and match canonical log line field names
 pub struct SpanAttributes {
     // Request metadata
     pub request_id: Option<String>,

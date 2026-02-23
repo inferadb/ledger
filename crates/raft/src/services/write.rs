@@ -31,13 +31,13 @@ use crate::{
     error::classify_raft_error,
     idempotency::IdempotencyCache,
     log_storage::AppliedStateAccessor,
+    logging::{OperationType, RequestContext, Sampler},
     metrics,
     proof::{self, ProofError},
     rate_limit::RateLimiter,
     services::slug_resolver::SlugResolver,
     trace_context,
     types::{LedgerRequest, LedgerResponse, LedgerTypeConfig},
-    wide_events::{OperationType, RequestContext, Sampler},
 };
 
 /// Classifies a batch writer error into the appropriate `tonic::Status`.
@@ -82,10 +82,10 @@ pub struct WriteServiceImpl {
     /// when batch_handle is None.
     #[builder(default = Arc::new(Mutex::new(())))]
     proposal_mutex: Arc<Mutex<()>>,
-    /// Sampler for wide events tail sampling.
+    /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
-    /// Node ID for wide events system context.
+    /// Node ID for logging system context.
     #[builder(default)]
     node_id: Option<u64>,
     /// Audit logger for compliance-ready event tracking.
@@ -339,7 +339,7 @@ impl WriteServiceImpl {
         }
     }
 
-    /// Converts bytes to hex string for wide event logging.
+    /// Converts bytes to hex string for request logging.
     fn bytes_to_hex(bytes: &[u8]) -> String {
         bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
             let _ = write!(acc, "{b:02x}");
@@ -347,7 +347,7 @@ impl WriteServiceImpl {
         })
     }
 
-    /// Extracts operation type names from proto operations for wide event logging.
+    /// Extracts operation type names from proto operations for request logging.
     fn extract_operation_types(
         operations: &[inferadb_ledger_proto::proto::Operation],
     ) -> Vec<&'static str> {
@@ -505,7 +505,7 @@ impl WriteService for WriteServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this request
+        // Create logging context for this request
         let mut ctx = RequestContext::new("WriteService", "write");
         ctx.set_operation_type(OperationType::Write);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -562,7 +562,7 @@ impl WriteService for WriteServiceImpl {
         // Compute request hash for payload comparison (detects key reuse with different payload)
         let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
 
-        // Populate wide event context with request metadata
+        // Populate logging context with request metadata
         ctx.set_client_info(&client_id, 0, None);
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
@@ -927,7 +927,7 @@ impl WriteService for WriteServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this request
+        // Create logging context for this request
         let mut ctx = RequestContext::new("WriteService", "batch_write");
         ctx.set_operation_type(OperationType::Write);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -978,7 +978,7 @@ impl WriteService for WriteServiceImpl {
                 Status::invalid_argument("idempotency_key must be exactly 16 bytes")
             })?;
 
-        // Populate wide event context with request metadata
+        // Populate logging context with request metadata
         ctx.set_client_info(&client_id, 0, None);
         let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);

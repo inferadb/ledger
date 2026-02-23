@@ -70,7 +70,7 @@ bench-ci:
     cargo +{{rust}} bench -p inferadb-ledger-store --bench btree_bench -- --output-format bencher
     cargo +{{rust}} bench -p inferadb-ledger-server --bench read_bench -- --output-format bencher
     cargo +{{rust}} bench -p inferadb-ledger-server --bench write_bench -- --output-format bencher
-    cargo +{{rust}} bench -p inferadb-ledger-raft --bench wide_events_bench -- --output-format bencher
+    cargo +{{rust}} bench -p inferadb-ledger-raft --bench logging_bench -- --output-format bencher
 
 # ============================================================================
 # Code Quality

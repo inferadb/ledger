@@ -638,7 +638,7 @@
   ],
   "refresh": "30s",
   "schemaVersion": 38,
-  "tags": ["inferadb", "wide-events", "loki"],
+  "tags": ["inferadb", "logging", "loki"],
   "templating": {
     "list": [
       {
@@ -733,8 +733,8 @@
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "InferaDB Ledger Wide Events",
-  "uid": "inferadb-wide-events",
+  "title": "InferaDB Ledger Logging",
+  "uid": "inferadb-logging",
   "version": 1,
   "weekStart": ""
 }

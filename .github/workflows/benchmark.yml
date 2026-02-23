@@ -63,8 +63,8 @@ jobs:
       - name: Run benchmarks (server - write)
         run: cargo bench -p inferadb-ledger-server --bench write_bench -- --output-format bencher | tee -a server_bench.txt
 
-      - name: Run benchmarks (raft - wide events)
-        run: cargo bench -p inferadb-ledger-raft --bench wide_events_bench -- --output-format bencher | tee -a raft_bench.txt
+      - name: Run benchmarks (raft - logging)
+        run: cargo bench -p inferadb-ledger-raft --bench logging_bench -- --output-format bencher | tee -a raft_bench.txt
 
       - name: Combine benchmark results
         run: cat store_bench.txt server_bench.txt raft_bench.txt > all_bench.txt

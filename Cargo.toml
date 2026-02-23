@@ -85,7 +85,7 @@ metrics = "0.24"
 # Disable push-gateway (default) to avoid hyper-rustls/aws-lc-sys dependency
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
-# OpenTelemetry (OTLP export for wide events)
+# OpenTelemetry (OTLP export for canonical log lines)
 opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }

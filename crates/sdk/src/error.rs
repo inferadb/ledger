@@ -175,7 +175,7 @@ pub enum SdkError {
     ///
     /// When the server populates `x-request-id` and `x-trace-id` in response
     /// metadata, these fields are extracted automatically by `From<tonic::Status>`.
-    /// Operators can use them to correlate SDK errors with server-side wide event logs.
+    /// Operators can use them to correlate SDK errors with server-side canonical log lines.
     #[error("{}", format_rpc_error(code, message, request_id, trace_id))]
     Rpc {
         /// gRPC status code.

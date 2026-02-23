@@ -1,10 +1,10 @@
-# Wide Events Integration Guide
+# Logging Integration Guide
 
-Guide for engineers adding wide events to new services or extending existing integrations.
+Guide for engineers adding request logging to new services or extending existing integrations.
 
 ## Overview
 
-Wide events emit one comprehensive JSON event per gRPC request. The `RequestContext` builder accumulates fields throughout the request lifecycle and emits automatically on drop.
+Request logging emits one comprehensive JSON event per gRPC request. The `RequestContext` builder accumulates fields throughout the request lifecycle and emits automatically on drop.
 
 ```rust
 // Context created at method entry
@@ -27,7 +27,7 @@ ctx.set_success();
 Your service struct needs access to the sampler and node ID:
 
 ```rust
-use crate::wide_events::{OperationType, RequestContext, Sampler};
+use crate::logging::{OperationType, RequestContext, Sampler};
 
 pub struct MyServiceImpl {
     // ... existing fields ...
@@ -137,10 +137,10 @@ match result {
 
 ### Step 6: Remove Redundant Logging
 
-Remove or consolidate existing logging that the wide event replaces:
+Remove or consolidate existing logging that the canonical log line replaces:
 
 ```rust
-// REMOVE: These are now captured in the wide event
+// REMOVE: These are now captured in the canonical log line
 // debug!("Processing request for client {}", client_id);
 // info!("Request completed in {}ms", duration);
 
@@ -213,8 +213,8 @@ Write integration tests that verify event emission:
 
 ```rust
 #[tokio::test]
-async fn test_read_emits_wide_event() {
-    let (events, _guard) = capture_wide_events();
+async fn test_read_emits_log_event() {
+    let (events, _guard) = capture_log_events();
 
     let service = create_test_service();
     let request = Request::new(ReadRequest {
@@ -321,7 +321,7 @@ async fn test_read_emits_wide_event() {
 For deep call stacks where passing context is impractical:
 
 ```rust
-use crate::wide_events::with_current_context;
+use crate::logging::with_current_context;
 
 // In a nested function without direct context access
 fn record_storage_metric(key: &str, size: usize) {
@@ -336,7 +336,7 @@ The context is task-local (not thread-local), surviving across await points in a
 
 ## Performance Considerations
 
-Wide events are designed for minimal overhead:
+Request logging is designed for minimal overhead:
 
 | Operation                  | Typical Time |
 | -------------------------- | ------------ |
@@ -368,5 +368,5 @@ Truncated strings end with `...`. Control characters are replaced with `\uFFFD`.
 ## Related Documentation
 
 - [Operator Guide](../operations/logging.md) - Field reference, query cookbook
-- [Configuration Reference](../operations/configuration.md#wide-events-logging) - All config options
-- [Testing Guide](testing.md) - Test infrastructure for wide events
+- [Configuration Reference](../operations/configuration.md#logging) - All config options
+- [Testing Guide](testing.md) - Test infrastructure for request logging

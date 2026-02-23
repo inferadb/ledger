@@ -73,6 +73,8 @@ pub mod integrity_scrubber;
 #[doc(hidden)]
 pub mod log_storage;
 #[doc(hidden)]
+pub mod logging;
+#[doc(hidden)]
 pub mod multi_raft;
 #[doc(hidden)]
 pub mod multi_shard_server;
@@ -98,8 +100,6 @@ pub mod runtime_config;
 pub mod services;
 #[doc(hidden)]
 pub mod vip_cache;
-#[doc(hidden)]
-pub mod wide_events;
 
 #[doc(hidden)]
 pub mod auto_recovery;

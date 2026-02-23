@@ -58,7 +58,7 @@ Implementation details for contributors and advanced operators.
 - [Architecture](development/architecture.md) - Crate structure and code organization
 - [Testing Guide](development/testing.md) - Test categories and commands
 - [Debugging Guide](development/debugging.md) - Logging, profiling, common issues
-- [Logging](development/logging.md) - Adding wide events logging to new services
+- [Logging](development/logging.md) - Adding request logging to new services
 - [Release Process](development/release.md) - Versioning and publishing
 - [Contributing](CONTRIBUTING.md) - Development workflow
 

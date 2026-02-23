@@ -1,4 +1,4 @@
-//! Canonical log lines (wide events) for structured request-level observability.
+//! Canonical log lines for structured request-level observability.
 //!
 //! This module implements the canonical log line pattern where each request emits
 //! exactly one structured JSON event containing all request context. This enables:
@@ -48,7 +48,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use inferadb_ledger_raft::wide_events::{CanonicalLogLine, Outcome};
+//! use inferadb_ledger_raft::logging::{CanonicalLogLine, Outcome};
 //!
 //! async fn handle_request() {
 //!     let mut ctx = CanonicalLogLine::new("WriteService", "write");
@@ -125,7 +125,7 @@ pub enum OperationType {
     Admin,
 }
 
-/// Configuration for wide events sampling.
+/// Configuration for log sampling.
 ///
 /// Tail sampling samples events at emission time based on outcome and latency.
 /// This ensures errors and slow requests are never dropped while reducing log
@@ -134,7 +134,7 @@ pub enum OperationType {
 /// # Example
 ///
 /// ```no_run
-/// use inferadb_ledger_raft::wide_events::SamplingConfig;
+/// use inferadb_ledger_raft::logging::SamplingConfig;
 ///
 /// // Production: aggressive sampling
 /// let config = SamplingConfig::builder()
@@ -206,7 +206,7 @@ impl SamplingConfig {
     }
 }
 
-/// Sampler for wide events using deterministic tail sampling.
+/// Sampler for canonical log lines using deterministic tail sampling.
 ///
 /// Sampling decisions are made at event emission time based on:
 /// 1. Outcome (errors always sampled at 100%)
@@ -356,7 +356,7 @@ fn truncate_hash(hash: &str) -> String {
 /// # Example
 ///
 /// ```no_run
-/// use inferadb_ledger_raft::wide_events::with_current_context;
+/// use inferadb_ledger_raft::logging::with_current_context;
 ///
 /// fn record_storage_timing() {
 ///     with_current_context(|ctx| {
@@ -394,7 +394,7 @@ where
 ///
 /// When created, the guard sets up task-local storage with the provided context.
 /// When dropped, it removes the context from task-local storage and emits the
-/// wide event (via the context's Drop implementation).
+/// canonical log line (via the context's Drop implementation).
 ///
 /// # Task-Local Behavior
 ///
@@ -406,7 +406,7 @@ where
 /// # Example
 ///
 /// ```no_run
-/// use inferadb_ledger_raft::wide_events::{RequestContext, RequestContextGuard, with_current_context};
+/// use inferadb_ledger_raft::logging::{RequestContext, RequestContextGuard, with_current_context};
 ///
 /// async fn handle_request() {
 ///     let ctx = RequestContext::new("WriteService", "write");
@@ -435,7 +435,7 @@ impl RequestContextGuard {
     ///
     /// The context is available via [`with_current_context`] for the duration of the
     /// future's execution. When the future completes (or is dropped), the context's
-    /// wide event is emitted.
+    /// canonical log line is emitted.
     ///
     /// # Arguments
     ///
@@ -455,7 +455,7 @@ impl RequestContextGuard {
     /// Runs a synchronous closure with the given request context set as the current context.
     ///
     /// The context is available via [`with_current_context`] for the duration of the
-    /// closure's execution. When the closure returns, the context's wide event is emitted.
+    /// closure's execution. When the closure returns, the context's canonical log line is emitted.
     ///
     /// # Arguments
     ///
@@ -473,7 +473,7 @@ impl RequestContextGuard {
     }
 }
 
-/// Context builder for wide event emission.
+/// Context builder for canonical log line emission.
 ///
 /// Accumulates contextual fields throughout request processing and emits
 /// a single structured event on drop. Fields can be set in any order and
@@ -512,7 +512,7 @@ pub struct RequestContext {
     raft_term: Option<u64>,
     shard_id: Option<u32>,
 
-    // VIP status (for wide event field)
+    // VIP status (for canonical log line field)
     is_vip: Option<bool>,
 
     // Operation-specific (write)

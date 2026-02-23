@@ -748,7 +748,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `raft_network.rs`: gRPC-based Raft transport
 - `proto_compat.rs`: Orphan rule workarounds
 - `trace_context.rs`: W3C Trace Context
-- `wide_events.rs`: Canonical log lines (vault_slug field, `set_target(organization, vault_slug)`)
+- `logging.rs`: Canonical log lines (vault_slug field, `set_target(organization, vault_slug)`)
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `shard_router.rs`: Dynamic shard routing
 - `saga_orchestrator.rs`: Distributed transaction orchestration
@@ -1156,7 +1156,7 @@ The codebase has comprehensive observability:
 - **OpenTelemetry tracing**: W3C Trace Context propagation across services. OTLP exporter for traces/metrics. Configurable sampling ratio.
 - **Prometheus metrics**: 100+ metrics covering SLI/SLO, resource saturation, batch queues, rate limiting, hot keys, circuit breakers, etc. Custom histogram buckets for SLI.
 - **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, organization_slug, vault_slug, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
-- **Wide events**: Structured logging with tracing crate. Context propagation via spans.
+- **Structured logging**: Request-level structured logging with tracing crate. Context propagation via spans.
 - **SDK metrics**: Client-side metrics (request latency, retries, circuit state, connection pool) via `SdkMetrics` trait. Noop default for zero overhead.
 - **Audit logging**: File-based audit logger (JSON Lines) with fsync for durability. Prometheus metrics for audit events.
 
@@ -1220,7 +1220,7 @@ InferaDB Ledger is a **production-grade blockchain database** with exceptional e
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
 - **Raft consensus** via openraft, batching, idempotency, multi-shard horizontal scaling
 - **Enterprise features**: graceful shutdown, circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, time travel, tiered storage, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, audit logging, and 30+ more
-- **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, wide events, SDK-side metrics
+- **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics
 - **Comprehensive testing**: 1,671 test functions, property-based tests (proptest), crash recovery tests, chaos tests, 18 integration test files, benchmarks with CI tracking
 - **Security practices**: No unsafe, constant-time comparison, input validation, audit logging, TLS/mTLS, rate limiting, quotas
 - **Documentation**: 10 ADRs, invariant specs, module docs, rustdoc examples, 18 operations guides, 7 client guides, error code reference

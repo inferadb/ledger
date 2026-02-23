@@ -36,13 +36,13 @@ use tonic::{Request, Response, Status};
 use crate::{
     error::{ServiceError, classify_raft_error},
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    logging::{OperationType, RequestContext, Sampler},
     metrics,
     services::slug_resolver::SlugResolver,
     trace_context,
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
     },
-    wide_events::{OperationType, RequestContext, Sampler},
 };
 
 /// Handles organization and vault lifecycle, cluster membership, snapshots, and runtime
@@ -61,10 +61,10 @@ pub struct AdminServiceImpl {
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// The node's listen address (for GetNodeInfo RPC).
     listen_addr: SocketAddr,
-    /// Sampler for wide events tail sampling.
+    /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
-    /// Node ID for wide events system context.
+    /// Node ID for logging system context.
     #[builder(default)]
     node_id: Option<u64>,
     /// Audit logger for compliance-ready event tracking.
@@ -193,7 +193,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "create_organization");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -327,7 +327,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "delete_organization");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -459,7 +459,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "get_organization");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -517,7 +517,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<ListOrganizationsRequest>,
     ) -> Result<Response<ListOrganizationsResponse>, Status> {
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "list_organizations");
         ctx.set_operation_type(OperationType::Admin);
         ctx.set_admin_action("list_organizations");
@@ -567,7 +567,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "create_vault");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -731,7 +731,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "delete_vault");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -863,7 +863,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "get_vault");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -929,7 +929,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<ListVaultsRequest>,
     ) -> Result<Response<ListVaultsResponse>, Status> {
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "list_vaults");
         ctx.set_operation_type(OperationType::Admin);
         ctx.set_admin_action("list_vaults");
@@ -980,7 +980,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let _req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "create_snapshot");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -1039,7 +1039,7 @@ impl AdminService for AdminServiceImpl {
         let req = request.into_inner();
         let mut issues = Vec::new();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "check_integrity");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -1311,7 +1311,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "join_cluster");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -1521,7 +1521,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "leave_cluster");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -1612,7 +1612,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<GetClusterInfoRequest>,
     ) -> Result<Response<GetClusterInfoResponse>, Status> {
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "get_cluster_info");
         ctx.set_operation_type(OperationType::Admin);
         ctx.set_admin_action("get_cluster_info");
@@ -1695,7 +1695,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         _request: Request<GetNodeInfoRequest>,
     ) -> Result<Response<GetNodeInfoResponse>, Status> {
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "get_node_info");
         ctx.set_operation_type(OperationType::Admin);
         ctx.set_admin_action("get_node_info");
@@ -1739,7 +1739,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "recover_vault");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -2088,7 +2088,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "simulate_divergence");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);
@@ -2205,7 +2205,7 @@ impl AdminService for AdminServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create wide event context for this admin operation
+        // Create logging context for this admin operation
         let mut ctx = RequestContext::new("AdminService", "force_gc");
         ctx.set_operation_type(OperationType::Admin);
         ctx.extract_transport_metadata(&grpc_metadata);

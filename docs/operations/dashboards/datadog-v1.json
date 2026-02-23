@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "min_ledger_version": "0.5.0",
-  "title": "InferaDB Ledger Wide Events",
-  "description": "Comprehensive observability for InferaDB Ledger gRPC requests using wide events",
+  "title": "InferaDB Ledger Logging",
+  "description": "Comprehensive observability for InferaDB Ledger gRPC requests using canonical log lines",
   "widgets": [
     {
       "id": 1,
@@ -457,5 +457,5 @@
   "layout_type": "ordered",
   "notify_list": [],
   "reflow_type": "fixed",
-  "tags": ["inferadb", "wide-events", "observability"]
+  "tags": ["inferadb", "logging", "observability"]
 }

@@ -16,13 +16,13 @@ use snafu::Snafu;
 
 use crate::node_id;
 
-/// Configuration for wide events sampling.
+/// Configuration for log sampling.
 ///
 /// Controls tail sampling behavior: which events are logged based on
 /// outcome, latency, and organization priority.
 #[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
-pub struct WideEventsSamplingConfig {
+pub struct LogSamplingConfig {
     /// Sample rate for error outcomes (0.0-1.0). Default: 1.0 (100%).
     #[serde(default = "default_error_rate")]
     #[builder(default = default_error_rate())]
@@ -64,7 +64,7 @@ pub struct WideEventsSamplingConfig {
     pub slow_threshold_admin_ms: f64,
 }
 
-impl Default for WideEventsSamplingConfig {
+impl Default for LogSamplingConfig {
     fn default() -> Self {
         Self {
             error_rate: default_error_rate(),
@@ -79,9 +79,9 @@ impl Default for WideEventsSamplingConfig {
     }
 }
 
-impl WideEventsSamplingConfig {
+impl LogSamplingConfig {
     /// Creates a disabled sampling config (samples nothing except errors).
-    #[allow(dead_code)] // reserved for future use when wide events can be selectively disabled
+    #[allow(dead_code)] // reserved for future use when logging can be selectively disabled
     pub fn disabled() -> Self {
         Self {
             error_rate: 1.0,
@@ -129,7 +129,7 @@ impl WideEventsSamplingConfig {
             if !(0.0..=1.0).contains(&rate) {
                 return Err(ConfigError::Validation {
                     message: format!(
-                        "wide_events.sampling.{} must be between 0.0 and 1.0, got {}",
+                        "logging.sampling.{} must be between 0.0 and 1.0, got {}",
                         name, rate
                     ),
                 });
@@ -147,7 +147,7 @@ impl WideEventsSamplingConfig {
             if threshold <= 0.0 {
                 return Err(ConfigError::Validation {
                     message: format!(
-                        "wide_events.sampling.{} must be positive, got {}",
+                        "logging.sampling.{} must be positive, got {}",
                         name, threshold
                     ),
                 });
@@ -171,15 +171,15 @@ pub enum OtelTransport {
 
 /// Configuration for OpenTelemetry/OTLP trace export.
 ///
-/// Enables exporting wide events as OpenTelemetry traces to observability
+/// Enables exporting request logs as OpenTelemetry traces to observability
 /// backends like Jaeger, Tempo, or Honeycomb.
 ///
 /// # Environment Variables
 ///
 /// ```bash
-/// INFERADB__LEDGER__WIDE_EVENTS__OTEL__ENABLED=true
-/// INFERADB__LEDGER__WIDE_EVENTS__OTEL__ENDPOINT=http://localhost:4317
-/// INFERADB__LEDGER__WIDE_EVENTS__OTEL__TRANSPORT=grpc
+/// INFERADB__LEDGER__LOGGING__OTEL__ENABLED=true
+/// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
+/// INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT=grpc
 /// ```
 #[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
@@ -261,31 +261,31 @@ impl OtelConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.enabled && self.endpoint.is_none() {
             return Err(ConfigError::Validation {
-                message: "wide_events.otel.endpoint is required when OTEL is enabled".to_string(),
+                message: "logging.otel.endpoint is required when OTEL is enabled".to_string(),
             });
         }
 
         if self.batch_size == 0 {
             return Err(ConfigError::Validation {
-                message: "wide_events.otel.batch_size must be positive".to_string(),
+                message: "logging.otel.batch_size must be positive".to_string(),
             });
         }
 
         if self.batch_interval_ms == 0 {
             return Err(ConfigError::Validation {
-                message: "wide_events.otel.batch_interval_ms must be positive".to_string(),
+                message: "logging.otel.batch_interval_ms must be positive".to_string(),
             });
         }
 
         if self.timeout_ms == 0 {
             return Err(ConfigError::Validation {
-                message: "wide_events.otel.timeout_ms must be positive".to_string(),
+                message: "logging.otel.timeout_ms must be positive".to_string(),
             });
         }
 
         if self.shutdown_timeout_ms == 0 {
             return Err(ConfigError::Validation {
-                message: "wide_events.otel.shutdown_timeout_ms must be positive".to_string(),
+                message: "logging.otel.shutdown_timeout_ms must be positive".to_string(),
             });
         }
 
@@ -319,9 +319,9 @@ fn default_trace_raft_rpcs() -> bool {
 /// # Environment Variables
 ///
 /// ```bash
-/// INFERADB__LEDGER__WIDE_EVENTS__VIP__DISCOVERY_ENABLED=true
-/// INFERADB__LEDGER__WIDE_EVENTS__VIP__CACHE_TTL_SECS=60
-/// INFERADB__LEDGER__WIDE_EVENTS__VIP__TAG_NAME=vip
+/// INFERADB__LEDGER__LOGGING__VIP__DISCOVERY_ENABLED=true
+/// INFERADB__LEDGER__LOGGING__VIP__CACHE_TTL_SECS=60
+/// INFERADB__LEDGER__LOGGING__VIP__TAG_NAME=vip
 /// ```
 #[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
@@ -377,13 +377,13 @@ impl VipConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache_ttl_secs == 0 {
             return Err(ConfigError::Validation {
-                message: "wide_events.vip.cache_ttl_secs must be positive".to_string(),
+                message: "logging.vip.cache_ttl_secs must be positive".to_string(),
             });
         }
 
         if self.tag_name.is_empty() {
             return Err(ConfigError::Validation {
-                message: "wide_events.vip.tag_name cannot be empty".to_string(),
+                message: "logging.vip.tag_name cannot be empty".to_string(),
             });
         }
 
@@ -401,33 +401,33 @@ fn default_vip_tag_name() -> String {
     "vip".to_string()
 }
 
-/// Configuration for wide events logging.
+/// Configuration for request logging.
 ///
-/// Wide events provide comprehensive request-level logging with 50+ contextual
+/// Provides comprehensive request-level logging with 50+ contextual
 /// fields for debugging and observability.
 ///
 /// # Environment Variables
 ///
-/// Configures via environment variables with the `INFERADB__LEDGER__WIDE_EVENTS__` prefix:
+/// Configures via environment variables with the `INFERADB__LEDGER__LOGGING__` prefix:
 ///
 /// ```bash
-/// INFERADB__LEDGER__WIDE_EVENTS__ENABLED=true
-/// INFERADB__LEDGER__WIDE_EVENTS__SAMPLING__WRITE_RATE=0.1
-/// INFERADB__LEDGER__WIDE_EVENTS__VIP_ORGANIZATIONS=1,2,3
+/// INFERADB__LEDGER__LOGGING__ENABLED=true
+/// INFERADB__LEDGER__LOGGING__SAMPLING__WRITE_RATE=0.1
+/// INFERADB__LEDGER__LOGGING__VIP_ORGANIZATIONS=1,2,3
 /// ```
 #[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
-pub struct WideEventsConfig {
-    /// Whether wide events logging is enabled. Default: true.
-    #[serde(default = "default_wide_events_enabled")]
-    #[builder(default = default_wide_events_enabled())]
-    #[allow(dead_code)] // reserved for when wide events can be disabled
+pub struct LoggingConfig {
+    /// Whether request logging is enabled. Default: true.
+    #[serde(default = "default_logging_enabled")]
+    #[builder(default = default_logging_enabled())]
+    #[allow(dead_code)] // reserved for when logging can be disabled
     pub enabled: bool,
 
-    /// Sampling configuration for wide events.
+    /// Sampling configuration for request logging.
     #[serde(default)]
     #[builder(default)]
-    pub sampling: WideEventsSamplingConfig,
+    pub sampling: LogSamplingConfig,
 
     /// List of VIP organization IDs with elevated sampling rates.
     /// These are static overrides that always receive VIP treatment.
@@ -447,11 +447,11 @@ pub struct WideEventsConfig {
     pub otel: OtelConfig,
 }
 
-impl Default for WideEventsConfig {
+impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            enabled: default_wide_events_enabled(),
-            sampling: WideEventsSamplingConfig::default(),
+            enabled: default_logging_enabled(),
+            sampling: LogSamplingConfig::default(),
             vip_organizations: Vec::new(),
             vip: VipConfig::default(),
             otel: OtelConfig::default(),
@@ -459,19 +459,19 @@ impl Default for WideEventsConfig {
     }
 }
 
-impl WideEventsConfig {
+impl LoggingConfig {
     /// Creates a configuration with test-suitable values (all sampling enabled).
     pub fn for_test() -> Self {
         Self {
             enabled: true,
-            sampling: WideEventsSamplingConfig::for_test(),
+            sampling: LogSamplingConfig::for_test(),
             vip_organizations: Vec::new(),
             vip: VipConfig::for_test(),
             otel: OtelConfig::for_test(),
         }
     }
 
-    /// Validates wide events configuration.
+    /// Validates logging configuration.
     ///
     /// # Errors
     ///
@@ -484,7 +484,7 @@ impl WideEventsConfig {
     }
 }
 
-// Wide events sampling default value functions
+// Log sampling default value functions
 fn default_error_rate() -> f64 {
     1.0
 }
@@ -509,7 +509,7 @@ fn default_slow_threshold_write_ms() -> f64 {
 fn default_slow_threshold_admin_ms() -> f64 {
     1000.0
 }
-fn default_wide_events_enabled() -> bool {
+fn default_logging_enabled() -> bool {
     true
 }
 
@@ -702,15 +702,15 @@ pub struct Config {
     #[builder(default = default_timeout_secs())]
     pub timeout_secs: u64,
 
-    // === Wide Events ===
-    /// Wide events configuration for comprehensive request logging.
+    // === Logging ===
+    /// Logging configuration for comprehensive request logging.
     ///
-    /// Wide events emit a single JSON log line per request with 50+ contextual
+    /// Emits a single JSON log line per request with 50+ contextual
     /// fields for debugging and observability.
     #[arg(skip)]
     #[serde(default)]
     #[builder(default)]
-    pub wide_events: WideEventsConfig,
+    pub logging: LoggingConfig,
 
     // === Runtime Config ===
     /// Path to a TOML config file for hot-reloadable runtime settings.
@@ -782,7 +782,7 @@ impl Default for Config {
             batch_max_delay_secs: default_batch_max_delay_secs(),
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
-            wide_events: WideEventsConfig::default(),
+            logging: LoggingConfig::default(),
             config_file: None,
             backup: None,
         }
@@ -806,7 +806,7 @@ impl Config {
             single: true,
             join: false,
             cluster: None,
-            wide_events: WideEventsConfig::for_test(),
+            logging: LoggingConfig::for_test(),
             ..Self::default()
         }
     }
@@ -903,16 +903,16 @@ impl Config {
 
     /// Validates the configuration.
     ///
-    /// Validates bootstrap mode settings and wide events configuration:
+    /// Validates bootstrap mode settings and logging configuration:
     /// - `--single`: Single-node deployment
     /// - `--join`: Join existing cluster
     /// - `--cluster N`: Coordinated bootstrap (N must be >= 2)
-    /// - Wide events sampling rates must be 0.0-1.0
-    /// - Wide events thresholds must be positive
+    /// - Logging sampling rates must be 0.0-1.0
+    /// - Logging thresholds must be positive
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] if cluster size is less than 2 or wide events
+    /// Returns [`ConfigError`] if cluster size is less than 2 or logging
     /// configuration is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(n) = self.cluster
@@ -925,7 +925,7 @@ impl Config {
                 ),
             });
         }
-        self.wide_events.validate()?;
+        self.logging.validate()?;
         Ok(())
     }
 
@@ -1463,11 +1463,11 @@ mod tests {
         assert!(config.peers_as_file_path().is_none());
     }
 
-    // === Wide Events Config Tests ===
+    // === Log Sampling Config Tests ===
 
     #[test]
-    fn test_wide_events_sampling_config_defaults() {
-        let config = WideEventsSamplingConfig::default();
+    fn test_log_sampling_config_defaults() {
+        let config = LogSamplingConfig::default();
         assert!((config.error_rate - 1.0).abs() < f64::EPSILON);
         assert!((config.slow_rate - 1.0).abs() < f64::EPSILON);
         assert!((config.vip_rate - 0.5).abs() < f64::EPSILON);
@@ -1479,8 +1479,8 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_sampling_config_disabled() {
-        let config = WideEventsSamplingConfig::disabled();
+    fn test_log_sampling_config_disabled() {
+        let config = LogSamplingConfig::disabled();
         assert!((config.error_rate - 1.0).abs() < f64::EPSILON); // Errors always sampled
         assert!((config.slow_rate - 0.0).abs() < f64::EPSILON);
         assert!((config.vip_rate - 0.0).abs() < f64::EPSILON);
@@ -1490,8 +1490,8 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_sampling_config_for_test() {
-        let config = WideEventsSamplingConfig::for_test();
+    fn test_log_sampling_config_for_test() {
+        let config = LogSamplingConfig::for_test();
         // Test config samples everything
         assert!((config.error_rate - 1.0).abs() < f64::EPSILON);
         assert!((config.slow_rate - 1.0).abs() < f64::EPSILON);
@@ -1501,9 +1501,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_sampling_config_validate_rates() {
+    fn test_log_sampling_config_validate_rates() {
         // Valid rates
-        let config = WideEventsSamplingConfig::builder()
+        let config = LogSamplingConfig::builder()
             .error_rate(0.0)
             .slow_rate(0.5)
             .vip_rate(1.0)
@@ -1513,21 +1513,21 @@ mod tests {
         assert!(config.validate().is_ok());
 
         // Invalid: rate > 1.0
-        let config = WideEventsSamplingConfig::builder().error_rate(1.5).build();
+        let config = LogSamplingConfig::builder().error_rate(1.5).build();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("error_rate"));
         assert!(err.to_string().contains("0.0 and 1.0"));
 
         // Invalid: rate < 0.0
-        let config = WideEventsSamplingConfig::builder().write_rate(-0.1).build();
+        let config = LogSamplingConfig::builder().write_rate(-0.1).build();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("write_rate"));
     }
 
     #[test]
-    fn test_wide_events_sampling_config_validate_thresholds() {
+    fn test_log_sampling_config_validate_thresholds() {
         // Valid thresholds
-        let config = WideEventsSamplingConfig::builder()
+        let config = LogSamplingConfig::builder()
             .slow_threshold_read_ms(5.0)
             .slow_threshold_write_ms(50.0)
             .slow_threshold_admin_ms(500.0)
@@ -1535,27 +1535,27 @@ mod tests {
         assert!(config.validate().is_ok());
 
         // Invalid: threshold <= 0
-        let config = WideEventsSamplingConfig::builder().slow_threshold_read_ms(0.0).build();
+        let config = LogSamplingConfig::builder().slow_threshold_read_ms(0.0).build();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("slow_threshold_read_ms"));
         assert!(err.to_string().contains("positive"));
 
-        let config = WideEventsSamplingConfig::builder().slow_threshold_write_ms(-10.0).build();
+        let config = LogSamplingConfig::builder().slow_threshold_write_ms(-10.0).build();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("slow_threshold_write_ms"));
     }
 
     #[test]
-    fn test_wide_events_config_defaults() {
-        let config = WideEventsConfig::default();
+    fn test_logging_config_defaults() {
+        let config = LoggingConfig::default();
         assert!(config.enabled);
         assert!(config.vip_organizations.is_empty());
         // Sampling defaults are covered by sampling config tests
     }
 
     #[test]
-    fn test_wide_events_config_for_test() {
-        let config = WideEventsConfig::for_test();
+    fn test_logging_config_for_test() {
+        let config = LoggingConfig::for_test();
         assert!(config.enabled);
         assert!(config.vip_organizations.is_empty());
         // Test config samples everything
@@ -1564,45 +1564,45 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_config_validate() {
+    fn test_logging_config_validate() {
         // Valid config
-        let config = WideEventsConfig::default();
+        let config = LoggingConfig::default();
         assert!(config.validate().is_ok());
 
         // Invalid sampling config propagates error
-        let config = WideEventsConfig {
-            sampling: WideEventsSamplingConfig::builder().error_rate(2.0).build(),
-            ..WideEventsConfig::default()
+        let config = LoggingConfig {
+            sampling: LogSamplingConfig::builder().error_rate(2.0).build(),
+            ..LoggingConfig::default()
         };
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn test_config_includes_wide_events() {
+    fn test_config_includes_logging() {
         let config = Config::default();
-        assert!(config.wide_events.enabled);
+        assert!(config.logging.enabled);
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn test_config_for_test_uses_test_wide_events() {
+    fn test_config_for_test_uses_test_logging() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
         let config = Config::for_test(1, 50051, data_dir);
 
-        // for_test uses WideEventsConfig::for_test() which samples everything
-        assert!(config.wide_events.enabled);
-        assert!((config.wide_events.sampling.read_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.wide_events.sampling.write_rate - 1.0).abs() < f64::EPSILON);
+        // for_test uses LoggingConfig::for_test() which samples everything
+        assert!(config.logging.enabled);
+        assert!((config.logging.sampling.read_rate - 1.0).abs() < f64::EPSILON);
+        assert!((config.logging.sampling.write_rate - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_config_validate_includes_wide_events() {
-        // Config with invalid wide_events should fail validation
+    fn test_config_validate_includes_logging() {
+        // Config with invalid logging should fail validation
         let config = Config {
-            wide_events: WideEventsConfig {
-                sampling: WideEventsSamplingConfig::builder().vip_rate(-0.5).build(),
-                ..WideEventsConfig::default()
+            logging: LoggingConfig {
+                sampling: LogSamplingConfig::builder().vip_rate(-0.5).build(),
+                ..LoggingConfig::default()
             },
             ..Config::default()
         };
@@ -1611,8 +1611,8 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_sampling_config_builder() {
-        let config = WideEventsSamplingConfig::builder()
+    fn test_log_sampling_config_builder() {
+        let config = LogSamplingConfig::builder()
             .error_rate(0.9)
             .slow_rate(0.8)
             .vip_rate(0.7)
@@ -1634,9 +1634,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_config_builder() {
-        let sampling = WideEventsSamplingConfig::builder().read_rate(0.05).build();
-        let config = WideEventsConfig::builder()
+    fn test_logging_config_builder() {
+        let sampling = LogSamplingConfig::builder().read_rate(0.05).build();
+        let config = LoggingConfig::builder()
             .enabled(false)
             .sampling(sampling)
             .vip_organizations(vec![1, 2, 3])
@@ -1755,18 +1755,18 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_config_includes_otel() {
-        let config = WideEventsConfig::default();
+    fn test_logging_config_includes_otel() {
+        let config = LoggingConfig::default();
         assert!(!config.otel.enabled);
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn test_wide_events_config_validate_includes_otel() {
+    fn test_logging_config_validate_includes_otel() {
         // Invalid OTEL config should fail validation
-        let config = WideEventsConfig {
+        let config = LoggingConfig {
             otel: OtelConfig::builder().enabled(true).build(), // Missing endpoint
-            ..WideEventsConfig::default()
+            ..LoggingConfig::default()
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("endpoint"));
@@ -1818,18 +1818,18 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_events_config_includes_vip() {
-        let config = WideEventsConfig::default();
+    fn test_logging_config_includes_vip() {
+        let config = LoggingConfig::default();
         assert!(config.vip.discovery_enabled);
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn test_wide_events_config_validate_includes_vip() {
+    fn test_logging_config_validate_includes_vip() {
         // Invalid VIP config should fail validation
-        let config = WideEventsConfig {
+        let config = LoggingConfig {
             vip: VipConfig { cache_ttl_secs: 0, ..VipConfig::default() },
-            ..WideEventsConfig::default()
+            ..LoggingConfig::default()
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("cache_ttl_secs"));

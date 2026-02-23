@@ -1,6 +1,6 @@
-//! Wide events performance benchmarks.
+//! Logging performance benchmarks.
 //!
-//! These benchmarks validate that wide events meet the performance targets
+//! These benchmarks validate that request logging meets the performance targets
 //! specified in the PRD:
 //!
 //! - Context creation: <1μs
@@ -13,13 +13,13 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use inferadb_ledger_raft::wide_events::{Outcome, RequestContext, Sampler, SamplingConfig};
+use inferadb_ledger_raft::logging::{Outcome, RequestContext, Sampler, SamplingConfig};
 
 /// Benchmark RequestContext::new() creation time.
 ///
 /// Target: <1μs
 fn bench_context_creation(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wide_events/context_creation");
+    let mut group = c.benchmark_group("logging/context_creation");
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("new", |b| {
@@ -32,11 +32,11 @@ fn bench_context_creation(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark populating all wide event fields.
+/// Benchmark populating all request log fields.
 ///
 /// Target: <10μs
 fn bench_field_population(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wide_events/field_population");
+    let mut group = c.benchmark_group("logging/field_population");
     group.throughput(Throughput::Elements(1));
 
     // Benchmark populating a few critical fields
@@ -103,7 +103,7 @@ fn bench_field_population(c: &mut Criterion) {
 ///
 /// Target: <1μs
 fn bench_sampling_decision(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wide_events/sampling");
+    let mut group = c.benchmark_group("logging/sampling");
     group.throughput(Throughput::Elements(1));
 
     let config = SamplingConfig::builder()
@@ -124,7 +124,7 @@ fn bench_sampling_decision(c: &mut Criterion) {
                 &request_id,
                 Some(&Outcome::Success),
                 50.0, // duration_ms
-                inferadb_ledger_raft::wide_events::OperationType::Write,
+                inferadb_ledger_raft::logging::OperationType::Write,
                 Some(1), // organization_id
             );
             black_box(decision)
@@ -139,7 +139,7 @@ fn bench_sampling_decision(c: &mut Criterion) {
                 &request_id,
                 Some(&error_outcome),
                 50.0,
-                inferadb_ledger_raft::wide_events::OperationType::Write,
+                inferadb_ledger_raft::logging::OperationType::Write,
                 Some(1),
             );
             black_box(decision)
@@ -153,13 +153,13 @@ fn bench_sampling_decision(c: &mut Criterion) {
 ///
 /// Target: <100μs p99 total overhead
 fn bench_end_to_end(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wide_events/end_to_end");
+    let mut group = c.benchmark_group("logging/end_to_end");
     group.throughput(Throughput::Elements(1));
 
     let config = SamplingConfig::builder().build();
     let sampler = Sampler::new(config);
 
-    // Benchmark the complete wide events overhead for a typical write request
+    // Benchmark the complete logging overhead for a typical write request
     group.bench_function("write_request", |b| {
         b.iter(|| {
             // 1. Create context
@@ -222,7 +222,7 @@ fn bench_end_to_end(c: &mut Criterion) {
 ///
 /// Validates that operation_types Vec doesn't cause significant overhead.
 fn bench_operation_types_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wide_events/operation_types");
+    let mut group = c.benchmark_group("logging/operation_types");
 
     for count in [1, 5, 10, 20] {
         group.bench_with_input(BenchmarkId::new("count", count), &count, |b, &count| {
