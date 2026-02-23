@@ -187,7 +187,7 @@ impl EventStore {
 
     /// Deletes expired event entries using the collect-then-delete pattern.
     ///
-    /// Scans all entries, deserializes only [`EventMeta`] (first field) to check
+    /// Scans all entries, deserializes only [`EventMeta`] (first two fields) to check
     /// `expires_at`, collects expired keys, then deletes them in a write
     /// transaction up to `max_batch`.
     ///
@@ -212,7 +212,7 @@ impl EventStore {
                 break;
             }
 
-            // Thin deserialization — only reads the first field (expires_at)
+            // Thin deserialization — reads emission (field 1) + expires_at (field 2)
             let meta: EventMeta =
                 inferadb_ledger_types::decode(&value_bytes).context(CodecSnafu)?;
 
@@ -261,9 +261,10 @@ impl EventStore {
 
     /// Scans all apply-phase events for inclusion in Raft snapshots.
     ///
-    /// Returns the most recent `max_entries` entries where
-    /// `emission == ApplyPhase`, sorted newest-first. When there are
-    /// more apply-phase entries than `max_entries`, the oldest are omitted.
+    /// Uses thin deserialization ([`EmissionMeta`]) to read only the `emission`
+    /// discriminant (~1–2 bytes) for each event, skipping full deserialization
+    /// of handler-phase events (~55% of total). Apply-phase events are then
+    /// fully deserialized, sorted newest-first, and truncated to `max_entries`.
     ///
     /// # Errors
     ///
@@ -273,20 +274,21 @@ impl EventStore {
         txn: &ReadTransaction<'_, B>,
         max_entries: usize,
     ) -> Result<Vec<inferadb_ledger_types::events::EventEntry>> {
-        use inferadb_ledger_types::events::EventEmission;
+        use inferadb_ledger_types::events::{EmissionMeta, EventEmission};
 
         let iter = txn.iter::<Events>().context(StorageSnafu)?;
 
-        // Collect all apply-phase entries. Keys are org_id (8) || timestamp (8) || hash (8),
-        // so iteration is chronological within each org but interleaved across orgs.
-        // We collect all, then keep the most recent `max_entries`.
         let mut entries: Vec<inferadb_ledger_types::events::EventEntry> = Vec::new();
 
         for (_key_bytes, value_bytes) in iter {
-            let entry: inferadb_ledger_types::events::EventEntry =
+            // Thin deserialization — reads only the emission discriminant (~1–2 bytes)
+            let meta: EmissionMeta =
                 inferadb_ledger_types::decode(&value_bytes).context(CodecSnafu)?;
 
-            if matches!(entry.emission, EventEmission::ApplyPhase) {
+            if matches!(meta.emission, EventEmission::ApplyPhase) {
+                // Full deserialization only for apply-phase events
+                let entry: inferadb_ledger_types::events::EventEntry =
+                    inferadb_ledger_types::decode(&value_bytes).context(CodecSnafu)?;
                 entries.push(entry);
             }
         }
@@ -942,5 +944,113 @@ mod tests {
             EventStore::list(&txn, org_id, start_ns, end_ns, 100, None).expect("list mid");
         assert_eq!(mid.len(), 1);
         assert_eq!(mid[0].timestamp.timestamp(), 2000);
+    }
+
+    /// Verifies GC (`delete_expired`) works correctly after the `EventEntry` field
+    /// reorder. `EventMeta` now reads `emission` (field 1) + `expires_at` (field 2),
+    /// so the GC must still correctly identify expired entries.
+    #[test]
+    fn delete_expired_works_after_field_reorder() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+
+            // Expired apply-phase event
+            let e1 = make_entry(1, [1u8; 16], 1_700_000_000, 50);
+            EventStore::write(&mut txn, &e1).expect("write");
+
+            // Expired handler-phase event
+            let mut e2 = make_entry(1, [2u8; 16], 1_700_000_001, 50);
+            e2.emission = EventEmission::HandlerPhase { node_id: 1 };
+            EventStore::write(&mut txn, &e2).expect("write");
+
+            // Non-expired event
+            let e3 = make_entry(1, [3u8; 16], 1_700_000_002, 0);
+            EventStore::write(&mut txn, &e3).expect("write");
+
+            txn.commit().expect("commit");
+        }
+
+        {
+            let read_txn = events_db.read().expect("read txn");
+            let mut write_txn = events_db.write().expect("write txn");
+            let deleted =
+                EventStore::delete_expired(&read_txn, &mut write_txn, 100, 100).expect("gc");
+            assert_eq!(deleted, 2, "both expired entries should be deleted");
+            write_txn.commit().expect("commit");
+        }
+
+        let txn = events_db.read().expect("read txn");
+        let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(count, 1, "only non-expired entry remains");
+    }
+
+    /// 50 apply-phase + 50 handler-phase events: scan returns exactly 50 apply-phase.
+    #[test]
+    fn scan_apply_phase_50_apply_50_handler() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+
+            for i in 0..50u8 {
+                let entry = make_entry(1, [i; 16], 1_700_000_000 + i64::from(i), 0);
+                EventStore::write(&mut txn, &entry).expect("write apply");
+            }
+
+            for i in 50..100u8 {
+                let mut entry = make_entry(1, [i; 16], 1_700_000_000 + i64::from(i), 0);
+                entry.emission = EventEmission::HandlerPhase { node_id: 1 };
+                EventStore::write(&mut txn, &entry).expect("write handler");
+            }
+
+            txn.commit().expect("commit");
+        }
+
+        let txn = events_db.read().expect("read txn");
+        let results = EventStore::scan_apply_phase(&txn, 1000).expect("scan");
+
+        assert_eq!(results.len(), 50, "exactly 50 apply-phase events");
+        for entry in &results {
+            assert!(
+                matches!(entry.emission, EventEmission::ApplyPhase),
+                "all entries must be apply-phase"
+            );
+        }
+    }
+
+    /// scan_apply_phase with max_entries truncation returns newest N sorted desc.
+    #[test]
+    fn scan_apply_phase_truncates_to_newest() {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+
+        {
+            let mut txn = events_db.write().expect("write txn");
+            for i in 0..20u8 {
+                let entry = make_entry(1, [i; 16], 1_700_000_000 + i64::from(i), 0);
+                EventStore::write(&mut txn, &entry).expect("write");
+            }
+            txn.commit().expect("commit");
+        }
+
+        let txn = events_db.read().expect("read txn");
+        let results = EventStore::scan_apply_phase(&txn, 5).expect("scan");
+
+        assert_eq!(results.len(), 5, "truncated to max_entries");
+
+        // Newest first
+        for window in results.windows(2) {
+            assert!(window[0].timestamp >= window[1].timestamp, "must be sorted newest-first");
+        }
+
+        // The 5 newest timestamps correspond to i=15..19
+        let min_ts = chrono::TimeZone::timestamp_opt(&Utc, 1_700_000_015, 0).unwrap().timestamp();
+        for entry in &results {
+            assert!(
+                entry.timestamp.timestamp() >= min_ts,
+                "truncated entries should be the 5 newest"
+            );
+        }
     }
 }

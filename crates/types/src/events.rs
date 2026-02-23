@@ -33,21 +33,34 @@ use crate::types::OrganizationId;
 ///
 /// # Field Ordering
 ///
-/// `expires_at` is the first field for GC efficiency — postcard deserializes fields
-/// sequentially, allowing a thin [`EventMeta`] wrapper to check expiry without
-/// full deserialization.
+/// Fields are ordered for thin deserialization efficiency (postcard serializes
+/// sequentially by declaration order):
+///
+/// 1. `emission` — [`EmissionMeta`] reads only this field to filter handler-phase events in
+///    [`EventStore::scan_apply_phase`] without full deserialization.
+/// 2. `expires_at` — [`EventMeta`] reads `emission` + `expires_at` for GC checks.
+///
+/// **Do not reorder fields** without updating `EmissionMeta`, `EventMeta`, and
+/// the `event_entry_serialization_byte_pinning` test.
 ///
 /// # Serialization
 ///
-/// Uses postcard for storage (compact binary) and serde for JSON API responses.
-/// All optional/new fields have `#[serde(default)]` for forward-compatible
-/// deserialization of older stored entries.
+/// Uses postcard for storage (compact binary, position-dependent) and serde
+/// for JSON API responses. Optional fields have `#[serde(default)]` for
+/// forward-compatible JSON deserialization. Postcard serialization order
+/// matches struct declaration order — field reorders are breaking changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventEntry {
+    /// `ApplyPhase` or `HandlerPhase { node_id }`.
+    ///
+    /// **Must be field 1** — [`EmissionMeta`] thin-deserializes only this field
+    /// to filter handler-phase events in snapshot collection.
+    pub emission: EventEmission,
+
     /// Unix timestamp for TTL expiry (0 = no expiry).
     ///
-    /// **Must be the first field** for GC efficiency — the garbage collector
-    /// deserializes only this field via [`EventMeta`] to check expiry.
+    /// **Must be field 2** — [`EventMeta`] thin-deserializes `emission` +
+    /// `expires_at` for GC expiry checks.
     pub expires_at: u64,
 
     /// Deterministic UUID v5 (apply-phase) or random UUID v4 (handler-phase).
@@ -72,9 +85,6 @@ pub struct EventEntry {
 
     /// What happened — used for internal routing and scope enforcement.
     pub action: EventAction,
-
-    /// `ApplyPhase` or `HandlerPhase { node_id }`.
-    pub emission: EventEmission,
 
     /// Who performed the action (server-assigned actor, never client-controlled).
     pub principal: String,
@@ -116,12 +126,29 @@ pub struct EventEntry {
 
 /// Thin wrapper for GC-efficient expiry checks.
 ///
-/// Deserializes only the first field of [`EventEntry`] (postcard sequential
-/// deserialization) to avoid full decode overhead during garbage collection.
+/// Deserializes the first two fields of [`EventEntry`] (postcard sequential
+/// deserialization): `emission` then `expires_at`. The GC reads `expires_at`
+/// to check expiry without full decode overhead.
+///
+/// See also [`EmissionMeta`] which reads only `emission` (field 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMeta {
-    /// Unix timestamp for TTL expiry (0 = no expiry).
+    /// Emission phase (field 1 of `EventEntry`).
+    pub emission: EventEmission,
+
+    /// Unix timestamp for TTL expiry (0 = no expiry, field 2 of `EventEntry`).
     pub expires_at: u64,
+}
+
+/// Thin deserialization target for [`EventStore::scan_apply_phase`].
+///
+/// Reads only the `emission` field (first in serialization order) to filter
+/// handler-phase events without full [`EventEntry`] deserialization.
+/// Follows the same pattern as [`EventMeta`] used by GC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmissionMeta {
+    /// Emission phase (field 1 of `EventEntry`).
+    pub emission: EventEmission,
 }
 
 /// Event scope — determines which log an event belongs to.
@@ -929,9 +956,72 @@ mod tests {
     fn event_meta_deserializes_first_field_only() {
         let entry = sample_event_entry();
         let bytes = postcard::to_allocvec(&entry).expect("encode");
-        // EventMeta only reads expires_at (first field)
+        // EventMeta reads emission (field 1) + expires_at (field 2)
         let meta: EventMeta = postcard::from_bytes(&bytes).expect("decode meta");
+        assert_eq!(meta.emission, entry.emission);
         assert_eq!(meta.expires_at, entry.expires_at);
+    }
+
+    #[test]
+    fn emission_meta_thin_deserializes_apply_phase() {
+        let entry = sample_event_entry();
+        assert!(matches!(entry.emission, EventEmission::ApplyPhase));
+        let bytes = postcard::to_allocvec(&entry).expect("encode");
+        let meta: EmissionMeta = postcard::from_bytes(&bytes).expect("decode emission meta");
+        assert_eq!(meta.emission, EventEmission::ApplyPhase);
+    }
+
+    #[test]
+    fn emission_meta_thin_deserializes_handler_phase() {
+        let mut entry = sample_event_entry();
+        entry.emission = EventEmission::HandlerPhase { node_id: 42 };
+        let bytes = postcard::to_allocvec(&entry).expect("encode");
+        let meta: EmissionMeta = postcard::from_bytes(&bytes).expect("decode emission meta");
+        assert_eq!(meta.emission, EventEmission::HandlerPhase { node_id: 42 });
+    }
+
+    #[test]
+    fn event_meta_reads_emission_and_expires_at_after_reorder() {
+        // Verify EventMeta works for both ApplyPhase and HandlerPhase variants
+        let mut entry = sample_event_entry();
+        entry.emission = EventEmission::HandlerPhase { node_id: 99 };
+        entry.expires_at = 2_000_000_000;
+        let bytes = postcard::to_allocvec(&entry).expect("encode");
+        let meta: EventMeta = postcard::from_bytes(&bytes).expect("decode meta");
+        assert_eq!(meta.emission, EventEmission::HandlerPhase { node_id: 99 });
+        assert_eq!(meta.expires_at, 2_000_000_000);
+    }
+
+    #[test]
+    fn event_entry_full_serde_roundtrip_after_reorder() {
+        let entry = sample_event_entry();
+        let bytes = postcard::to_allocvec(&entry).expect("encode");
+        let decoded: EventEntry = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded, entry);
+    }
+
+    /// Byte-pinning test: verifies `emission` is serialized first.
+    ///
+    /// Postcard encodes enums as a varint discriminant. `ApplyPhase` is variant 0,
+    /// so the first byte of a serialized `EventEntry` with `ApplyPhase` emission
+    /// must be `0x00`. `HandlerPhase` is variant 1 (`0x01`), followed by the
+    /// varint-encoded `node_id`.
+    ///
+    /// This test prevents accidental field reorders that would break thin
+    /// deserialization via `EmissionMeta` and `EventMeta`.
+    #[test]
+    fn event_entry_serialization_byte_pinning() {
+        // ApplyPhase: first byte is 0x00 (variant 0)
+        let mut entry = sample_event_entry();
+        entry.emission = EventEmission::ApplyPhase;
+        let bytes = postcard::to_allocvec(&entry).expect("encode apply");
+        assert_eq!(bytes[0], 0x00, "first byte must be ApplyPhase discriminant (0x00)");
+
+        // HandlerPhase: first byte is 0x01 (variant 1), followed by node_id varint
+        entry.emission = EventEmission::HandlerPhase { node_id: 7 };
+        let bytes = postcard::to_allocvec(&entry).expect("encode handler");
+        assert_eq!(bytes[0], 0x01, "first byte must be HandlerPhase discriminant (0x01)");
+        assert_eq!(bytes[1], 7, "second byte must be node_id varint (7)");
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! (deterministic) and expire at the same threshold; handler-phase events
 //! are node-local. Each node independently GCs its own `events.db`.
 //!
-//! Uses thin [`EventMeta`] deserialization (first field only) during scans
+//! Uses thin [`EventMeta`] deserialization (first two fields) during scans
 //! to avoid full [`EventEntry`] decode overhead.
 //!
 //! [`TtlGarbageCollector`]: crate::TtlGarbageCollector
