@@ -403,27 +403,33 @@ async fn test_watch_blocks_vault_isolation() {
     );
 }
 
-/// Test: lagging subscriber receives stream error, can reconnect from last known height.
+/// Test: high-volume writes with mid-stream reconnection.
 ///
-/// This tests backpressure handling. The broadcast channel has a 1024 buffer;
-/// a slow consumer that falls behind should receive an error.
+/// Verifies the system handles sustained block production exceeding the broadcast
+/// channel capacity (1000), and that a subscriber can reconnect from an arbitrary
+/// height to resume receiving historical + live blocks.
 ///
-/// Note: This test is marked slow because it needs to generate >1024 blocks
-/// to trigger the Lagged condition, which takes time.
+/// Note: Broadcast `Lagged` errors cannot be reliably triggered through gRPC
+/// integration tests because sequential writes (~22 msg/sec) are too slow to
+/// outpace the server-side stream consumer. The lag behavior is a well-tested
+/// `tokio::sync::broadcast` feature. This test instead validates:
+/// 1. The system writes >1000 blocks without errors
+/// 2. A subscriber receives all blocks via the streaming API
+/// 3. Mid-stream reconnection from an arbitrary height works correctly
 #[serial]
 #[tokio::test]
-#[ignore = "slow: requires >1024 blocks to trigger lagged condition"]
-async fn test_watch_blocks_lagging_subscriber() {
+#[ignore = "slow: writes >1000 blocks to exercise broadcast capacity"]
+async fn test_watch_blocks_high_volume_reconnect() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
     let organization_id =
-        create_organization(leader.addr, "lagging-ns").await.expect("create organization");
+        create_organization(leader.addr, "highvol-ns").await.expect("create organization");
     let vault_slug = create_vault(leader.addr, organization_id).await.expect("create vault");
 
-    // Subscribe but don't consume any messages
+    // Subscribe from block 1
     let mut read_client = create_read_client(leader.addr).await.expect("create read client");
     let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -436,56 +442,58 @@ async fn test_watch_blocks_lagging_subscriber() {
     let mut stream =
         read_client.watch_blocks(request).await.expect("watch_blocks should succeed").into_inner();
 
-    // Write >1024 blocks to overflow the broadcast buffer
-    // The subscriber is not consuming, so it will lag behind
-    for i in 1..=1100 {
+    // Write 1200 blocks — exceeds the broadcast channel capacity (1000) to exercise
+    // buffer recycling. Reuse a single client_id to avoid bloating the AppliedState
+    // blob (serialized as a single B+ tree value) with unique client sequences.
+    let total_writes: u64 = 1200;
+    let client_id = "highvol-writer";
+    for i in 1..=total_writes {
         write_entity(
             leader.addr,
             organization_id,
             vault_slug,
-            &format!("lag-key-{}", i),
-            format!("lag-value-{}", i).as_bytes(),
-            &format!("lag-client-{}", i),
+            &format!("hv-key-{}", i),
+            format!("hv-value-{}", i).as_bytes(),
+            client_id,
         )
         .await
         .expect("write should succeed");
     }
 
-    // Now try to consume - should eventually hit an error due to lag
-    let mut received_count = 0;
-    let mut hit_error = false;
-
+    // Consume all available messages from the stream
+    let mut received_count = 0u64;
     loop {
-        match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-            Ok(Some(Ok(_))) => {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(announcement))) => {
                 received_count += 1;
+                // Verify announcements arrive in order
+                assert_eq!(
+                    announcement.height, received_count,
+                    "Block heights should be sequential"
+                );
             },
-            Ok(Some(Err(_))) => {
-                // This is the expected Lagged error converted to stream error
-                hit_error = true;
-                break;
+            Ok(Some(Err(e))) => {
+                panic!("Unexpected stream error: {:?}", e);
             },
             Ok(None) => {
-                // Stream ended unexpectedly
                 break;
             },
             Err(_) => {
-                // Timeout - no more messages
+                // Timeout — no more messages pending
                 break;
             },
         }
     }
 
-    // Should have received some messages but hit an error before getting all 1100
-    assert!(
-        hit_error || received_count < 1100,
-        "Should either hit error or not receive all messages due to lag. Received: {}",
-        received_count
+    assert_eq!(
+        received_count, total_writes,
+        "Should receive all {} blocks via the streaming API",
+        total_writes
     );
 
-    // Verify we can reconnect from a later height
-    // (simulate reconnection by creating a new subscription)
-    let reconnect_height = received_count as u64 + 1;
+    // Drop the first stream and reconnect from an arbitrary mid-point
+    drop(stream);
+    let reconnect_height = total_writes / 2;
     let mut read_client2 = create_read_client(leader.addr).await.expect("create read client");
     let reconnect_request = inferadb_ledger_proto::proto::WatchBlocksRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -495,11 +503,38 @@ async fn test_watch_blocks_lagging_subscriber() {
         start_height: reconnect_height,
     };
 
-    let reconnect_result = read_client2.watch_blocks(reconnect_request).await;
-    assert!(
-        reconnect_result.is_ok(),
-        "Reconnection should succeed from height {}",
-        reconnect_height
+    let mut reconnect_stream = read_client2
+        .watch_blocks(reconnect_request)
+        .await
+        .expect("reconnection should succeed")
+        .into_inner();
+
+    // Verify we receive the historical blocks from reconnect_height onwards
+    let mut reconnect_count = 0u64;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), reconnect_stream.next()).await {
+            Ok(Some(Ok(announcement))) => {
+                let expected_height = reconnect_height + reconnect_count;
+                assert_eq!(
+                    announcement.height, expected_height,
+                    "Reconnected stream should resume from height {}",
+                    reconnect_height
+                );
+                reconnect_count += 1;
+            },
+            Ok(Some(Err(e))) => {
+                panic!("Unexpected reconnect stream error: {:?}", e);
+            },
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    let expected_reconnect = total_writes - reconnect_height + 1;
+    assert_eq!(
+        reconnect_count, expected_reconnect,
+        "Should receive {} blocks after reconnecting from height {}",
+        expected_reconnect, reconnect_height
     );
 }
 
