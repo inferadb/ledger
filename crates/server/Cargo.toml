@@ -75,7 +75,7 @@ rand.workspace = true
 inferadb-ledger-test-utils.workspace = true
 futures.workspace = true
 criterion.workspace = true
-serial_test = "3.2"
+serial_test = "3.4"
 uuid.workspace = true
 
 # Network simulation testing
