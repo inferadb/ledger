@@ -156,7 +156,7 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Install cargo-udeps
-        uses: taiki-e/install-action@d4422f254e595ee762a758628fe4f16ce050fa2e # v2.67.28
+        uses: taiki-e/install-action@7f491e26f71f4ec2e6902c7c95c73043f209ab79 # v2.68.9
         with:
           tool: cargo-udeps
 
@@ -249,7 +249,7 @@ jobs:
           brew install protobuf
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@d4422f254e595ee762a758628fe4f16ce050fa2e # v2.67.28
+        uses: taiki-e/install-action@7f491e26f71f4ec2e6902c7c95c73043f209ab79 # v2.68.9
         with:
           tool: cargo-nextest
 
@@ -299,7 +299,7 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@d4422f254e595ee762a758628fe4f16ce050fa2e # v2.67.28
+        uses: taiki-e/install-action@7f491e26f71f4ec2e6902c7c95c73043f209ab79 # v2.68.9
         with:
           tool: cargo-llvm-cov
 
