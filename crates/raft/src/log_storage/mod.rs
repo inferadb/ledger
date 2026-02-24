@@ -183,6 +183,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -195,6 +196,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         // Only shard 0 exists, so it should be selected
@@ -215,6 +217,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -227,6 +230,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         // Shard 1: 2 organizations (equal load)
@@ -240,6 +244,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -252,6 +257,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         // Tie-breaker: lower shard_id wins
@@ -272,6 +278,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -284,6 +291,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -296,6 +304,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         // Shard 1: 1 organization (lighter)
@@ -309,6 +318,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         // Shard 1 has fewer organizations
@@ -329,6 +339,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -341,6 +352,7 @@ mod tests {
                 status: OrganizationStatus::Deleted,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -353,6 +365,7 @@ mod tests {
                 status: OrganizationStatus::Deleted,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         // Shard 1: 2 active
@@ -366,6 +379,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         organizations.insert(
@@ -378,6 +392,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         // Shard 0 has only 1 active organization (deleted don't count)
@@ -399,6 +414,7 @@ mod tests {
                     status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
+                    storage_bytes: 0,
                 },
             );
         }
@@ -414,6 +430,7 @@ mod tests {
                     status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
+                    storage_bytes: 0,
                 },
             );
         }
@@ -429,6 +446,7 @@ mod tests {
                     status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
+                    storage_bytes: 0,
                 },
             );
         }
@@ -457,6 +475,7 @@ mod tests {
                     status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
+                    storage_bytes: 0,
                 },
             );
         }
@@ -471,6 +490,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         state.sequences.organization = OrganizationId::new(5); // Next ID is 5
@@ -516,6 +536,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         state.sequences.organization = OrganizationId::new(2);
@@ -591,6 +612,8 @@ mod tests {
             organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -1685,7 +1708,13 @@ mod tests {
         store.apply_request(&start_migration, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Write { organization_id, vault_id, transactions: vec![] };
+        let write = LedgerRequest::Write {
+            organization_id,
+            vault_id,
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+        };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
@@ -1855,7 +1884,13 @@ mod tests {
         store.apply_request(&delete_ns, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Write { organization_id, vault_id, transactions: vec![] };
+        let write = LedgerRequest::Write {
+            organization_id,
+            vault_id,
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+        };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
@@ -1959,7 +1994,13 @@ mod tests {
         }
 
         // Try to write to suspended organization - should fail
-        let write = LedgerRequest::Write { organization_id, vault_id, transactions: vec![] };
+        let write = LedgerRequest::Write {
+            organization_id,
+            vault_id,
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+        };
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
@@ -2296,16 +2337,22 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             LedgerRequest::Write {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             LedgerRequest::Write {
                 organization_id: OrganizationId::new(2),
                 vault_id: VaultId::new(3),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             LedgerRequest::System(SystemRequest::CreateUser {
                 name: "Alice".to_string(),
@@ -2460,6 +2507,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             };
             store_a.apply_request(&write, &mut state_a);
             store_b.apply_request(&write, &mut state_b);
@@ -2528,26 +2577,36 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             LedgerRequest::Write {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(2),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             LedgerRequest::Write {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             LedgerRequest::Write {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(2),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             LedgerRequest::Write {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
         ];
 
@@ -2679,6 +2738,8 @@ mod tests {
             organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![tx],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         let (response, vault_entry) = store.apply_request(&request, &mut state);
@@ -2741,6 +2802,7 @@ mod tests {
             id_to_slug: HashMap::new(),
             vault_slug_index: HashMap::new(),
             vault_id_to_slug: HashMap::new(),
+            last_applied_timestamp_ns: 0,
         };
 
         // Add some data
@@ -2765,6 +2827,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         original.vaults.insert(
@@ -2827,6 +2890,7 @@ mod tests {
                     status: OrganizationStatus::Active,
                     pending_shard_id: None,
                     quota: None,
+                    storage_bytes: 0,
                 },
             );
         }
@@ -2843,239 +2907,6 @@ mod tests {
 
         assert!(accessor.get_organization(OrganizationId::new(1)).is_some());
         assert!(accessor.get_organization(OrganizationId::new(99)).is_none());
-    }
-
-    // ========================================================================
-    // Snapshot Install Tests
-    // ========================================================================
-    //
-    // These tests verify that snapshot installation correctly restores state,
-    // which is critical for follower catch-up and cluster recovery.
-
-    /// Test that snapshot install restores all AppliedState fields.
-    ///
-    /// This test directly creates a CombinedSnapshot and verifies install_snapshot
-    /// correctly restores all state including shard tracking.
-    #[tokio::test]
-    async fn test_snapshot_install_restores_state() {
-        use std::io::Cursor;
-
-        use openraft::{SnapshotMeta, StoredMembership};
-
-        // Build a CombinedSnapshot with realistic data
-        let mut applied_state = AppliedState {
-            last_applied: Some(make_log_id(1, 100)),
-            membership: StoredMembership::default(),
-            sequences: SequenceCounters::new(),
-            vault_heights: HashMap::new(),
-            vault_health: HashMap::new(),
-            previous_vault_hashes: HashMap::new(),
-            organizations: HashMap::new(),
-            vaults: HashMap::new(),
-            shard_height: 55,
-            previous_shard_hash: [0xBE; 32],
-            client_sequences: HashMap::new(),
-            organization_storage_bytes: HashMap::new(),
-            slug_index: HashMap::new(),
-            id_to_slug: HashMap::new(),
-            vault_slug_index: HashMap::new(),
-            vault_id_to_slug: HashMap::new(),
-        };
-
-        // Add state data
-        applied_state.sequences.next_organization();
-        applied_state.sequences.next_organization();
-        applied_state.sequences.next_vault();
-        applied_state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 42);
-        applied_state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 100);
-        applied_state.organizations.insert(
-            OrganizationId::new(1),
-            OrganizationMeta {
-                organization_id: OrganizationId::new(1),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard_id: ShardId::new(0),
-                name: "production".to_string(),
-                status: OrganizationStatus::Active,
-                pending_shard_id: None,
-                quota: None,
-            },
-        );
-        applied_state.organizations.insert(
-            OrganizationId::new(2),
-            OrganizationMeta {
-                organization_id: OrganizationId::new(2),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard_id: ShardId::new(0),
-                name: "staging".to_string(),
-                status: OrganizationStatus::Active,
-                pending_shard_id: None,
-                quota: None,
-            },
-        );
-        applied_state.vaults.insert(
-            (OrganizationId::new(1), VaultId::new(1)),
-            VaultMeta {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
-                slug: VaultSlug::new(1),
-                name: Some("main-vault".to_string()),
-                deleted: false,
-                last_write_timestamp: 1234567890,
-                retention_policy: BlockRetentionPolicy::default(),
-            },
-        );
-
-        let combined = CombinedSnapshot {
-            applied_state,
-            vault_entities: HashMap::new(),
-            event_entries: Vec::new(),
-        };
-
-        let snapshot_data = postcard::to_allocvec(&combined).expect("serialize snapshot");
-
-        // Create target store (simulating a new follower)
-        let target_dir = tempdir().expect("create target dir");
-        let mut target_store = RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.db"))
-            .expect("open target");
-
-        // Verify initial state is empty
-        assert_eq!(target_store.current_shard_height(), 0);
-        assert!(target_store.applied_state.read().vault_heights.is_empty());
-
-        // Install snapshot on target
-        let meta = SnapshotMeta {
-            last_log_id: Some(make_log_id(1, 100)),
-            last_membership: StoredMembership::default(),
-            snapshot_id: "test-snapshot".to_string(),
-        };
-        target_store
-            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
-            .await
-            .expect("install snapshot");
-
-        // Verify state was restored
-        let restored = target_store.applied_state.read();
-
-        // Check sequence counters
-        assert_eq!(
-            restored.sequences.organization,
-            OrganizationId::new(3),
-            "organization counter should be restored"
-        );
-        assert_eq!(restored.sequences.vault, VaultId::new(2), "vault counter should be restored");
-
-        // Check vault heights
-        assert_eq!(
-            restored.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
-            Some(&42)
-        );
-        assert_eq!(
-            restored.vault_heights.get(&(OrganizationId::new(1), VaultId::new(2))),
-            Some(&100)
-        );
-
-        // Check shard tracking
-        assert_eq!(restored.shard_height, 55, "shard_height should be restored");
-        assert_eq!(
-            restored.previous_shard_hash, [0xBE; 32],
-            "previous_shard_hash should be restored"
-        );
-
-        // Check organization registry
-        assert_eq!(restored.organizations.len(), 2);
-        let ns1 = restored
-            .organizations
-            .get(&OrganizationId::new(1))
-            .expect("organization 1 should exist");
-        assert_eq!(ns1.name, "production");
-
-        // Check vault registry
-        assert_eq!(restored.vaults.len(), 1);
-        let v1 = restored
-            .vaults
-            .get(&(OrganizationId::new(1), VaultId::new(1)))
-            .expect("vault (1,1) should exist");
-        assert_eq!(v1.name, Some("main-vault".to_string()));
-
-        // Verify the target store's runtime fields are also updated
-        drop(restored);
-        assert_eq!(target_store.current_shard_height(), 55);
-    }
-
-    /// Test that snapshot install on empty store works correctly.
-    #[tokio::test]
-    async fn test_snapshot_install_on_fresh_node() {
-        use std::io::Cursor;
-
-        use openraft::{SnapshotMeta, StoredMembership};
-
-        // Create a minimal CombinedSnapshot
-        let combined = CombinedSnapshot {
-            applied_state: AppliedState {
-                last_applied: Some(make_log_id(2, 50)),
-                membership: StoredMembership::default(),
-                sequences: SequenceCounters {
-                    organization: OrganizationId::new(5),
-                    vault: VaultId::new(10),
-                    user: 3,
-                    user_email: 7,
-                    email_verify: 12,
-                },
-                vault_heights: {
-                    let mut h = HashMap::new();
-                    h.insert((OrganizationId::new(1), VaultId::new(1)), 25);
-                    h
-                },
-                vault_health: HashMap::new(),
-                previous_vault_hashes: HashMap::new(),
-                organizations: HashMap::new(),
-                vaults: HashMap::new(),
-                shard_height: 30,
-                previous_shard_hash: [0xAA; 32],
-                client_sequences: HashMap::new(),
-                organization_storage_bytes: HashMap::new(),
-                slug_index: HashMap::new(),
-                id_to_slug: HashMap::new(),
-                vault_slug_index: HashMap::new(),
-                vault_id_to_slug: HashMap::new(),
-            },
-            vault_entities: HashMap::new(),
-            event_entries: Vec::new(),
-        };
-
-        let snapshot_data = postcard::to_allocvec(&combined).expect("serialize snapshot");
-
-        // Fresh node
-        let dir = tempdir().expect("create dir");
-        let mut store =
-            RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).expect("open");
-
-        // Verify initial state is empty
-        assert_eq!(store.current_shard_height(), 0);
-        assert!(store.applied_state.read().vault_heights.is_empty());
-
-        // Install snapshot
-        let meta = SnapshotMeta {
-            last_log_id: Some(make_log_id(2, 50)),
-            last_membership: StoredMembership::default(),
-            snapshot_id: "fresh-install".to_string(),
-        };
-        store.install_snapshot(&meta, Box::new(Cursor::new(snapshot_data))).await.expect("install");
-
-        // Verify state
-        assert_eq!(store.current_shard_height(), 30);
-        assert_eq!(store.applied_state.read().sequences.organization, OrganizationId::new(5));
-        assert_eq!(store.applied_state.read().sequences.vault, VaultId::new(10));
-        assert_eq!(store.applied_state.read().sequences.user_email, 7);
-        assert_eq!(store.applied_state.read().sequences.email_verify, 12);
-        assert_eq!(
-            store
-                .applied_state
-                .read()
-                .vault_heights
-                .get(&(OrganizationId::new(1), VaultId::new(1))),
-            Some(&25)
-        );
     }
 
     #[tokio::test]
@@ -3224,6 +3055,8 @@ mod tests {
             organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![], // Empty transactions still create a block
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         let entry = Entry {
@@ -3304,6 +3137,8 @@ mod tests {
             organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         let entry = Entry {
@@ -3361,6 +3196,8 @@ mod tests {
                 }],
                 timestamp: far_future,
             }],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         let payload = RaftPayload { request: write_request, proposed_at: far_future };
@@ -3431,6 +3268,8 @@ mod tests {
             organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         let payload = RaftPayload { request: write_request, proposed_at: far_future };
@@ -3475,6 +3314,8 @@ mod tests {
                 }],
                 timestamp: far_future,
             }],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         // Helper to create a store, set up state, and apply
@@ -3731,6 +3572,8 @@ mod tests {
             organization_id: OrganizationId::new(1),
             vault_id: VaultId::new(1),
             transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
         let (response, _) = store.apply_request(&write, &mut state);
         assert!(matches!(response, LedgerResponse::Error { .. }));
@@ -3980,6 +3823,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx1],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4008,6 +3853,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx2],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4065,6 +3912,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx_set],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4086,6 +3935,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx_del],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4139,6 +3990,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4214,6 +4067,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx1],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4237,6 +4092,8 @@ mod tests {
                 organization_id: OrganizationId::new(2),
                 vault_id: VaultId::new(2),
                 transactions: vec![tx2],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4324,6 +4181,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![tx],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
         );
@@ -4445,6 +4304,8 @@ mod tests {
                     organization_id: OrganizationId::new(1),
                     vault_id: VaultId::new(1),
                     transactions: vec![tx],
+                    idempotency_key: [0u8; 16],
+                    request_hash: 0,
                 },
                 &mut state,
             );
@@ -4505,6 +4366,8 @@ mod tests {
                 }],
                 timestamp: fixed_timestamp(),
             }],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         }
     }
 
@@ -4525,6 +4388,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         state.slug_index.insert(org_slug, org_id);
@@ -4570,6 +4434,7 @@ mod tests {
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         // Verify response is a successful write
@@ -4634,6 +4499,7 @@ mod tests {
             &mut idx_a,
             &mut events_a,
             90,
+            &mut PendingExternalWrites::default(),
         );
         store_b.apply_request_with_events(
             &write_request,
@@ -4642,6 +4508,7 @@ mod tests {
             &mut idx_b,
             &mut events_b,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         // Both must produce the same number of events
@@ -4679,13 +4546,23 @@ mod tests {
                 ],
                 timestamp: fixed_timestamp(),
             }],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
         };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         // Should have: 1 WriteCommitted + 2 EntityExpired = 3 events
         let expired_events: Vec<&EventEntry> =
@@ -4727,7 +4604,15 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         // Write events through the EventWriter (simulating what apply_to_state_machine does)
         let ew = store.event_writer().expect("event writer configured");
@@ -4770,7 +4655,15 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         let org_event = events
             .iter()
@@ -4802,7 +4695,15 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         let del_event = events
             .iter()
@@ -4837,7 +4738,15 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         let join_event = events
             .iter()
@@ -4865,7 +4774,15 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         let leave_event = events
             .iter()
@@ -4892,7 +4809,15 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&request, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         let user_event = events
             .iter()
@@ -4925,7 +4850,15 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(&suspend, &mut state, ts, &mut op_index, &mut events, 90);
+        store.apply_request_with_events(
+            &suspend,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
 
         let suspend_event = events
             .iter()
@@ -4953,6 +4886,7 @@ mod tests {
             &mut resume_op_index,
             &mut resume_events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         let resume_event = resume_events
@@ -4995,6 +4929,7 @@ mod tests {
             &mut op_index,
             &mut all_events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         // Emit an org-scoped event (WriteCommitted)
@@ -5006,6 +4941,7 @@ mod tests {
             &mut op_index,
             &mut all_events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         // Persist all events
@@ -5064,6 +5000,7 @@ mod tests {
             &mut idx_a,
             &mut events_a,
             90,
+            &mut PendingExternalWrites::default(),
         );
         store_b.apply_request_with_events(
             &request,
@@ -5072,6 +5009,7 @@ mod tests {
             &mut idx_b,
             &mut events_b,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         assert_eq!(events_a.len(), events_b.len());
@@ -5106,6 +5044,7 @@ mod tests {
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
         let org_id = match resp {
             LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
@@ -5128,6 +5067,7 @@ mod tests {
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
         assert!(
             matches!(resp, LedgerResponse::VaultCreated { .. }),
@@ -5164,6 +5104,7 @@ mod tests {
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
         assert!(
             matches!(resp, LedgerResponse::VaultDeleted { success: true }),
@@ -5210,6 +5151,8 @@ mod tests {
                         }],
                         timestamp: fixed_timestamp(),
                     }],
+                    idempotency_key: [0u8; 16],
+                    request_hash: 0,
                 },
             ],
         };
@@ -5218,8 +5161,15 @@ mod tests {
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
 
-        let (resp, _) =
-            store.apply_request_with_events(&batch, &mut state, ts, &mut op_index, &mut events, 90);
+        let (resp, _) = store.apply_request_with_events(
+            &batch,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+        );
         assert!(matches!(resp, LedgerResponse::BatchWrite { .. }), "expected BatchWrite response");
 
         // Should have: two WriteCommitted events (one per inner write) + one BatchWriteCommitted
@@ -5267,6 +5217,7 @@ mod tests {
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         let health_event = events
@@ -5303,6 +5254,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
         state.slug_index.insert(org_b_slug, org_b);
@@ -5337,6 +5289,7 @@ mod tests {
             &mut op_index,
             &mut all_events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         // Write to org B
@@ -5357,12 +5310,15 @@ mod tests {
                     }],
                     timestamp: ts,
                 }],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
             ts,
             &mut op_index,
             &mut all_events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         // Verify org isolation: filter events by org_id
@@ -5413,6 +5369,7 @@ mod tests {
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         // Events are accumulated but the writer will filter org events on write.
@@ -5456,6 +5413,7 @@ mod tests {
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         let write_event = events
@@ -5489,12 +5447,15 @@ mod tests {
                     }],
                     timestamp: ts,
                 }],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
             },
             &mut state,
             ts,
             &mut op_index,
             &mut events,
             90,
+            &mut PendingExternalWrites::default(),
         );
 
         let second_write = events
@@ -5510,9 +5471,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn event_snapshot_includes_apply_phase_entries() {
-        use std::{collections::BTreeMap, io::Cursor};
+        use std::collections::BTreeMap;
 
         use chrono::{TimeZone, Utc};
         use inferadb_ledger_types::events::{EventEmission, EventOutcome};
@@ -5526,6 +5487,30 @@ mod tests {
         {
             let mut state = source_store.applied_state.write();
             state.last_applied = Some(make_log_id(1, 10));
+        }
+        // Insert OrganizationMeta so event collection can find org IDs
+        {
+            let org_meta = super::types::OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(100),
+                name: "test-org".to_string(),
+                shard_id: ShardId::new(0),
+                status: OrganizationStatus::Active,
+                pending_shard_id: None,
+                quota: None,
+                storage_bytes: 0,
+            };
+            let encoded = postcard::to_allocvec(&org_meta).expect("encode org meta");
+            let mut write_txn = source_store.db.write().expect("write txn");
+            write_txn.insert::<tables::OrganizationMeta>(&1i64, &encoded).expect("insert org meta");
+            write_txn.commit().expect("commit org meta");
+        }
+        // Persist core to database — snapshot builder reads from DB, not in-memory state
+        {
+            let state = source_store.applied_state.read();
+            source_store
+                .save_state_core(&state, &PendingExternalWrites::default())
+                .expect("persist core");
         }
 
         // Write apply-phase events directly to the events database
@@ -5558,17 +5543,20 @@ mod tests {
         }
 
         // Get snapshot from source
-        let mut snapshot = source_store
+        let snapshot = source_store
             .get_current_snapshot()
             .await
             .expect("get snapshot")
             .expect("snapshot should exist");
-        let snapshot_data = {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut *snapshot.snapshot, &mut buf)
-                .expect("read snapshot data");
-            buf
-        };
+
+        // Copy snapshot file for install on target
+        let snapshot_path = target_dir.path().join("snapshot_copy.bin");
+        {
+            let mut src_file = snapshot.snapshot;
+            let mut dst_file =
+                tokio::fs::File::create(&snapshot_path).await.expect("create snapshot copy");
+            tokio::io::copy(&mut *src_file, &mut dst_file).await.expect("copy snapshot data");
+        }
 
         // Install snapshot on target
         let mut target_store = store_with_events(target_dir.path());
@@ -5577,8 +5565,9 @@ mod tests {
             last_membership: snapshot.meta.last_membership,
             snapshot_id: "test-snapshot".to_string(),
         };
+        let install_file = tokio::fs::File::open(&snapshot_path).await.expect("open snapshot copy");
         target_store
-            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
+            .install_snapshot(&meta, Box::new(install_file))
             .await
             .expect("install snapshot");
 
@@ -5595,9 +5584,9 @@ mod tests {
         assert!(matches!(events[0].emission, EventEmission::ApplyPhase));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn event_snapshot_excludes_handler_phase_entries() {
-        use std::{collections::BTreeMap, io::Cursor};
+        use std::collections::BTreeMap;
 
         use chrono::{TimeZone, Utc};
         use inferadb_ledger_types::events::{EventEmission, EventOutcome};
@@ -5610,6 +5599,30 @@ mod tests {
         {
             let mut state = source_store.applied_state.write();
             state.last_applied = Some(make_log_id(1, 10));
+        }
+        // Insert OrganizationMeta so event collection can find org IDs
+        {
+            let org_meta = super::types::OrganizationMeta {
+                organization_id: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(100),
+                name: "test-org".to_string(),
+                shard_id: ShardId::new(0),
+                status: OrganizationStatus::Active,
+                pending_shard_id: None,
+                quota: None,
+                storage_bytes: 0,
+            };
+            let encoded = postcard::to_allocvec(&org_meta).expect("encode org meta");
+            let mut write_txn = source_store.db.write().expect("write txn");
+            write_txn.insert::<tables::OrganizationMeta>(&1i64, &encoded).expect("insert org meta");
+            write_txn.commit().expect("commit org meta");
+        }
+        // Persist core to database — snapshot builder reads from DB, not in-memory state
+        {
+            let state = source_store.applied_state.read();
+            source_store
+                .save_state_core(&state, &PendingExternalWrites::default())
+                .expect("persist core");
         }
 
         // Write both apply-phase and handler-phase events
@@ -5666,17 +5679,20 @@ mod tests {
         }
 
         // Get snapshot — should only contain apply-phase events
-        let mut snapshot = source_store
+        let snapshot = source_store
             .get_current_snapshot()
             .await
             .expect("get snapshot")
             .expect("snapshot should exist");
-        let snapshot_data = {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut *snapshot.snapshot, &mut buf)
-                .expect("read snapshot data");
-            buf
-        };
+
+        // Copy snapshot file for install on target
+        let snapshot_path = target_dir.path().join("snapshot_copy.bin");
+        {
+            let mut src_file = snapshot.snapshot;
+            let mut dst_file =
+                tokio::fs::File::create(&snapshot_path).await.expect("create snapshot copy");
+            tokio::io::copy(&mut *src_file, &mut dst_file).await.expect("copy snapshot data");
+        }
 
         // Install snapshot on target
         let mut target_store = store_with_events(target_dir.path());
@@ -5685,8 +5701,9 @@ mod tests {
             last_membership: snapshot.meta.last_membership,
             snapshot_id: "test-snapshot".to_string(),
         };
+        let install_file = tokio::fs::File::open(&snapshot_path).await.expect("open snapshot copy");
         target_store
-            .install_snapshot(&meta, Box::new(Cursor::new(snapshot_data)))
+            .install_snapshot(&meta, Box::new(install_file))
             .await
             .expect("install snapshot");
 
@@ -5709,6 +5726,440 @@ mod tests {
             all_events.len(),
             1,
             "handler-phase event should not be transferred via snapshot"
+        );
+    }
+
+    // ========================================================================
+    // Client Sequence TTL Eviction Tests
+    // ========================================================================
+
+    /// Helper: run eviction logic on state + pending, matching the
+    /// implementation in `apply_to_state_machine`.
+    fn run_eviction(
+        state: &mut AppliedState,
+        pending: &mut PendingExternalWrites,
+        proposed_at_secs: i64,
+        ttl_seconds: i64,
+    ) {
+        let mut expired_keys: Vec<(
+            (inferadb_ledger_types::OrganizationId, inferadb_ledger_types::VaultId, String),
+            Vec<u8>,
+        )> = state
+            .client_sequences
+            .iter()
+            .filter(|(_, entry)| proposed_at_secs.saturating_sub(entry.last_seen) > ttl_seconds)
+            .map(|(key, _)| {
+                let bytes_key =
+                    PendingExternalWrites::client_sequence_key(key.0, key.1, key.2.as_bytes());
+                (key.clone(), bytes_key)
+            })
+            .collect();
+
+        expired_keys.sort_by(|a, b| a.1.cmp(&b.1));
+
+        for (map_key, bytes_key) in expired_keys {
+            state.client_sequences.remove(&map_key);
+            pending.client_sequences_deleted.push(bytes_key);
+        }
+    }
+
+    #[test]
+    fn test_eviction_removes_expired_entries() {
+        let mut state = AppliedState::default();
+        let org = OrganizationId::new(1);
+        let vault = VaultId::new(1);
+
+        // Insert entry that is 2 days old
+        state.client_sequences.insert(
+            (org, vault, "old-client".to_string()),
+            ClientSequenceEntry {
+                sequence: 1,
+                last_seen: 1_000_000,
+                last_idempotency_key: [1u8; 16],
+                last_request_hash: 42,
+            },
+        );
+
+        let mut pending = PendingExternalWrites::default();
+        // proposed_at is 2 days later (ttl = 86400 = 1 day)
+        run_eviction(&mut state, &mut pending, 1_000_000 + 200_000, 86400);
+
+        assert!(state.client_sequences.is_empty(), "expired entry should be removed");
+        assert_eq!(pending.client_sequences_deleted.len(), 1, "one B+ tree delete expected");
+    }
+
+    #[test]
+    fn test_eviction_retains_entries_within_ttl() {
+        let mut state = AppliedState::default();
+        let org = OrganizationId::new(1);
+        let vault = VaultId::new(1);
+
+        // Insert entry that is 1 hour old (well within 24h TTL)
+        state.client_sequences.insert(
+            (org, vault, "fresh-client".to_string()),
+            ClientSequenceEntry {
+                sequence: 5,
+                last_seen: 1_000_000,
+                last_idempotency_key: [2u8; 16],
+                last_request_hash: 99,
+            },
+        );
+
+        let mut pending = PendingExternalWrites::default();
+        run_eviction(&mut state, &mut pending, 1_000_000 + 3600, 86400);
+
+        assert_eq!(state.client_sequences.len(), 1, "fresh entry should be retained");
+        assert!(pending.client_sequences_deleted.is_empty(), "no B+ tree deletes expected");
+    }
+
+    #[test]
+    fn test_eviction_zero_expired_entries() {
+        let mut state = AppliedState::default();
+        let org = OrganizationId::new(1);
+        let vault = VaultId::new(1);
+
+        // All entries are recent
+        for i in 0..5 {
+            state.client_sequences.insert(
+                (org, vault, format!("client-{i}")),
+                ClientSequenceEntry {
+                    sequence: i + 1,
+                    last_seen: 1_000_000,
+                    last_idempotency_key: [0u8; 16],
+                    last_request_hash: 0,
+                },
+            );
+        }
+
+        let mut pending = PendingExternalWrites::default();
+        run_eviction(&mut state, &mut pending, 1_000_000 + 100, 86400);
+
+        assert_eq!(state.client_sequences.len(), 5, "all entries retained");
+        assert!(pending.client_sequences_deleted.is_empty(), "no deletes");
+    }
+
+    #[test]
+    fn test_eviction_all_entries_expired() {
+        let mut state = AppliedState::default();
+        let org = OrganizationId::new(1);
+
+        // Insert 3 entries, all very old
+        for i in 0..3u64 {
+            state.client_sequences.insert(
+                (org, VaultId::new(i as i64 + 1), format!("client-{i}")),
+                ClientSequenceEntry {
+                    sequence: i + 1,
+                    last_seen: 100,
+                    last_idempotency_key: [0u8; 16],
+                    last_request_hash: 0,
+                },
+            );
+        }
+
+        let mut pending = PendingExternalWrites::default();
+        run_eviction(&mut state, &mut pending, 100 + 200_000, 86400);
+
+        assert!(state.client_sequences.is_empty(), "all entries evicted");
+        assert_eq!(pending.client_sequences_deleted.len(), 3, "three B+ tree deletes expected");
+    }
+
+    #[test]
+    fn test_eviction_candidates_sorted_by_key() {
+        let mut state = AppliedState::default();
+
+        // Insert entries with IDs that sort in a specific order when encoded
+        // as big-endian bytes. Org 2 > Org 1 in byte ordering.
+        state.client_sequences.insert(
+            (OrganizationId::new(2), VaultId::new(1), "b-client".to_string()),
+            ClientSequenceEntry { sequence: 1, last_seen: 100, ..ClientSequenceEntry::default() },
+        );
+        state.client_sequences.insert(
+            (OrganizationId::new(1), VaultId::new(1), "a-client".to_string()),
+            ClientSequenceEntry { sequence: 2, last_seen: 100, ..ClientSequenceEntry::default() },
+        );
+        state.client_sequences.insert(
+            (OrganizationId::new(1), VaultId::new(2), "c-client".to_string()),
+            ClientSequenceEntry { sequence: 3, last_seen: 100, ..ClientSequenceEntry::default() },
+        );
+
+        let mut pending = PendingExternalWrites::default();
+        run_eviction(&mut state, &mut pending, 100 + 200_000, 86400);
+
+        // Verify deletion order: sorted by big-endian composite key
+        assert_eq!(pending.client_sequences_deleted.len(), 3);
+
+        // Keys should be sorted: (org=1,vault=1,"a-client") < (org=1,vault=2,"c-client") <
+        // (org=2,vault=1,"b-client")
+        let key_1_1_a = PendingExternalWrites::client_sequence_key(
+            OrganizationId::new(1),
+            VaultId::new(1),
+            b"a-client",
+        );
+        let key_1_2_c = PendingExternalWrites::client_sequence_key(
+            OrganizationId::new(1),
+            VaultId::new(2),
+            b"c-client",
+        );
+        let key_2_1_b = PendingExternalWrites::client_sequence_key(
+            OrganizationId::new(2),
+            VaultId::new(1),
+            b"b-client",
+        );
+        assert_eq!(pending.client_sequences_deleted[0], key_1_1_a);
+        assert_eq!(pending.client_sequences_deleted[1], key_1_2_c);
+        assert_eq!(pending.client_sequences_deleted[2], key_2_1_b);
+    }
+
+    #[test]
+    fn test_eviction_deterministic_across_replicas() {
+        // Two independent state machines with identical state must produce
+        // identical eviction results.
+        let mut state_a = AppliedState::default();
+        let mut state_b = AppliedState::default();
+
+        for i in 0..10u64 {
+            let entry = ClientSequenceEntry {
+                sequence: i + 1,
+                last_seen: 100 + i as i64,
+                last_idempotency_key: [0u8; 16],
+                last_request_hash: 0,
+            };
+            let key = (OrganizationId::new(1), VaultId::new(1), format!("client-{i}"));
+            state_a.client_sequences.insert(key.clone(), entry.clone());
+            state_b.client_sequences.insert(key, entry);
+        }
+
+        let mut pending_a = PendingExternalWrites::default();
+        let mut pending_b = PendingExternalWrites::default();
+
+        run_eviction(&mut state_a, &mut pending_a, 100 + 200_000, 86400);
+        run_eviction(&mut state_b, &mut pending_b, 100 + 200_000, 86400);
+
+        assert_eq!(
+            pending_a.client_sequences_deleted, pending_b.client_sequences_deleted,
+            "eviction must be deterministic across replicas"
+        );
+        assert_eq!(
+            state_a.client_sequences.len(),
+            state_b.client_sequences.len(),
+            "remaining entry count must match"
+        );
+    }
+
+    #[test]
+    fn test_eviction_clock_regression_no_panic() {
+        // Simulate proposed_at going backward (clock regression after leader change).
+        // With i64 saturating_sub, negative deltas become 0 — no eviction.
+        let mut state = AppliedState::default();
+        state.client_sequences.insert(
+            (OrganizationId::new(1), VaultId::new(1), "client".to_string()),
+            ClientSequenceEntry {
+                sequence: 1,
+                last_seen: 1_000_000,
+                last_idempotency_key: [0u8; 16],
+                last_request_hash: 0,
+            },
+        );
+
+        let mut pending = PendingExternalWrites::default();
+        // proposed_at is BEFORE last_seen — clock went backward
+        run_eviction(&mut state, &mut pending, 500_000, 86400);
+
+        assert_eq!(state.client_sequences.len(), 1, "no eviction on clock regression");
+        assert!(pending.client_sequences_deleted.is_empty());
+    }
+
+    #[test]
+    fn test_eviction_backward_by_more_than_ttl_no_overflow() {
+        // proposed_at backward by more than TTL — verify no signed subtraction overflow
+        let mut state = AppliedState::default();
+        state.client_sequences.insert(
+            (OrganizationId::new(1), VaultId::new(1), "client".to_string()),
+            ClientSequenceEntry {
+                sequence: 1,
+                last_seen: i64::MAX - 100,
+                last_idempotency_key: [0u8; 16],
+                last_request_hash: 0,
+            },
+        );
+
+        let mut pending = PendingExternalWrites::default();
+        // proposed_at is 0 — massive backward step
+        run_eviction(&mut state, &mut pending, 0, 86400);
+
+        assert_eq!(state.client_sequences.len(), 1, "saturating_sub prevents overflow");
+        assert!(pending.client_sequences_deleted.is_empty());
+    }
+
+    #[test]
+    fn test_eviction_mixed_expired_and_fresh() {
+        let mut state = AppliedState::default();
+        let org = OrganizationId::new(1);
+        let vault = VaultId::new(1);
+
+        // Old entry (expired)
+        state.client_sequences.insert(
+            (org, vault, "old-client".to_string()),
+            ClientSequenceEntry {
+                sequence: 1,
+                last_seen: 100,
+                last_idempotency_key: [1u8; 16],
+                last_request_hash: 42,
+            },
+        );
+
+        // Fresh entry (within TTL)
+        state.client_sequences.insert(
+            (org, vault, "new-client".to_string()),
+            ClientSequenceEntry {
+                sequence: 2,
+                last_seen: 100_000,
+                last_idempotency_key: [2u8; 16],
+                last_request_hash: 99,
+            },
+        );
+
+        let mut pending = PendingExternalWrites::default();
+        run_eviction(&mut state, &mut pending, 100_000 + 50_000, 86400);
+
+        assert_eq!(state.client_sequences.len(), 1, "only fresh entry retained");
+        assert!(
+            state.client_sequences.contains_key(&(org, vault, "new-client".to_string())),
+            "new-client should survive eviction"
+        );
+        assert_eq!(pending.client_sequences_deleted.len(), 1, "one delete for old-client");
+    }
+
+    /// Verifies that `build_snapshot()` and `get_current_snapshot()` produce byte-identical
+    /// snapshot files when the apply loop is quiesced. No events DB is configured, eliminating
+    /// the only non-deterministic section.
+    ///
+    /// Both methods call the shared `write_snapshot_to_file()` function which reads from
+    /// a `ReadTransaction` (deterministic B-tree iteration order), compresses via zstd
+    /// (deterministic at the same compression level), and appends a SHA-256 checksum
+    /// (pure function of compressed bytes).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_snapshot_determinism_build_and_get_current_produce_identical_files() {
+        use openraft::{RaftSnapshotBuilder, RaftStorage};
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let dir = tempdir().expect("create temp dir");
+        let mut store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+
+        // Apply a batch of Raft entries that create organizations, vaults, and writes.
+        // apply_to_state_machine persists state via save_state_core + flush_external_writes.
+        let entries = vec![
+            // Entry 1: Create organization
+            Entry {
+                log_id: make_log_id(1, 1),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
+                    name: "snapshot-org-1".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(1000),
+                    shard_id: Some(ShardId::new(0)),
+                    quota: None,
+                })),
+            },
+            // Entry 2: Create vault in org 1
+            Entry {
+                log_id: make_log_id(1, 2),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
+                    organization_id: OrganizationId::new(1),
+                    slug: VaultSlug::new(100),
+                    name: Some("vault-1".to_string()),
+                    retention_policy: None,
+                })),
+            },
+            // Entry 3: Write to vault (populates vault_heights, vault_hashes, client_sequences)
+            Entry {
+                log_id: make_log_id(1, 3),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
+                    organization_id: OrganizationId::new(1),
+                    vault_id: VaultId::new(1),
+                    transactions: vec![],
+                    idempotency_key: [1u8; 16],
+                    request_hash: 42,
+                })),
+            },
+            // Entry 4: Create second organization
+            Entry {
+                log_id: make_log_id(1, 4),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
+                    name: "snapshot-org-2".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(2000),
+                    shard_id: Some(ShardId::new(0)),
+                    quota: None,
+                })),
+            },
+            // Entry 5: Create vault in org 2
+            Entry {
+                log_id: make_log_id(1, 5),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
+                    organization_id: OrganizationId::new(2),
+                    slug: VaultSlug::new(200),
+                    name: Some("vault-2".to_string()),
+                    retention_policy: None,
+                })),
+            },
+            // Entry 6: Write to second vault
+            Entry {
+                log_id: make_log_id(1, 6),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
+                    organization_id: OrganizationId::new(2),
+                    vault_id: VaultId::new(2),
+                    transactions: vec![],
+                    idempotency_key: [2u8; 16],
+                    request_hash: 99,
+                })),
+            },
+        ];
+
+        store.apply_to_state_machine(&entries).await.expect("apply batch");
+
+        // Now take two snapshots via different code paths.
+        // No events DB configured, so event section is deterministically empty.
+
+        // Snapshot A via get_current_snapshot() (on RaftLogStore)
+        let snapshot_a = store
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("snapshot should exist");
+
+        // Snapshot B via build_snapshot() (on LedgerSnapshotBuilder)
+        let mut builder = store.get_snapshot_builder().await;
+        let snapshot_b = builder.build_snapshot().await.expect("build_snapshot");
+
+        // Read both files completely
+        let mut bytes_a = Vec::new();
+        let mut file_a = snapshot_a.snapshot;
+        file_a.seek(std::io::SeekFrom::Start(0)).await.expect("seek a");
+        file_a.read_to_end(&mut bytes_a).await.expect("read a");
+
+        let mut bytes_b = Vec::new();
+        let mut file_b = snapshot_b.snapshot;
+        file_b.seek(std::io::SeekFrom::Start(0)).await.expect("seek b");
+        file_b.read_to_end(&mut bytes_b).await.expect("read b");
+
+        // The files must be byte-identical
+        assert_eq!(bytes_a.len(), bytes_b.len(), "snapshot files should have identical length");
+        assert_eq!(
+            bytes_a, bytes_b,
+            "get_current_snapshot() and build_snapshot() should produce byte-identical files \
+             when the apply loop is quiesced and no events are present"
+        );
+
+        // Sanity: file should be non-trivial
+        assert!(
+            bytes_a.len() > 32,
+            "snapshot file should be non-trivial ({} bytes)",
+            bytes_a.len()
+        );
+
+        // Verify both snapshots report the same last_applied
+        assert_eq!(
+            snapshot_a.meta.last_log_id, snapshot_b.meta.last_log_id,
+            "both snapshots should report the same last_applied"
         );
     }
 }

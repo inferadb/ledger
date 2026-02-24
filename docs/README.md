@@ -44,10 +44,10 @@ Blockchain database for cryptographically verifiable authorization.
 
 ### Runbooks
 
-- [Rolling Upgrade](operations/runbooks/rolling-upgrade.md) - Zero-downtime upgrades
+- [Upgrade Runbook](operations/runbooks/rolling-upgrade.md) - Version upgrade procedures
 - [Backup Verification](operations/runbooks/backup-verification.md) - Backup testing
 - [Disaster Recovery](operations/runbooks/disaster-recovery.md) - Recovery procedures
-- [Troubleshooting](troubleshooting.md) - Common issues and solutions
+- [Troubleshooting](operations/troubleshooting.md) - Common issues and solutions
 
 ## Internals
 

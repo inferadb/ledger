@@ -72,6 +72,10 @@ opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 
+# Compression
+async-compression.workspace = true
+zstd.workspace = true
+
 # Streaming
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"

@@ -418,7 +418,6 @@ async fn test_watch_blocks_vault_isolation() {
 /// 3. Mid-stream reconnection from an arbitrary height works correctly
 #[serial]
 #[tokio::test]
-#[ignore = "slow: writes >1000 blocks to exercise broadcast capacity"]
 async fn test_watch_blocks_high_volume_reconnect() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;

@@ -371,6 +371,80 @@ impl EventStore {
 
         Ok(entries)
     }
+
+    /// Scans apply-phase events using per-organization range scans with a
+    /// timestamp cutoff.
+    ///
+    /// For each organization, performs a B-tree range scan starting at the
+    /// cutoff timestamp (inclusive) through the organization's maximum key.
+    /// This avoids loading all events into memory — only events newer than
+    /// the cutoff are read.
+    ///
+    /// Returns serialized event entries (postcard-encoded `EventEntry`).
+    /// Total results are capped at `max_entries`.
+    ///
+    /// # Arguments
+    ///
+    /// * `txn` — Read transaction on the events database
+    /// * `org_ids` — Organization IDs to scan (determines per-org range bounds)
+    /// * `cutoff_timestamp_ns` — Minimum timestamp (nanoseconds since epoch); events older than
+    ///   this are excluded. Use `0` to include all events.
+    /// * `max_entries` — Global cap on total returned events
+    ///
+    /// # Errors
+    ///
+    /// Returns `EventStoreError::Storage` if any iterator fails.
+    /// Returns `EventStoreError::Codec` if deserialization fails.
+    pub fn scan_apply_phase_ranged<B: StorageBackend>(
+        txn: &ReadTransaction<'_, B>,
+        org_ids: &[OrganizationId],
+        cutoff_timestamp_ns: u64,
+        max_entries: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        use inferadb_ledger_types::events::{EmissionMeta, EventEmission};
+
+        let mut result = Vec::new();
+
+        for &org_id in org_ids {
+            if result.len() >= max_entries {
+                break;
+            }
+
+            // Range: [org_id ++ cutoff_ts ++ 0x00..00, org_id ++ u64::MAX ++ u64::MAX]
+            let start = crate::events_keys::org_time_prefix(org_id, cutoff_timestamp_ns).to_vec();
+            let end = {
+                let mut e = crate::events_keys::org_time_prefix(org_id, u64::MAX).to_vec();
+                // Extend to full 24-byte key with max hash for inclusive upper bound
+                e.extend_from_slice(&u64::MAX.to_be_bytes());
+                e
+            };
+
+            let iter = txn.range::<Events>(Some(&start), Some(&end)).context(StorageSnafu)?;
+
+            let org_bytes = org_prefix(org_id);
+
+            for (key_bytes, value_bytes) in iter {
+                if result.len() >= max_entries {
+                    break;
+                }
+
+                // Ensure we're still within the target org
+                if key_bytes.len() < 8 || key_bytes[..8] != org_bytes[..] {
+                    break;
+                }
+
+                // Thin deserialization — reads only the emission discriminant
+                let meta: EmissionMeta =
+                    inferadb_ledger_types::decode(&value_bytes).context(CodecSnafu)?;
+
+                if matches!(meta.emission, EventEmission::ApplyPhase) {
+                    result.push(value_bytes);
+                }
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 /// Increments a byte slice as a big-endian integer (for exclusive cursor starts).

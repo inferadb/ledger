@@ -44,6 +44,10 @@ inferadb-ledger-test-utils.workspace = true
 name = "btree_bench"
 harness = false
 
+[[bench]]
+name = "file_io_bench"
+harness = false
+
 [features]
 default = []
 # Enable additional safety checks (slower but catches bugs)

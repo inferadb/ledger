@@ -173,7 +173,7 @@ Before upgrading:
 
 1. Review changelog for state machine changes
 2. Test upgrade path in staging
-3. Coordinate rolling upgrades (followers first, then leader)
+3. Follow the [Upgrade Runbook](runbooks/rolling-upgrade.md) (pre-GA: full cluster wipe required)
 4. Monitor for divergence during and after upgrade
 
 ## Runbook: Complete Vault Rebuild

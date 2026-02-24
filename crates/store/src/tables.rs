@@ -1,6 +1,6 @@
 //! Fixed table definitions for the store engine.
 //!
-//! The store has exactly 15 tables, all known at compile time.
+//! The store has exactly 20 tables, all known at compile time.
 //! This enables type-safe access and eliminates dynamic table lookup overhead.
 
 use crate::types::KeyType;
@@ -81,11 +81,23 @@ pub enum TableId {
     // ========================================================================
     /// Vault slug → internal ID mapping for external identifier resolution.
     VaultSlugIndex = 16,
+
+    // ========================================================================
+    // Vault-Scoped State Tables (composite key: {organization_id:8BE}{vault_id:8BE})
+    // ========================================================================
+    /// Vault block heights: composite key → `u64` vault block height.
+    VaultHeights = 17,
+
+    /// Vault hashes: composite key → `[u8; 32]` SHA-256 hash.
+    VaultHashes = 18,
+
+    /// Vault health status: composite key → postcard `VaultHealthStatus`.
+    VaultHealth = 19,
 }
 
 impl TableId {
     /// Total number of tables.
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 20;
 
     /// Returns the key type for this table.
     #[inline]
@@ -98,17 +110,19 @@ impl TableId {
             Self::VaultMeta | Self::OrganizationMeta => KeyType::I64,
 
             // String keys
-            Self::RaftState | Self::Sequences | Self::ClientSequences | Self::CompactionMeta => {
-                KeyType::Str
-            },
+            Self::RaftState | Self::Sequences | Self::CompactionMeta => KeyType::Str,
 
-            // Byte slice keys
+            // Byte slice keys (composite keys with big-endian integer prefixes)
             Self::Entities
             | Self::Relationships
             | Self::ObjIndex
             | Self::SubjIndex
             | Self::VaultBlockIndex
-            | Self::TimeTravelIndex => KeyType::Bytes,
+            | Self::TimeTravelIndex
+            | Self::ClientSequences
+            | Self::VaultHeights
+            | Self::VaultHashes
+            | Self::VaultHealth => KeyType::Bytes,
 
             // u64 keys (time-travel config uses vault_id)
             Self::TimeTravelConfig => KeyType::U64,
@@ -142,6 +156,9 @@ impl TableId {
             Self::TimeTravelIndex => "time_travel_index",
             Self::OrganizationSlugIndex => "organization_slug_index",
             Self::VaultSlugIndex => "vault_slug_index",
+            Self::VaultHeights => "vault_heights",
+            Self::VaultHashes => "vault_hashes",
+            Self::VaultHealth => "vault_health",
         }
     }
 
@@ -165,6 +182,9 @@ impl TableId {
             Self::TimeTravelIndex,
             Self::OrganizationSlugIndex,
             Self::VaultSlugIndex,
+            Self::VaultHeights,
+            Self::VaultHashes,
+            Self::VaultHealth,
         ]
     }
 
@@ -189,6 +209,9 @@ impl TableId {
             14 => Some(Self::TimeTravelIndex),
             15 => Some(Self::OrganizationSlugIndex),
             16 => Some(Self::VaultSlugIndex),
+            17 => Some(Self::VaultHeights),
+            18 => Some(Self::VaultHashes),
+            19 => Some(Self::VaultHealth),
             _ => None,
         }
     }
@@ -306,11 +329,14 @@ impl Table for Sequences {
     type ValueType = u64;
 }
 
-/// Client sequences table: idempotency tracking.
+/// Client sequences table: idempotency tracking with composite byte keys.
+///
+/// Key format: `{org_id:8BE}{vault_id:8BE}{client_id:raw}` for correct lexicographic
+/// ordering and collision-free encoding.
 pub struct ClientSequences;
 impl Table for ClientSequences {
     const ID: TableId = TableId::ClientSequences;
-    type KeyType = String;
+    type KeyType = Vec<u8>;
     type ValueType = Vec<u8>;
 }
 
@@ -354,6 +380,36 @@ impl Table for VaultSlugIndex {
     type ValueType = Vec<u8>;
 }
 
+/// Vault block heights: tracks per-vault block height.
+///
+/// Key: `{organization_id:8BE}{vault_id:8BE}`, Value: `u64` vault block height.
+pub struct VaultHeights;
+impl Table for VaultHeights {
+    const ID: TableId = TableId::VaultHeights;
+    type KeyType = Vec<u8>;
+    type ValueType = Vec<u8>;
+}
+
+/// Vault hashes: tracks per-vault previous block hash.
+///
+/// Key: `{organization_id:8BE}{vault_id:8BE}`, Value: `[u8; 32]` SHA-256 hash.
+pub struct VaultHashes;
+impl Table for VaultHashes {
+    const ID: TableId = TableId::VaultHashes;
+    type KeyType = Vec<u8>;
+    type ValueType = Vec<u8>;
+}
+
+/// Vault health status: tracks per-vault health state.
+///
+/// Key: `{organization_id:8BE}{vault_id:8BE}`, Value: postcard `VaultHealthStatus`.
+pub struct VaultHealth;
+impl Table for VaultHealth {
+    const ID: TableId = TableId::VaultHealth;
+    type KeyType = Vec<u8>;
+    type ValueType = Vec<u8>;
+}
+
 // ============================================================================
 // Table Directory Entry
 // ============================================================================
@@ -361,7 +417,7 @@ impl Table for VaultSlugIndex {
 /// On-disk representation of a table's metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct TableEntry {
-    /// Table identifier (0-16).
+    /// Table identifier (0-19).
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,
@@ -420,5 +476,72 @@ mod tests {
         assert_eq!(entry.table_id, recovered.table_id);
         assert_eq!(entry.root_page, recovered.root_page);
         assert_eq!(entry.entry_count, recovered.entry_count);
+    }
+
+    #[test]
+    fn test_new_vault_tables_round_trip() {
+        for (id, expected_byte) in
+            [(TableId::VaultHeights, 17u8), (TableId::VaultHashes, 18), (TableId::VaultHealth, 19)]
+        {
+            assert_eq!(id as u8, expected_byte);
+            let recovered = TableId::from_u8(expected_byte).expect("from_u8 should succeed");
+            assert_eq!(id, recovered);
+        }
+    }
+
+    #[test]
+    fn test_new_vault_tables_key_types() {
+        assert_eq!(TableId::VaultHeights.key_type(), KeyType::Bytes);
+        assert_eq!(TableId::VaultHashes.key_type(), KeyType::Bytes);
+        assert_eq!(TableId::VaultHealth.key_type(), KeyType::Bytes);
+    }
+
+    #[test]
+    fn test_client_sequences_key_type_is_bytes() {
+        assert_eq!(TableId::ClientSequences.key_type(), KeyType::Bytes);
+    }
+
+    #[test]
+    fn test_new_vault_tables_names() {
+        assert_eq!(TableId::VaultHeights.name(), "vault_heights");
+        assert_eq!(TableId::VaultHashes.name(), "vault_hashes");
+        assert_eq!(TableId::VaultHealth.name(), "vault_health");
+    }
+
+    #[test]
+    fn test_table_count_is_20() {
+        assert_eq!(TableId::COUNT, 20);
+        assert_eq!(TableId::all().len(), 20);
+    }
+
+    #[test]
+    fn test_from_u8_rejects_out_of_range() {
+        assert!(TableId::from_u8(20).is_none());
+        assert!(TableId::from_u8(255).is_none());
+    }
+
+    #[test]
+    fn test_directory_page_fits_minimum_page_size() {
+        // With COUNT=20 tables, the directory occupies 20 * 17 = 340 bytes.
+        // This must fit within the minimum 512-byte page size.
+        let directory_size = TableId::COUNT * TableEntry::SIZE;
+        assert_eq!(directory_size, 340);
+        assert!(
+            directory_size <= 512,
+            "directory size {directory_size} exceeds minimum 512-byte page"
+        );
+    }
+
+    #[test]
+    fn test_table_roots_array_capacity() {
+        // CommittedState.table_roots is [PageId; TableId::COUNT].
+        // Verify COUNT matches the number of defined variants.
+        let all = TableId::all();
+        assert_eq!(all.len(), TableId::COUNT);
+
+        // Verify all IDs are unique and sequential from 0.
+        for (i, id) in all.iter().enumerate() {
+            assert_eq!(*id as u8, i as u8, "table ID {id:?} should have discriminant {i}");
+        }
     }
 }

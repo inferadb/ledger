@@ -58,7 +58,7 @@ Custom B+ tree storage engine with MVCC.
 - `BTree` - B+ tree implementation
 - `Transaction` - MVCC transaction with snapshot isolation
 
-**Tables:** 15 tables for different data types (entities, relationships, blocks, etc.)
+**Tables:** 20 compile-time tables (`TableId` enum) for entities, relationships, blocks, Raft log, vault metadata, slug indexes, client sequences, and more.
 
 ### `inferadb-ledger-state`
 
@@ -83,6 +83,7 @@ Raft consensus via [Openraft](https://github.com/datafuselabs/openraft), gRPC se
 - `LogStorage` - Raft log backed by store
 - `StateMachine` - State machine implementation
 - `BatchProcessor` - Transaction batching
+- `MultiShardWriteService` - Cross-shard write forwarding
 
 **gRPC services:**
 

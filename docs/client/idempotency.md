@@ -23,8 +23,17 @@ struct Transaction {
 
 The leader maintains sequence state per client:
 
-- **Persistent**: `last_committed_seq` (survives restarts via Raft snapshots)
-- **In-memory cache**: Recent `WriteSuccess` responses (max 10,000 entries, 5-minute TTL)
+- **Persistent**: `ClientSequenceEntry` in the replicated `ClientSequences` B+ tree table (survives restarts and leader failover)
+- **In-memory cache**: Moka TinyLFU cache of recent `WriteSuccess` responses (max 100,000 entries, 24-hour TTL)
+
+### `ClientSequenceEntry` Fields
+
+| Field                  | Type      | Description                                     |
+| ---------------------- | --------- | ----------------------------------------------- |
+| `sequence`             | `u64`     | Last committed sequence number                  |
+| `last_seen`            | `i64`     | Deterministic apply-phase timestamp              |
+| `last_idempotency_key` | `[u8;16]` | UUID v4 from the last write                    |
+| `last_request_hash`    | `u64`     | Seahash of the last write's operation payload   |
 
 ### Validation Rules
 
@@ -34,16 +43,31 @@ The leader maintains sequence state per client:
 | `seq == last_committed_seq + 1` | Process transaction                 | Expected next            |
 | `seq > last_committed_seq + 1`  | Reject with `SEQUENCE_GAP`          | Client bug or lost state |
 
-### Duplicate Handling
+### Two-Tier Duplicate Detection
 
-When `seq <= last_committed_seq`:
+When `seq <= last_committed_seq`, the server checks two tiers:
 
-1. If response is in cache (≤5 min old, ≤10,000 entries) → return cached `WriteSuccess`
-2. If cache is evicted → request proceeds to Raft (state machine handles idempotency)
+1. **Moka cache hit** (fast path): Returns the full cached `WriteSuccess` including `committed_tx_id`, block header, and transaction proof. Sub-microsecond lookup.
 
-**Cache limitation**: After cache eviction, the server relies on the Raft state machine to handle duplicate operations idempotently. Clients should complete retries within the cache window (5 minutes) for best UX and guaranteed cached response.
+2. **Moka cache miss, replicated state hit** (cross-failover path): Checks the persistent `ClientSequenceEntry`. If the `last_idempotency_key` matches and `last_request_hash` matches, returns `WRITE_ERROR_CODE_ALREADY_COMMITTED` with `assigned_sequence` from the replicated entry. The `committed_tx_id` is not available in this path — only the moka cache stores the full response.
 
-The server durably stores only the sequence number, not transaction metadata.
+3. **Both miss** (post-eviction): If the client sequence entry has been evicted (TTL expired), the request proceeds as a new write. This is the documented limitation of the 24-hour TTL window.
+
+### Cross-Failover Behavior
+
+After a leader failover, the new leader's moka cache is empty. However, the `ClientSequenceEntry` is replicated via Raft and persisted in the `ClientSequences` B+ tree table. Retrying a write with the same idempotency key within the TTL window returns `ALREADY_COMMITTED` — the response includes the `assigned_sequence` but not the full `WriteSuccess` metadata.
+
+**Idempotency key reuse detection**: If the `last_idempotency_key` matches but `last_request_hash` differs (same key, different payload), the server returns `IDEMPOTENCY_KEY_REUSED` — this indicates a client bug where the same UUID was used for different operations.
+
+### TTL Eviction
+
+Client sequence entries are evicted deterministically:
+
+- **Trigger**: When `last_applied.index % eviction_interval == 0` (default: every 1,000 log entries)
+- **Criteria**: Entries where `proposed_at - last_seen > ttl_seconds` (default: 86,400 seconds / 24 hours)
+- **Determinism**: Eviction candidates are sorted by composite key encoding before deletion, ensuring identical behavior across all replicas regardless of HashMap iteration order
+
+After eviction, a retried write with the same idempotency key is treated as a new request. Clients should complete retries within the 24-hour TTL window.
 
 ### Gap Handling
 
@@ -61,10 +85,11 @@ Client should call `GetClientState` to recover, then resume from `last_committed
 | Scenario             | Client Action                           | Server Response                  |
 | -------------------- | --------------------------------------- | -------------------------------- |
 | Network timeout      | Retry with same `(client_id, sequence)` | Cached `WriteSuccess` (if fresh) |
+| Leader failover      | Retry with same idempotency key         | `ALREADY_COMMITTED` (replicated) |
 | `SEQUENCE_GAP` error | Call `GetClientState`, resume sequence  | Reject until correct sequence    |
 | Success              | Increment sequence for next write       | N/A                              |
 
-**Exactly-once semantics**: Retrying within the cache window (5 minutes) returns the cached result. After cache eviction, the state machine ensures idempotent operation handling.
+**Exactly-once semantics**: Within the 24-hour TTL window, retries return the cached/replicated result regardless of leader changes. After TTL expiration, a retried write may execute as a new write. For operations requiring stronger guarantees, use application-level idempotency keys stored in the vault itself (via conditional writes with `SetCondition::IfNotExists`).
 
 ## Client Requirements
 
@@ -77,7 +102,7 @@ Client should call `GetClientState` to recover, then resume from `last_committed
 
 1. Never accept `sequence <= last_committed_seq` as new transaction
 2. Reject gaps (`sequence > last_committed_seq + 1`) to catch client bugs early
-3. Persist `last_committed_seq` as part of vault state (survives leader failover)
+3. Persist `last_committed_seq` as part of replicated state (survives leader failover within TTL window)
 
 ## Client Recovery
 

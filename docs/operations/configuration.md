@@ -346,6 +346,43 @@ inferadb-ledger \
   --timeout 30
 ```
 
+## Storage Configuration
+
+Snapshot and cache settings. Configured via TOML file or `UpdateConfig` RPC.
+
+| TOML Key                        | Type     | Default     | Description                              |
+| ------------------------------- | -------- | ----------- | ---------------------------------------- |
+| `storage.cache_size_bytes`      | usize    | `268435456` | B+ tree page cache size (256 MB default) |
+| `storage.hot_cache_snapshots`   | usize    | `3`         | Snapshots to keep in hot cache           |
+| `storage.snapshot_interval`     | duration | `5m`        | Interval between automatic snapshots     |
+| `storage.compression_level`     | i32      | `3`         | zstd compression level (1–22)            |
+
+**Compression level trade-offs**: Level 3 (default) balances speed and ratio well for typical workloads (~3–4x compression). Higher levels (6–10) yield marginally better compression at increasing CPU cost. Levels above 10 are rarely worthwhile for Ledger's data patterns.
+
+## Client Sequence Eviction
+
+Controls how expired client sequence entries are purged from the replicated state. These entries enable cross-failover idempotency deduplication within the TTL window.
+
+| TOML Key                                           | Type | Default | Description                                        |
+| -------------------------------------------------- | ---- | ------- | -------------------------------------------------- |
+| `raft.client_sequence_eviction.eviction_interval`  | u64  | `1000`  | Evict when `last_applied.index % interval == 0`    |
+| `raft.client_sequence_eviction.ttl_seconds`         | i64  | `86400` | Entry TTL in seconds (24 hours default)            |
+
+**Eviction is deterministic**: triggered by the Raft log index, ensuring all replicas evict identical entries at the same point. Lower `eviction_interval` means more frequent checks (slightly more CPU per apply cycle). Higher values mean entries may live slightly beyond TTL.
+
+### TOML Example
+
+```toml
+[storage]
+cache_size_bytes = 536870912  # 512 MB
+compression_level = 3
+snapshot_interval = "5m"
+
+[raft.client_sequence_eviction]
+eviction_interval = 1000
+ttl_seconds = 86400
+```
+
 ## Events Configuration
 
 Audit event logging and external ingestion. See [Events Operations Guide](events.md) for architecture and event catalog.

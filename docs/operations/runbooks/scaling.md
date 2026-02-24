@@ -320,5 +320,5 @@ See [Disaster Recovery](disaster-recovery.md) for detailed procedures.
 ## See Also
 
 - [Deployment Guide](../deployment.md) - Initial cluster setup
-- [Rolling Upgrade](rolling-upgrade.md) - Upgrade procedures
+- [Upgrade Runbook](rolling-upgrade.md) - Version upgrade procedures
 - [Disaster Recovery](disaster-recovery.md) - Recovery procedures

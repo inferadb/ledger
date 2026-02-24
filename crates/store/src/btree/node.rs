@@ -5,11 +5,12 @@
 //! ## Leaf Node Layout
 //! ```text
 //! [Page Header: 16 bytes]
-//! [Cell Count: 2 bytes]
-//! [Free Space Start: 2 bytes]
-//! [Free Space End: 2 bytes]
-//! [Reserved: 2 bytes]
-//! [Bloom Filter: 256 bytes]
+//! [Cell Count: 2 bytes]        (offset 16)
+//! [Free Space Start: 2 bytes]  (offset 18)
+//! [Free Space End: 2 bytes]    (offset 20)
+//! [Reserved: 2 bytes]          (offset 22)
+//! [Next Leaf: 8 bytes]         (offset 24, PageId — 0 = no next leaf)
+//! [Bloom Filter: 256 bytes]    (offset 32)
 //! [Cell Pointers: 2 bytes each, pointing to cells from end of page]
 //! ... free space ...
 //! [Cells: (key_len:2, val_len:2, key_bytes, val_bytes)]
@@ -35,8 +36,9 @@ use crate::{
     page::{PAGE_HEADER_SIZE, Page},
 };
 
-/// Node header size (after page header).
-pub const NODE_HEADER_SIZE: usize = 8;
+/// Node header size (after page header): cell_count(2) + free_start(2) +
+/// free_end(2) + reserved(2) + next_leaf(8) = 16 bytes.
+pub const NODE_HEADER_SIZE: usize = 16;
 
 /// Offset of cell count in node (after page header).
 const CELL_COUNT_OFFSET: usize = PAGE_HEADER_SIZE;
@@ -47,14 +49,18 @@ const FREE_START_OFFSET: usize = PAGE_HEADER_SIZE + 2;
 /// Offset of free space end pointer.
 const FREE_END_OFFSET: usize = PAGE_HEADER_SIZE + 4;
 
+/// Offset of the next-leaf pointer (leaf nodes only, 8 bytes, little-endian u64).
+/// A value of 0 means no next leaf (end of linked list).
+const NEXT_LEAF_OFFSET: usize = PAGE_HEADER_SIZE + 8;
+
 /// Offset of rightmost child (branch nodes only).
 const RIGHTMOST_CHILD_OFFSET: usize = PAGE_HEADER_SIZE + 6;
 
 /// Offset where the bloom filter region begins (leaf nodes only).
-const LEAF_BLOOM_OFFSET: usize = PAGE_HEADER_SIZE + NODE_HEADER_SIZE;
+pub const LEAF_BLOOM_OFFSET: usize = PAGE_HEADER_SIZE + NODE_HEADER_SIZE;
 
 /// Offset where cell pointers begin (leaf nodes, after bloom filter).
-const LEAF_CELL_PTRS_OFFSET: usize = LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE;
+pub const LEAF_CELL_PTRS_OFFSET: usize = LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE;
 
 /// Offset where cell pointers begin (branch nodes, after rightmost child).
 const BRANCH_CELL_PTRS_OFFSET: usize = PAGE_HEADER_SIZE + 6 + 8; // +8 for rightmost child
@@ -132,6 +138,9 @@ impl<'a> LeafNode<'a> {
 
         let free_end = page_size as u16;
         page.data[FREE_END_OFFSET..FREE_END_OFFSET + 2].copy_from_slice(&free_end.to_le_bytes());
+
+        // Zero the next-leaf pointer (0 = end of linked list)
+        page.data[NEXT_LEAF_OFFSET..NEXT_LEAF_OFFSET + 8].copy_from_slice(&0u64.to_le_bytes());
 
         // Zero the bloom filter region
         page.data[LEAF_BLOOM_OFFSET..LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE].fill(0);
@@ -392,6 +401,20 @@ impl<'a> LeafNode<'a> {
         self.rebuild_bloom_filter();
 
         // Note: Cell data becomes dead space (would need compaction to reclaim)
+        self.page.dirty = true;
+    }
+
+    /// Returns the next leaf page ID in the linked list (0 = no next leaf).
+    pub fn next_leaf(&self) -> PageId {
+        u64::from_le_bytes(
+            self.page.data[NEXT_LEAF_OFFSET..NEXT_LEAF_OFFSET + 8].try_into().unwrap(),
+        )
+    }
+
+    /// Sets the next leaf page ID in the linked list (0 = no next leaf).
+    pub fn set_next_leaf(&mut self, page_id: PageId) {
+        self.page.data[NEXT_LEAF_OFFSET..NEXT_LEAF_OFFSET + 8]
+            .copy_from_slice(&page_id.to_le_bytes());
         self.page.dirty = true;
     }
 
@@ -670,6 +693,11 @@ impl<'a> LeafNodeRef<'a> {
         Ok(Self { data: &page.data })
     }
 
+    /// Returns the next leaf page ID in the linked list (0 = no next leaf).
+    pub fn next_leaf(&self) -> PageId {
+        u64::from_le_bytes(self.data[NEXT_LEAF_OFFSET..NEXT_LEAF_OFFSET + 8].try_into().unwrap())
+    }
+
     /// Reads the bloom filter embedded in this leaf page.
     pub fn bloom_filter(&self) -> BloomFilter {
         BloomFilter::from_array(
@@ -931,5 +959,50 @@ mod tests {
         // Navigate
         assert_eq!(node.child_for_key(b"apple"), 10); // < "m"
         assert_eq!(node.child_for_key(b"zebra"), 100); // >= "m"
+    }
+
+    #[test]
+    fn test_leaf_next_leaf_default_zero() {
+        let mut page = make_leaf_page(0);
+        let node = LeafNode::init(&mut page);
+        assert_eq!(node.next_leaf(), 0, "init() should set next_leaf to 0");
+    }
+
+    #[test]
+    fn test_leaf_set_and_get_next_leaf() {
+        let mut page = make_leaf_page(0);
+        let mut node = LeafNode::init(&mut page);
+
+        node.set_next_leaf(42);
+        assert_eq!(node.next_leaf(), 42);
+
+        node.set_next_leaf(u64::MAX);
+        assert_eq!(node.next_leaf(), u64::MAX);
+
+        node.set_next_leaf(0);
+        assert_eq!(node.next_leaf(), 0);
+    }
+
+    #[test]
+    fn test_leaf_node_ref_next_leaf() {
+        let mut page = make_leaf_page(0);
+        {
+            let mut node = LeafNode::init(&mut page);
+            node.set_next_leaf(99);
+        }
+        let node_ref = LeafNodeRef::from_page(&page).unwrap();
+        assert_eq!(node_ref.next_leaf(), 99);
+    }
+
+    /// Compile-time const assertions for leaf layout consistency.
+    #[test]
+    fn test_leaf_layout_const_assertions() {
+        // LEAF_BLOOM_OFFSET == PAGE_HEADER_SIZE + NODE_HEADER_SIZE
+        const _: () = assert!(LEAF_BLOOM_OFFSET == PAGE_HEADER_SIZE + NODE_HEADER_SIZE);
+        // LEAF_CELL_PTRS_OFFSET == LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE
+        const _: () = assert!(LEAF_CELL_PTRS_OFFSET == LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE);
+        // NODE_HEADER_SIZE is 16 (cell_count:2 + free_start:2 + free_end:2 + reserved:2 +
+        // next_leaf:8)
+        const _: () = assert!(NODE_HEADER_SIZE == 16);
     }
 }

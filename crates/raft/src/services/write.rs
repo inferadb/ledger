@@ -441,6 +441,8 @@ impl WriteServiceImpl {
         vault_id: Option<VaultId>,
         operations: &[inferadb_ledger_proto::proto::Operation],
         client_id: &str,
+        idempotency_key: [u8; 16],
+        request_hash: u64,
     ) -> Result<LedgerRequest, Status> {
         // Convert proto operations to internal Operations
         // Time the proto → internal type conversion
@@ -472,6 +474,8 @@ impl WriteServiceImpl {
             organization_id,
             vault_id: vault_id.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
+            idempotency_key,
+            request_hash,
         })
     }
 }
@@ -630,8 +634,71 @@ impl WriteService for WriteServiceImpl {
                 ));
             },
             IdempotencyCheckResult::NewRequest => {
-                // Proceed with new request
+                // Moka miss — check replicated state for cross-failover dedup
                 ctx.set_idempotency_hit(false);
+                if let Some(ref state) = self.applied_state {
+                    use crate::log_storage::IdempotencyCheckResult as ReplicatedCheck;
+                    match state.client_idempotency_check(
+                        organization_id,
+                        vault_id,
+                        &client_id,
+                        &idempotency_key,
+                        request_hash,
+                    ) {
+                        ReplicatedCheck::AlreadyCommitted { sequence } => {
+                            metrics::record_idempotency_hit();
+                            metrics::record_write(true, ctx.elapsed_secs());
+                            return Ok(response_with_correlation(
+                                WriteResponse {
+                                    result: Some(
+                                        inferadb_ledger_proto::proto::write_response::Result::Error(
+                                            WriteError {
+                                                code: WriteErrorCode::AlreadyCommitted.into(),
+                                                key: String::new(),
+                                                current_version: None,
+                                                current_value: None,
+                                                message: "Request already committed (cross-failover dedup)".to_string(),
+                                                committed_tx_id: None,
+                                                committed_block_height: None,
+                                                assigned_sequence: Some(sequence),
+                                            },
+                                        ),
+                                    ),
+                                },
+                                &ctx.request_id(),
+                                &trace_ctx.trace_id,
+                            ));
+                        },
+                        ReplicatedCheck::KeyReused => {
+                            ctx.set_error(
+                                "IdempotencyKeyReused",
+                                "Idempotency key reused with different payload (cross-failover)",
+                            );
+                            metrics::record_write(false, ctx.elapsed_secs());
+                            return Ok(response_with_correlation(
+                                WriteResponse {
+                                    result: Some(
+                                        inferadb_ledger_proto::proto::write_response::Result::Error(
+                                            WriteError {
+                                                code: WriteErrorCode::IdempotencyKeyReused.into(),
+                                                key: String::new(),
+                                                current_version: None,
+                                                current_value: None,
+                                                message: "Idempotency key was already used with a different request payload".to_string(),
+                                                committed_tx_id: None,
+                                                committed_block_height: None,
+                                                assigned_sequence: None,
+                                            },
+                                        ),
+                                    ),
+                                },
+                                &ctx.request_id(),
+                                &trace_ctx.trace_id,
+                            ));
+                        },
+                        ReplicatedCheck::Miss => {},
+                    }
+                }
                 metrics::record_idempotency_miss();
             },
         }
@@ -695,6 +762,8 @@ impl WriteService for WriteServiceImpl {
             Some(vault_id),
             &req.operations,
             &client_id,
+            idempotency_key,
+            request_hash,
         )?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
@@ -1078,8 +1147,71 @@ impl WriteService for WriteServiceImpl {
                 }, &ctx.request_id(), &trace_ctx.trace_id));
             },
             IdempotencyCheckResult::NewRequest => {
-                // Proceed with new request
+                // Moka miss — check replicated state for cross-failover dedup
                 ctx.set_idempotency_hit(false);
+                if let Some(ref state) = self.applied_state {
+                    use crate::log_storage::IdempotencyCheckResult as ReplicatedCheck;
+                    match state.client_idempotency_check(
+                        organization_id,
+                        vault_id,
+                        &client_id,
+                        &idempotency_key,
+                        request_hash,
+                    ) {
+                        ReplicatedCheck::AlreadyCommitted { sequence } => {
+                            metrics::record_idempotency_hit();
+                            metrics::record_batch_write(true, 0, ctx.elapsed_secs());
+                            return Ok(response_with_correlation(
+                                BatchWriteResponse {
+                                    result: Some(
+                                        inferadb_ledger_proto::proto::batch_write_response::Result::Error(
+                                            WriteError {
+                                                code: WriteErrorCode::AlreadyCommitted.into(),
+                                                key: String::new(),
+                                                current_version: None,
+                                                current_value: None,
+                                                message: "Request already committed (cross-failover dedup)".to_string(),
+                                                committed_tx_id: None,
+                                                committed_block_height: None,
+                                                assigned_sequence: Some(sequence),
+                                            },
+                                        ),
+                                    ),
+                                },
+                                &ctx.request_id(),
+                                &trace_ctx.trace_id,
+                            ));
+                        },
+                        ReplicatedCheck::KeyReused => {
+                            ctx.set_error(
+                                "IdempotencyKeyReused",
+                                "Idempotency key reused with different payload (cross-failover)",
+                            );
+                            metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+                            return Ok(response_with_correlation(
+                                BatchWriteResponse {
+                                    result: Some(
+                                        inferadb_ledger_proto::proto::batch_write_response::Result::Error(
+                                            WriteError {
+                                                code: WriteErrorCode::IdempotencyKeyReused.into(),
+                                                key: String::new(),
+                                                current_version: None,
+                                                current_value: None,
+                                                message: "Idempotency key was already used with a different request payload".to_string(),
+                                                committed_tx_id: None,
+                                                committed_block_height: None,
+                                                assigned_sequence: None,
+                                            },
+                                        ),
+                                    ),
+                                },
+                                &ctx.request_id(),
+                                &trace_ctx.trace_id,
+                            ));
+                        },
+                        ReplicatedCheck::Miss => {},
+                    }
+                }
                 metrics::record_idempotency_miss();
             },
         }
@@ -1144,6 +1276,8 @@ impl WriteService for WriteServiceImpl {
             Some(vault_id),
             &all_operations,
             &client_id,
+            idempotency_key,
+            request_hash,
         )?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)

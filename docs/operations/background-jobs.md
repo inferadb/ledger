@@ -38,7 +38,18 @@ Removes transaction bodies from old blocks in vaults with `COMPACTED` retention 
 
 ### B-tree Compaction
 
-Merges underfull leaf nodes after deletions to reclaim space and maintain read performance.
+Merges underfull leaf nodes after deletions to reclaim space and maintain read performance. Uses forward-only O(N) single-pass compaction via the leaf linked list (`next_leaf` sibling pointers).
+
+The compaction algorithm:
+
+1. Starts at the leftmost leaf and walks the `next_leaf` chain forward.
+2. For each underfull leaf, checks whether the next neighbor shares the same parent branch node.
+3. If both are underfull and share a parent, merges them (greedy — re-checks the merged leaf against its new neighbor).
+4. If they span a branch boundary (different parents), skips to avoid cross-branch complexity.
+5. After merging, the right leaf is freed and the left leaf's `next_leaf` is updated to skip the freed page.
+6. If the parent becomes empty and is the root, performs root collapse.
+
+This replaces the previous O(N²) algorithm that collected all leaf info and restarted from the beginning after each merge.
 
 - **Default interval**: 1 hour
 - **Leader only**: Yes

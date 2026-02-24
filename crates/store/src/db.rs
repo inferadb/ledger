@@ -1169,6 +1169,38 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         Ok(())
     }
 
+    /// Inserts a pre-encoded key-value pair into a table by ID.
+    ///
+    /// Unlike [`insert`](Self::insert), this method accepts raw bytes that are
+    /// **already** in the B-tree encoding format (e.g. from [`TableIterator`]).
+    /// No additional encoding is applied. This is used by snapshot installation
+    /// to stream entries directly from the snapshot file into the B-tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read/write fails during the B-tree operation.
+    pub fn insert_raw(&mut self, table_id: TableId, key: &[u8], value: &[u8]) -> Result<()> {
+        let root = self.table_roots[table_id as usize];
+        let provider = BufferedWritePageProvider {
+            db: self.db,
+            txn_id: self.snapshot_id.raw(),
+            dirty_pages: &mut self.dirty_pages,
+            pages_to_free: &mut self.pages_to_free,
+        };
+
+        let mut btree = BTree::new(root, provider);
+        btree.insert(key, value)?;
+
+        let splits = btree.split_count();
+        if splits > 0 {
+            self.db.page_splits.fetch_add(splits, Ordering::Relaxed);
+        }
+
+        self.table_roots[table_id as usize] = btree.root_page();
+
+        Ok(())
+    }
+
     /// Deletes a key from a table.
     ///
     /// # Errors

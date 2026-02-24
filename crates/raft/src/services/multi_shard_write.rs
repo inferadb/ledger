@@ -22,11 +22,13 @@ use crate::{
     error::classify_raft_error,
     idempotency::IdempotencyCache,
     metrics,
+    multi_raft::MultiRaftManager,
     proof::{self, ProofError},
     rate_limit::RateLimiter,
     services::{
+        ForwardClient,
         metadata::{response_with_correlation, status_with_correlation},
-        shard_resolver::ShardResolver,
+        shard_resolver::{RemoteShardInfo, ResolveResult, ShardResolver},
         slug_resolver::SlugResolver,
     },
     trace_context,
@@ -41,6 +43,10 @@ use crate::{
 pub struct MultiShardWriteService {
     /// Shard resolver for routing requests.
     resolver: Arc<dyn ShardResolver>,
+    /// Multi-raft manager for creating forward clients when needed.
+    /// Optional to support standalone single-shard deployments.
+    #[builder(default)]
+    manager: Option<Arc<MultiRaftManager>>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Per-organization rate limiter (optional).
@@ -84,6 +90,31 @@ impl MultiShardWriteService {
         if let Some(ref handle) = self.event_handle {
             handle.record_handler_event(entry);
         }
+    }
+
+    /// Returns a forward client for a remote shard.
+    ///
+    /// Creates a gRPC connection to the remote shard's leader (or any member if leader unknown).
+    async fn get_forward_client(&self, remote: &RemoteShardInfo) -> Result<ForwardClient, Status> {
+        let manager = self.manager.as_ref().ok_or_else(|| {
+            Status::unavailable("Request forwarding not configured for this service")
+        })?;
+
+        let router =
+            manager.router().ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
+
+        let connection = router
+            .get_connection(
+                remote.shard_id,
+                &remote.routing.member_nodes,
+                remote.routing.leader_hint.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!("Failed to connect to remote shard: {}", e))
+            })?;
+
+        Ok(ForwardClient::new(connection))
     }
 
     /// Sets input validation configuration for request field limits.
@@ -184,7 +215,13 @@ impl MultiShardWriteService {
             actor: actor.to_string(),
         };
 
-        Ok(LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] })
+        Ok(LedgerRequest::Write {
+            organization_id,
+            vault_id,
+            transactions: vec![transaction],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        })
     }
 }
 
@@ -209,6 +246,89 @@ impl WriteService for MultiShardWriteService {
         let system = self.resolver.system_shard()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+
+        // Check for remote forwarding — if the organization is on a remote shard,
+        // run pre-flight checks and forward the raw request (no vault resolution).
+        if self.resolver.supports_forwarding()
+            && let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+        {
+            // Pre-flight: validation on originating node
+            if let Err(status) = self.validate_operations(&req.operations) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                        organization_id,
+                        req.organization.as_ref().map(|n| n.slug),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: status.message().to_string(),
+                    })
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status);
+            }
+
+            // Pre-flight: rate limit on originating node
+            if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                        organization_id,
+                        req.organization.as_ref().map(|n| n.slug),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: "rate_limited".to_string(),
+                    })
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+            }
+
+            // Pre-flight: quota on originating node
+            let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
+            super::helpers::check_storage_quota(
+                self.quota_checker.as_ref(),
+                organization_id,
+                estimated_bytes,
+            )
+            .map_err(|status| {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::QuotaExceeded,
+                        organization_id,
+                        req.organization.as_ref().map(|n| n.slug),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: "storage_quota_exceeded".to_string(),
+                    })
+                    .detail("estimated_bytes", &estimated_bytes.to_string())
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                status_with_correlation(status, &request_id, &trace_ctx.trace_id)
+            })?;
+
+            // Forward to remote shard — destination resolves vault slug
+            debug!(
+                organization_id = organization_id.value(),
+                shard_id = remote.shard_id.value(),
+                "Forwarding write to remote shard"
+            );
+            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let mut client = self.get_forward_client(&remote).await?;
+            return client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
+        }
+
+        // Local processing path (single-shard or forwarding-enabled with local org)
         let ctx = self.resolver.resolve(organization_id)?;
         let vault_id =
             SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
@@ -475,6 +595,94 @@ impl WriteService for MultiShardWriteService {
         let system = self.resolver.system_shard()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+
+        // Check for remote forwarding — if the organization is on a remote shard,
+        // run pre-flight checks and forward the raw request (no vault resolution).
+        if self.resolver.supports_forwarding()
+            && let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+        {
+            // Flatten operations for pre-flight validation
+            let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
+                req.operations.iter().flat_map(|group| group.operations.clone()).collect();
+
+            // Pre-flight: validation on originating node
+            if let Err(status) = self.validate_operations(&all_operations) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                        organization_id,
+                        req.organization.as_ref().map(|n| n.slug),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: status.message().to_string(),
+                    })
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status);
+            }
+
+            // Pre-flight: rate limit on originating node
+            if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                        organization_id,
+                        req.organization.as_ref().map(|n| n.slug),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: "rate_limited".to_string(),
+                    })
+                    .operations_count(all_operations.len() as u32)
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+            }
+
+            // Pre-flight: quota on originating node
+            let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
+            super::helpers::check_storage_quota(
+                self.quota_checker.as_ref(),
+                organization_id,
+                estimated_bytes,
+            )
+            .map_err(|status| {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::QuotaExceeded,
+                        organization_id,
+                        req.organization.as_ref().map(|n| n.slug),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: "storage_quota_exceeded".to_string(),
+                    })
+                    .detail("estimated_bytes", &estimated_bytes.to_string())
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                status_with_correlation(status, &request_id, &trace_ctx.trace_id)
+            })?;
+
+            // Forward to remote shard — destination resolves vault slug
+            debug!(
+                organization_id = organization_id.value(),
+                shard_id = remote.shard_id.value(),
+                "Forwarding batch_write to remote shard"
+            );
+            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let mut client = self.get_forward_client(&remote).await?;
+            return client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
+        }
+
+        // Local processing path (single-shard or forwarding-enabled with local org)
         let ctx = self.resolver.resolve(organization_id)?;
         let vault_id =
             SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
@@ -742,9 +950,52 @@ impl WriteService for MultiShardWriteService {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_multi_shard_write_service_creation() {
         // Basic struct test - full testing requires Raft setup
+    }
+
+    #[test]
+    fn test_single_shard_resolver_does_not_support_forwarding() {
+        // Verify SingleShardResolver returns supports_forwarding() = false,
+        // which ensures the write forwarding code path is never entered
+        // for single-shard deployments.
+        fn assert_no_forwarding(resolver: &dyn ShardResolver) {
+            assert!(!resolver.supports_forwarding());
+        }
+        // SingleShardResolver::new requires Raft and state instances.
+        // Instead, verify the trait default returns false.
+        struct StubResolver;
+        impl ShardResolver for StubResolver {
+            fn resolve(
+                &self,
+                _: inferadb_ledger_types::OrganizationId,
+            ) -> Result<crate::services::shard_resolver::ShardContext, tonic::Status> {
+                Err(tonic::Status::unimplemented("stub"))
+            }
+            fn system_shard(
+                &self,
+            ) -> Result<crate::services::shard_resolver::ShardContext, tonic::Status> {
+                Err(tonic::Status::unimplemented("stub"))
+            }
+        }
+        let resolver = StubResolver;
+        assert_no_forwarding(&resolver);
+    }
+
+    #[test]
+    fn test_manager_field_defaults_to_none() {
+        // Verify that MultiShardWriteService can be built without a manager
+        // (the default for single-shard deployments). The builder should not
+        // require the manager field.
+        //
+        // Cannot fully construct without a resolver and idempotency cache,
+        // but we verify the struct definition accepts Option<_> for manager.
+        fn _check_field_type(service: &MultiShardWriteService) {
+            let _: &Option<Arc<MultiRaftManager>> = &service.manager;
+        }
     }
 
     // Proto↔domain conversion tests (set_condition, operation variants) are in

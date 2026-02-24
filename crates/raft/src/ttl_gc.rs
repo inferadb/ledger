@@ -126,8 +126,13 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             actor: GC_ACTOR.to_string(),
         };
 
-        let request =
-            LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
+        let request = LedgerRequest::Write {
+            organization_id,
+            vault_id,
+            transactions: vec![transaction],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        };
 
         self.raft
             .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })

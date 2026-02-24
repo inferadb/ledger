@@ -460,3 +460,118 @@ async fn test_multi_shard_concurrent_writes() {
         }
     }
 }
+
+// ============================================================================
+// Write Forwarding Integration Tests
+// ============================================================================
+
+/// Tests that writes to a local-shard follower node succeed.
+///
+/// In a 3-node cluster where all nodes host all shards, writing to any node
+/// should succeed — the `resolve_with_forward()` returns `Local` and the
+/// Raft layer handles leader election internally. This verifies the new
+/// forwarding code path is a transparent no-op for local organizations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_write_forwarding_local_shard_all_nodes() {
+    // Single-node cluster with 2 data shards still uses MultiShardResolver
+    // (supports_forwarding=true) so the forwarding code path is exercised.
+    let cluster = MultiShardTestCluster::new(1, 2).await;
+    assert!(
+        cluster.wait_for_leaders(Duration::from_secs(15)).await,
+        "all shards should elect leaders"
+    );
+
+    let node = cluster.any_node();
+    let ns_id = create_organization(node.addr, "fwd-local-all").await.expect("create organization");
+    let vault_slug = create_vault(node.addr, ns_id).await.expect("create vault");
+
+    // Write through the forwarding-enabled resolver — resolve_with_forward
+    // returns Local because the single node hosts every shard.
+    let height = write_entity(node.addr, ns_id, vault_slug, "fwd-key-0", b"fwd-val-0")
+        .await
+        .expect("write should succeed through forwarding path");
+    assert!(height > 0, "block height should be positive");
+
+    // Verify readable
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let value =
+        read_entity(node.addr, ns_id, vault_slug, "fwd-key-0").await.expect("read after write");
+    assert_eq!(value, Some(b"fwd-val-0".to_vec()));
+}
+
+/// Tests batch write through the forwarding-enabled `MultiShardWriteService`.
+///
+/// Verifies that `batch_write()` through `MultiShardWriteService` with the
+/// forwarding-enabled `MultiShardResolver` works correctly for local shards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_batch_write_forwarding_local_shard() {
+    let cluster = MultiShardTestCluster::new(1, 2).await;
+    assert!(
+        cluster.wait_for_leaders(Duration::from_secs(15)).await,
+        "all shards should elect leaders"
+    );
+
+    let node = cluster.any_node();
+    let ns_id =
+        create_organization(node.addr, "fwd-batch-local").await.expect("create organization");
+    let vault_slug = create_vault(node.addr, ns_id).await.expect("create vault");
+
+    // Send batch write through the forwarding-enabled resolver
+    let mut client = create_write_client(node.addr).await.expect("connect");
+
+    let request = inferadb_ledger_proto::proto::BatchWriteRequest {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id as u64 }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
+            id: "batch-fwd-client".to_string(),
+        }),
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
+        operations: vec![inferadb_ledger_proto::proto::BatchWriteOperation {
+            operations: vec![
+                inferadb_ledger_proto::proto::Operation {
+                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                        inferadb_ledger_proto::proto::SetEntity {
+                            key: "batch-fwd-1".to_string(),
+                            value: b"batch-fwd-val-1".to_vec(),
+                            expires_at: None,
+                            condition: None,
+                        },
+                    )),
+                },
+                inferadb_ledger_proto::proto::Operation {
+                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                        inferadb_ledger_proto::proto::SetEntity {
+                            key: "batch-fwd-2".to_string(),
+                            value: b"batch-fwd-val-2".to_vec(),
+                            expires_at: None,
+                            condition: None,
+                        },
+                    )),
+                },
+            ],
+        }],
+        include_tx_proofs: false,
+    };
+
+    let response =
+        client.batch_write(request).await.expect("batch write to non-leader").into_inner();
+    match response.result {
+        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Success(s)) => {
+            assert!(s.block_height > 0, "batch should produce a block");
+        },
+        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(e)) => {
+            panic!("batch write failed: {:?}", e);
+        },
+        None => panic!("no result in batch write response"),
+    }
+
+    // Verify readable
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let val1 =
+        read_entity(node.addr, ns_id, vault_slug, "batch-fwd-1").await.expect("read batch key 1");
+    let val2 =
+        read_entity(node.addr, ns_id, vault_slug, "batch-fwd-2").await.expect("read batch key 2");
+
+    assert_eq!(val1, Some(b"batch-fwd-val-1".to_vec()));
+    assert_eq!(val2, Some(b"batch-fwd-val-2".to_vec()));
+}

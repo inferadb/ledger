@@ -199,6 +199,8 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             organization_id,
             vault_id: VaultId::new(0), // Organization-level entities
             transactions: vec![transaction],
+            idempotency_key: [0; 16],
+            request_hash: 0,
         };
 
         self.raft

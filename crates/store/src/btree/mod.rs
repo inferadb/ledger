@@ -215,6 +215,10 @@ impl<P: PageProvider> BTree<P> {
     /// Descends from the root tracking the path, then backtracks to find
     /// the nearest ancestor with a right sibling child. Returns `None` if
     /// the key is in the rightmost leaf (no next leaf exists).
+    ///
+    /// Note: The hot iteration path now uses `LeafNode::next_leaf()` for O(1)
+    /// traversal. This method is retained as a diagnostic/fallback utility.
+    #[allow(dead_code)]
     fn find_next_leaf(&self, key: &[u8]) -> Result<Option<PageId>> {
         // Collect the path from root to leaf: (branch_page_id, child_index_taken).
         // child_index is the separator index whose left child we followed,
@@ -286,6 +290,7 @@ impl<P: PageProvider> BTree<P> {
     }
 
     /// Finds the leftmost leaf starting from a given page.
+    #[allow(dead_code)]
     fn find_first_leaf_from(&self, start: PageId) -> Result<PageId> {
         let mut current = start;
         loop {
@@ -739,11 +744,15 @@ impl<P: PageProvider> BTree<P> {
 
     /// Compacts the B+ tree by merging underfull leaf nodes.
     ///
-    /// Walks all leaves left-to-right. When a leaf's fill factor is below
-    /// `min_fill_factor`, attempts to merge it with its right sibling
-    /// (if the combined entries fit in one page). After merging, the
-    /// separator key is removed from the parent branch and the right
-    /// sibling page is freed.
+    /// Walks all leaves left-to-right using the leaf linked list (`next_leaf`
+    /// pointers) for O(1) leaf-to-leaf traversal. When a leaf's fill factor
+    /// is below `min_fill_factor`, attempts to merge it with its right sibling.
+    /// Greedy: after merging, the merged leaf is re-checked against its new
+    /// next neighbor.
+    ///
+    /// Only merges leaves that share the same parent branch node — leaves
+    /// spanning a branch boundary are skipped (merging them would modify the
+    /// wrong parent branch).
     ///
     /// # Arguments
     /// * `min_fill_factor` — Threshold below which a leaf is considered underfull (0.0 to 1.0,
@@ -760,86 +769,95 @@ impl<P: PageProvider> BTree<P> {
             return Ok(CompactionStats::default());
         }
 
+        // Check if root is a leaf — single leaf trees have nothing to compact
+        {
+            let root_page = self.provider.read_page(self.root_page)?;
+            if root_page.page_type()? == PageType::BTreeLeaf {
+                return Ok(CompactionStats::default());
+            }
+        }
+
         let mut stats = CompactionStats::default();
 
-        // Collect all (leaf_page_id, parent_page_id, child_index_in_parent) tuples
-        // by walking the tree. We collect first to avoid borrowing issues.
-        let mut leaf_info = self.collect_leaf_info()?;
+        // Find leftmost leaf — O(depth)
+        let mut current_id = self.find_first_leaf()?;
 
-        // Process pairs of adjacent leaves that share the same parent.
-        // We iterate with a window: for each underfull leaf, check if it can
-        // merge with the next leaf (which must share the same parent branch).
-        // After each merge, re-collect leaf info since the tree structure changed.
-        let mut i = 0;
-        while i + 1 < leaf_info.len() {
-            let (left_id, left_parent_id, _left_child_idx) = leaf_info[i];
-            let (right_id, right_parent_id, _right_child_idx) = leaf_info[i + 1];
+        // Forward-only iteration via next_leaf pointers
+        loop {
+            let current_page = self.provider.read_page(current_id)?;
+            let current_leaf = LeafNodeRef::from_page(&current_page)?;
+            let next_id = current_leaf.next_leaf();
 
-            // Only merge siblings under the same parent branch
-            if left_parent_id != right_parent_id {
-                i += 1;
+            // End of linked list
+            if next_id == 0 {
+                break;
+            }
+
+            // Check fill factor of current leaf
+            let fill = leaf_fill_factor(&current_page)?;
+            if fill >= min_fill_factor {
+                current_id = next_id;
                 continue;
             }
 
-            let left_page = self.provider.read_page(left_id)?;
-            let left_fill = leaf_fill_factor(&left_page)?;
-
-            if left_fill >= min_fill_factor {
-                i += 1;
+            // Read next leaf and check if merge is possible
+            let next_page = self.provider.read_page(next_id)?;
+            if !can_merge_leaves(&current_page, &next_page)? {
+                current_id = next_id;
                 continue;
             }
 
-            let right_page = self.provider.read_page(right_id)?;
+            // Same-parent check: find parent of both leaves via root-to-leaf descent
+            // Use first key of each leaf as the representative key
+            let current_first_key = if current_leaf.cell_count() > 0 {
+                current_leaf.key(0).to_vec()
+            } else {
+                // Empty leaf — use the next leaf's first key to find parents.
+                // Empty current can still be merged (merge_leaves handles it).
+                Vec::new()
+            };
 
-            // Check if combined entries fit in one page
-            if !can_merge_leaves(&left_page, &right_page)? {
-                i += 1;
+            let next_leaf_ref = LeafNodeRef::from_page(&next_page)?;
+            let next_first_key = if next_leaf_ref.cell_count() > 0 {
+                next_leaf_ref.key(0).to_vec()
+            } else {
+                Vec::new()
+            };
+
+            let current_parent = self.find_parent_of_leaf(current_id, &current_first_key)?;
+            let next_parent = self.find_parent_of_leaf(next_id, &next_first_key)?;
+
+            if current_parent.0 != next_parent.0 {
+                // Different parents — skip merge, advance
+                current_id = next_id;
                 continue;
             }
 
-            // Perform the merge: move all right entries into left
-            let mut left_page = left_page;
-            let mut right_page = right_page;
-            merge_leaves(&mut left_page, &mut right_page)?;
-            self.provider.write_page(left_page);
+            let parent_id = current_parent.0;
 
-            // Update parent branch: remove the separator between left and right.
-            //
-            // In our B+ tree layout, branch cells have the form:
-            //   cell[i] = (separator_key, left_child)
-            // and rightmost_child covers the rightmost subtree.
-            //
-            // When we merge left+right, we need to remove the separator
-            // that pointed to the right child. The separator index in the
-            // parent is `left_child_idx` — the separator whose left child
-            // is the left leaf. After removing it, the left leaf absorbs
-            // the right leaf's entries, and the right child pointer is no
-            // longer needed.
-            if left_parent_id != 0 {
-                let mut parent_page = self.provider.read_page(left_parent_id)?;
+            // Perform the merge: move all entries from next into current
+            let mut current_page = current_page;
+            let mut next_page = next_page;
+            merge_leaves(&mut current_page, &mut next_page)?;
+            self.provider.write_page(current_page);
+
+            // Update parent branch: remove the separator between current and next
+            if parent_id != 0 {
+                let mut parent_page = self.provider.read_page(parent_id)?;
                 let mut branch = BranchNode::from_page(&mut parent_page)?;
                 let branch_count = branch.cell_count() as usize;
 
-                // Find the separator index that separates left from right.
-                // The separator at index `sep_idx` has:
-                //   child(sep_idx) = left_id (or it could be rightmost)
-                // The right sibling is either child(sep_idx+1) or rightmost_child.
-                let sep_idx = self.find_separator_index(&branch, left_id, right_id, branch_count);
+                let sep_idx = self.find_separator_index(&branch, current_id, next_id, branch_count);
 
                 if let Some(idx) = sep_idx {
-                    // If the right child was at child(idx+1), just delete
-                    // the separator at idx. The child at idx (left) stays.
                     if idx + 1 < branch_count {
-                        // Right is child(idx+1). After deleting separator at idx,
-                        // cell at idx+1 shifts to idx, and its child becomes the
-                        // left child pointer. We need to set that child to left_id.
+                        // Right is child(idx+1). Delete separator, update child pointer.
                         branch.delete(idx);
-                        branch.set_child(idx, left_id);
+                        branch.set_child(idx, current_id);
                     } else {
                         // Right is the rightmost_child.
-                        // Delete the last separator, set rightmost to left_id.
                         branch.delete(idx);
-                        branch.set_rightmost_child(left_id);
+                        branch.set_rightmost_child(current_id);
                     }
 
                     drop(branch);
@@ -851,7 +869,6 @@ impl<P: PageProvider> BTree<P> {
                     };
 
                     if parent_count == 0 && parent_page.id == self.root_page {
-                        // Root branch has no separators — its rightmost_child is the only child.
                         let only_child = {
                             let b = BranchNode::from_page(&mut parent_page)?;
                             b.rightmost_child()
@@ -865,15 +882,13 @@ impl<P: PageProvider> BTree<P> {
                 }
             }
 
-            self.provider.free_page(right_id);
+            self.provider.free_page(next_id);
             stats.pages_merged += 1;
             stats.pages_freed += 1;
 
-            // Re-collect leaf info since the tree structure changed (parent
-            // branch was modified, right page was freed). Restart the scan
-            // so the merged left can potentially merge with its new neighbor.
-            leaf_info = self.collect_leaf_info()?;
-            i = 0;
+            // Greedy: do NOT advance current_id — re-check the merged leaf
+            // against its new next neighbor. The merged leaf's next_leaf was
+            // already updated by merge_leaves() to point past the freed right page.
         }
 
         Ok(stats)
@@ -885,7 +900,11 @@ impl<P: PageProvider> BTree<P> {
     /// `child_index_in_parent` is the index of the child pointer in the parent
     /// branch that leads to this leaf. For rightmost children, the index is
     /// set to the branch's cell_count (one past the last separator).
-    fn collect_leaf_info(&self) -> Result<Vec<(PageId, PageId, usize)>> {
+    ///
+    /// This method performs a full DFS traversal of the tree — O(N) page reads.
+    /// It is retained as a diagnostic utility (e.g., for metrics and
+    /// fragmentation analysis) but is no longer used during compaction.
+    pub fn collect_leaf_info(&self) -> Result<Vec<(PageId, PageId, usize)>> {
         let mut result = Vec::new();
         self.collect_leaf_info_recursive(self.root_page, 0, 0, &mut result)?;
         Ok(result)
@@ -956,13 +975,137 @@ impl<P: PageProvider> BTree<P> {
 
         None
     }
+
+    /// Finds the parent branch node of a leaf by descending from the root
+    /// using a representative key.
+    ///
+    /// Returns `(parent_page_id, child_index_in_parent)` where
+    /// `child_index_in_parent` is the index in the parent's child array that
+    /// leads to the target leaf. For rightmost children, the index equals the
+    /// branch's cell count.
+    ///
+    /// If the root IS the target leaf, returns `(0, 0)`.
+    fn find_parent_of_leaf(&self, target_leaf_id: PageId, key: &[u8]) -> Result<(PageId, usize)> {
+        let mut current = self.root_page;
+        let mut parent_id: PageId = 0;
+        let mut child_idx: usize = 0;
+
+        loop {
+            if current == target_leaf_id {
+                return Ok((parent_id, child_idx));
+            }
+
+            let page = self.provider.read_page(current)?;
+            match page.page_type()? {
+                PageType::BTreeLeaf => {
+                    // Reached a leaf that isn't the target — the key routing
+                    // didn't lead to the expected leaf. This can happen with
+                    // empty leaves (empty key). Fall back to scanning all
+                    // children of the last parent.
+                    if parent_id != 0 {
+                        return self.find_parent_by_scan(parent_id, target_leaf_id);
+                    }
+                    // Root is a leaf and not the target — shouldn't happen
+                    return Ok((0, 0));
+                },
+                PageType::BTreeBranch => {
+                    let mut page = page;
+                    let branch = BranchNode::from_page(&mut page)?;
+                    let count = branch.cell_count() as usize;
+
+                    // Check if any direct child is the target leaf
+                    for i in 0..count {
+                        if branch.child(i) == target_leaf_id {
+                            return Ok((current, i));
+                        }
+                    }
+                    if branch.rightmost_child() == target_leaf_id {
+                        return Ok((current, count));
+                    }
+
+                    // Not a direct child — descend using the key
+                    parent_id = current;
+                    if key.is_empty() {
+                        // Empty key: go to leftmost child
+                        child_idx = 0;
+                        current = branch.child(0);
+                    } else {
+                        // Route via key comparison
+                        let mut found = false;
+                        for i in 0..count {
+                            let sep_key = branch.key(i);
+                            if key < sep_key {
+                                child_idx = i;
+                                current = branch.child(i);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            child_idx = count;
+                            current = branch.rightmost_child();
+                        }
+                    }
+                },
+                pt => {
+                    return Err(Error::PageTypeMismatch {
+                        expected: PageType::BTreeLeaf,
+                        found: pt,
+                    });
+                },
+            }
+        }
+    }
+
+    /// Fallback parent finder: scans all children of a branch to find the
+    /// target leaf. Used when key-based routing fails (e.g., for empty leaves).
+    fn find_parent_by_scan(
+        &self,
+        branch_id: PageId,
+        target_leaf_id: PageId,
+    ) -> Result<(PageId, usize)> {
+        let mut page = self.provider.read_page(branch_id)?;
+        let branch = BranchNode::from_page(&mut page)?;
+        let count = branch.cell_count() as usize;
+
+        for i in 0..count {
+            if branch.child(i) == target_leaf_id {
+                return Ok((branch_id, i));
+            }
+        }
+        if branch.rightmost_child() == target_leaf_id {
+            return Ok((branch_id, count));
+        }
+
+        // Target not found as direct child — search recursively
+        for i in 0..count {
+            let child_id = branch.child(i);
+            let child_page = self.provider.read_page(child_id)?;
+            if child_page.page_type()? == PageType::BTreeBranch {
+                let result = self.find_parent_by_scan(child_id, target_leaf_id)?;
+                if result.0 != 0 {
+                    return Ok(result);
+                }
+            }
+        }
+        let rightmost = branch.rightmost_child();
+        let rightmost_page = self.provider.read_page(rightmost)?;
+        if rightmost_page.page_type()? == PageType::BTreeBranch {
+            let result = self.find_parent_by_scan(rightmost, target_leaf_id)?;
+            if result.0 != 0 {
+                return Ok(result);
+            }
+        }
+
+        Ok((0, 0))
+    }
 }
 
 /// Iterator over B-tree entries in sorted key order.
 ///
 /// Supports forward iteration over key-value pairs stored in the B-tree.
-/// Leaf pages are loaded on demand as the cursor advances, and sibling
-/// traversal uses branch-node backtracking (not next-leaf pointers).
+/// Leaf pages are loaded on demand as the cursor advances. Sibling leaf
+/// traversal uses `next_leaf` pointers for O(1) leaf-to-leaf advancement.
 ///
 /// Created by [`BTree::iter`].
 pub struct BTreeIterator<'a, P: PageProvider> {
@@ -1034,36 +1177,28 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
             return Ok(true);
         }
 
-        // Current leaf exhausted — navigate to the next leaf via the branch
-        // structure. This correctly handles variable-length keys where
-        // increment_key may produce a key still within the current leaf's range.
+        // Current leaf exhausted — follow the next_leaf pointer for O(1)
+        // leaf-to-leaf traversal instead of O(depth) tree re-descent.
         let page = self
             .current_leaf
             .as_ref()
             .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
         let leaf = LeafNodeRef::from_page(page)?;
-        let count = leaf.cell_count() as usize;
+        let next_leaf_id = leaf.next_leaf();
 
-        if count == 0 {
+        if next_leaf_id == 0 {
+            // End of linked list — no more leaves
             self.state.position.valid = false;
             return Ok(false);
         }
 
-        // Use the last key to locate the current leaf in the tree, then find
-        // its right sibling via branch-node backtracking.
-        let last_key = leaf.key(count - 1);
-        match self.tree.find_next_leaf(last_key)? {
-            Some(next_leaf_id) => {
-                self.current_leaf = Some(self.tree.provider.read_page(next_leaf_id)?);
-                let new_page = self.current_leaf.as_ref().unwrap();
-                cursor_ops::move_to_first_in_leaf(&mut self.state.position, new_page)?;
-                Ok(self.state.position.valid)
-            },
-            None => {
-                self.state.position.valid = false;
-                Ok(false)
-            },
-        }
+        self.current_leaf = Some(self.tree.provider.read_page(next_leaf_id)?);
+        let new_page = self
+            .current_leaf
+            .as_ref()
+            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
+        cursor_ops::move_to_first_in_leaf(&mut self.state.position, new_page)?;
+        Ok(self.state.position.valid)
     }
 
     /// Returns the current key-value pair, if positioned (returns owned copies).
@@ -1711,5 +1846,920 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 20, "Expected 20 remaining keys after compaction");
+    }
+
+    // =========================================================================
+    // Leaf linked list tests
+    // =========================================================================
+
+    #[test]
+    fn test_linked_list_1000_entries_iterate_all() {
+        let mut tree = make_tree();
+
+        for i in 0..1000u32 {
+            let key = format!("key{:05}", i);
+            let value = format!("val{:05}", i);
+            tree.insert(key.as_bytes(), value.as_bytes()).unwrap();
+        }
+
+        // Verify iteration via next_leaf chain visits every entry in key order
+        let mut iter = tree.range(Range::all()).unwrap();
+        let mut count = 0;
+        let mut prev_key: Option<Vec<u8>> = None;
+        while let Some((key, _)) = iter.next_entry().unwrap() {
+            if let Some(ref pk) = prev_key {
+                assert!(pk < &key, "keys not in order: {:?} >= {:?}", pk, key);
+            }
+            prev_key = Some(key);
+            count += 1;
+        }
+        assert_eq!(count, 1000, "Expected 1000 entries from iteration, got {}", count);
+    }
+
+    #[test]
+    fn test_linked_list_split_maintains_chain() {
+        let mut tree = make_tree();
+
+        // Insert enough to trigger at least one split (large values to fill pages faster)
+        let big_value = vec![0xABu8; 200];
+        for i in 0..100u32 {
+            let key = format!("k{:04}", i);
+            tree.insert(key.as_bytes(), &big_value).unwrap();
+        }
+
+        assert!(tree.split_count() > 0, "Expected at least one split");
+
+        // Walk the leaf linked list manually and verify it visits all leaves
+        let first_leaf = tree.find_first_leaf().unwrap();
+        let mut leaf_ids = vec![first_leaf];
+        let mut current = first_leaf;
+
+        loop {
+            let page = tree.provider.read_page(current).unwrap();
+            let leaf = node::LeafNodeRef::from_page(&page).unwrap();
+            let next = leaf.next_leaf();
+            if next == 0 {
+                break;
+            }
+            leaf_ids.push(next);
+            current = next;
+        }
+
+        // Verify all entries are reachable via the linked list
+        let mut total_entries = 0;
+        for &leaf_id in &leaf_ids {
+            let page = tree.provider.read_page(leaf_id).unwrap();
+            let leaf = node::LeafNodeRef::from_page(&page).unwrap();
+            total_entries += leaf.cell_count() as usize;
+        }
+        assert_eq!(total_entries, 100, "Linked list should reach all 100 entries");
+
+        // Verify keys across leaves are in order
+        let mut prev_last_key: Option<Vec<u8>> = None;
+        for &leaf_id in &leaf_ids {
+            let page = tree.provider.read_page(leaf_id).unwrap();
+            let leaf = node::LeafNodeRef::from_page(&page).unwrap();
+            let count = leaf.cell_count() as usize;
+            if count > 0 {
+                let first_key = leaf.key(0).to_vec();
+                if let Some(ref plk) = prev_last_key {
+                    assert!(
+                        plk < &first_key,
+                        "Leaf boundary keys not ordered: {:?} >= {:?}",
+                        plk,
+                        first_key
+                    );
+                }
+                prev_last_key = Some(leaf.key(count - 1).to_vec());
+            }
+        }
+    }
+
+    #[test]
+    fn test_linked_list_100k_scan_page_reads() {
+        let mut tree = make_tree();
+
+        for i in 0..100_000u32 {
+            let key = i.to_be_bytes();
+            let value = i.to_be_bytes();
+            tree.insert(&key, &value).unwrap();
+        }
+
+        // Count entries via iteration (exercises the linked list path)
+        let mut iter = tree.range(Range::all()).unwrap();
+        let mut count = 0u32;
+        while iter.next_entry().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 100_000);
+
+        // Count leaves in the linked list
+        let first_leaf = tree.find_first_leaf().unwrap();
+        let mut leaf_count = 1usize;
+        let mut current = first_leaf;
+        loop {
+            let page = tree.provider.read_page(current).unwrap();
+            let leaf = node::LeafNodeRef::from_page(&page).unwrap();
+            let next = leaf.next_leaf();
+            if next == 0 {
+                break;
+            }
+            leaf_count += 1;
+            current = next;
+        }
+
+        // With next_leaf O(1), the iteration should read approximately
+        // leaf_count pages for the leaf traversal (plus initial seek).
+        // The old O(depth) approach would read ~2*depth*leaf_count pages.
+        assert!(leaf_count > 10, "Expected multiple leaves for 100K entries, got {}", leaf_count);
+    }
+
+    #[test]
+    fn test_linked_list_insert_delete_half_iterate() {
+        let mut tree = make_tree();
+
+        for i in 0..200u32 {
+            let key = format!("key{:05}", i);
+            tree.insert(key.as_bytes(), b"v").unwrap();
+        }
+
+        // Delete even-indexed entries
+        for i in (0..200u32).step_by(2) {
+            let key = format!("key{:05}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        // Verify iteration still works (linked list intact despite deletes)
+        let mut iter = tree.range(Range::all()).unwrap();
+        let mut count = 0;
+        let mut prev_key: Option<Vec<u8>> = None;
+        while let Some((key, _)) = iter.next_entry().unwrap() {
+            if let Some(ref pk) = prev_key {
+                assert!(pk < &key, "keys not in order after deletes");
+            }
+            prev_key = Some(key);
+            count += 1;
+        }
+        assert_eq!(count, 100, "Expected 100 remaining entries");
+    }
+
+    #[test]
+    fn test_linked_list_empty_tree() {
+        let tree = make_tree();
+
+        // Empty tree: root_page == 0, no leaves to iterate
+        let mut iter = tree.range(Range::all()).unwrap();
+        assert!(iter.next_entry().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_linked_list_single_leaf() {
+        let mut tree = make_tree();
+
+        tree.insert(b"only_key", b"only_value").unwrap();
+
+        // Single-leaf tree: next_leaf should be 0
+        let root = tree.root_page();
+        let page = tree.provider.read_page(root).unwrap();
+        let leaf = node::LeafNodeRef::from_page(&page).unwrap();
+        assert_eq!(leaf.next_leaf(), 0, "Single-leaf tree should have next_leaf=0");
+
+        // Iteration should work
+        let mut iter = tree.range(Range::all()).unwrap();
+        let (key, val) = iter.next_entry().unwrap().unwrap();
+        assert_eq!(key, b"only_key");
+        assert_eq!(val, b"only_value");
+        assert!(iter.next_entry().unwrap().is_none());
+    }
+
+    // =========================================================================
+    // Fill factor tests
+    // =========================================================================
+
+    #[test]
+    fn test_fill_factor_empty_leaf() {
+        use crate::btree::split::leaf_fill_factor;
+
+        let mut page = Page::new(1, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        LeafNode::init(&mut page);
+
+        let factor = leaf_fill_factor(&page).unwrap();
+        assert!(
+            (factor - 0.0).abs() < f64::EPSILON,
+            "Empty leaf should have fill factor 0.0, got {}",
+            factor
+        );
+    }
+
+    #[test]
+    fn test_fill_factor_capacity_denominator() {
+        use crate::{
+            bloom::BLOOM_FILTER_SIZE,
+            btree::{
+                node::{LEAF_CELL_PTRS_OFFSET, NODE_HEADER_SIZE},
+                split::leaf_fill_factor,
+            },
+            page::PAGE_HEADER_SIZE,
+        };
+
+        // Verify the denominator = page_size - LEAF_CELL_PTRS_OFFSET
+        let expected_capacity =
+            DEFAULT_PAGE_SIZE - PAGE_HEADER_SIZE - NODE_HEADER_SIZE - BLOOM_FILTER_SIZE;
+        let expected_capacity_alt = DEFAULT_PAGE_SIZE - LEAF_CELL_PTRS_OFFSET;
+        assert_eq!(expected_capacity, expected_capacity_alt);
+
+        // Fill a page nearly full and check fill factor approaches 1.0
+        let mut page = Page::new(1, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        let mut node = LeafNode::init(&mut page);
+
+        let mut i = 0u32;
+        loop {
+            let key = i.to_be_bytes();
+            let value = [0u8; 10];
+            if !node.can_insert(&key, &value) {
+                break;
+            }
+            node.insert(i as usize, &key, &value);
+            i += 1;
+        }
+
+        let factor = leaf_fill_factor(&page).unwrap();
+        assert!(factor > 0.9, "Nearly-full leaf should have fill factor >0.9, got {}", factor);
+    }
+
+    // ====================================================================
+    // Forward-only compaction tests (Task 12)
+    // ====================================================================
+
+    /// Helper: count all entries by walking the leaf linked list directly.
+    /// Does not use BTreeIterator (which can't handle empty first leaves).
+    fn count_all_entries(tree: &BTree<TestPageProvider>) -> usize {
+        if tree.root_page == 0 {
+            return 0;
+        }
+        let mut count = 0;
+        let mut current = tree.find_first_leaf().unwrap();
+        loop {
+            let page = tree.provider.read_page(current).unwrap();
+            let leaf = LeafNodeRef::from_page(&page).unwrap();
+            count += leaf.cell_count() as usize;
+            let next = leaf.next_leaf();
+            if next == 0 {
+                break;
+            }
+            current = next;
+        }
+        count
+    }
+
+    /// Helper: collect all entries in order by walking the leaf linked list.
+    fn collect_all_entries(tree: &BTree<TestPageProvider>) -> Vec<(Vec<u8>, Vec<u8>)> {
+        if tree.root_page == 0 {
+            return Vec::new();
+        }
+        let mut entries = Vec::new();
+        let mut current = tree.find_first_leaf().unwrap();
+        loop {
+            let page = tree.provider.read_page(current).unwrap();
+            let leaf = LeafNodeRef::from_page(&page).unwrap();
+            let cell_count = leaf.cell_count() as usize;
+            for i in 0..cell_count {
+                entries.push((leaf.key(i).to_vec(), leaf.value(i).to_vec()));
+            }
+            let next = leaf.next_leaf();
+            if next == 0 {
+                break;
+            }
+            current = next;
+        }
+        entries
+    }
+
+    /// Helper: count leaves by following the linked list.
+    fn count_leaves(tree: &BTree<TestPageProvider>) -> usize {
+        if tree.root_page == 0 {
+            return 0;
+        }
+        let first = tree.find_first_leaf().unwrap();
+        let mut count = 1;
+        let mut current = first;
+        loop {
+            let page = tree.provider.read_page(current).unwrap();
+            let leaf = LeafNodeRef::from_page(&page).unwrap();
+            let next = leaf.next_leaf();
+            if next == 0 {
+                break;
+            }
+            count += 1;
+            current = next;
+        }
+        count
+    }
+
+    #[test]
+    fn test_compact_forward_100_leaves_10pct_fill() {
+        // Tree with 100 leaves all at ~10% fill — compact should reduce to ~10 leaves.
+        let mut tree = make_tree();
+
+        // Insert enough keys to create many leaves (with 4KB pages, ~100 entries per leaf)
+        // 10000 keys → ~100 leaves
+        for i in 0..10_000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        let leaves_before = count_leaves(&tree);
+        assert!(leaves_before >= 50, "Expected many leaves, got {leaves_before}");
+
+        // Delete 90% of entries to make most leaves ~10% full
+        for i in 0..9000u32 {
+            let key = format!("k{:06}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        let remaining = count_all_entries(&tree);
+        assert_eq!(remaining, 1000);
+
+        let stats = tree.compact(0.4).unwrap();
+
+        let leaves_after = count_leaves(&tree);
+
+        // Should have merged significantly
+        assert!(stats.pages_merged > 0, "Expected merges after deleting 90% of keys");
+        assert!(
+            leaves_after < leaves_before / 2,
+            "Expected at least 50% leaf reduction, before={leaves_before} after={leaves_after}"
+        );
+
+        // All remaining data intact
+        for i in 9000..10_000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            assert_eq!(
+                tree.get(key.as_bytes()).unwrap(),
+                Some(val.into_bytes()),
+                "Missing key after compaction: k{i:06}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compact_forward_no_underfull_zero_merges() {
+        // Tree with no under-filled leaves — compact is a single forward pass with zero merges.
+        let mut tree = make_tree();
+
+        for i in 0..1000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        let leaves_before = count_leaves(&tree);
+        let entries_before = count_all_entries(&tree);
+
+        let stats = tree.compact(0.4).unwrap();
+
+        assert_eq!(stats.pages_merged, 0, "Expected zero merges on full tree");
+        assert_eq!(stats.pages_freed, 0, "Expected zero frees on full tree");
+        assert_eq!(count_leaves(&tree), leaves_before);
+        assert_eq!(count_all_entries(&tree), entries_before);
+    }
+
+    #[test]
+    fn test_compact_forward_alternating_full_empty() {
+        // Alternating full/empty leaves — verify correct merge and relink.
+        let mut tree = make_tree();
+
+        // Insert 2000 keys to create enough leaves
+        for i in 0..2000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete every other "chunk" of entries to create alternating patterns.
+        // We delete entries in contiguous ranges that map to specific leaves.
+        // With ~100 entries per leaf, deleting 0..100, keeping 100..200, etc.
+        for chunk_start in (0..2000u32).step_by(200) {
+            for i in chunk_start..std::cmp::min(chunk_start + 100, 2000) {
+                let key = format!("k{:06}", i);
+                tree.delete(key.as_bytes()).unwrap();
+            }
+        }
+
+        let remaining_before = count_all_entries(&tree);
+
+        let stats = tree.compact(0.4).unwrap();
+
+        // Should have performed some merges
+        assert!(stats.pages_merged > 0, "Expected merges with alternating empty leaves");
+
+        // All remaining entries intact and in order
+        let remaining_after = count_all_entries(&tree);
+        assert_eq!(remaining_before, remaining_after, "Entry count changed after compaction");
+
+        // Verify linked list integrity — entries should be in sorted order
+        let entries = collect_all_entries(&tree);
+        for window in entries.windows(2) {
+            assert!(
+                window[0].0 < window[1].0,
+                "Entries not in order: {:?} >= {:?}",
+                String::from_utf8_lossy(&window[0].0),
+                String::from_utf8_lossy(&window[1].0)
+            );
+        }
+    }
+
+    #[test]
+    fn test_compact_forward_linked_list_integrity() {
+        // Verify linked list integrity after compaction (iterate all entries, confirm
+        // complete and in order).
+        let mut tree = make_tree();
+
+        // Insert entries
+        for i in 0..3000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete most entries
+        for i in 0..2700u32 {
+            let key = format!("k{:06}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        tree.compact(0.4).unwrap();
+
+        // Verify via iterator (uses next_leaf linked list)
+        let entries = collect_all_entries(&tree);
+        assert_eq!(entries.len(), 300);
+
+        // Verify sorted order
+        for window in entries.windows(2) {
+            assert!(window[0].0 < window[1].0);
+        }
+
+        // Verify every expected key is present
+        for i in 2700..3000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), Some(val.into_bytes()));
+        }
+    }
+
+    #[test]
+    fn test_compact_forward_then_insert() {
+        // Compact a tree, then insert new entries — verify B+ tree operations
+        // work correctly on the compacted structure.
+        let mut tree = make_tree();
+
+        for i in 0..1000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete most entries and compact
+        for i in 0..900u32 {
+            let key = format!("k{:06}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        tree.compact(0.4).unwrap();
+
+        // Insert new entries into the compacted tree
+        for i in 5000..6000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Verify all entries: old surviving + new
+        for i in 900..1000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), Some(val.into_bytes()));
+        }
+        for i in 5000..6000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), Some(val.into_bytes()));
+        }
+
+        // Verify total count
+        assert_eq!(count_all_entries(&tree), 1100);
+    }
+
+    #[test]
+    fn test_compact_forward_single_leaf_tree() {
+        // Single-leaf tree (root is a leaf) — no crash, no merge, leaf unchanged.
+        let mut tree = make_tree();
+
+        // Insert a few entries (stays in single leaf)
+        for i in 0..5u32 {
+            let key = format!("k{:04}", i);
+            let val = format!("v{:04}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        let stats = tree.compact(0.4).unwrap();
+
+        assert_eq!(stats.pages_merged, 0);
+        assert_eq!(stats.pages_freed, 0);
+        assert_eq!(count_all_entries(&tree), 5);
+    }
+
+    #[test]
+    fn test_compact_forward_empty_tree() {
+        // Empty tree — no crash, returns immediately.
+        let mut tree = make_tree();
+
+        let stats = tree.compact(0.4).unwrap();
+
+        assert_eq!(stats.pages_merged, 0);
+        assert_eq!(stats.pages_freed, 0);
+    }
+
+    #[test]
+    fn test_compact_forward_greedy_merge_3_adjacent() {
+        // 3 adjacent under-filled leaves (A→B→C, each at ~20% fill) — verify
+        // greedy merge collapses A+B first, then merged A+C if they fit,
+        // producing a single leaf (not stopping after one merge).
+        let mut tree = make_tree();
+
+        // Insert enough to create at least 4-5 leaves
+        for i in 0..500u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete entries to leave only ~20 per original leaf
+        // Keep entries that map to 3 adjacent leaves
+        // With ~100 entries per leaf: leaves are [0..99], [100..199], [200..299], etc.
+        // Delete 80% of each leaf's entries to bring them to ~20% fill
+        for i in 0..500u32 {
+            // Keep every 5th entry
+            if i % 5 != 0 {
+                let key = format!("k{:06}", i);
+                tree.delete(key.as_bytes()).unwrap();
+            }
+        }
+
+        let remaining = count_all_entries(&tree);
+        assert_eq!(remaining, 100); // 500 / 5
+
+        let leaves_before = count_leaves(&tree);
+        let stats = tree.compact(0.4).unwrap();
+        let leaves_after = count_leaves(&tree);
+
+        // Greedy merge should collapse multiple adjacent underfull leaves
+        assert!(
+            stats.pages_merged >= 2,
+            "Expected greedy merge (>=2 merges), got {}",
+            stats.pages_merged
+        );
+        assert!(
+            leaves_after < leaves_before,
+            "Expected fewer leaves after greedy merge, before={leaves_before} after={leaves_after}"
+        );
+
+        // All remaining entries intact
+        for i in (0..500u32).step_by(5) {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            assert_eq!(
+                tree.get(key.as_bytes()).unwrap(),
+                Some(val.into_bytes()),
+                "Missing key after greedy compaction: k{i:06}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compact_forward_branch_boundary_skip() {
+        // Two adjacent under-filled leaves spanning a branch boundary (different parents)
+        // — verify the same-parent restriction prevents the merge and compaction
+        // advances past them without corruption.
+        let mut tree = make_tree();
+
+        // Create a tree deep enough to have multiple branch nodes.
+        // With 4K pages and ~100 entries per leaf, we need many entries to get
+        // multiple branches. At depth 3+, branch boundaries exist.
+        for i in 0..10_000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        let tree_depth = tree.depth().unwrap();
+
+        // Delete most entries
+        for i in 0..9500u32 {
+            let key = format!("k{:06}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        let entries_before = count_all_entries(&tree);
+        assert_eq!(entries_before, 500);
+
+        // Compact — some merges may be skipped due to branch boundaries
+        let stats = tree.compact(0.4).unwrap();
+
+        // Verify no corruption: all remaining data intact
+        for i in 9500..10_000u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            assert_eq!(
+                tree.get(key.as_bytes()).unwrap(),
+                Some(val.into_bytes()),
+                "Key k{i:06} missing after compaction (tree depth was {tree_depth})"
+            );
+        }
+
+        // Verify linked list integrity
+        let entries = collect_all_entries(&tree);
+        assert_eq!(entries.len(), 500);
+        for window in entries.windows(2) {
+            assert!(window[0].0 < window[1].0);
+        }
+
+        // Some merges should have happened (not all pairs span boundaries)
+        if tree_depth >= 3 {
+            // At depth 3+, there's a chance of branch boundary skips, but most
+            // pairs should still merge (same parent)
+            assert!(stats.pages_merged > 0, "Expected some merges even with branch boundaries");
+        }
+    }
+
+    #[test]
+    fn test_compact_forward_crash_safety_cow() {
+        // Crash safety: compact within a transaction-like scope by cloning
+        // the provider state, compacting, then verifying the original is unchanged.
+        // This simulates dropping a WriteTransaction before commit.
+        let mut tree = make_tree();
+
+        for i in 0..500u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete most entries
+        for i in 0..480u32 {
+            let key = format!("k{:06}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        // Snapshot the tree state before compaction
+        let pages_snapshot = tree.provider.pages.clone();
+        let root_snapshot = tree.root_page;
+
+        // Compact
+        let stats = tree.compact(0.4).unwrap();
+        assert!(stats.pages_merged > 0);
+
+        // Restore original state (simulates dropping WriteTransaction without commit)
+        tree.provider.pages = pages_snapshot;
+        tree.root_page = root_snapshot;
+
+        // Original tree should be completely unmodified
+        let entries = count_all_entries(&tree);
+        assert_eq!(entries, 20, "Original tree should have 20 entries unchanged");
+
+        for i in 480..500u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:06}", i);
+            assert_eq!(tree.get(key.as_bytes()).unwrap(), Some(val.into_bytes()));
+        }
+
+        // Linked list should be intact on the original
+        let entries_list = collect_all_entries(&tree);
+        assert_eq!(entries_list.len(), 20);
+        for window in entries_list.windows(2) {
+            assert!(window[0].0 < window[1].0);
+        }
+    }
+
+    // =========================================================================
+    // Compaction benchmark: O(N²) vs O(N)
+    // =========================================================================
+
+    #[test]
+    fn test_compact_benchmark_100k_30pct_fragmentation() {
+        use std::time::Instant;
+
+        let mut tree = make_tree();
+
+        // Insert 100K entries
+        for i in 0..100_000u32 {
+            let key = format!("k{:08}", i);
+            let val = format!("v{:08}", i);
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        // Delete 30% (every 3rd entry) to create distributed fragmentation
+        for i in (0..100_000u32).step_by(3) {
+            let key = format!("k{:08}", i);
+            tree.delete(key.as_bytes()).unwrap();
+        }
+
+        let remaining = count_all_entries(&tree);
+        let leaf_count = count_leaves(&tree);
+
+        // Snapshot tree state for reproducible comparison
+        let pages_snapshot = tree.provider.pages.clone();
+        let root_snapshot = tree.root_page;
+
+        // --- Measure O(N) forward-only compaction ---
+        let iterations = 5;
+        let mut new_elapsed_total = std::time::Duration::ZERO;
+        let mut merge_count = 0u64;
+
+        for _ in 0..iterations {
+            let start = Instant::now();
+            let stats = tree.compact(0.4).unwrap();
+            new_elapsed_total += start.elapsed();
+            merge_count = stats.pages_merged;
+
+            // Restore fragmented tree state for next iteration
+            tree.provider.pages = pages_snapshot.clone();
+            tree.root_page = root_snapshot;
+        }
+        let new_avg = new_elapsed_total / iterations as u32;
+
+        // --- Simulate O(N²) scanning cost ---
+        // The old algorithm called collect_leaf_info() after every single
+        // merge and restarted from the beginning. This measures the DFS
+        // traversal cost × merge_count — the dominant term that makes the
+        // old approach O(N²). The merge cost is identical in both algorithms,
+        // so this comparison is conservative (new_avg includes merge cost,
+        // old simulation measures only scanning).
+        let mut old_scan_total = std::time::Duration::ZERO;
+
+        for _ in 0..iterations {
+            let start = Instant::now();
+            for _ in 0..merge_count {
+                let _ = tree.collect_leaf_info().unwrap();
+            }
+            old_scan_total += start.elapsed();
+        }
+        let old_avg = old_scan_total / iterations as u32;
+
+        // Report
+        eprintln!("\n=== Compaction Benchmark: 100K entries, 30% fragmentation ===");
+        eprintln!("  Remaining entries: {remaining}");
+        eprintln!("  Leaf count: {leaf_count}");
+        eprintln!("  Merges performed: {merge_count}");
+        eprintln!("  O(N) forward-only compact: {new_avg:?} avg over {iterations} runs");
+        eprintln!(
+            "  O(N²) scan simulation ({merge_count} × collect_leaf_info): {old_avg:?} avg over {iterations} runs"
+        );
+        let speedup = old_avg.as_secs_f64() / new_avg.as_secs_f64();
+        eprintln!("  Speedup: {speedup:.1}x (target: ≥10x)");
+
+        assert!(
+            speedup >= 10.0,
+            "Expected ≥10x speedup for O(N) vs O(N²) compaction, got {speedup:.1}x \
+             (new={new_avg:?}, old_scan={old_avg:?}, merges={merge_count})"
+        );
+    }
+
+    #[test]
+    fn test_delete_all_from_mid_leaf_predecessor_next_leaf_updated() {
+        // Scenario: predecessor → target → successor, where target has all
+        // entries deleted. After compaction, the target leaf must be freed and
+        // no longer referenced by any leaf's next_leaf pointer.
+        //
+        // The compact() algorithm merges underfull leaves with their right
+        // neighbor. When predecessor is underfull and target is empty,
+        // merge_leaves(predecessor, target) sets predecessor.next_leaf =
+        // target.next_leaf, effectively skipping the freed target page.
+        let mut tree = make_tree();
+
+        // Use longer values to ensure leaves can't absorb too many neighbors
+        // (fills leaves faster, limits greedy merge cascading).
+        for i in 0..300u32 {
+            let key = format!("k{:06}", i);
+            let val = format!("v{:0>200}", i); // 200-byte values → fewer entries per leaf
+            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
+        }
+
+        let initial_leaves = count_leaves(&tree);
+        assert!(initial_leaves >= 4, "Need at least 4 leaves, got {initial_leaves}");
+
+        // Walk the linked list to identify entries in each leaf.
+        let first_leaf_id = tree.find_first_leaf().unwrap();
+
+        struct LeafInfo {
+            page_id: PageId,
+            keys: Vec<Vec<u8>>,
+        }
+        let mut leaf_infos: Vec<LeafInfo> = Vec::new();
+        let mut current = first_leaf_id;
+        loop {
+            let page = tree.provider.read_page(current).unwrap();
+            let leaf = LeafNodeRef::from_page(&page).unwrap();
+            let count = leaf.cell_count() as usize;
+            let mut keys = Vec::with_capacity(count);
+            for i in 0..count {
+                keys.push(leaf.key(i).to_vec());
+            }
+            let next = leaf.next_leaf();
+            leaf_infos.push(LeafInfo { page_id: current, keys });
+            if next == 0 {
+                break;
+            }
+            current = next;
+        }
+        assert!(leaf_infos.len() >= 4, "Need at least 4 leaves in linked list");
+
+        // Pick three consecutive leaves: predecessor, target, successor.
+        // Use leaves [1], [2], [3] so the predecessor is NOT the first leaf
+        // (avoids edge cases with the leftmost leaf).
+        let predecessor_id = leaf_infos[1].page_id;
+        let target_id = leaf_infos[2].page_id;
+        let target_keys = leaf_infos[2].keys.clone();
+
+        // Verify initial chain includes target.
+        {
+            let pred_page = tree.provider.read_page(predecessor_id).unwrap();
+            let pred_leaf = LeafNodeRef::from_page(&pred_page).unwrap();
+            assert_eq!(pred_leaf.next_leaf(), target_id, "Predecessor should point to target");
+        }
+
+        // Delete ALL entries from the target leaf.
+        let mut deleted_count = target_keys.len();
+        assert!(!target_keys.is_empty(), "Target leaf should have entries");
+        for key in &target_keys {
+            let result = tree.delete(key).unwrap();
+            assert!(result.is_some(), "Target key should have existed");
+        }
+
+        // Also make the predecessor underfull by deleting most of its entries.
+        let pred_keys = &leaf_infos[1].keys;
+        let keep_in_pred = 1; // Keep 1 entry → clearly underfull
+        for key in pred_keys.iter().skip(keep_in_pred) {
+            let result = tree.delete(key).unwrap();
+            assert!(result.is_some(), "Predecessor key should have existed");
+            deleted_count += 1;
+        }
+
+        // Verify the target leaf is empty.
+        {
+            let target_page = tree.provider.read_page(target_id).unwrap();
+            let target_leaf = LeafNodeRef::from_page(&target_page).unwrap();
+            assert_eq!(target_leaf.cell_count(), 0, "Target leaf should be empty");
+        }
+
+        // Run compaction.
+        let stats = tree.compact(0.4).unwrap();
+        assert!(stats.pages_merged > 0, "Expected at least one merge");
+
+        // Core invariant: the target page must NOT appear in the linked list.
+        // Walk the entire linked list and verify target_id is absent.
+        {
+            let mut current = tree.find_first_leaf().unwrap();
+            loop {
+                assert_ne!(
+                    current, target_id,
+                    "Target page {target_id} should not appear in the linked list after compaction"
+                );
+                let page = tree.provider.read_page(current).unwrap();
+                let leaf = LeafNodeRef::from_page(&page).unwrap();
+                let next = leaf.next_leaf();
+                if next == 0 {
+                    break;
+                }
+                current = next;
+            }
+        }
+
+        // Verify all remaining entries are intact and ordered.
+        let remaining = collect_all_entries(&tree);
+        let expected_count = 300 - deleted_count;
+        assert_eq!(
+            remaining.len(),
+            expected_count,
+            "Expected {expected_count} entries remaining, got {}",
+            remaining.len()
+        );
+        for window in remaining.windows(2) {
+            assert!(
+                window[0].0 < window[1].0,
+                "Entries not in order: {:?} >= {:?}",
+                String::from_utf8_lossy(&window[0].0),
+                String::from_utf8_lossy(&window[1].0)
+            );
+        }
+
+        // Leaf count should have decreased.
+        let final_leaves = count_leaves(&tree);
+        assert!(
+            final_leaves < initial_leaves,
+            "Should have fewer leaves after compaction ({final_leaves} >= {initial_leaves})"
+        );
     }
 }

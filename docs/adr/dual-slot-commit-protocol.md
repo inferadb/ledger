@@ -58,6 +58,12 @@ Bit 1 of the god byte tracks whether a clean shutdown occurred:
 
 If the flag is set on open, the free list may be inconsistent (crash after data commit but before free list persistence). Recovery rebuilds the free list by scanning all reachable pages in the B+ tree — O(total_pages) but only happens after crashes.
 
+### Snapshot Integration
+
+Snapshots use a separate file-based format with zstd compression and SHA-256 integrity verification. The dual-slot protocol secures individual `WriteTransaction` commits, while snapshot installation writes all state into a single `WriteTransaction` — the same atomic commit mechanism protects both normal apply-loop writes and full snapshot installs.
+
+During snapshot installation, the `WriteTransaction` accumulates all dirty pages (COW copies of modified B+ tree nodes). On `commit()`, these are flushed via the dual-slot protocol. If the process crashes before commit, the `WriteTransaction` is dropped and no state changes are visible — the node retries snapshot installation on the next attempt from openraft.
+
 ## Consequences
 
 ### Positive
@@ -83,4 +89,5 @@ If the flag is set on open, the free list may be inconsistent (crash after data 
 - `crates/store/src/backend/mod.rs` — `DatabaseHeader`, `CommitSlot`
 - `crates/store/src/db.rs` — `persist_state_to_disk()`, `load_state_from_disk()`
 - `crates/store/tests/crash_recovery.rs` — Crash injection tests
+- `crates/raft/src/snapshot.rs` — File-based snapshot writer/reader
 - `MANIFEST.md` — Storage format specification

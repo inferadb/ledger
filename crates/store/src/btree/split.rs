@@ -39,11 +39,11 @@
 //! matters because `free_space()` (the gap between `free_start` and `free_end`)
 //! does not account for dead cell data left by deletions.
 
-use super::node::{BranchNode, BranchNodeRef, LeafNode, LeafNodeRef};
+use super::node::{BranchNode, BranchNodeRef, LeafNode, LeafNodeRef, NODE_HEADER_SIZE};
 use crate::{
     bloom::BLOOM_FILTER_SIZE,
     error::{Error, PageId, Result},
-    page::Page,
+    page::{PAGE_HEADER_SIZE, Page},
 };
 
 /// Result of splitting a leaf node.
@@ -84,10 +84,12 @@ pub struct BranchSplitResult {
 ///
 /// Returns an error if the page data is corrupted or the page type is invalid.
 pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitResult> {
-    // Collect all entries from original
+    // Collect all entries and the original's next-leaf pointer before init() zeros it
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let old_next_leaf: PageId;
     {
         let node = LeafNode::from_page(original)?;
+        old_next_leaf = node.next_leaf();
         let count = node.cell_count() as usize;
         for i in 0..count {
             let (k, v) = node.get(i);
@@ -98,22 +100,25 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
     // Handle edge case: empty or single-entry leaf
     // This can happen when updating a large value that doesn't fit even after deletion
     if entries.is_empty() {
-        // Re-initialize both pages as empty leaves
         LeafNode::init(original);
         LeafNode::init(new_page);
-        // Return an empty separator key - the caller will insert the new key
-        // into either the left or right page based on comparison
+        // Maintain linked list: left→right→old_successor
+        {
+            let mut left = LeafNode::from_page(original)?;
+            left.set_next_leaf(new_page.id);
+        }
+        {
+            let mut right = LeafNode::from_page(new_page)?;
+            right.set_next_leaf(old_next_leaf);
+        }
         return Ok(LeafSplitResult { new_page_id: new_page.id, separator_key: Vec::new() });
     }
 
     let split_at = entries.len() / 2;
-    // When there's only 1 entry, split_at=0, so we need at least index 0 to exist
     let separator_key = entries[split_at].0.clone();
 
-    // Re-initialize original as empty leaf
+    // Re-initialize both pages (zeros next_leaf)
     LeafNode::init(original);
-
-    // Re-initialize new page as empty leaf
     LeafNode::init(new_page);
 
     // Insert left half into original
@@ -122,6 +127,8 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
         for (i, (key, value)) in entries[..split_at].iter().enumerate() {
             left.insert(i, key, value);
         }
+        // Maintain linked list: left→right
+        left.set_next_leaf(new_page.id);
     }
 
     // Insert right half into new page
@@ -130,6 +137,8 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
         for (i, (key, value)) in entries[split_at..].iter().enumerate() {
             right.insert(i, key, value);
         }
+        // Maintain linked list: right→old_successor
+        right.set_next_leaf(old_next_leaf);
     }
 
     Ok(LeafSplitResult { new_page_id: new_page.id, separator_key })
@@ -159,10 +168,12 @@ pub fn split_leaf_for_key(
     new_key: &[u8],
     new_value: &[u8],
 ) -> Result<LeafSplitResult> {
-    // Collect all entries from original
+    // Capture the original's next-leaf pointer before any init() zeros it
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let old_next_leaf: PageId;
     {
         let node = LeafNode::from_page(original)?;
+        old_next_leaf = node.next_leaf();
         let count = node.cell_count() as usize;
         for i in 0..count {
             let (k, v) = node.get(i);
@@ -174,21 +185,32 @@ pub fn split_leaf_for_key(
     if entries.is_empty() {
         LeafNode::init(original);
         LeafNode::init(new_page);
+        // Maintain linked list: left→right→old_successor
+        {
+            let mut left = LeafNode::from_page(original)?;
+            left.set_next_leaf(new_page.id);
+        }
+        {
+            let mut right = LeafNode::from_page(new_page)?;
+            right.set_next_leaf(old_next_leaf);
+        }
         return Ok(LeafSplitResult { new_page_id: new_page.id, separator_key: Vec::new() });
     }
 
-    // Helper function to test if a split point works
+    // Helper function to test if a split point works.
+    // On success, also sets up the linked list pointers.
     let try_split = |split_at: usize,
                      separator_key: &[u8],
                      entries: &[(Vec<u8>, Vec<u8>)],
                      original: &mut Page,
                      new_page: &mut Page,
                      new_key: &[u8],
-                     new_value: &[u8]|
+                     new_value: &[u8],
+                     old_next_leaf: PageId|
      -> Result<bool> {
         let new_key_goes_left = new_key < separator_key;
 
-        // Re-initialize pages
+        // Re-initialize pages (zeros next_leaf)
         LeafNode::init(original);
         LeafNode::init(new_page);
 
@@ -201,7 +223,6 @@ pub fn split_leaf_for_key(
                 }
                 left.insert(i, key, value);
             }
-            // Check if new key would fit in left (if it goes there)
             if new_key_goes_left && !left.can_insert(new_key, new_value) {
                 return Ok(false);
             }
@@ -216,10 +237,19 @@ pub fn split_leaf_for_key(
                 }
                 right.insert(i, key, value);
             }
-            // Check if new key would fit in right (if it goes there)
             if !new_key_goes_left && !right.can_insert(new_key, new_value) {
                 return Ok(false);
             }
+        }
+
+        // Split succeeded — maintain linked list: left→right→old_successor
+        {
+            let mut left = LeafNode::from_page(original)?;
+            left.set_next_leaf(new_page.id);
+        }
+        {
+            let mut right = LeafNode::from_page(new_page)?;
+            right.set_next_leaf(old_next_leaf);
         }
 
         Ok(true)
@@ -231,29 +261,20 @@ pub fn split_leaf_for_key(
     let max_offset = entries.len();
 
     for offset in 0..=max_offset {
-        // Try split points at mid-offset and mid+offset
         let candidates = [mid.saturating_sub(offset), (mid + offset).min(entries.len())];
 
         for &split_at in &candidates {
-            // Determine separator key based on split point
             let separator_key: Vec<u8> = if split_at == 0 {
-                // All existing entries go right; separator is first existing key
-                // new_key must be < separator to go left (into empty left page)
                 if new_key >= entries[0].0.as_slice() {
-                    // new_key would go right, not useful for this case
                     continue;
                 }
                 entries[0].0.clone()
             } else if split_at >= entries.len() {
-                // All existing entries go left; new_key goes right
-                // separator is new_key itself (keys >= new_key go right)
                 if new_key <= entries[entries.len() - 1].0.as_slice() {
-                    // new_key would go left, not useful for this case
                     continue;
                 }
                 new_key.to_vec()
             } else {
-                // Normal case: separator is first key of right half
                 entries[split_at].0.clone()
             };
 
@@ -265,14 +286,13 @@ pub fn split_leaf_for_key(
                 new_page,
                 new_key,
                 new_value,
+                old_next_leaf,
             )? {
                 return Ok(LeafSplitResult { new_page_id: new_page.id, separator_key });
             }
         }
     }
 
-    // If we couldn't find a valid split point, return an error
-    // This can happen with large values that don't fit even in an empty page
     Err(Error::PageFull)
 }
 
@@ -376,8 +396,11 @@ pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
         }
     }
 
+    // Save right's next_leaf BEFORE init() zeros it
+    let right_next_leaf: PageId;
     {
         let node = LeafNode::from_page(right)?;
+        right_next_leaf = node.next_leaf();
         let count = node.cell_count() as usize;
         for i in 0..count {
             let (k, v) = node.get(i);
@@ -385,12 +408,14 @@ pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
         }
     }
 
-    // Re-initialize left page fresh (reclaims all dead space)
+    // Re-initialize left page fresh (reclaims all dead space, zeros next_leaf)
     {
         let mut left_node = LeafNode::init(left);
         for (i, (key, value)) in all_entries.iter().enumerate() {
             left_node.insert(i, key, value);
         }
+        // Maintain linked list: left now points to right's successor
+        left_node.set_next_leaf(right_next_leaf);
     }
 
     // Clear right (will be freed by caller)
@@ -422,9 +447,8 @@ pub fn leaf_fill_factor(page: &Page) -> Result<f64> {
         live_bytes += 2 + 2 + 2 + key.len() + value.len();
     }
 
-    // Total usable space = page size - page header - node header (cell_count + free_start +
-    // free_end = 6 bytes) - bloom filter region
-    let total_content = page.size() - crate::page::PAGE_HEADER_SIZE - 6 - BLOOM_FILTER_SIZE;
+    // Total usable space = page_size - page_header - node_header - bloom_filter
+    let total_content = page.size() - PAGE_HEADER_SIZE - NODE_HEADER_SIZE - BLOOM_FILTER_SIZE;
 
     Ok(live_bytes as f64 / total_content as f64)
 }
@@ -466,7 +490,7 @@ pub fn can_merge_leaves(left: &Page, right: &Page) -> Result<bool> {
     }
 
     // Total usable space in one page (page_header + node_header + bloom_filter overhead)
-    let total_content = left.size() - crate::page::PAGE_HEADER_SIZE - 6 - BLOOM_FILTER_SIZE;
+    let total_content = left.size() - PAGE_HEADER_SIZE - NODE_HEADER_SIZE - BLOOM_FILTER_SIZE;
 
     Ok(total_live <= total_content)
 }

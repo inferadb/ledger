@@ -159,6 +159,27 @@ impl<B: StorageBackend> StateLayer<B> {
         self.db.write().context(StoreSnafu)
     }
 
+    /// Restores a single entity during snapshot installation.
+    ///
+    /// Writes a raw key/value pair directly into the Entities table within the
+    /// provided transaction. No condition checking, version tracking, or dirty
+    /// key tracking — snapshot restoration replaces the entire entity table.
+    ///
+    /// The key must be a full storage key (vault_id + bucket_id + local_key),
+    /// as produced by [`encode_storage_key`](crate::encode_storage_key).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the table insert fails.
+    pub fn restore_entity(
+        txn: &mut WriteTransaction<'_, B>,
+        storage_key: &[u8],
+        encoded_value: &[u8],
+    ) -> Result<()> {
+        txn.insert_raw(inferadb_ledger_store::tables::TableId::Entities, storage_key, encoded_value)
+            .context(StoreSnafu)
+    }
+
     /// Applies a batch of operations using an externally-provided transaction.
     ///
     /// Does **not** commit the transaction or mark dirty buckets — the caller

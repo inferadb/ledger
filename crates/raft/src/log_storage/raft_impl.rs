@@ -3,10 +3,11 @@
 //! Implements [`RaftLogReader`], [`RaftStorage`], and [`RaftSnapshotBuilder`]
 //! using the B-tree-backed storage engine.
 
-use std::{collections::HashMap, fmt::Debug, io::Cursor, ops::RangeBounds, sync::Arc};
+use std::{fmt::Debug, ops::RangeBounds, sync::Arc};
 
-use inferadb_ledger_store::tables;
-use inferadb_ledger_types::{decode, encode};
+use inferadb_ledger_state::EventsDatabase;
+use inferadb_ledger_store::{FileBackend, TableId, tables};
+use inferadb_ledger_types::{decode, encode, events::EventConfig};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
     StoredMembership, Vote,
@@ -17,12 +18,19 @@ use parking_lot::RwLock;
 use super::{
     ShardChainState,
     store::RaftLogStore,
-    types::{AppliedState, CombinedSnapshot},
+    types::{AppliedState, AppliedStateCore, PendingExternalWrites},
 };
 use crate::{
     metrics,
+    snapshot::{
+        SNAPSHOT_TABLE_IDS, SnapshotError, SnapshotReader, SnapshotWriter, SyncSnapshotReader,
+    },
     types::{LedgerNodeId, LedgerTypeConfig},
 };
+
+/// Version sentinel prepended to the serialized `AppliedStateCore` in the
+/// `RaftState` B+ tree table. Matches `RaftLogStore::STATE_CORE_VERSION`.
+const STATE_CORE_VERSION_SENTINEL: [u8; 2] = [0x00, 0x01];
 
 // ============================================================================
 // RaftLogReader Implementation
@@ -159,33 +167,335 @@ impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
 // RaftSnapshotBuilder Implementation
 // ============================================================================
 
-/// Builds Raft snapshots by serializing the current applied state and entity data.
+/// Builds Raft snapshots by streaming B-tree tables into compressed snapshot files.
+///
+/// Holds shared references to the database and state layer so that
+/// `build_snapshot()` can open a `ReadTransaction` for a consistent
+/// point-in-time view — no `AppliedState` clone needed, no in-memory
+/// state lock acquired.
 pub struct LedgerSnapshotBuilder {
-    /// State to snapshot.
-    state: AppliedState,
+    /// Shared B-tree database (log + state tables).
+    db: Arc<inferadb_ledger_store::Database<FileBackend>>,
+    /// State layer for entity/relationship storage (used during snapshot entity
+    /// restoration via `StateLayer::restore_entity()`).
+    #[allow(dead_code)]
+    state_layer: Option<Arc<inferadb_ledger_state::StateLayer<FileBackend>>>,
+    /// Events database for apply-phase event snapshot (separate from main db).
+    events_db: Option<Arc<EventsDatabase<FileBackend>>>,
+    /// Event config for snapshot event limits.
+    event_config: Option<EventConfig>,
 }
 
 impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
     async fn build_snapshot(
         &mut self,
     ) -> Result<Snapshot<LedgerTypeConfig>, StorageError<LedgerNodeId>> {
-        let data = encode(&self.state).map_err(|e| to_serde_error(&e))?;
+        // Extract org IDs and timestamp for per-org event range scans.
+        let (org_ids, last_ts) = extract_snapshot_event_context(&self.db)?;
+
+        // Collect events synchronously before entering async code.
+        // EventsDatabase contains raw pointers (!Send), so the reference
+        // must not live across await points.
+        let event_entries = collect_snapshot_events(
+            self.events_db.as_deref(),
+            self.event_config.as_ref(),
+            &org_ids,
+            last_ts,
+        );
+
+        let (file, meta) = write_snapshot_to_file(&self.db, event_entries)
+            .await
+            .map_err(|e| snapshot_to_storage_error(&e))?;
+
+        Ok(Snapshot { meta, snapshot: Box::new(file) })
+    }
+}
+
+// ============================================================================
+// Shared snapshot creation helper
+// ============================================================================
+
+/// Creates a complete snapshot file and returns the open file handle plus metadata.
+///
+/// Separates sync B-tree reads from async file I/O for `Send` safety:
+/// 1. (sync) Open `ReadTransaction`, read `AppliedStateCore` + table + entity data
+/// 2. (async) Write all pre-collected data to the snapshot file via `SnapshotWriter`
+///
+/// All data comes from a single `ReadTransaction` for transactional consistency —
+/// no in-memory `AppliedState` lock needed.
+///
+/// Event entries must be collected by the caller before invoking this function,
+/// because `EventsDatabase` contains raw pointers (`!Send`). Passing pre-collected
+/// `Vec<Vec<u8>>` keeps this async function's future `Send`-safe.
+async fn write_snapshot_to_file(
+    db: &inferadb_ledger_store::Database<FileBackend>,
+    event_entries: Vec<Vec<u8>>,
+) -> Result<(tokio::fs::File, SnapshotMeta<LedgerNodeId, openraft::BasicNode>), SnapshotError> {
+    // --- Sync phase: collect all data from a single ReadTransaction ---
+
+    let (core_bytes, last_applied, membership, snapshot_id, table_data, entity_entries) = {
+        let read_txn = db.read().map_err(|e| SnapshotError::InvalidEntry {
+            reason: format!("Failed to open read transaction: {e}"),
+        })?;
+
+        // 1. Read AppliedStateCore from the RaftState table
+        let state_data = read_txn
+            .get::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string())
+            .map_err(|e| SnapshotError::InvalidEntry {
+            reason: format!("Failed to read AppliedStateCore from RaftState: {e}"),
+        })?;
+
+        let (core, core_bytes) = match state_data {
+            Some(data) if data.len() >= 2 && data[0..2] == STATE_CORE_VERSION_SENTINEL => {
+                // New format: version sentinel + postcard(AppliedStateCore)
+                let core: AppliedStateCore =
+                    decode(&data[2..]).map_err(|e| SnapshotError::InvalidEntry {
+                        reason: format!("Failed to decode AppliedStateCore: {e}"),
+                    })?;
+                let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
+                    reason: format!("Failed to re-encode AppliedStateCore: {e}"),
+                })?;
+                (core, core_bytes)
+            },
+            Some(data) => {
+                // Old format: full AppliedState blob (pre-migration)
+                let state: AppliedState =
+                    decode(&data).map_err(|e| SnapshotError::InvalidEntry {
+                        reason: format!("Failed to decode old-format AppliedState: {e}"),
+                    })?;
+                let core = AppliedStateCore::from(&state);
+                let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
+                    reason: format!("Failed to encode AppliedStateCore: {e}"),
+                })?;
+                (core, core_bytes)
+            },
+            None => {
+                // Fresh database — empty state
+                let core = AppliedStateCore {
+                    last_applied: None,
+                    membership: StoredMembership::default(),
+                    shard_height: 0,
+                    previous_shard_hash: inferadb_ledger_types::Hash::default(),
+                    last_applied_timestamp_ns: 0,
+                };
+                let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
+                    reason: format!("Failed to encode default AppliedStateCore: {e}"),
+                })?;
+                (core, core_bytes)
+            },
+        };
 
         let snapshot_id = format!(
             "snapshot-{}-{}",
-            self.state.last_applied.as_ref().map_or(0, |l| l.index),
+            core.last_applied.as_ref().map_or(0, |l| l.index),
             chrono::Utc::now().timestamp()
         );
 
-        Ok(Snapshot {
-            meta: SnapshotMeta {
-                last_log_id: self.state.last_applied,
-                last_membership: self.state.membership.clone(),
-                snapshot_id,
-            },
-            snapshot: Box::new(Cursor::new(data)),
-        })
+        // 2. Collect all table data from the same ReadTransaction
+        let mut tables = Vec::with_capacity(SNAPSHOT_TABLE_IDS.len());
+        for &table_id_u8 in SNAPSHOT_TABLE_IDS {
+            let table_id = TableId::from_u8(table_id_u8)
+                .ok_or(SnapshotError::UnknownTableId { table_id: table_id_u8 })?;
+            let entries = iter_table_raw(&read_txn, table_id)?;
+            tables.push((table_id_u8, entries));
+        }
+
+        // Collect entities
+        let entities = iter_table_raw(&read_txn, TableId::Entities)?;
+
+        // ReadTransaction is dropped here — no longer held across awaits
+        (core_bytes, core.last_applied, core.membership.clone(), snapshot_id, tables, entities)
+    };
+
+    // --- Async phase: write all collected data to the snapshot file ---
+
+    let std_file = tempfile::tempfile().map_err(|e| SnapshotError::Io {
+        source: e,
+        location: snafu::Location::new(file!(), line!(), 0),
+    })?;
+    let file = tokio::fs::File::from_std(std_file);
+    let mut writer = SnapshotWriter::new(file);
+
+    // Header
+    writer.write_header(&core_bytes).await?;
+
+    // Table sections
+    writer.write_table_count(table_data.len() as u32).await?;
+    for (table_id_u8, entries) in &table_data {
+        writer.write_table_header(*table_id_u8, entries.len() as u32).await?;
+        for (key, value) in entries {
+            writer.write_table_entry(key, value).await?;
+        }
     }
+
+    // Entity section
+    writer.write_entity_count(entity_entries.len() as u64).await?;
+    for (key, value) in &entity_entries {
+        writer.write_entity_entry(key, value).await?;
+    }
+
+    // Event section
+    writer.write_event_count(event_entries.len() as u64).await?;
+    for entry_bytes in &event_entries {
+        writer.write_event_entry(entry_bytes).await?;
+    }
+
+    // Finalize: flush zstd stream and write checksum footer
+    let mut file = writer.finish().await?;
+
+    // Seek to start for reading
+    use tokio::io::AsyncSeekExt;
+    file.seek(std::io::SeekFrom::Start(0)).await.map_err(|e| SnapshotError::Io {
+        source: e,
+        location: snafu::Location::new(file!(), line!(), 0),
+    })?;
+
+    let meta = SnapshotMeta { last_log_id: last_applied, last_membership: membership, snapshot_id };
+
+    tracing::info!(
+        last_applied = ?last_applied,
+        table_count = table_data.len(),
+        entity_count = entity_entries.len(),
+        event_count = event_entries.len(),
+        "Snapshot file created"
+    );
+
+    Ok((file, meta))
+}
+
+/// Iterates all entries in a table by its runtime `TableId`, returning raw
+/// pre-encoded `(key, value)` byte pairs.
+///
+/// This uses the typed `iter` method for each known table ID. The iterator
+/// always yields `(Vec<u8>, Vec<u8>)` regardless of the table's declared
+/// key/value types, because `TableIterator::Item = (Vec<u8>, Vec<u8>)`.
+fn iter_table_raw(
+    read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
+    table_id: TableId,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, SnapshotError> {
+    // Macro to reduce boilerplate: each table type has the same iterator pattern
+    macro_rules! collect_table {
+        ($table:ty) => {{
+            let iter = read_txn.iter::<$table>().map_err(|e| SnapshotError::InvalidEntry {
+                reason: format!("Failed to iterate table {}: {e}", table_id as u8),
+            })?;
+            Ok(iter.collect())
+        }};
+    }
+
+    match table_id {
+        TableId::Entities => collect_table!(tables::Entities),
+        TableId::Relationships => collect_table!(tables::Relationships),
+        TableId::ObjIndex => collect_table!(tables::ObjIndex),
+        TableId::SubjIndex => collect_table!(tables::SubjIndex),
+        TableId::Blocks => collect_table!(tables::Blocks),
+        TableId::VaultBlockIndex => collect_table!(tables::VaultBlockIndex),
+        TableId::RaftLog => collect_table!(tables::RaftLog),
+        TableId::RaftState => collect_table!(tables::RaftState),
+        TableId::VaultMeta => collect_table!(tables::VaultMeta),
+        TableId::OrganizationMeta => collect_table!(tables::OrganizationMeta),
+        TableId::Sequences => collect_table!(tables::Sequences),
+        TableId::ClientSequences => collect_table!(tables::ClientSequences),
+        TableId::CompactionMeta => collect_table!(tables::CompactionMeta),
+        TableId::TimeTravelConfig => collect_table!(tables::TimeTravelConfig),
+        TableId::TimeTravelIndex => collect_table!(tables::TimeTravelIndex),
+        TableId::OrganizationSlugIndex => collect_table!(tables::OrganizationSlugIndex),
+        TableId::VaultSlugIndex => collect_table!(tables::VaultSlugIndex),
+        TableId::VaultHeights => collect_table!(tables::VaultHeights),
+        TableId::VaultHashes => collect_table!(tables::VaultHashes),
+        TableId::VaultHealth => collect_table!(tables::VaultHealth),
+    }
+}
+
+/// Extracts organization IDs and the last applied deterministic timestamp from
+/// the database. Used by snapshot creation to parameterize event collection.
+fn extract_snapshot_event_context(
+    db: &inferadb_ledger_store::Database<FileBackend>,
+) -> Result<(Vec<inferadb_ledger_types::OrganizationId>, i64), StorageError<LedgerNodeId>> {
+    let read_txn = db.read().map_err(|e| to_storage_error(&e))?;
+
+    // Extract org IDs from OrganizationMeta table
+    let org_iter = read_txn.iter::<tables::OrganizationMeta>().map_err(|e| to_storage_error(&e))?;
+    let org_ids: Vec<_> = org_iter
+        .filter_map(|(key, _)| {
+            <i64 as inferadb_ledger_store::Key>::decode(&key)
+                .map(inferadb_ledger_types::OrganizationId::new)
+        })
+        .collect();
+
+    // Extract last_applied_timestamp_ns from AppliedStateCore
+    let timestamp_ns = read_txn
+        .get::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string())
+        .map_err(|e| to_storage_error(&e))?
+        .and_then(|data| {
+            if data.len() >= 2 && data[0..2] == STATE_CORE_VERSION_SENTINEL {
+                decode::<AppliedStateCore>(&data[2..]).ok()
+            } else {
+                None
+            }
+        })
+        .map_or(0, |core| core.last_applied_timestamp_ns);
+
+    Ok((org_ids, timestamp_ns))
+}
+
+/// Collects apply-phase events from events.db for snapshot inclusion.
+///
+/// Uses per-organization range scans with a timestamp cutoff derived from
+/// the last applied entry's deterministic timestamp. This avoids the
+/// sort-then-truncate pattern that loads all events into memory.
+///
+/// Returns serialized event entries (already postcard-encoded `EventEntry`
+/// bytes from the B-tree values). Capped by `EventConfig::max_snapshot_events`.
+/// Returns an empty vec if events are not configured or scanning fails
+/// (best-effort).
+fn collect_snapshot_events(
+    events_db: Option<&EventsDatabase<FileBackend>>,
+    event_config: Option<&EventConfig>,
+    org_ids: &[inferadb_ledger_types::OrganizationId],
+    last_applied_timestamp_ns: i64,
+) -> Vec<Vec<u8>> {
+    let Some(edb) = events_db else {
+        return Vec::new();
+    };
+    let max_events = event_config.map_or(10_000, |c| c.max_snapshot_events);
+    let ttl_days = event_config.map_or(90, |c| c.default_ttl_days);
+
+    // Compute cutoff: last_applied_timestamp - TTL.
+    // Events older than the TTL would be GC'd shortly after the follower joins,
+    // so excluding them from the snapshot avoids unnecessary transfer.
+    let ttl_ns = i64::from(ttl_days) * 86_400 * 1_000_000_000;
+    let cutoff_ns = last_applied_timestamp_ns.saturating_sub(ttl_ns).max(0) as u64;
+
+    let read_txn = match edb.read() {
+        Ok(txn) => txn,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to open events.db for snapshot");
+            return Vec::new();
+        },
+    };
+
+    let entries = match inferadb_ledger_state::EventStore::scan_apply_phase_ranged(
+        &read_txn, org_ids, cutoff_ns, max_events,
+    ) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to scan events for snapshot");
+            return Vec::new();
+        },
+    };
+
+    if !entries.is_empty() {
+        tracing::debug!(
+            count = entries.len(),
+            max = max_events,
+            org_count = org_ids.len(),
+            cutoff_ns,
+            "Collected apply-phase events for snapshot via range scan"
+        );
+    }
+
+    entries
 }
 
 // ============================================================================
@@ -220,6 +530,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             shard_chain: RwLock::new(*self.shard_chain.read()),
             block_announcements: self.block_announcements.clone(),
             event_writer: None,
+            client_sequence_eviction: self.client_sequence_eviction.clone(),
         }
     }
 
@@ -393,6 +704,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             .unwrap_or_else(chrono::Utc::now);
         let mut events = Vec::new();
         let mut op_index = 0u32;
+        let mut pending = PendingExternalWrites::default();
         let ttl_days = self.event_writer.as_ref().map_or(0, |ew| ew.config().default_ttl_days);
 
         // Get the committed_index from the last entry (for ShardBlock metadata)
@@ -412,6 +724,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     &mut op_index,
                     &mut events,
                     ttl_days,
+                    &mut pending,
                 ),
                 EntryPayload::Membership(membership) => {
                     state.membership =
@@ -501,9 +814,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     shard_block.extract_vault_block(entry.organization_id, entry.vault_id);
                 if let Some(vb) = vault_block {
                     let block_hash = inferadb_ledger_types::hash::block_hash(&vb.header);
-                    state
-                        .previous_vault_hashes
-                        .insert((entry.organization_id, entry.vault_id), block_hash);
+                    let key = (entry.organization_id, entry.vault_id);
+                    state.previous_vault_hashes.insert(key, block_hash);
+                    pending.vault_hashes.push((key, block_hash));
                 }
             }
 
@@ -518,10 +831,66 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             state.previous_shard_hash = shard_hash;
         }
 
-        // Persist state
+        // Client sequence TTL eviction — deterministic from log index.
+        //
+        // Triggered when any entry in this batch has an index that is a
+        // multiple of eviction_interval. This guarantees identical eviction
+        // behavior across replicas regardless of how openraft batches entries.
+        let eviction_interval = self.client_sequence_eviction.eviction_interval;
+        let eviction_ttl = self.client_sequence_eviction.ttl_seconds;
+        let should_evict = eviction_interval > 0
+            && entries.iter().any(|e| e.log_id.index % eviction_interval == 0);
+
+        if should_evict {
+            let proposed_at_secs = block_timestamp.timestamp();
+            // Collect expired entries: deterministic sort by composite key encoding
+            // ensures identical deletion order across replicas (HashMap iteration is
+            // non-deterministic in Rust).
+            let mut expired_keys: Vec<(
+                (inferadb_ledger_types::OrganizationId, inferadb_ledger_types::VaultId, String),
+                Vec<u8>,
+            )> = state
+                .client_sequences
+                .iter()
+                .filter(|(_, entry)| {
+                    // Saturating subtraction: if proposed_at < last_seen (clock
+                    // regression after leader change), treat delta as 0 — skip eviction
+                    // rather than risk spurious deletes.
+                    proposed_at_secs.saturating_sub(entry.last_seen) > eviction_ttl
+                })
+                .map(|(key, _)| {
+                    let bytes_key =
+                        PendingExternalWrites::client_sequence_key(key.0, key.1, key.2.as_bytes());
+                    (key.clone(), bytes_key)
+                })
+                .collect();
+
+            // Sort by composite bytes key (matches B+ tree ordering)
+            expired_keys.sort_by(|a, b| a.1.cmp(&b.1));
+
+            for (map_key, bytes_key) in expired_keys {
+                state.client_sequences.remove(&map_key);
+                pending.client_sequences_deleted.push(bytes_key);
+            }
+        }
+
+        // Record deterministic timestamp for snapshot event collection.
+        // This ensures two snapshots of the same state produce identical event
+        // sets regardless of wall-clock time.
+        state.last_applied_timestamp_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+
+        // Snapshot sequence counters into pending (once per batch, not per-operation)
+        pending
+            .sequences
+            .push(("organization".to_string(), state.sequences.organization.value() as u64));
+        pending.sequences.push(("vault".to_string(), state.sequences.vault.value() as u64));
+        pending.sequences.push(("user".to_string(), state.sequences.user as u64));
+        pending.sequences.push(("user_email".to_string(), state.sequences.user_email as u64));
+        pending.sequences.push(("email_verify".to_string(), state.sequences.email_verify as u64));
+
+        // Persist core state blob + external table writes atomically
+        self.save_state_core(&state, &pending)?;
         drop(state);
-        let state_ref = self.applied_state.read().clone();
-        self.save_applied_state(&state_ref)?;
 
         // Write accumulated events to events.db (best-effort: log failures but
         // don't fail the Raft apply — events are audit data, not consensus-critical).
@@ -551,106 +920,226 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        LedgerSnapshotBuilder { state: self.applied_state.read().clone() }
+        LedgerSnapshotBuilder {
+            db: Arc::clone(&self.db),
+            state_layer: self.state_layer.as_ref().map(Arc::clone),
+            events_db: self.event_writer.as_ref().map(|ew| Arc::clone(ew.events_db())),
+            event_config: self.event_writer.as_ref().map(|ew| ew.config().clone()),
+        }
     }
 
     async fn begin_receiving_snapshot(
         &mut self,
-    ) -> Result<Box<Cursor<Vec<u8>>>, StorageError<LedgerNodeId>> {
-        Ok(Box::new(Cursor::new(Vec::new())))
+    ) -> Result<Box<tokio::fs::File>, StorageError<LedgerNodeId>> {
+        // Create a temp file for receiving snapshot data from the leader.
+        // openraft will write the streamed chunks into this file, then pass
+        // it to install_snapshot().
+        let std_file = tempfile::tempfile().map_err(|e| {
+            StorageError::from_io_error(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Write,
+                e,
+            )
+        })?;
+        let file = tokio::fs::File::from_std(std_file);
+        Ok(Box::new(file))
     }
 
     async fn install_snapshot(
         &mut self,
-        _meta: &SnapshotMeta<LedgerNodeId, openraft::BasicNode>,
-        snapshot: Box<Cursor<Vec<u8>>>,
+        meta: &SnapshotMeta<LedgerNodeId, openraft::BasicNode>,
+        snapshot: Box<tokio::fs::File>,
     ) -> Result<(), StorageError<LedgerNodeId>> {
-        let data = snapshot.into_inner();
+        use tokio::io::AsyncSeekExt;
 
-        // Try to deserialize as CombinedSnapshot first (new format)
-        let combined: CombinedSnapshot = decode(&data).map_err(|e| to_serde_error(&e))?;
+        let mut file = *snapshot;
 
-        // Restore AppliedState
-        *self.applied_state.write() = combined.applied_state.clone();
-        self.save_applied_state(&combined.applied_state)?;
+        // =============================================================
+        // Async phase: verify SHA-256 checksum over compressed bytes
+        // =============================================================
+        let file_size = file
+            .seek(std::io::SeekFrom::End(0))
+            .await
+            .map_err(|e| to_io_storage_error(e, "seek to end"))?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|e| to_io_storage_error(e, "seek to start"))?;
 
-        // Restore shard chain tracking from snapshot (single lock)
-        *self.shard_chain.write() = ShardChainState {
-            height: combined.applied_state.shard_height,
-            previous_hash: combined.applied_state.previous_shard_hash,
-        };
+        SnapshotReader::verify_checksum(&mut file, file_size)
+            .await
+            .map_err(|e| snapshot_to_storage_error(&e))?;
 
-        // Restore StateLayer entities if StateLayer is configured
-        if let Some(state_layer) = &self.state_layer {
-            for (vault_id, entities) in &combined.vault_entities {
-                for entity in entities {
-                    // Convert entity to SetEntity operation
-                    let ops = vec![inferadb_ledger_types::Operation::SetEntity {
-                        key: String::from_utf8_lossy(&entity.key).to_string(),
-                        value: entity.value.clone(),
-                        condition: None, // No condition for snapshot restore
-                        expires_at: if entity.expires_at == 0 {
-                            None
-                        } else {
-                            Some(entity.expires_at)
-                        },
-                    }];
-                    // Apply at the entity's version height
-                    if let Err(e) = state_layer.apply_operations(*vault_id, &ops, entity.version) {
-                        tracing::warn!(
-                            vault_id = vault_id.value(),
-                            key = %String::from_utf8_lossy(&entity.key),
-                            error = %e,
-                            "Failed to restore entity from snapshot"
-                        );
+        // Convert to std::fs::File for synchronous streaming
+        let std_file = file.into_std().await;
+        let compressed_size = file_size - crate::snapshot::CHECKSUM_SIZE as u64;
+
+        // =============================================================
+        // Sync phase: stream decompressed data directly into B-trees
+        // =============================================================
+        // Using block_in_place because:
+        // 1. WriteTransaction is !Send (RefCell/raw pointers)
+        // 2. Sync zstd::Decoder avoids async/sync boundary issues
+        // 3. No staging Vecs — entries stream directly into WriteTransaction
+
+        let db = &self.db;
+        let event_writer_ref = self.event_writer.as_ref();
+
+        let (core, table_count, entity_count, event_count) =
+            tokio::task::block_in_place(|| -> Result<_, StorageError<LedgerNodeId>> {
+                use std::io::{BufReader, Read, Seek, SeekFrom};
+
+                let mut file = std_file;
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|e| to_io_storage_error(e, "sync seek to start"))?;
+
+                // Create sync zstd decoder over the compressed portion
+                let reader = BufReader::new(file.take(compressed_size));
+                let mut decoder = zstd::stream::read::Decoder::new(reader)
+                    .map_err(|e| to_io_storage_error(e, "zstd decoder init"))?;
+
+                // Read header → AppliedStateCore
+                let core_bytes = SyncSnapshotReader::read_header(&mut decoder)
+                    .map_err(|e| snapshot_to_storage_error(&e))?;
+                let core: AppliedStateCore = decode(&core_bytes).map_err(|e| to_serde_error(&e))?;
+
+                // Open WriteTransaction — all table + entity writes go here
+                let mut write_txn = db.write().map_err(|e| to_storage_error(&e))?;
+
+                // Stream table entries directly into WriteTransaction
+                let table_count = SyncSnapshotReader::read_u32(&mut decoder)
+                    .map_err(|e| snapshot_to_storage_error(&e))?;
+
+                for _ in 0..table_count {
+                    let (table_id_u8, entry_count) =
+                        SyncSnapshotReader::read_table_header(&mut decoder)
+                            .map_err(|e| snapshot_to_storage_error(&e))?;
+
+                    let table_id = TableId::from_u8(table_id_u8).ok_or_else(|| {
+                        snapshot_to_storage_error(&SnapshotError::UnknownTableId {
+                            table_id: table_id_u8,
+                        })
+                    })?;
+
+                    for _ in 0..entry_count {
+                        let (key, value) = SyncSnapshotReader::read_kv_entry(&mut decoder)
+                            .map_err(|e| snapshot_to_storage_error(&e))?;
+                        write_txn
+                            .insert_raw(table_id, &key, &value)
+                            .map_err(|e| to_storage_error(&e))?;
                     }
                 }
-            }
-            tracing::info!(
-                vault_count = combined.vault_entities.len(),
-                "Restored StateLayer from snapshot"
-            );
-        }
 
-        // Restore apply-phase events from snapshot (if event_writer is configured)
-        if !combined.event_entries.is_empty()
-            && let Some(ew) = &self.event_writer
-        {
-            match ew.events_db().write() {
-                Ok(mut txn) => {
-                    let mut written = 0usize;
-                    for entry in &combined.event_entries {
-                        if let Err(e) = inferadb_ledger_state::EventStore::write(&mut txn, entry) {
+                // Stream entity entries directly into WriteTransaction
+                let entity_count = SyncSnapshotReader::read_u64(&mut decoder)
+                    .map_err(|e| snapshot_to_storage_error(&e))?;
+
+                for _ in 0..entity_count {
+                    let (key, value) = SyncSnapshotReader::read_kv_entry(&mut decoder)
+                        .map_err(|e| snapshot_to_storage_error(&e))?;
+                    inferadb_ledger_state::StateLayer::restore_entity(&mut write_txn, &key, &value)
+                        .map_err(|e| to_storage_error(&e))?;
+                }
+
+                // Persist the AppliedStateCore blob with version sentinel
+                let core_data = encode(&core).map_err(|e| to_serde_error(&e))?;
+                let mut state_data =
+                    Vec::with_capacity(STATE_CORE_VERSION_SENTINEL.len() + core_data.len());
+                state_data.extend_from_slice(&STATE_CORE_VERSION_SENTINEL);
+                state_data.extend_from_slice(&core_data);
+                write_txn
+                    .insert::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string(), &state_data)
+                    .map_err(|e| to_storage_error(&e))?;
+
+                // Atomic commit — either all writes are visible or none
+                write_txn.commit().map_err(|e| to_storage_error(&e))?;
+
+                // Best-effort event restoration (separate database)
+                // Stream events directly into events.db WriteTransaction — no staging Vec
+                let event_count = SyncSnapshotReader::read_u64(&mut decoder)
+                    .map_err(|e| snapshot_to_storage_error(&e))?;
+
+                if event_count > 0
+                    && let Some(ew) = event_writer_ref
+                {
+                    match ew.events_db().write() {
+                        Ok(mut event_txn) => {
+                            let mut written = 0usize;
+                            for _ in 0..event_count {
+                                match SyncSnapshotReader::read_event_entry(&mut decoder) {
+                                    Ok(entry_bytes) => {
+                                        match decode::<inferadb_ledger_types::events::EventEntry>(
+                                            &entry_bytes,
+                                        ) {
+                                            Ok(entry) => {
+                                                if inferadb_ledger_state::EventStore::write(
+                                                    &mut event_txn,
+                                                    &entry,
+                                                )
+                                                .is_ok()
+                                                {
+                                                    written += 1;
+                                                }
+                                            },
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "Failed to decode event entry from snapshot"
+                                                );
+                                            },
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to read event entry from snapshot"
+                                        );
+                                        break;
+                                    },
+                                }
+                            }
+                            if let Err(e) = event_txn.commit() {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to commit restored events from snapshot"
+                                );
+                            } else {
+                                tracing::info!(
+                                    count = written,
+                                    total = event_count,
+                                    "Restored apply-phase events from snapshot"
+                                );
+                            }
+                        },
+                        Err(e) => {
                             tracing::warn!(
-                                event_id = %uuid::Uuid::from_bytes(entry.event_id),
                                 error = %e,
-                                "Failed to restore event from snapshot"
+                                "Failed to open write transaction for event snapshot restore"
                             );
-                        } else {
-                            written += 1;
-                        }
+                        },
                     }
-                    if let Err(e) = txn.commit() {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to commit restored events from snapshot"
-                        );
-                    } else {
-                        tracing::info!(
-                            count = written,
-                            total = combined.event_entries.len(),
-                            "Restored apply-phase events from snapshot"
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to open write transaction for event snapshot restore"
-                    );
-                },
-            }
-        }
+                }
+
+                Ok((core, table_count, entity_count, event_count))
+            })?;
+
+        // =============================================================
+        // Restore in-memory state from the committed tables
+        // =============================================================
+        let loaded_state = self.load_applied_state_from_db(&core)?;
+        *self.applied_state.write() = loaded_state;
+
+        // Restore shard chain tracking
+        *self.shard_chain.write() =
+            ShardChainState { height: core.shard_height, previous_hash: core.previous_shard_hash };
+
+        tracing::info!(
+            snapshot_id = %meta.snapshot_id,
+            last_log_id = ?meta.last_log_id,
+            table_count,
+            entity_count,
+            event_count,
+            "Snapshot installed (streaming)"
+        );
 
         Ok(())
     }
@@ -658,105 +1147,211 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
-        let state = self.applied_state.read();
-
-        if state.last_applied.is_none() {
-            return Ok(None);
+        // Check whether any state has been applied by reading from the database.
+        // This avoids acquiring the in-memory AppliedState lock.
+        {
+            let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
+            let has_state = read_txn
+                .get::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string())
+                .map_err(|e| to_storage_error(&e))?
+                .is_some();
+            if !has_state {
+                return Ok(None);
+            }
         }
 
-        // Collect entities from StateLayer if configured
-        // StateLayer is internally thread-safe via inferadb-ledger-store's MVCC, so no lock needed
-        let vault_entities = if let Some(state_layer) = &self.state_layer {
-            let mut entities_map = HashMap::new();
+        // Extract org IDs and timestamp for per-org event range scans.
+        let (org_ids, last_ts) = extract_snapshot_event_context(&self.db)?;
 
-            // Get entities for each known vault
-            for &(organization_id, vault_id) in state.vault_heights.keys() {
-                // List all entities in this vault (up to 10000 per vault for snapshot)
-                match state_layer.list_entities(vault_id, None, None, 10000) {
-                    Ok(entities) => {
-                        if !entities.is_empty() {
-                            entities_map.insert(vault_id, entities);
-                            tracing::debug!(
-                                organization_id = organization_id.value(),
-                                vault_id = vault_id.value(),
-                                count = entities_map.get(&vault_id).map(|e| e.len()).unwrap_or(0),
-                                "Collected entities for snapshot"
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            organization_id = organization_id.value(),
-                            vault_id = vault_id.value(),
-                            error = %e,
-                            "Failed to list entities for snapshot"
-                        );
-                    },
+        // Collect events synchronously — EventsDatabase contains raw pointers
+        // (!Send), so the Arc<EventsDatabase> reference must not live across
+        // await points.
+        let event_entries = {
+            let events_db = self.event_writer.as_ref().map(|ew| Arc::clone(ew.events_db()));
+            let event_config = self.event_writer.as_ref().map(|ew| ew.config().clone());
+            collect_snapshot_events(events_db.as_deref(), event_config.as_ref(), &org_ids, last_ts)
+        };
+
+        let (file, meta) = write_snapshot_to_file(&self.db, event_entries)
+            .await
+            .map_err(|e| snapshot_to_storage_error(&e))?;
+
+        Ok(Some(Snapshot { meta, snapshot: Box::new(file) }))
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+impl RaftLogStore {
+    /// Reconstructs the full `AppliedState` from an `AppliedStateCore` blob and
+    /// the externalized B-tree tables. Used during snapshot installation to
+    /// rebuild the in-memory state after table data has been committed.
+    fn load_applied_state_from_db(
+        &self,
+        core: &AppliedStateCore,
+    ) -> Result<AppliedState, StorageError<LedgerNodeId>> {
+        let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
+
+        let mut state = AppliedState {
+            last_applied: core.last_applied,
+            membership: core.membership.clone(),
+            shard_height: core.shard_height,
+            previous_shard_hash: core.previous_shard_hash,
+            last_applied_timestamp_ns: core.last_applied_timestamp_ns,
+            ..Default::default()
+        };
+
+        // Load organizations
+        let org_iter =
+            read_txn.iter::<tables::OrganizationMeta>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in org_iter {
+            if let Some(org_id_val) = inferadb_ledger_store::Key::decode(&key_bytes) {
+                let org_id = inferadb_ledger_types::OrganizationId::new(org_id_val);
+                if let Ok(meta) = decode::<super::types::OrganizationMeta>(&value_bytes) {
+                    state.id_to_slug.insert(org_id, meta.slug);
+                    state.slug_index.insert(meta.slug, org_id);
+                    state.organization_storage_bytes.insert(org_id, meta.storage_bytes);
+                    state.organizations.insert(org_id, meta);
                 }
             }
+        }
 
-            entities_map
-        } else {
-            HashMap::new()
-        };
-
-        // Collect apply-phase events from events.db for snapshot (if available)
-        let event_entries = if let Some(ew) = &self.event_writer {
-            let max_events = ew.config().max_snapshot_events;
-            match ew.events_db().read() {
-                Ok(txn) => {
-                    match inferadb_ledger_state::EventStore::scan_apply_phase(&txn, max_events) {
-                        Ok(entries) => {
-                            if !entries.is_empty() {
-                                tracing::debug!(
-                                    count = entries.len(),
-                                    max = max_events,
-                                    "Collected apply-phase events for snapshot"
-                                );
-                            }
-                            entries
-                        },
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to scan apply-phase events for snapshot"
-                            );
-                            Vec::new()
-                        },
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to open read transaction for event snapshot"
-                    );
-                    Vec::new()
-                },
+        // Load vaults
+        let vault_iter = read_txn.iter::<tables::VaultMeta>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in vault_iter {
+            if let Some(vault_id_val) = <i64 as inferadb_ledger_store::Key>::decode(&key_bytes) {
+                let vault_id = inferadb_ledger_types::VaultId::new(vault_id_val);
+                if let Ok(meta) = decode::<super::types::VaultMeta>(&value_bytes) {
+                    state.vault_id_to_slug.insert(vault_id, meta.slug);
+                    state.vault_slug_index.insert(meta.slug, vault_id);
+                    state.vaults.insert((meta.organization_id, vault_id), meta);
+                }
             }
-        } else {
-            Vec::new()
-        };
+        }
 
-        // Create combined snapshot
-        let combined =
-            CombinedSnapshot { applied_state: state.clone(), vault_entities, event_entries };
+        // Load sequences
+        let seq_iter = read_txn.iter::<tables::Sequences>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in seq_iter {
+            if let (Some(name), Some(val)) = (
+                <String as inferadb_ledger_store::Key>::decode(&key_bytes),
+                <u64 as inferadb_ledger_store::Value>::decode(&value_bytes),
+            ) {
+                match name.as_str() {
+                    "organization" => {
+                        state.sequences.organization =
+                            inferadb_ledger_types::OrganizationId::new(val as i64);
+                    },
+                    "vault" => {
+                        state.sequences.vault = inferadb_ledger_types::VaultId::new(val as i64);
+                    },
+                    "user" => state.sequences.user = val as i64,
+                    "user_email" => state.sequences.user_email = val as i64,
+                    "email_verify" => state.sequences.email_verify = val as i64,
+                    _ => {},
+                }
+            }
+        }
 
-        let data = encode(&combined).map_err(|e| to_serde_error(&e))?;
+        // Load vault heights (values are postcard-encoded u64, not raw BE)
+        let height_iter =
+            read_txn.iter::<tables::VaultHeights>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in height_iter {
+            if key_bytes.len() == 16 {
+                let org_id = inferadb_ledger_types::OrganizationId::new(i64::from_be_bytes(
+                    key_bytes[..8].try_into().unwrap_or([0; 8]),
+                ));
+                let vault_id = inferadb_ledger_types::VaultId::new(i64::from_be_bytes(
+                    key_bytes[8..16].try_into().unwrap_or([0; 8]),
+                ));
+                if let Ok(height) = decode::<u64>(&value_bytes) {
+                    state.vault_heights.insert((org_id, vault_id), height);
+                }
+            }
+        }
 
-        let snapshot_id = format!(
-            "snapshot-{}-{}",
-            state.last_applied.as_ref().map_or(0, |l| l.index),
-            chrono::Utc::now().timestamp()
-        );
+        // Load vault hashes
+        let hash_iter = read_txn.iter::<tables::VaultHashes>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in hash_iter {
+            if key_bytes.len() == 16 && value_bytes.len() == 32 {
+                let org_id = inferadb_ledger_types::OrganizationId::new(i64::from_be_bytes(
+                    key_bytes[..8].try_into().unwrap_or([0; 8]),
+                ));
+                let vault_id = inferadb_ledger_types::VaultId::new(i64::from_be_bytes(
+                    key_bytes[8..16].try_into().unwrap_or([0; 8]),
+                ));
+                let hash: inferadb_ledger_types::Hash =
+                    value_bytes.as_slice().try_into().unwrap_or([0; 32]);
+                state.previous_vault_hashes.insert((org_id, vault_id), hash);
+            }
+        }
 
-        Ok(Some(Snapshot {
-            meta: SnapshotMeta {
-                last_log_id: state.last_applied,
-                last_membership: state.membership.clone(),
-                snapshot_id,
-            },
-            snapshot: Box::new(Cursor::new(data)),
-        }))
+        // Load vault health
+        let health_iter =
+            read_txn.iter::<tables::VaultHealth>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in health_iter {
+            if key_bytes.len() == 16 {
+                let org_id = inferadb_ledger_types::OrganizationId::new(i64::from_be_bytes(
+                    key_bytes[..8].try_into().unwrap_or([0; 8]),
+                ));
+                let vault_id = inferadb_ledger_types::VaultId::new(i64::from_be_bytes(
+                    key_bytes[8..16].try_into().unwrap_or([0; 8]),
+                ));
+                if let Ok(status) = decode::<super::types::VaultHealthStatus>(&value_bytes) {
+                    state.vault_health.insert((org_id, vault_id), status);
+                }
+            }
+        }
+
+        // Load client sequences
+        let cs_iter =
+            read_txn.iter::<tables::ClientSequences>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in cs_iter {
+            if key_bytes.len() >= 16 {
+                let org_id = inferadb_ledger_types::OrganizationId::new(i64::from_be_bytes(
+                    key_bytes[..8].try_into().unwrap_or([0; 8]),
+                ));
+                let vault_id = inferadb_ledger_types::VaultId::new(i64::from_be_bytes(
+                    key_bytes[8..16].try_into().unwrap_or([0; 8]),
+                ));
+                let client_id = String::from_utf8_lossy(&key_bytes[16..]).to_string();
+                if let Ok(entry) = decode::<super::types::ClientSequenceEntry>(&value_bytes) {
+                    state.client_sequences.insert((org_id, vault_id, client_id), entry);
+                }
+            }
+        }
+
+        // Load slug indexes
+        let slug_iter =
+            read_txn.iter::<tables::OrganizationSlugIndex>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in slug_iter {
+            if let (Some(slug_val), Some(org_id_val)) = (
+                <u64 as inferadb_ledger_store::Key>::decode(&key_bytes),
+                decode::<i64>(&value_bytes).ok(),
+            ) {
+                let slug = inferadb_ledger_types::OrganizationSlug::new(slug_val);
+                let org_id = inferadb_ledger_types::OrganizationId::new(org_id_val);
+                state.slug_index.insert(slug, org_id);
+                state.id_to_slug.insert(org_id, slug);
+            }
+        }
+
+        let vault_slug_iter =
+            read_txn.iter::<tables::VaultSlugIndex>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in vault_slug_iter {
+            if let (Some(slug_val), Some(vault_id_val)) = (
+                <u64 as inferadb_ledger_store::Key>::decode(&key_bytes),
+                decode::<i64>(&value_bytes).ok(),
+            ) {
+                let slug = inferadb_ledger_types::VaultSlug::new(slug_val);
+                let vault_id = inferadb_ledger_types::VaultId::new(vault_id_val);
+                state.vault_slug_index.insert(slug, vault_id);
+                state.vault_id_to_slug.insert(vault_id, slug);
+            }
+        }
+
+        Ok(state)
     }
 }
 
@@ -777,5 +1372,21 @@ pub(super) fn to_serde_error<E: std::error::Error>(e: &E) -> StorageError<Ledger
         openraft::ErrorSubject::Store,
         openraft::ErrorVerb::Read,
         std::io::Error::other(e.to_string()),
+    )
+}
+
+fn snapshot_to_storage_error(e: &SnapshotError) -> StorageError<LedgerNodeId> {
+    StorageError::from_io_error(
+        openraft::ErrorSubject::Snapshot(None),
+        openraft::ErrorVerb::Read,
+        std::io::Error::other(e.to_string()),
+    )
+}
+
+fn to_io_storage_error(e: std::io::Error, context: &str) -> StorageError<LedgerNodeId> {
+    StorageError::from_io_error(
+        openraft::ErrorSubject::Snapshot(None),
+        openraft::ErrorVerb::Read,
+        std::io::Error::other(format!("{context}: {e}")),
     )
 }

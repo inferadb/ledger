@@ -47,8 +47,10 @@ Storage = (entities × avg_entity_size) +
 - 1M entities at 500 bytes avg = 500 MB
 - 10M relationships at 100 bytes = 1 GB
 - 30 days of blocks at 10 MB/day = 300 MB
-- 2 snapshots at 1.5 GB each = 3 GB
+- 2 snapshots at 1.5 GB each = 3 GB (compressed ~3–4x with zstd level 3)
 - **Total**: ~5 GB per vault
+
+**Snapshot compression**: zstd level 3 (default) achieves ~3–4x compression on typical entity/relationship data. Raw snapshot size is roughly proportional to entity count × average value size. A vault with 1M entities at 500 bytes averages ~150–170 MB compressed per snapshot.
 
 ### Memory
 
@@ -75,6 +77,32 @@ Memory = base (200 MB) +
 - Raft: 100 MB (10K proposals)
 - Idempotency: 100 MB (100K entries)
 - **Total**: ~1 GB active memory
+
+### WriteTransaction Memory Envelope
+
+Each `WriteTransaction` accumulates COW (copy-on-write) pages in memory before committing. Peak memory during a write transaction:
+
+| Scenario                   | Approximate Peak Memory |
+| -------------------------- | ----------------------- |
+| Single entity write        | ~64 KB (1–2 pages)     |
+| Batch of 100 entities      | ~1–5 MB                |
+| Snapshot installation       | Proportional to state size (all pages rewritten) |
+| B-tree compaction merge    | ~128 KB per merge       |
+
+Monitor `inferadb_ledger_resource_write_txn_dirty_pages` for actual COW page counts.
+
+### Per-Shard Sizing
+
+Recommended per-shard limits for stable performance:
+
+| Metric              | Recommended Limit | Hard Limit     |
+| ------------------- | ----------------- | -------------- |
+| State database size | <10 GB            | ~50 GB         |
+| Total entities      | <50M              | ~100M          |
+| Vaults per shard    | <500              | Unlimited      |
+| Organizations       | <100              | Unlimited      |
+
+Beyond these limits, add a new shard and assign new organizations to it. See [Shard Management](shard-management.md).
 
 ### CPU
 

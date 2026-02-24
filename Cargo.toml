@@ -50,6 +50,7 @@ base64 = "0.22"
 
 # Compression
 zstd = "0.13"
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

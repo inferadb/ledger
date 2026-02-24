@@ -1,31 +1,46 @@
-# Rolling Upgrade Runbook
+# Upgrade Runbook
 
-Procedure for upgrading Ledger nodes with zero downtime.
+Procedure for upgrading Ledger to a new version.
 
-## Version Compatibility
+> **Pre-GA Disclaimer**: InferaDB Ledger is pre-1.0 software. Until 1.0, upgrades between minor versions require a full cluster wipe and restore. Rolling upgrades (zero-downtime, node-by-node) will be supported starting with 1.0 stable releases.
 
-Ledger supports rolling upgrades between adjacent minor versions. Major version upgrades may require additional steps.
+## Version Compatibility (Pre-GA)
 
-| From Version | To Version | Upgrade Path   | Notes                             |
-| ------------ | ---------- | -------------- | --------------------------------- |
-| 1.0.x        | 1.0.y      | Direct rolling | Patch versions always compatible  |
-| 1.x          | 1.y        | Direct rolling | Minor versions forward-compatible |
-| 0.x          | 1.0        | Stop-start     | Breaking proto changes            |
+| From Version | To Version | Upgrade Path            | Notes                              |
+| ------------ | ---------- | ----------------------- | ---------------------------------- |
+| 0.x          | 0.y        | Full cluster wipe       | Schema/format changes between minors |
+| 0.x.y        | 0.x.z      | Full cluster wipe       | Even patch versions may change format |
 
-**Compatibility rules:**
+**Pre-GA constraint**: The on-disk format (B+ tree page layout, snapshot binary format, Raft log encoding) is not yet stable. Any version bump may change internal formats. In-place upgrades risk data corruption.
 
-1. Nodes can replicate across one minor version difference
-2. Patch version upgrades are always safe
-3. All nodes must be upgraded within 24 hours
-4. Never skip minor versions (1.0 → 1.2 requires 1.0 → 1.1 → 1.2)
+### Mixed-Version Cluster Behavior
+
+Running nodes on different binary versions in the same Raft group is **not supported** and causes snapshot transfer failures.
+
+**Root cause**: The `SnapshotData` type changed from `Cursor<Vec<u8>>` (in-memory blob) to `tokio::fs::File` (file-based streaming). This is a compile-time type change in the `declare_raft_types!` macro — the snapshot wire format is incompatible between the two representations.
+
+**What happens if attempted**:
+
+1. Leader and follower negotiate a snapshot transfer via openraft's `install_snapshot` RPC.
+2. The sender serializes snapshot chunks using the new file-based streaming format (zstd-compressed, SHA-256 verified).
+3. The receiver expects the old in-memory blob format and fails to decode the chunks.
+4. The follower cannot catch up — it will retry indefinitely, never joining the cluster.
+5. If a majority of nodes are on the old version, the new-version leader cannot replicate to a quorum.
+
+**Additional incompatibilities**:
+
+- `AppliedStateCore` gained a `last_applied_timestamp_ns` field. Old nodes cannot deserialize the new format (postcard is not self-describing — field count mismatch causes decode failure).
+- Snapshot event collection uses per-organization range scans with timestamp cutoff. Old nodes use full-table scan with sort-then-truncate — the event sets may differ for the same logical state.
+
+**Required action**: Always use the full cluster wipe procedure below. Do not attempt to upgrade one node at a time.
 
 ## Prerequisites
 
 - [ ] Cluster is healthy (all nodes reporting, leader elected)
-- [ ] No ongoing migrations or recoveries
-- [ ] Backup verification completed within 24 hours
+- [ ] Backup created and verified within 1 hour (see [Backup Verification](backup-verification.md))
 - [ ] New version tested in staging environment
-- [ ] Rollback plan reviewed
+- [ ] Maintenance window scheduled (cluster unavailable during upgrade)
+- [ ] All clients notified of downtime
 
 ## Pre-Upgrade Checks
 
@@ -43,291 +58,232 @@ grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo
 
 Expected: All nodes return `SERVING`, one `leader_id` is set.
 
-### 2. Check Proposal Backlog
+### 2. Create Fresh Backup
 
 ```bash
-curl -s localhost:9090/metrics | grep inferadb_ledger_raft_proposals_pending
+# Trigger backup on leader
+grpcurl -plaintext leader:50051 ledger.v1.AdminService/CreateBackup
+
+# Verify backup exists
+grpcurl -plaintext leader:50051 ledger.v1.AdminService/ListBackups
 ```
 
-Expected: Value < 10. If higher, wait for backlog to clear.
+### 3. Verify Backup Integrity
 
-### 3. Record Current State
+Follow the [Weekly Restore Test](backup-verification.md#weekly-restore-test) procedure to confirm the backup is restorable.
+
+### 4. Record Current State
 
 ```bash
-# Save cluster state for comparison
+# Save cluster state for post-upgrade comparison
 grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo > pre-upgrade-cluster.json
 
-# Record current version
-inferadb-ledger --version > pre-upgrade-version.txt
+# Record vault heights
+for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
+  echo "Vault $vault:"
+  grpcurl -plaintext \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
+    localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
+done > pre-upgrade-heights.txt
 ```
 
-## Upgrade Procedure
+## Upgrade Procedure (Full Cluster Wipe)
 
-### Order of Operations
+### Step 1: Stop All Nodes
 
-1. **Upgrade followers first** (non-leaders)
-2. **Upgrade leader last** (triggers election)
-
-This minimizes leader elections during the upgrade.
-
-### Identify Leader
+Stop all cluster nodes simultaneously. Order does not matter since the cluster will be rebuilt.
 
 ```bash
-grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo | jq -r '.leader_id.id'
-```
+# Kubernetes
+kubectl scale statefulset ledger --replicas=0
 
-### Upgrade a Follower Node
-
-For each follower (non-leader) node:
-
-#### Step 1: Drain Traffic (if using load balancer)
-
-```bash
-# Remove from load balancer
-kubectl label pod ledger-1 ledger.inferadb.com/ready=false --overwrite
-```
-
-#### Step 2: Stop the Node
-
-```bash
-# Graceful shutdown
-kubectl delete pod ledger-1
-
-# Or systemd
+# Or systemd (on each node)
 systemctl stop ledger
 ```
 
-#### Step 3: Verify Node Left Cleanly
+### Step 2: Delete Data Directories
+
+Remove all on-disk state from every node. The backup created in pre-upgrade will be the restore source.
 
 ```bash
-# Check from another node
-grpcurl -plaintext node2:50051 ledger.v1.AdminService/GetClusterInfo
+# On each node
+rm -rf /var/lib/ledger/raft/
+rm -rf /var/lib/ledger/state/
+# Keep node_id file if you want nodes to retain their identities
+# rm /var/lib/ledger/node_id  # Only if node IDs must change
 ```
 
-Cluster should show reduced membership.
+> **Warning**: This deletes all Raft logs, state databases, and snapshots. Ensure your backup is verified before proceeding.
 
-#### Step 4: Upgrade and Start
+### Step 3: Deploy New Binary
 
 ```bash
-# Pull new image / install new binary
-docker pull inferadb/ledger:v1.2.0
+# Kubernetes
+kubectl set image statefulset/ledger ledger=inferadb/ledger:v0.NEW.0
 
-# Start node
-kubectl apply -f ledger-1-pod.yaml
-
-# Or systemd
-systemctl start ledger
+# Or systemd (on each node)
+# Install new binary, then:
+systemctl daemon-reload
 ```
 
-#### Step 5: Verify Node Rejoined
+### Step 4: Start First Node
+
+Start one node as a single-node cluster to perform the restore:
 
 ```bash
-# Check health
-grpcurl -plaintext node1:50051 ledger.v1.HealthService/Check
-
-# Check cluster membership
-grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo
+# Start in single-node mode
+inferadb-ledger --single --data /var/lib/ledger
 ```
 
-Wait for node to catch up (commit index should match other nodes).
-
-#### Step 6: Re-enable Traffic
+### Step 5: Restore from Backup
 
 ```bash
-kubectl label pod ledger-1 ledger.inferadb.com/ready=true --overwrite
+# Restore the pre-upgrade backup
+grpcurl -plaintext localhost:50051 \
+  -d '{"backup_id": "BACKUP_ID_FROM_STEP_2"}' \
+  ledger.v1.AdminService/RestoreBackup
 ```
 
-#### Step 7: Wait Before Next Node
-
-Wait 2 minutes and verify:
-
-- No errors in logs
-- Metrics look normal
-- Write latency stable
-
-### Upgrade Leader Node
-
-After all followers are upgraded:
-
-#### Step 1: Identify Current Leader
+### Step 6: Verify Restored State
 
 ```bash
-LEADER=$(grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo | jq -r '.leader_id.id')
-echo "Current leader: $LEADER"
-```
+# Check organizations
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations
 
-#### Step 2: Gracefully Transfer Leadership (Optional)
+# Verify vault heights match pre-upgrade
+for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
+  echo "Vault $vault:"
+  grpcurl -plaintext \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
+    localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
+done
 
-```bash
-# If supported, request leadership transfer
-grpcurl -plaintext $LEADER:50051 ledger.v1.AdminService/TransferLeadership
-```
-
-#### Step 3: Stop Leader
-
-```bash
-# Stop the leader node
-kubectl delete pod $LEADER
-
-# New leader will be elected automatically
-```
-
-#### Step 4: Monitor Election
-
-```bash
-# Watch for new leader
-watch -n1 'grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo | jq -r .leader_id.id'
-```
-
-Election should complete within 5 seconds.
-
-#### Step 5: Upgrade and Start Former Leader
-
-Same as follower procedure (Steps 4-7).
-
-## Post-Upgrade Verification
-
-### 1. Version Check
-
-```bash
-for node in node1 node2 node3; do
-  echo "$node: $(grpcurl -plaintext $node:50051 ledger.v1.AdminService/GetNodeInfo | jq -r .version)"
+# Run integrity checks
+for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
+  grpcurl -plaintext \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}, \"full_check\": true}" \
+    localhost:50051 ledger.v1.AdminService/CheckIntegrity
 done
 ```
 
-All nodes should report new version.
+### Step 7: Expand to Full Cluster
 
-### 2. Cluster Health
+Stop the single-node instance and restart as a cluster:
 
 ```bash
-grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo > post-upgrade-cluster.json
-diff pre-upgrade-cluster.json post-upgrade-cluster.json
+# Stop single-node mode
+systemctl stop ledger
+
+# Start all nodes in cluster mode
+# Node 1 (has restored data):
+INFERADB__LEDGER__DATA=/var/lib/ledger \
+INFERADB__LEDGER__CLUSTER=3 \
+INFERADB__LEDGER__PEERS=node1,node2,node3 \
+inferadb-ledger
+
+# Nodes 2 and 3 (empty, will sync from node 1):
+INFERADB__LEDGER__DATA=/var/lib/ledger \
+INFERADB__LEDGER__JOIN=true \
+INFERADB__LEDGER__PEERS=node1:50051 \
+inferadb-ledger
 ```
 
-Membership should be identical.
-
-### 3. Functional Test
+### Step 8: Verify Cluster Health
 
 ```bash
-# Write test
+# Wait for all nodes to join
+watch -n1 'grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo | jq ".members | length"'
+
+# Verify leader elected
+grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo
+
+# Run functional test
 grpcurl -plaintext \
   -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "upgrade-test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:upgrade", "value": "dGVzdA=="}}]}' \
   localhost:50051 ledger.v1.WriteService/Write
-
-# Read test
-grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "key": "test:upgrade"}' \
-  localhost:50051 ledger.v1.ReadService/Read
 ```
 
-### 4. Metrics Comparison
+## Post-Upgrade Verification
+
+### 1. Compare State
 
 ```bash
-# Compare key metrics
+# Compare vault heights to pre-upgrade
+diff pre-upgrade-heights.txt <(for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
+  echo "Vault $vault:"
+  grpcurl -plaintext \
+    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
+    localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
+done)
+```
+
+### 2. Metrics Comparison
+
+```bash
 curl -s localhost:9090/metrics | grep -E '(proposals_pending|write_latency|is_leader)'
 ```
 
-Values should be similar to pre-upgrade baseline.
+### 3. Re-enable Traffic
+
+```bash
+# Kubernetes
+kubectl label pods -l app=ledger ledger.inferadb.com/ready=true --overwrite
+```
 
 ## Rollback Procedure
 
-If issues are detected during upgrade:
+If the new version has issues after restore:
 
-### 1. Stop the Problematic Node
-
-```bash
-kubectl delete pod ledger-bad
-```
-
-### 2. Restore Previous Version
-
-```bash
-docker pull inferadb/ledger:v1.1.0  # Previous version
-```
-
-### 3. Start with Old Version
-
-```bash
-kubectl apply -f ledger-1-pod-v1.1.0.yaml
-```
-
-### 4. If Multiple Nodes Affected
-
-If more than one node has issues:
-
-1. Stop all upgraded nodes
-2. Restore from backup if data corruption suspected
-3. Start nodes with old version one at a time
+1. Stop all nodes
+2. Delete data directories again
+3. Deploy the **previous** binary version
+4. Restore from the same pre-upgrade backup
+5. Expand to full cluster
 
 ## Timing Guidelines
 
-| Cluster Size | Total Upgrade Time | Per-Node Window |
-| ------------ | ------------------ | --------------- |
-| 3 nodes      | 15-20 minutes      | 5 minutes       |
-| 5 nodes      | 25-35 minutes      | 5 minutes       |
-| 7 nodes      | 35-45 minutes      | 5 minutes       |
+| Cluster Size | Total Upgrade Time | Downtime Window    |
+| ------------ | ------------------ | ------------------ |
+| 3 nodes      | 15-30 minutes      | 15-30 minutes      |
+| 5 nodes      | 20-40 minutes      | 20-40 minutes      |
+| 7 nodes      | 25-45 minutes      | 25-45 minutes      |
 
-## Common Issues
+Most time is spent on backup verification and post-restore integrity checks, not the wipe/restart itself.
 
-### Node Won't Rejoin
+## Future: Rolling Upgrades (Post-1.0)
 
-**Symptoms**: Node starts but doesn't appear in cluster membership.
+After the 1.0 stable release, Ledger will support zero-downtime rolling upgrades between compatible versions:
 
-**Solutions**:
+- Patch versions (1.0.x → 1.0.y): always rolling-upgrade compatible
+- Minor versions (1.x → 1.y): rolling-upgrade compatible within one minor version
+- Major versions: may require full cluster wipe (documented per release)
 
-1. Check logs for bootstrap errors
-2. Verify peer DNS is resolving correctly
-3. Check network connectivity to other nodes
-
-### Leader Election Stuck
-
-**Symptoms**: No leader elected after stopping old leader.
-
-**Solutions**:
-
-1. Verify quorum is available (majority of nodes)
-2. Check for network partitions
-3. Review Raft logs for split-brain indicators
-
-### Performance Degradation
-
-**Symptoms**: Higher latency or errors after upgrade.
-
-**Solutions**:
-
-1. Check for new configuration requirements
-2. Review release notes for breaking changes
-3. Consider rollback if issues persist
+This runbook will be updated with rolling upgrade procedures when 1.0 stabilizes the on-disk format.
 
 ## Checklist Summary
 
 Pre-upgrade:
 
 - [ ] All nodes healthy
-- [ ] Proposal backlog cleared
-- [ ] State recorded
+- [ ] Fresh backup created and verified
+- [ ] Maintenance window scheduled
+- [ ] Clients notified
 
-Per follower:
+Upgrade:
 
-- [ ] Drain traffic
-- [ ] Stop node
-- [ ] Verify left cleanly
-- [ ] Upgrade and start
-- [ ] Verify rejoined
-- [ ] Re-enable traffic
-- [ ] Wait 2 minutes
-
-Leader:
-
-- [ ] Identify leader
-- [ ] Stop (triggers election)
-- [ ] Monitor new leader election
-- [ ] Upgrade and start
-- [ ] Verify rejoined
+- [ ] All nodes stopped
+- [ ] Data directories deleted
+- [ ] New binary deployed
+- [ ] First node started in single-node mode
+- [ ] Backup restored
+- [ ] Restored state verified
+- [ ] Cluster expanded
+- [ ] Cluster health verified
 
 Post-upgrade:
 
-- [ ] All versions match
-- [ ] Cluster healthy
-- [ ] Functional tests pass
+- [ ] Vault heights match pre-upgrade
+- [ ] Integrity checks pass
+- [ ] Write operations succeed
 - [ ] Metrics normal
+- [ ] Traffic re-enabled

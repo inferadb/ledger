@@ -185,9 +185,9 @@ grpcurl -plaintext \
   localhost:50051 ledger.v1.AdminService/GetVault
 ```
 
-Status will be `DIVERGED`.
+Status will be `DIVERGED`. The auto-recovery background job will attempt recovery automatically with exponential backoff.
 
-3. **Attempt automatic recovery**:
+3. **Attempt manual recovery** (if auto-recovery has not resolved it):
 
 ```bash
 grpcurl -plaintext \
@@ -213,6 +213,12 @@ grpcurl -plaintext healthy-node:50051 \
 
 # Remove corrupted node, let it resync from snapshot
 ```
+
+**Note on snapshots**: Snapshots are zstd-compressed binary files containing `AppliedStateCore` plus 9 externalized B+ tree tables, entity data, and event data. A SHA-256 checksum footer over the compressed bytes is verified before any decompression. Snapshot installation writes all state into a single `WriteTransaction` — either the entire install succeeds atomically or no state changes are visible.
+
+### Table-Level Inconsistency
+
+If the integrity scrubber detects corruption in specific externalized tables (e.g., `VaultHeights`, `ClientSequences`) while the core `AppliedStateCore` is intact, the affected shard can be recovered by installing a snapshot from a healthy replica. The snapshot will overwrite all 9 externalized tables atomically via a single `WriteTransaction`.
 
 ## Regional Failover
 
@@ -294,5 +300,5 @@ Escalation path for production incidents:
 ## Related Runbooks
 
 - [Backup Verification](backup-verification.md) - Ensure backups are restorable
-- [Rolling Upgrade](rolling-upgrade.md) - Upgrade without downtime
+- [Upgrade Runbook](rolling-upgrade.md) - Version upgrade procedures
 - [Troubleshooting](../../troubleshooting.md) - Common issues

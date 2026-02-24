@@ -365,6 +365,8 @@ mod tests {
             organization_id: inferadb_ledger_types::OrganizationId::new(organization_id),
             vault_id: inferadb_ledger_types::VaultId::new(vault_id),
             transactions: vec![],
+            idempotency_key: [0; 16],
+            request_hash: 0,
         }
     }
 

@@ -126,6 +126,8 @@ pub mod server;
 #[doc(hidden)]
 pub mod shard_router;
 #[doc(hidden)]
+pub mod snapshot;
+#[doc(hidden)]
 pub mod ttl_gc;
 #[doc(hidden)]
 pub mod types;

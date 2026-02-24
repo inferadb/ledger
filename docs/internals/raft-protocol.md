@@ -67,7 +67,9 @@ Sent by leaders to replicate log entries and maintain heartbeats. Empty `entries
 
 ### InstallSnapshot
 
-Sent by leaders to followers that are too far behind to catch up via log replay. Transfers a snapshot in chunks.
+Sent by leaders to followers that are too far behind to catch up via log replay. Transfers a zstd-compressed, SHA-256-checksummed snapshot file in chunks.
+
+The snapshot is a binary file containing: LSNP magic, version header, `AppliedStateCore` (postcard-serialized), 9 externalized table sections, entity data, and event data — all within a single zstd-compressed stream with a 32-byte SHA-256 checksum footer over the compressed bytes.
 
 **Request:**
 
@@ -76,7 +78,7 @@ Sent by leaders to followers that are too far behind to catch up via log replay.
 | `vote`     | RaftVote         | Leader's term and node ID            |
 | `meta`     | RaftSnapshotMeta | Snapshot metadata                    |
 | `offset`   | uint64           | Byte offset in snapshot data         |
-| `data`     | bytes            | Chunk of snapshot data               |
+| `data`     | bytes            | Chunk of compressed snapshot data    |
 | `done`     | bool             | True if this is the final chunk      |
 | `shard_id` | uint64           | (Optional) Target shard (default: 0) |
 
@@ -85,6 +87,16 @@ Sent by leaders to followers that are too far behind to catch up via log replay.
 | Field  | Type     | Description              |
 | ------ | -------- | ------------------------ |
 | `vote` | RaftVote | Responder's current term |
+
+**Snapshot installation process:**
+
+1. Follower receives chunks and writes them to a temporary `tokio::fs::File`.
+2. On final chunk (`done = true`), follower verifies the SHA-256 checksum over the entire compressed file before any decompression.
+3. Follower decompresses the zstd stream and reads sections: `AppliedStateCore`, table entries, entities, events.
+4. All state is written into a single `WriteTransaction` — either all state is installed atomically (on commit) or none is visible (on drop).
+5. Event restoration runs in a separate best-effort transaction on the events database.
+6. Follower updates `last_applied` only after successful `WriteTransaction` commit.
+7. Follower resumes normal `AppendEntries` replication.
 
 ## Message Types
 
@@ -172,12 +184,15 @@ Nodes receiving a request for a shard they don't host return `NOT_FOUND`.
 
 ```
 1. Leader detects follower is too far behind
-2. Leader: InstallSnapshot(chunk=1, offset=0) → follower
-3. Follower: Write chunk to temp file
-4. ... repeat for all chunks ...
-5. Leader: InstallSnapshot(done=true) → follower
-6. Follower: Apply snapshot, truncate log
-7. Follower: Resume normal AppendEntries
+2. Leader: build snapshot → zstd-compressed file with SHA-256 checksum
+3. Leader: InstallSnapshot(chunk=1, offset=0) → follower
+4. Follower: Write compressed chunk to temp file
+5. ... repeat for all chunks ...
+6. Leader: InstallSnapshot(done=true) → follower
+7. Follower: Verify SHA-256 checksum (over compressed bytes)
+8. Follower: Decompress zstd stream, install state via WriteTransaction
+9. Follower: Commit WriteTransaction atomically
+10. Follower: Resume normal AppendEntries
 ```
 
 ## Related Documentation
@@ -185,3 +200,4 @@ Nodes receiving a request for a shard they don't host return `NOT_FOUND`.
 - [Consensus](consensus.md) - Raft integration, write/read paths, batching
 - [Discovery](discovery.md) - Peer discovery and cluster formation
 - [AdminService](../client/admin.md) - Cluster management operations
+- [Storage](storage.md) - Snapshot format details

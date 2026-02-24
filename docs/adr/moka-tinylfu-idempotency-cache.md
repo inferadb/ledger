@@ -73,15 +73,30 @@ Moka implements TinyLFU with a modified Count-Min Sketch for frequency estimatio
 - **Compaction complexity.** TTL-based entries in persistent storage require background compaction or garbage collection.
 - **No correctness benefit.** Idempotency is best-effort with TTL. After TTL expiry, a duplicate write succeeds as a new write regardless of storage durability.
 
+### Two-Tier Lookup
+
+The moka cache is the **fast-path** (Tier 1) in a two-tier idempotency system:
+
+1. **Tier 1 — Moka TinyLFU cache** (in-memory, sub-microsecond): Holds full `WriteSuccess` results for the hottest entries. This is the primary deduplication path during normal operation.
+2. **Tier 2 — `ClientSequences` B+ tree table** (replicated, persistent): Stores `ClientSequenceEntry` records (sequence number, last seen timestamp, last idempotency key hash, last request hash) in the replicated state. Survives leader failover within the TTL window (default 24 hours).
+
+**Lookup order:**
+
+1. Check moka cache — hit returns cached `WriteSuccess` immediately (fast path)
+2. On moka miss, check `ClientSequences` table — hit returns `ALREADY_COMMITTED` (no full `WriteSuccess` available, but confirms the write was committed)
+3. Both miss — proceed with new Raft proposal
+
+**TTL eviction** of `ClientSequenceEntry` records is deterministic: triggered when `last_applied.index % eviction_interval == 0`, ensuring all replicas evict identical entries at the same log index. See [Configuration](../operations/configuration.md#client-sequence-eviction) for tuning parameters.
+
 ### Failover Behavior
 
-The idempotency cache is **in-memory only** and does not survive leader failover. This is a documented and tested trade-off:
+The moka cache is **in-memory only** and does not survive leader failover. However, the persistent `ClientSequences` table provides cross-failover deduplication:
 
-- On leader failover, the new leader starts with an empty cache
-- A client retrying a pre-failover write will execute it as a new write
-- This is acceptable because: (a) failover is rare, (b) the client's retry window is short relative to TTL, (c) application-level idempotency (via conditional writes with `SetCondition::IfNotExists`) provides stronger guarantees when needed
+- On leader failover, the new leader starts with an empty moka cache but has access to all `ClientSequenceEntry` records in the replicated `ClientSequences` table
+- A client retrying a pre-failover write will be deduplicated via Tier 2 (returns `ALREADY_COMMITTED` within the 24-hour TTL window)
+- After TTL expiry, a duplicate write succeeds as a new write regardless — this is acceptable because the retry window is orders of magnitude shorter than TTL
 
-Raft log replay does not repopulate the cache — doing so would require persisting per-entry hashes and results, adding disk I/O to every write for a rare edge case.
+Raft log replay does not repopulate the moka cache — the persistent table provides sufficient cross-failover guarantees without adding disk I/O to every write's hot path.
 
 ### Memory Footprint
 
@@ -111,8 +126,8 @@ This is negligible compared to typical Raft node memory (multi-GB for page cache
 
 ### Negative
 
-- **Does not survive leader failover** — new leader starts with empty cache; pre-failover retries may execute as new writes
-- **Single-node scope** — cache is local to the leader; followers don't participate (acceptable because followers don't process writes)
+- **Moka cache does not survive leader failover** — new leader starts with empty moka cache (Tier 2 persistent table provides cross-failover deduplication within TTL window)
+- **Single-node scope** — moka cache is local to the leader; followers don't participate (acceptable because followers don't process writes, and the persistent `ClientSequences` table is replicated)
 - **UUID collision assumption** — relies on UUID v4's 122 bits of entropy; at 100k writes/sec × 24h ≈ 8.64B entries, collision probability is ~10⁻²⁰
 
 ### Neutral

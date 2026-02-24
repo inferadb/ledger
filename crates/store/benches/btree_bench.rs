@@ -158,29 +158,34 @@ fn bench_insert_in_memory(c: &mut Criterion) {
 /// Benchmark full-table iteration at various dataset sizes.
 ///
 /// Measures the streaming iterator's buffer-refill performance.
+/// The 1M entry benchmark validates that leaf linked list traversal (O(1)
+/// per leaf boundary) scales linearly. Target: ≥2x improvement over the
+/// pre-linked-list O(depth) per-leaf-boundary approach.
 fn bench_iteration(c: &mut Criterion) {
     let mut group = c.benchmark_group("btree/iteration");
 
-    for entity_count in [1_000, 10_000] {
+    for entity_count in [1_000, 10_000, 1_000_000] {
+        let label = if entity_count >= 1_000_000 {
+            format!("{}M", entity_count / 1_000_000)
+        } else {
+            format!("{}k", entity_count / 1000)
+        };
+
         group.throughput(Throughput::Elements(entity_count as u64));
 
         let temp_dir = TempDir::new().expect("create temp dir");
         let db = Database::<FileBackend>::create(temp_dir.path().join("bench.db"))
             .expect("create database");
-        populate_entities(&db, entity_count, 1000);
+        populate_entities(&db, entity_count, 10_000);
 
-        group.bench_with_input(
-            BenchmarkId::new("full_scan", format!("{}k", entity_count / 1000)),
-            &entity_count,
-            |b, _| {
-                b.iter(|| {
-                    let txn = db.read().expect("read txn");
-                    let iter = txn.iter::<Entities>().expect("iter");
-                    let count = iter.count();
-                    black_box(count)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("full_scan", label), &entity_count, |b, _| {
+            b.iter(|| {
+                let txn = db.read().expect("read txn");
+                let iter = txn.iter::<Entities>().expect("iter");
+                let count = iter.count();
+                black_box(count)
+            });
+        });
     }
 
     group.finish();
@@ -219,6 +224,57 @@ fn bench_range_scan(c: &mut Criterion) {
 // =============================================================================
 // Mixed Workload
 // =============================================================================
+
+// =============================================================================
+// Compaction
+// =============================================================================
+
+/// Benchmark compaction on a 100K-entry tree with 30% fragmentation.
+///
+/// Uses `iter_custom` because compaction is destructive — each iteration
+/// requires a fresh fragmented tree. Measures the O(N) forward-only
+/// compaction via leaf linked list pointers.
+fn bench_compaction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("btree/compaction");
+    group.throughput(Throughput::Elements(100_000));
+
+    group.bench_function("100k_30pct_frag", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let temp_dir = TempDir::new().expect("create temp dir");
+                let db = Database::<FileBackend>::create(temp_dir.path().join("bench.db"))
+                    .expect("create database");
+
+                // Populate 100K entries
+                populate_entities(&db, 100_000, 10_000);
+
+                // Delete 30% to create distributed fragmentation
+                {
+                    let mut txn = db.write().expect("write txn");
+                    for i in (0..100_000usize).step_by(3) {
+                        let key = format!("key-{:08}", i).into_bytes();
+                        txn.delete::<Entities>(&key).expect("delete");
+                    }
+                    txn.commit().expect("commit");
+                }
+
+                // Measure compaction only
+                let start = std::time::Instant::now();
+                {
+                    let mut txn = db.write().expect("write txn");
+                    let stats = txn.compact_table::<Entities>(0.4).expect("compact");
+                    txn.commit().expect("commit");
+                    black_box(stats);
+                }
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+
+    group.finish();
+}
 
 /// Benchmark a mixed read/write workload (90% reads, 10% writes).
 fn bench_mixed_workload(c: &mut Criterion) {
@@ -280,8 +336,8 @@ criterion_group! {
 criterion_group! {
     name = scan_benches;
     config = Criterion::default()
-        .measurement_time(Duration::from_secs(5))
-        .sample_size(50);
+        .measurement_time(Duration::from_secs(10))
+        .sample_size(20);
     targets = bench_iteration, bench_range_scan
 }
 
@@ -293,4 +349,12 @@ criterion_group! {
     targets = bench_mixed_workload
 }
 
-criterion_main!(lookup_benches, insert_benches, scan_benches, mixed_benches);
+criterion_group! {
+    name = compaction_benches;
+    config = Criterion::default()
+        .measurement_time(Duration::from_secs(30))
+        .sample_size(10);
+    targets = bench_compaction
+}
+
+criterion_main!(lookup_benches, insert_benches, scan_benches, mixed_benches, compaction_benches);

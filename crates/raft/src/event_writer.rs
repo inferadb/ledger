@@ -575,11 +575,11 @@ impl<B: StorageBackend> EventHandle<B> {
 
 /// Per-source token bucket rate limiter for external event ingestion.
 ///
-/// Maintains one [`TokenBucket`] per `source_service` value (e.g., `"engine"`,
+/// Maintains one `TokenBucket` per `source_service` value (e.g., `"engine"`,
 /// `"control"`). Each bucket is sized to the configured
 /// `ingest_rate_limit_per_source` events/sec.
 ///
-/// The rate limit is runtime-updatable via [`AtomicU64`] — no restart required
+/// The rate limit is runtime-updatable via `AtomicU64` — no restart required
 /// when the operator changes `IngestionConfig.ingest_rate_limit_per_source`
 /// through `UpdateConfig` RPC or SIGHUP.
 pub struct IngestionRateLimiter {

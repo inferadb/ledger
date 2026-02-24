@@ -175,6 +175,23 @@ Response includes routing table:
 }
 ```
 
+## Write Forwarding
+
+In multi-shard deployments, the `MultiShardWriteService` transparently forwards writes to the correct shard leader. Clients can send write requests to **any node** in the cluster — if the target organization lives on a different shard, the receiving node forwards the request to the correct shard's leader.
+
+```
+Client → Node A (Shard 0) → resolve_with_forward(org) → Shard 1 Leader → Response → Node A → Client
+```
+
+**Behavior:**
+
+- The originating node performs pre-flight validation (rate limiting, input validation, idempotency check) before forwarding
+- The destination shard leader performs vault slug resolution and Raft proposal
+- Forwarding is transparent to clients — the response is relayed back through the originating node
+- If the destination leader is unavailable, the client receives `UNAVAILABLE` and can retry
+
+This means clients do not need shard-aware routing for writes. Any node accepts writes for any organization. For reads, the same forwarding applies via `MultiShardReadService`.
+
 ## Client Routing
 
 Clients use the routing table to send requests to the correct shard:

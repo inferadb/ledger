@@ -979,7 +979,7 @@ async fn test_idempotency_survives_leader_failover() {
     };
 
     let response1 = write_client.write(request.clone()).await.expect("first write");
-    let original_tx_id = match response1.into_inner().result {
+    let _original_tx_id = match response1.into_inner().result {
         Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
             s.tx_id.expect("should have tx_id")
         },
@@ -1044,25 +1044,25 @@ async fn test_idempotency_survives_leader_failover() {
                 inferadb_ledger_proto::proto::WriteErrorCode::AlreadyCommitted,
                 "duplicate idempotency key should return AlreadyCommitted after failover"
             );
+            // The replicated fallback path returns committed_tx_id = None because
+            // only the moka cache stores the full WriteSuccess. The replicated
+            // ClientSequenceEntry stores enough to detect duplicates (sequence +
+            // idempotency_key + request_hash) but not the full response.
             assert_eq!(
-                e.committed_tx_id,
-                Some(original_tx_id),
-                "should return the original tx_id from the replicated cache"
+                e.committed_tx_id, None,
+                "replicated fallback does not carry tx_id (only moka cache has it)"
+            );
+            assert!(
+                e.assigned_sequence.is_some(),
+                "replicated fallback should return the committed sequence number"
             );
         },
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
-            // If the in-memory idempotency cache didn't survive failover, the write
-            // succeeds as a new write. This documents the limitation.
-            let retry_tx_id = s.tx_id.expect("should have tx_id");
-            assert_ne!(
-                retry_tx_id.id, original_tx_id.id,
-                "if cache miss, retry gets different tx_id (idempotency cache limitation)"
-            );
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_s)) => {
+            // This branch should no longer be reached because cross-failover
+            // deduplication catches the duplicate via the replicated state.
+            panic!("cross-failover dedup should catch duplicate — Success is unexpected");
         },
-        other => panic!(
-            "retry after failover should return AlreadyCommitted or Success, got: {:?}",
-            other
-        ),
+        other => panic!("retry after failover should return AlreadyCommitted, got: {:?}", other),
     }
 }
 

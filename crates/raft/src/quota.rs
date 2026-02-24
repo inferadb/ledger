@@ -216,6 +216,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: Some(ns_quota.clone()),
+                storage_bytes: 0,
             },
         );
 
@@ -254,6 +255,7 @@ mod tests {
                     max_write_ops_per_sec: u32::MAX,
                     max_read_ops_per_sec: u32::MAX,
                 }),
+                storage_bytes: 0,
             },
         );
 
@@ -306,6 +308,7 @@ mod tests {
                     max_write_ops_per_sec: u32::MAX,
                     max_read_ops_per_sec: u32::MAX,
                 }),
+                storage_bytes: 0,
             },
         );
 
@@ -362,6 +365,7 @@ mod tests {
                     max_write_ops_per_sec: u32::MAX,
                     max_read_ops_per_sec: u32::MAX,
                 }),
+                storage_bytes: 0,
             },
         );
 
@@ -396,6 +400,7 @@ mod tests {
                     max_write_ops_per_sec: u32::MAX,
                     max_read_ops_per_sec: u32::MAX,
                 }),
+                storage_bytes: 0,
             },
         );
 
@@ -443,6 +448,7 @@ mod tests {
                 status: OrganizationStatus::Active,
                 pending_shard_id: None,
                 quota: None,
+                storage_bytes: 0,
             },
         );
 

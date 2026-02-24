@@ -6,9 +6,11 @@ Procedure for verifying backup integrity and testing restore procedures.
 
 Ledger backups consist of:
 
-1. **Raft snapshots**: Full state machine snapshots
+1. **Raft snapshots**: zstd-compressed binary files containing `AppliedStateCore`, 9 externalized B+ tree tables, entity data, and event data — with a SHA-256 checksum footer over the compressed bytes
 2. **Block archive**: Transaction history (if retention policy is `FULL`)
 3. **Node ID file**: `{data_dir}/node_id`
+
+Snapshot integrity is verified at restore time: the SHA-256 checksum is validated before any decompression, and state is written into a single `WriteTransaction` (either all tables install atomically or none are visible).
 
 Verification ensures backups can be restored successfully.
 

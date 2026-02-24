@@ -12,6 +12,20 @@ use parking_lot::RwLock;
 
 use super::types::{AppliedState, OrganizationMeta, VaultHealthStatus, VaultMeta};
 
+/// Result of checking the replicated client sequence table for idempotency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyCheckResult {
+    /// The idempotency key matches and the request hash matches.
+    /// The request was already committed with the given sequence number.
+    AlreadyCommitted { sequence: u64 },
+    /// The idempotency key matches but the request hash differs.
+    /// A different request was already committed with this key.
+    KeyReused,
+    /// No entry found for this client, or the stored idempotency key
+    /// does not match. Proceed with the new proposal.
+    Miss,
+}
+
 /// Provides shared read access to the Raft state machine's applied state.
 ///
 /// Services use this to query vault heights and health status
@@ -102,8 +116,7 @@ impl AppliedStateAccessor {
             .read()
             .client_sequences
             .get(&(organization_id, vault_id, client_id.to_string()))
-            .copied()
-            .unwrap_or(0)
+            .map_or(0, |entry| entry.sequence)
     }
 
     /// Returns the current shard height (for snapshot info).
@@ -198,9 +211,216 @@ impl AppliedStateAccessor {
         self.state.read().vault_id_to_slug.get(&id).copied()
     }
 
+    /// Checks the replicated client sequence table for idempotency.
+    ///
+    /// This is the cross-failover deduplication path: when the node-local
+    /// moka cache misses (e.g. after leader failover), this method checks
+    /// the Raft-replicated `ClientSequenceEntry` for a matching idempotency key.
+    ///
+    /// Returns [`IdempotencyCheckResult::AlreadyCommitted`] if the key and hash
+    /// match, [`IdempotencyCheckResult::KeyReused`] if the key matches but the
+    /// hash differs, or [`IdempotencyCheckResult::Miss`] if no entry exists.
+    pub fn client_idempotency_check(
+        &self,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+        client_id: &str,
+        idempotency_key: &[u8; 16],
+        request_hash: u64,
+    ) -> IdempotencyCheckResult {
+        // Zero key means the client didn't provide an idempotency key
+        if *idempotency_key == [0u8; 16] {
+            return IdempotencyCheckResult::Miss;
+        }
+
+        let key = (organization_id, vault_id, client_id.to_string());
+        let state = self.state.read();
+
+        match state.client_sequences.get(&key) {
+            Some(entry) if entry.last_idempotency_key == *idempotency_key => {
+                if entry.last_request_hash == request_hash {
+                    IdempotencyCheckResult::AlreadyCommitted { sequence: entry.sequence }
+                } else {
+                    IdempotencyCheckResult::KeyReused
+                }
+            },
+            _ => IdempotencyCheckResult::Miss,
+        }
+    }
+
     /// Creates an accessor from a pre-built state (for testing).
     #[cfg(test)]
     pub fn new_for_test(state: Arc<RwLock<AppliedState>>) -> Self {
         Self { state }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use inferadb_ledger_types::{OrganizationId, VaultId};
+    use parking_lot::RwLock;
+
+    use super::*;
+    use crate::log_storage::types::ClientSequenceEntry;
+
+    fn make_accessor_with_entry(
+        org: OrganizationId,
+        vault: VaultId,
+        client_id: &str,
+        entry: ClientSequenceEntry,
+    ) -> AppliedStateAccessor {
+        let mut state = AppliedState::default();
+        state.client_sequences.insert((org, vault, client_id.to_string()), entry);
+        AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)))
+    }
+
+    #[test]
+    fn idempotency_check_already_committed() {
+        let key = [1u8; 16];
+        let entry = ClientSequenceEntry {
+            sequence: 42,
+            last_seen: 1000,
+            last_idempotency_key: key,
+            last_request_hash: 12345,
+        };
+        let accessor =
+            make_accessor_with_entry(OrganizationId::new(1), VaultId::new(1), "client-1", entry);
+
+        let result = accessor.client_idempotency_check(
+            OrganizationId::new(1),
+            VaultId::new(1),
+            "client-1",
+            &key,
+            12345,
+        );
+        assert_eq!(result, IdempotencyCheckResult::AlreadyCommitted { sequence: 42 });
+    }
+
+    #[test]
+    fn idempotency_check_key_reused() {
+        let key = [2u8; 16];
+        let entry = ClientSequenceEntry {
+            sequence: 10,
+            last_seen: 1000,
+            last_idempotency_key: key,
+            last_request_hash: 111,
+        };
+        let accessor =
+            make_accessor_with_entry(OrganizationId::new(1), VaultId::new(1), "client-1", entry);
+
+        // Same key, different hash
+        let result = accessor.client_idempotency_check(
+            OrganizationId::new(1),
+            VaultId::new(1),
+            "client-1",
+            &key,
+            999,
+        );
+        assert_eq!(result, IdempotencyCheckResult::KeyReused);
+    }
+
+    #[test]
+    fn idempotency_check_miss_no_entry() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+
+        let result = accessor.client_idempotency_check(
+            OrganizationId::new(1),
+            VaultId::new(1),
+            "client-1",
+            &[3u8; 16],
+            42,
+        );
+        assert_eq!(result, IdempotencyCheckResult::Miss);
+    }
+
+    #[test]
+    fn idempotency_check_miss_different_key() {
+        let stored_key = [4u8; 16];
+        let check_key = [5u8; 16];
+        let entry = ClientSequenceEntry {
+            sequence: 10,
+            last_seen: 1000,
+            last_idempotency_key: stored_key,
+            last_request_hash: 42,
+        };
+        let accessor =
+            make_accessor_with_entry(OrganizationId::new(1), VaultId::new(1), "client-1", entry);
+
+        // Different idempotency key — treated as new request
+        let result = accessor.client_idempotency_check(
+            OrganizationId::new(1),
+            VaultId::new(1),
+            "client-1",
+            &check_key,
+            42,
+        );
+        assert_eq!(result, IdempotencyCheckResult::Miss);
+    }
+
+    #[test]
+    fn idempotency_check_zero_key_always_miss() {
+        let zero_key = [0u8; 16];
+        let entry = ClientSequenceEntry {
+            sequence: 10,
+            last_seen: 1000,
+            last_idempotency_key: zero_key,
+            last_request_hash: 42,
+        };
+        let accessor =
+            make_accessor_with_entry(OrganizationId::new(1), VaultId::new(1), "client-1", entry);
+
+        // Zero key means client didn't provide idempotency — always miss
+        let result = accessor.client_idempotency_check(
+            OrganizationId::new(1),
+            VaultId::new(1),
+            "client-1",
+            &zero_key,
+            42,
+        );
+        assert_eq!(result, IdempotencyCheckResult::Miss);
+    }
+
+    #[test]
+    fn idempotency_check_post_eviction_is_miss() {
+        // After TTL eviction removes a ClientSequenceEntry, a retry with
+        // the same idempotency key is treated as a new request (Miss).
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+
+        // Entry was evicted — no entry in state
+        let result = accessor.client_idempotency_check(
+            OrganizationId::new(1),
+            VaultId::new(1),
+            "client-1",
+            &[6u8; 16],
+            12345,
+        );
+        assert_eq!(result, IdempotencyCheckResult::Miss);
+    }
+
+    #[test]
+    fn idempotency_check_different_vault_is_miss() {
+        let key = [7u8; 16];
+        let entry = ClientSequenceEntry {
+            sequence: 42,
+            last_seen: 1000,
+            last_idempotency_key: key,
+            last_request_hash: 12345,
+        };
+        let accessor =
+            make_accessor_with_entry(OrganizationId::new(1), VaultId::new(1), "client-1", entry);
+
+        // Same key, same hash, but different vault
+        let result = accessor.client_idempotency_check(
+            OrganizationId::new(1),
+            VaultId::new(2),
+            "client-1",
+            &key,
+            12345,
+        );
+        assert_eq!(result, IdempotencyCheckResult::Miss);
     }
 }

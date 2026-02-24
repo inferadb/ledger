@@ -40,7 +40,7 @@ Operational documentation for running InferaDB Ledger in production.
 
 | Runbook                                                | Description              |
 | ------------------------------------------------------ | ------------------------ |
-| [Rolling Upgrade](runbooks/rolling-upgrade.md)         | Zero-downtime upgrades   |
+| [Upgrade Runbook](runbooks/rolling-upgrade.md)         | Version upgrades         |
 | [Backup Verification](runbooks/backup-verification.md) | Testing backup integrity |
 | [Disaster Recovery](runbooks/disaster-recovery.md)     | Recovery procedures      |
 

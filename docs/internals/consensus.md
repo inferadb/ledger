@@ -20,6 +20,8 @@ gRPC/HTTP2 over TCP for both client APIs and inter-node Raft messages. TCP's ker
 
 ## Write Path
 
+### Direct Write (Client → Leader)
+
 ```
 Client → Leader: WriteRequest
 Leader → Followers: Raft AppendEntries
@@ -30,15 +32,30 @@ Leader: Construct Block, Update State Tree
 Leader → Client: WriteResponse (block_height, tx_proof)
 ```
 
+### Forwarded Write (Client → Any Node)
+
+Automatic write forwarding allows clients to send writes to any node. The receiving node resolves the target shard and forwards to the leader transparently:
+
+```
+Client → Node A: WriteRequest
+Node A: Resolve shard → Shard S, Leader = Node B
+Node A → Node B: Forward WriteRequest (with trace context + gRPC deadline)
+Node B: Raft proposal + apply (normal write path)
+Node B → Node A: WriteResponse
+Node A → Client: WriteResponse
+```
+
+Pre-flight checks (validation, rate limiting, quota) execute on the originating node before forwarding. Vault slug resolution and idempotency deduplication happen on the destination leader. The `MultiShardWriteService` uses `resolve_with_forward()` to determine whether to handle locally or forward.
+
 ### Write Stages
 
 1. **Received**: Leader accepts transaction into pending queue
 2. **Replicated**: Raft log entry replicated to quorum (2f+1 nodes)
 3. **Committed**: Raft marks entry as committed
 4. **Applied**: Block constructed, state tree updated, state_root computed
-5. **Persisted**: Block written to disk with fsync
+5. **Persisted**: `AppliedStateCore` + externalized tables written atomically in a single `WriteTransaction`
 
-**Client guarantee**: `WriteResponse` returns after stage 4. Data is durable once replicated to quorum.
+**Client guarantee**: `WriteResponse` returns after stage 5. Data is durable once replicated to quorum.
 
 ### Block Finality
 
@@ -49,6 +66,28 @@ A block is final when:
 - `state_root` computed and included in the block header
 
 **Reorg safety**: Raft guarantees committed entries are never removed. No reorg risk—once committed, a block is permanent.
+
+## Client Sequence Persistence
+
+Client sequences are persisted in the replicated `ClientSequences` B+ tree table as `ClientSequenceEntry` structs containing:
+
+- `sequence`: Last committed sequence number
+- `last_seen`: Deterministic apply-phase timestamp (from `RaftPayload.proposed_at`)
+- `last_idempotency_key`: UUID v4 from the last write
+- `last_request_hash`: Seahash of the last write's operations
+
+### Two-Tier Idempotency
+
+Duplicate detection uses a two-tier lookup:
+
+1. **Moka cache (fast path)**: In-memory TinyLFU cache with 24h TTL. Returns the full `WriteSuccess` response including `committed_tx_id`.
+2. **Replicated state (fallback)**: On moka cache miss, checks `ClientSequenceEntry` in the replicated `AppliedState`. Returns `ALREADY_COMMITTED` with `assigned_sequence` but without `committed_tx_id` (only the moka cache stores the full response).
+
+This provides cross-failover deduplication: after a leader change, the new leader's moka cache is empty, but the persistent `ClientSequenceEntry` (replicated via Raft) detects duplicates within the TTL window.
+
+### TTL Eviction
+
+Client sequence entries are evicted when `proposed_at - last_seen > ttl_seconds` (default: 86,400 seconds / 24 hours). Eviction triggers deterministically when `last_applied.index % eviction_interval == 0` (default: 1,000). Eviction candidates are sorted by composite key before deletion to ensure identical behavior across all replicas.
 
 ## Transaction Batching
 
@@ -128,6 +167,7 @@ All state machine operations must be deterministic. Identical transactions on id
 - **No random values**: If randomness needed, it comes from the leader
 - **Consistent floating-point**: Use fixed-point arithmetic
 - **Ordered iteration**: Use sorted maps/sets, not hash-based
+- **Deterministic eviction**: Client sequence eviction triggers on `log_id.index % interval`, with candidates sorted by composite key before deletion
 
 ### Raft Integration Sequence
 

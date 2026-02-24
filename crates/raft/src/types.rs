@@ -6,7 +6,7 @@
 //! - Response types
 //! - Snapshot data format
 
-use std::{fmt, io::Cursor};
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 // Re-export domain types that originated here but now live in types crate.
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 // - `NodeId`: Node identifier type (u64)
 // - `Node`: Node metadata (BasicNode with address info)
 // - `Entry`: Log entry format (default Entry)
-// - `SnapshotData`: Snapshot format (in-memory cursor for MVP)
+// - `SnapshotData`: Snapshot format (file-based streaming with zstd compression)
 // - `AsyncRuntime`: Tokio runtime
 // - `Responder`: One-shot channel responder
 // ============================================================================
@@ -54,7 +54,7 @@ openraft::declare_raft_types!(
         NodeId = LedgerNodeId,
         Node = BasicNode,
         Entry = openraft::Entry<LedgerTypeConfig>,
-        SnapshotData = Cursor<Vec<u8>>,
+        SnapshotData = tokio::fs::File,
         AsyncRuntime = openraft::TokioRuntime,
         Responder = OneshotResponder<LedgerTypeConfig>
 );
@@ -77,6 +77,15 @@ pub enum LedgerRequest {
         vault_id: VaultId,
         /// Transactions to apply atomically.
         transactions: Vec<Transaction>,
+        /// Idempotency key (16-byte UUID) for cross-failover deduplication.
+        /// Stored in the replicated `ClientSequenceEntry` so new leaders can
+        /// detect retries without the moka cache.
+        #[serde(default)]
+        idempotency_key: [u8; 16],
+        /// Hash of the request payload (seahash) for detecting key reuse
+        /// with different payloads after failover.
+        #[serde(default)]
+        request_hash: u64,
     },
 
     /// Creates a new organization (applied to `_system`).
@@ -537,6 +546,8 @@ mod tests {
                 organization_id: OrganizationId::new(1),
                 vault_id: VaultId::new(1),
                 transactions: vec![],
+                idempotency_key: [0; 16],
+                request_hash: 0,
             },
             proposed_at: ts,
         };

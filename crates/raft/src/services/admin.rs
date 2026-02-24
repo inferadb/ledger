@@ -2296,8 +2296,13 @@ impl AdminService for AdminServiceImpl {
                 actor: "system:gc".to_string(),
             };
 
-            let gc_request =
-                LedgerRequest::Write { organization_id, vault_id, transactions: vec![transaction] };
+            let gc_request = LedgerRequest::Write {
+                organization_id,
+                vault_id,
+                transactions: vec![transaction],
+                idempotency_key: [0; 16],
+                request_hash: 0,
+            };
 
             match self
                 .raft

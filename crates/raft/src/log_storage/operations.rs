@@ -16,8 +16,8 @@ use inferadb_ledger_types::{
 use super::{
     store::RaftLogStore,
     types::{
-        AppliedState, OrganizationMeta, VaultHealthStatus, VaultMeta, estimate_write_storage_delta,
-        select_least_loaded_shard,
+        AppliedState, ClientSequenceEntry, OrganizationMeta, PendingExternalWrites,
+        VaultHealthStatus, VaultMeta, estimate_write_storage_delta, select_least_loaded_shard,
     },
 };
 use crate::{
@@ -43,14 +43,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ) -> (LedgerResponse, Option<VaultEntry>) {
         let mut events = Vec::new();
         let mut op_index = 0u32;
-        self.apply_request_with_events(request, state, Utc::now(), &mut op_index, &mut events, 0)
+        let mut pending = PendingExternalWrites::default();
+        self.apply_request_with_events(
+            request,
+            state,
+            Utc::now(),
+            &mut op_index,
+            &mut events,
+            0,
+            &mut pending,
+        )
     }
 
     /// Applies a single request with event emission support.
     ///
     /// Like [`apply_request`], but additionally accumulates deterministic
-    /// apply-phase events into `events`. The `op_index` counter is incremented
-    /// for each event emitted, ensuring unique UUID v5 event IDs across a batch.
+    /// apply-phase events into `events` and external table writes into
+    /// `pending`. The `op_index` counter is incremented for each event
+    /// emitted, ensuring unique UUID v5 event IDs across a batch.
     ///
     /// `ttl_days` controls event expiry (from [`EventConfig::default_ttl_days`]).
     pub(super) fn apply_request_with_events(
@@ -61,12 +71,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
         op_index: &mut u32,
         events: &mut Vec<EventEntry>,
         ttl_days: u32,
+        pending: &mut PendingExternalWrites,
     ) -> (LedgerResponse, Option<VaultEntry>) {
         // Block height for event emission (from shard chain state)
         let block_height = self.shard_chain.read().height + 1;
 
         match request {
-            LedgerRequest::Write { organization_id, vault_id, transactions } => {
+            LedgerRequest::Write {
+                organization_id,
+                vault_id,
+                transactions,
+                idempotency_key,
+                request_hash,
+            } => {
                 // Check organization status before processing write
                 if let Some(org_meta) = state.organizations.get(organization_id) {
                     match org_meta.status {
@@ -186,12 +203,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Update vault height in applied state
                 state.vault_heights.insert(key, new_height);
+                pending.vault_heights.push((key, new_height));
 
                 // Update last write timestamp from latest transaction (deterministic)
                 if let Some(last_tx) = transactions.last()
                     && let Some(vault_meta) = state.vaults.get_mut(&key)
                 {
                     vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
+                    // Re-serialize after in-place mutation
+                    if let Ok(blob) = encode(vault_meta) {
+                        pending.vaults.push((vault_meta.vault_id, blob));
+                    }
                 }
 
                 // Server-assigned sequences: assign monotonic sequence to each transaction.
@@ -202,9 +224,31 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     .iter()
                     .map(|tx| {
                         let client_key = (*organization_id, *vault_id, tx.client_id.clone());
-                        let current = state.client_sequences.get(&client_key).copied().unwrap_or(0);
-                        let new_sequence = current + 1;
-                        state.client_sequences.insert(client_key, new_sequence);
+                        let current_seq =
+                            state.client_sequences.get(&client_key).map_or(0, |e| e.sequence);
+                        let new_sequence = current_seq + 1;
+                        let entry = ClientSequenceEntry {
+                            sequence: new_sequence,
+                            last_seen: block_timestamp.timestamp(),
+                            last_idempotency_key: *idempotency_key,
+                            last_request_hash: *request_hash,
+                        };
+                        state.client_sequences.insert(client_key, entry);
+
+                        // Mirror to pending external writes
+                        let cs_key = PendingExternalWrites::client_sequence_key(
+                            *organization_id,
+                            *vault_id,
+                            tx.client_id.as_bytes(),
+                        );
+                        if let Ok(value) = encode(&ClientSequenceEntry {
+                            sequence: new_sequence,
+                            last_seen: block_timestamp.timestamp(),
+                            last_idempotency_key: *idempotency_key,
+                            last_request_hash: *request_hash,
+                        }) {
+                            pending.client_sequences.push((cs_key, value));
+                        }
 
                         // Record the first transaction's assigned sequence for the response
                         if assigned_sequence == 0 {
@@ -240,6 +284,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
                 crate::metrics::set_organization_storage_bytes(organization_id.value(), *entry);
                 crate::metrics::record_organization_operation(organization_id.value(), "write");
+
+                // Mirror updated OrganizationMeta (with new storage_bytes) to pending
+                if let Some(org_meta) = state.organizations.get_mut(organization_id) {
+                    org_meta.storage_bytes = *entry;
+                    if let Ok(blob) = encode(org_meta) {
+                        pending.organizations.push((*organization_id, blob));
+                    }
+                }
 
                 // Compute block hash from vault entry (for response)
                 // We temporarily build a BlockHeader to compute the hash
@@ -302,22 +354,26 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Use provided shard_id or select least-loaded shard
                 let assigned_shard =
                     shard_id.unwrap_or_else(|| select_least_loaded_shard(&state.organizations));
-                state.organizations.insert(
+                let org_meta = OrganizationMeta {
                     organization_id,
-                    OrganizationMeta {
-                        organization_id,
-                        slug: *slug,
-                        name: name.clone(),
-                        shard_id: assigned_shard,
-                        status: OrganizationStatus::Active,
-                        pending_shard_id: None,
-                        quota: quota.clone(),
-                    },
-                );
+                    slug: *slug,
+                    name: name.clone(),
+                    shard_id: assigned_shard,
+                    status: OrganizationStatus::Active,
+                    pending_shard_id: None,
+                    quota: quota.clone(),
+                    storage_bytes: 0,
+                };
+                // Mirror to pending external writes
+                if let Ok(blob) = encode(&org_meta) {
+                    pending.organizations.push((organization_id, blob));
+                }
+                state.organizations.insert(organization_id, org_meta);
 
                 // Insert into bidirectional slug index
                 state.slug_index.insert(*slug, organization_id);
                 state.id_to_slug.insert(organization_id, *slug);
+                pending.slug_index.push((*slug, organization_id));
 
                 // Persist organization to StateLayer for ShardRouter discovery.
                 // This enables the ShardRouter to find the organization->shard mapping.
@@ -426,23 +482,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let vault_id = state.sequences.next_vault();
                 let key = (*organization_id, vault_id);
                 state.vault_heights.insert(key, 0);
+                pending.vault_heights.push((key, 0));
                 state.vault_health.insert(key, VaultHealthStatus::Healthy);
-                state.vaults.insert(
-                    key,
-                    VaultMeta {
-                        organization_id: *organization_id,
-                        vault_id,
-                        slug: *slug,
-                        name: name.clone(),
-                        deleted: false,
-                        last_write_timestamp: 0, // No writes yet
-                        retention_policy: retention_policy.unwrap_or_default(),
-                    },
-                );
+                pending.vault_health.push((key, VaultHealthStatus::Healthy));
+                let vault_meta = VaultMeta {
+                    organization_id: *organization_id,
+                    vault_id,
+                    slug: *slug,
+                    name: name.clone(),
+                    deleted: false,
+                    last_write_timestamp: 0, // No writes yet
+                    retention_policy: retention_policy.unwrap_or_default(),
+                };
+                if let Ok(blob) = encode(&vault_meta) {
+                    pending.vaults.push((vault_id, blob));
+                }
+                state.vaults.insert(key, vault_meta);
 
                 // Insert into bidirectional vault slug index
                 state.vault_slug_index.insert(*slug, vault_id);
                 state.vault_id_to_slug.insert(vault_id, *slug);
+                pending.vault_slug_index.push((*slug, vault_id));
 
                 // Emit VaultCreated event
                 let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
@@ -489,9 +549,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // Already deleting - check if vaults are gone now
                             if blocking_vault_ids.is_empty() {
                                 org.status = OrganizationStatus::Deleted;
+                                // Re-serialize after in-place mutation
+                                if let Ok(blob) = encode(org) {
+                                    pending.organizations.push((*organization_id, blob));
+                                }
                                 // Clean up slug index on final deletion
                                 if let Some(slug) = state.id_to_slug.remove(organization_id) {
                                     state.slug_index.remove(&slug);
+                                    pending.slug_index_deleted.push(slug);
                                 }
                                 LedgerResponse::OrganizationDeleted {
                                     success: true,
@@ -510,9 +575,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             if blocking_vault_ids.is_empty() {
                                 // No blocking vaults - delete immediately
                                 org.status = OrganizationStatus::Deleted;
+                                // Re-serialize after in-place mutation
+                                if let Ok(blob) = encode(org) {
+                                    pending.organizations.push((*organization_id, blob));
+                                }
                                 // Clean up slug index on final deletion
                                 if let Some(slug) = state.id_to_slug.remove(organization_id) {
                                     state.slug_index.remove(&slug);
+                                    pending.slug_index_deleted.push(slug);
                                 }
                                 LedgerResponse::OrganizationDeleted {
                                     success: true,
@@ -521,6 +591,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             } else {
                                 // Has vaults - transition to Deleting state
                                 org.status = OrganizationStatus::Deleting;
+                                // Re-serialize after in-place mutation
+                                if let Ok(blob) = encode(org) {
+                                    pending.organizations.push((*organization_id, blob));
+                                }
                                 LedgerResponse::OrganizationDeleting {
                                     organization_id: *organization_id,
                                     blocking_vault_ids,
@@ -556,10 +630,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault) = state.vaults.get_mut(&key) {
                     vault.deleted = true;
+                    // Re-serialize vault meta after in-place mutation
+                    if let Ok(blob) = encode(vault) {
+                        pending.vaults.push((vault.vault_id, blob));
+                    }
 
                     // Clean up vault slug index
                     if let Some(slug) = state.vault_id_to_slug.remove(vault_id) {
                         state.vault_slug_index.remove(&slug);
+                        pending.vault_slug_index_deleted.push(slug);
                     }
 
                     // Check if organization is in Deleting state and this was the last vault
@@ -575,9 +654,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if !remaining_vaults {
                             // Auto-transition organization to Deleted
                             org.status = OrganizationStatus::Deleted;
+                            // Re-serialize org meta after in-place mutation
+                            if let Ok(blob) = encode(org) {
+                                pending.organizations.push((*organization_id, blob));
+                            }
                             // Clean up slug index
                             if let Some(slug) = state.id_to_slug.remove(organization_id) {
                                 state.slug_index.remove(&slug);
+                                pending.slug_index_deleted.push(slug);
                             }
                             tracing::info!(
                                 organization_id = organization_id.value(),
@@ -635,6 +719,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         },
                         _ => {
                             org.status = OrganizationStatus::Suspended;
+                            if let Ok(blob) = encode(org) {
+                                pending.organizations.push((*organization_id, blob));
+                            }
                             LedgerResponse::OrganizationSuspended {
                                 organization_id: *organization_id,
                             }
@@ -671,6 +758,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     match org.status {
                         OrganizationStatus::Suspended => {
                             org.status = OrganizationStatus::Active;
+                            if let Ok(blob) = encode(org) {
+                                pending.organizations.push((*organization_id, blob));
+                            }
                             LedgerResponse::OrganizationResumed {
                                 organization_id: *organization_id,
                             }
@@ -728,6 +818,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             } else {
                                 org.status = OrganizationStatus::Migrating;
                                 org.pending_shard_id = Some(*target_shard_id);
+                                if let Ok(blob) = encode(org) {
+                                    pending.organizations.push((*organization_id, blob));
+                                }
                                 LedgerResponse::MigrationStarted {
                                     organization_id: *organization_id,
                                     target_shard_id: *target_shard_id,
@@ -785,6 +878,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 org.shard_id = target_shard;
                                 org.status = OrganizationStatus::Active;
                                 org.pending_shard_id = None;
+                                if let Ok(blob) = encode(org) {
+                                    pending.organizations.push((*organization_id, blob));
+                                }
                                 LedgerResponse::MigrationCompleted {
                                     organization_id: *organization_id,
                                     old_shard_id: old_shard,
@@ -844,7 +940,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let key = (*organization_id, *vault_id);
                 if *healthy {
                     // Mark vault as healthy
-                    state.vault_health.insert(key, VaultHealthStatus::Healthy);
+                    let status = VaultHealthStatus::Healthy;
+                    state.vault_health.insert(key, status.clone());
+                    pending.vault_health.push((key, status));
                     crate::metrics::set_vault_health(
                         organization_id.value(),
                         vault_id.value(),
@@ -859,13 +957,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     (recovery_attempt, recovery_started_at)
                 {
                     // Mark vault as recovering
-                    state.vault_health.insert(
-                        key,
-                        VaultHealthStatus::Recovering {
-                            started_at: *started_at,
-                            attempt: *attempt,
-                        },
-                    );
+                    let status = VaultHealthStatus::Recovering {
+                        started_at: *started_at,
+                        attempt: *attempt,
+                    };
+                    state.vault_health.insert(key, status.clone());
+                    pending.vault_health.push((key, status));
                     crate::metrics::set_vault_health(
                         organization_id.value(),
                         vault_id.value(),
@@ -882,9 +979,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     let expected = expected_root.unwrap_or(inferadb_ledger_types::ZERO_HASH);
                     let computed = computed_root.unwrap_or(inferadb_ledger_types::ZERO_HASH);
                     let at_height = diverged_at_height.unwrap_or(0);
-                    state
-                        .vault_health
-                        .insert(key, VaultHealthStatus::Diverged { expected, computed, at_height });
+                    let status = VaultHealthStatus::Diverged { expected, computed, at_height };
+                    state.vault_health.insert(key, status.clone());
+                    pending.vault_health.push((key, status));
                     crate::metrics::set_vault_health(
                         organization_id.value(),
                         vault_id.value(),
@@ -956,6 +1053,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 let new_shard_id =
                                     inferadb_ledger_types::ShardId::new(*shard_id as u32);
                                 org.shard_id = new_shard_id;
+                                if let Ok(blob) = encode(org) {
+                                    pending.organizations.push((*organization_id, blob));
+                                }
                                 LedgerResponse::OrganizationMigrated {
                                     organization_id: *organization_id,
                                     old_shard_id,
@@ -1043,6 +1143,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         op_index,
                         events,
                         ttl_days,
+                        pending,
                     );
                     responses.push(response);
                     if vault_entry.is_some() {

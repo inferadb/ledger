@@ -121,6 +121,7 @@ impl MultiShardLedgerServer {
 
         let write_service = MultiShardWriteService::builder()
             .resolver(resolver.clone())
+            .manager(Some(self.manager.clone()))
             .idempotency(self.idempotency.clone())
             .rate_limiter(self.organization_rate_limiter.clone())
             .hot_key_detector(self.hot_key_detector.clone())

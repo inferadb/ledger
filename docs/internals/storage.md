@@ -24,7 +24,7 @@ The current implementation uses a unified database approach rather than per-shar
 | Decision               | Rationale                                          |
 | ---------------------- | -------------------------------------------------- |
 | Unified database files | Custom B+ tree engine with MVCC                    |
-| Table-based storage    | 15 tables for different data types (see tables.rs) |
+| Table-based storage    | 20 tables for different data types (see tables.rs) |
 | Dual-slot commit       | Atomic commits using header slot flipping          |
 | Snapshots by height    | Predictable naming; simple retention policy        |
 
@@ -48,23 +48,43 @@ Key operations:
 
 ### State Storage
 
-The database uses 15 tables (see `crates/store/src/tables.rs`):
+The database uses 20 tables (see `crates/store/src/tables.rs`):
 
-| Table           | Key Format                              | Purpose                    |
-| --------------- | --------------------------------------- | -------------------------- |
-| Relationships   | `{vault_id:8BE}{bucket_id:1}{key}`      | Relationship tuples        |
-| Entities        | `{vault_id:8BE}{bucket_id:1}{key}`      | Key-value entities         |
-| ObjIndex        | `{vault_id:8BE}{resource}#{relation}`   | Resource→subject lookup    |
-| SubjIndex       | `{vault_id:8BE}{subject}#{relation}`    | Subject→resource lookup    |
-| VaultMeta       | `{organization_slug:8BE}{vault_id:8BE}`      | Vault metadata             |
-| Blocks          | `{shard_height:8BE}`                    | Block storage              |
-| VaultBlockIndex | `{organization_slug:8BE}{vault_id:8BE}{h:8}` | Vault height→block mapping |
-| RaftLog         | `{log_id:8BE}`                          | Raft log entries           |
-| RaftState       | `{key}`                                 | Raft persistent state      |
+| Table              | Key Format                              | Purpose                              |
+| ------------------ | --------------------------------------- | ------------------------------------ |
+| Relationships      | `{vault_id:8BE}{bucket_id:1}{key}`      | Relationship tuples                  |
+| Entities           | `{vault_id:8BE}{bucket_id:1}{key}`      | Key-value entities                   |
+| ObjIndex           | `{vault_id:8BE}{resource}#{relation}`   | Resource→subject lookup              |
+| SubjIndex          | `{vault_id:8BE}{subject}#{relation}`    | Subject→resource lookup              |
+| VaultMeta          | `{organization_slug:8BE}{vault_id:8BE}` | Vault metadata                       |
+| Blocks             | `{shard_height:8BE}`                    | Block storage                        |
+| VaultBlockIndex    | `{org_slug:8BE}{vault_id:8BE}{h:8}`    | Vault height→block mapping           |
+| RaftLog            | `{log_id:8BE}`                          | Raft log entries                     |
+| RaftState          | `{key}`                                 | Raft persistent state                |
+| OrganizationMeta   | `{org_id:8BE}`                          | Organization metadata                |
+| Sequences          | `{counter_name}`                        | Sequence counters                    |
+| OrganizationSlugIndex | `{slug:8BE}`                         | Slug→org_id lookup                   |
+| VaultSlugIndex     | `{slug:8BE}`                            | Slug→vault_id lookup                 |
+| ClientSequences    | `{org_id:8BE}{vault_id:8BE}{client_id}` | Client sequence entries (composite)  |
+| VaultHeights       | `{org_id:8BE}{vault_id:8BE}`            | Per-vault blockchain heights         |
+| VaultHashes        | `{org_id:8BE}{vault_id:8BE}`            | Per-vault previous block hashes      |
+| VaultHealth        | `{org_id:8BE}{vault_id:8BE}`            | Per-vault health status              |
 
 **Key format**: `vault_id (8 bytes BE) + bucket_id (1 byte) + local_key`
 
 The bucket_id (0-255) enables incremental state root computation.
+
+### Externalized State Architecture
+
+The Raft state machine uses a two-tier persistence model:
+
+1. **`AppliedStateCore`** — A compact struct (<512 bytes) containing `last_applied`, `membership`, `shard_height`, and `previous_shard_hash`. Stored in the `RaftState` table with a 2-byte version sentinel prefix (`[0x00, 0x01]`).
+
+2. **Externalized tables** — Nine dedicated B+ tree tables (`OrganizationMeta`, `VaultMeta`, `VaultHeights`, `VaultHashes`, `VaultHealth`, `Sequences`, `ClientSequences`, `OrganizationSlugIndex`, `VaultSlugIndex`) store per-entity state that previously lived in a single serialized `AppliedState` blob.
+
+Both tiers are written atomically in a single `WriteTransaction` during each apply cycle. The in-memory `AppliedState` remains the hot cache for reads — externalized tables are the persistence layer only.
+
+On startup, `load_state_from_tables()` reconstructs the full `AppliedState` from the externalized tables, including derived fields (`id_to_slug`, `vault_id_to_slug`, `organization_storage_bytes`). The version sentinel prefix enables automatic migration from the legacy single-blob format.
 
 ## Block Archive
 
@@ -81,35 +101,33 @@ A secondary `VaultBlockIndex` table provides fast vault-specific lookups by vaul
 
 ### Format
 
-```rust
-struct SnapshotFile {
-    header: SnapshotHeader,
-    state_data: CompressedStateData,  // zstd compressed
-}
+Snapshots use a file-based streaming format with zstd compression and SHA-256 integrity verification. The binary layout is:
 
-struct SnapshotHeader {
-    magic: [u8; 4],                        // "LSNP"
-    version: u32,
-    shard_id: ShardId,
-    shard_height: u64,
-    vault_states: Vec<VaultSnapshotMeta>,
-    checksum: Hash,                        // SHA-256 of state_data
-    genesis_hash: Hash,                    // Links snapshot to shard origin
-    previous_snapshot_height: Option<u64>,
-    previous_snapshot_hash: Option<Hash>,
-    chain_commitment: ChainCommitment,     // Verification without full replay
-}
-
-struct VaultSnapshotMeta {
-    vault_id: VaultId,
-    vault_height: u64,
-    state_root: Hash,
-    bucket_roots: Vec<Hash>,  // 256 bucket roots for incremental state
-    key_count: u64,
-}
+```
+┌─────────────────────────────────────────────┐
+│ Magic: "LSNP" (4 bytes)                     │
+│ Version: 1 (u32)                            │
+├─────────────────────────────────────────────┤
+│ Header section: AppliedStateCore (postcard)  │
+├─────────────────────────────────────────────┤
+│ Table sections × 9 (externalized tables)    │
+│   Each: table_id + entry_count + key/value  │
+├─────────────────────────────────────────────┤
+│ Entity section: all entities across vaults  │
+├─────────────────────────────────────────────┤
+│ Event section: apply-phase events           │
+├─────────────────────────────────────────────┤
+│ SHA-256 checksum (32 bytes, over compressed)│
+└─────────────────────────────────────────────┘
 ```
 
+All sections (header through events) are zstd-compressed (level 3) as a single stream. The SHA-256 checksum covers the compressed bytes, enabling two-pass verification: checksum first (over compressed data), then decompress.
+
 **Naming**: `{shard_height:09}.snap` (e.g., `000001000.snap`)
+
+### Snapshot Data Type
+
+The openraft `SnapshotData` type is `tokio::fs::File`. Snapshots are written to temporary files, transferred as chunked byte streams between nodes, and installed by streaming decompressed data directly into a `WriteTransaction`.
 
 ### Chain Commitment
 
@@ -222,6 +240,21 @@ async fn recover(&mut self) -> Result<()> {
 | Corrupted log entry  | Fetch from peer, or rebuild from snapshot        |
 | Missing segment file | Fetch from peer (block archive is replicated)    |
 
+## File I/O
+
+The storage engine uses position-based I/O (`pread`/`pwrite` on Unix) for lock-free concurrent reads. Reads use `read_exact_at()` without acquiring any lock, while writes serialize through a `Mutex<()>` write lock.
+
+| Operation     | Lock Required | Syscall        |
+| ------------- | ------------- | -------------- |
+| `read_page`   | None          | `pread(2)`     |
+| `read_header` | None          | `pread(2)`     |
+| `write_page`  | `write_lock`  | `pwrite(2)`    |
+| `write_header`| `write_lock`  | `pwrite(2)`    |
+| `extend`      | `write_lock`  | `ftruncate(2)` |
+| `sync`        | None          | `fdatasync(2)` |
+
+On Windows, reads fall back to `seek_read()` which requires the write lock due to cursor mutation.
+
 ## File Locking
 
 Each node exclusively locks its data directory:
@@ -259,7 +292,7 @@ fn acquire_lock(data_dir: &Path) -> Result<FileLock> {
 | Chain hash break    | previous_hash mismatch      | Re-fetch blocks from healthy replica |
 | State divergence    | state_root mismatch         | Rebuild state tree from chain        |
 | Partial block       | Incomplete block data       | Re-fetch from quorum                 |
-| Snapshot corruption | state_root mismatch on load | Discard, use older or rebuild        |
+| Snapshot corruption | SHA-256 checksum mismatch   | Discard, use older or rebuild        |
 
 **Authoritative source**: Quorum determines truth. Corrupted nodes resync from healthy replicas.
 
@@ -269,3 +302,11 @@ fn acquire_lock(data_dir: &Path) -> Result<FileLock> {
 2. **State consistency**: `state.db` reflects all applied log entries up to `applied_index`
 3. **Block archive append-only**: Segment files never modified after creation
 4. **Snapshot validity**: Snapshot `state_root` matches block header at `shard_height`
+5. **Externalized table atomicity**: `AppliedStateCore` and all 9 externalized tables are written in a single `WriteTransaction` — either all succeed or none are visible
+6. **Snapshot integrity**: SHA-256 checksum over compressed bytes is verified before any decompression or state changes during installation
+
+## Format Compatibility
+
+The B+ tree leaf node layout (`NODE_HEADER_SIZE = 16`) includes a `next_leaf` sibling pointer that was not present in earlier versions (`NODE_HEADER_SIZE = 8`). This is a breaking page-level format change — existing data files cannot be read by the new binary.
+
+Nodes with old-format data directories must delete the directory and rejoin the cluster via snapshot install. See the [Upgrade Runbook](../operations/runbooks/rolling-upgrade.md) for the full procedure.

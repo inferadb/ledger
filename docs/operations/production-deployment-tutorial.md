@@ -558,6 +558,6 @@ kubectl exec ledger-0 -- grpcurl -plaintext \
 ## Next Steps
 
 - [Alerting Guide](alerting.md) - Configure PagerDuty/Slack notifications
-- [Rolling Upgrade](runbooks/rolling-upgrade.md) - Upgrade procedure
+- [Upgrade Runbook](runbooks/rolling-upgrade.md) - Version upgrade procedures
 - [Disaster Recovery](runbooks/disaster-recovery.md) - Recovery procedures
 - [Capacity Planning](capacity-planning.md) - Sizing guidelines

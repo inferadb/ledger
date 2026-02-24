@@ -285,3 +285,86 @@ fn default_batch_timeout() -> Duration {
 fn default_coalesce_enabled() -> bool {
     true
 }
+
+/// Configuration for client sequence TTL eviction.
+///
+/// Controls how frequently expired client sequence entries are purged
+/// from the replicated state. Eviction is deterministic from the Raft
+/// log index, ensuring all replicas evict identical entries.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::ClientSequenceEvictionConfig;
+/// let config = ClientSequenceEvictionConfig::builder()
+///     .eviction_interval(500)
+///     .ttl_seconds(3600)
+///     .build()
+///     .expect("valid eviction config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClientSequenceEvictionConfig {
+    /// Eviction triggers when `last_applied.index % eviction_interval == 0`.
+    ///
+    /// Lower values mean more frequent eviction checks (more CPU per apply cycle).
+    /// Higher values mean less frequent checks (entries may live slightly beyond TTL).
+    #[serde(default = "default_eviction_interval")]
+    pub eviction_interval: u64,
+    /// Time-to-live in seconds for client sequence entries.
+    ///
+    /// Entries where `proposed_at - last_seen > ttl_seconds` are evicted.
+    /// This bounds the cross-failover deduplication window.
+    #[serde(default = "default_ttl_seconds")]
+    pub ttl_seconds: i64,
+}
+
+#[bon::bon]
+impl ClientSequenceEvictionConfig {
+    /// Creates a new eviction configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if values are out of range.
+    #[builder]
+    pub fn new(
+        #[builder(default = default_eviction_interval())] eviction_interval: u64,
+        #[builder(default = default_ttl_seconds())] ttl_seconds: i64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { eviction_interval, ttl_seconds };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl ClientSequenceEvictionConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.eviction_interval == 0 {
+            return Err(ConfigError::Validation {
+                message: "eviction_interval must be > 0".to_string(),
+            });
+        }
+        if self.ttl_seconds <= 0 {
+            return Err(ConfigError::Validation { message: "ttl_seconds must be > 0".to_string() });
+        }
+        Ok(())
+    }
+}
+
+impl Default for ClientSequenceEvictionConfig {
+    fn default() -> Self {
+        Self { eviction_interval: default_eviction_interval(), ttl_seconds: default_ttl_seconds() }
+    }
+}
+
+fn default_eviction_interval() -> u64 {
+    1_000
+}
+
+fn default_ttl_seconds() -> i64 {
+    86_400 // 24 hours
+}
