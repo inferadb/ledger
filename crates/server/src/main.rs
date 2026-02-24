@@ -20,7 +20,6 @@
 
 mod bootstrap;
 mod config;
-mod config_reload;
 mod coordinator;
 mod discovery;
 mod node_id;
@@ -63,10 +62,6 @@ async fn main() -> Result<(), ServerError> {
             CliCommand::Config { action } => match action {
                 ConfigAction::Schema => {
                     print!("{}", config::generate_runtime_config_schema());
-                    return Ok(());
-                },
-                ConfigAction::Example => {
-                    print!("{}", config::generate_runtime_config_example());
                     return Ok(());
                 },
             },
@@ -130,18 +125,6 @@ async fn main() -> Result<(), ServerError> {
 
     // Mark node as ready now that bootstrap is complete
     health_state.mark_ready();
-
-    // Spawn SIGHUP config reload handler if a config file is specified
-    #[cfg(unix)]
-    if let Some(ref config_path) = config.config_file {
-        config_reload::spawn_sighup_handler(
-            config_path.clone(),
-            node.runtime_config.clone(),
-            None, // rate_limiter propagated via RuntimeConfigHandle::update()
-            None, // hot_key_detector propagated via RuntimeConfigHandle::update()
-        );
-        tracing::info!(config_file = %config_path.display(), "SIGHUP config reload enabled");
-    }
 
     // Spawn shutdown handler
     let raft_for_shutdown = node.raft.clone();

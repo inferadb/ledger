@@ -108,7 +108,8 @@ pub struct BootstrappedNode {
     /// Events garbage collector background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub events_gc_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Runtime configuration handle for hot-reloadable settings.
+    /// Runtime configuration handle for hot-reloadable settings (used by UpdateConfig RPC).
+    #[allow(dead_code)] // retained: handle is cloned into LedgerServer during bootstrap
     pub runtime_config: RuntimeConfigHandle,
 }
 

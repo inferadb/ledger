@@ -1071,8 +1071,7 @@ enum VaultHealthProto {
 // Set dry_run=true to validate without applying.
 message UpdateConfigRequest {
   // JSON-encoded RuntimeConfig (only reconfigurable fields).
-  // The JSON structure mirrors the TOML config file format for the
-  // reconfigurable subset: rate_limit, hot_key, compaction, validation.
+  // Reconfigurable subset: rate_limit, hot_key, compaction, validation.
   string config_json = 1;
   // If true, validate the config without applying changes.
   bool dry_run = 2;

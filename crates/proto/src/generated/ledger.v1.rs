@@ -1258,8 +1258,7 @@ pub struct ForceGcResponse {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpdateConfigRequest {
     /// JSON-encoded RuntimeConfig (only reconfigurable fields).
-    /// The JSON structure mirrors the TOML config file format for the
-    /// reconfigurable subset: rate_limit, hot_key, compaction, validation.
+    /// Reconfigurable subset: rate_limit, hot_key, compaction, validation.
     #[prost(string, tag = "1")]
     pub config_json: ::prost::alloc::string::String,
     /// If true, validate the config without applying changes.

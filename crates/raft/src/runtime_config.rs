@@ -3,7 +3,7 @@
 //! Provides [`RuntimeConfigHandle`] — a thread-safe handle to the current
 //! runtime configuration that supports atomic updates. Components read the
 //! config on every RPC via `ArcSwap::load()` (lock-free, wait-free on x86)
-//! and operators update it via the `UpdateConfig` RPC or SIGHUP.
+//! and operators update it via the `UpdateConfig` RPC.
 
 use std::sync::Arc;
 
@@ -137,7 +137,7 @@ impl RuntimeConfigHandle {
 
     /// Replaces the configuration without validation or side effects.
     ///
-    /// Used by the SIGHUP handler after external validation.
+    /// Replaces the config atomically without validation.
     pub fn store(&self, config: RuntimeConfig) {
         self.inner.store(Arc::new(config));
     }

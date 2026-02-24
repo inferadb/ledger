@@ -1,15 +1,19 @@
 //! Event logging domain types for organization-scoped audit trails.
 //!
 //! Provides the core types for the two-tier event logging system:
-//! - [`EventEntry`] — a structured audit event following the canonical log line pattern
-//! - [`EventScope`] — system or organization level scoping
-//! - [`EventAction`] — enumeration of all trackable actions with compile-time scope routing
-//! - [`EventOutcome`] — success, failure, or denial outcomes
-//! - [`EventEmission`] — apply-phase (deterministic) or handler-phase (node-local)
-//! - [`EventConfig`] — configuration for event retention, limits, and feature flags
+//! - [`EventEntry`](crate::events::EventEntry) — a structured audit event following the canonical
+//!   log line pattern
+//! - [`EventScope`](crate::events::EventScope) — system or organization level scoping
+//! - [`EventAction`](crate::events::EventAction) — enumeration of all trackable actions with
+//!   compile-time scope routing
+//! - [`EventOutcome`](crate::events::EventOutcome) — success, failure, or denial outcomes
+//! - [`EventEmission`](crate::events::EventEmission) — apply-phase (deterministic) or handler-phase
+//!   (node-local)
+//! - [`EventConfig`](crate::events::EventConfig) — configuration for event retention, limits, and
+//!   feature flags
 //!
-//! Each [`EventAction`] variant maps to exactly one [`EventScope`] via
-//! [`EventAction::scope()`], preventing dual-writing at compile time.
+//! Each `EventAction` variant maps to exactly one `EventScope` via
+//! `EventAction::scope()`, preventing dual-writing at compile time.
 //! The match is exhaustive — adding a new variant requires assigning a scope.
 
 // The schemars `JsonSchema` derive macro internally uses `.unwrap()` in its
@@ -37,7 +41,7 @@ use crate::types::OrganizationId;
 /// sequentially by declaration order):
 ///
 /// 1. `emission` — [`EmissionMeta`] reads only this field to filter handler-phase events in
-///    [`EventStore::scan_apply_phase`] without full deserialization.
+///    `EventStore::scan_apply_phase` without full deserialization.
 /// 2. `expires_at` — [`EventMeta`] reads `emission` + `expires_at` for GC checks.
 ///
 /// **Do not reorder fields** without updating `EmissionMeta`, `EventMeta`, and
@@ -140,7 +144,7 @@ pub struct EventMeta {
     pub expires_at: u64,
 }
 
-/// Thin deserialization target for [`EventStore::scan_apply_phase`].
+/// Thin deserialization target for `EventStore::scan_apply_phase`.
 ///
 /// Reads only the `emission` field (first in serialization order) to filter
 /// handler-phase events without full [`EventEntry`] deserialization.

@@ -77,7 +77,7 @@ All threshold values use `AtomicU64` for lock-free updates (floats stored via `f
 
 - `update_config()` atomically updates all thresholds
 - Existing token buckets retain current token counts (gradual convergence to new rates)
-- Integrated with `UpdateConfig` RPC and SIGHUP config reload
+- Integrated with `UpdateConfig` RPC for runtime reconfiguration
 
 ### Memory Management
 
@@ -91,7 +91,7 @@ Per-client and per-organization buckets are stored in `HashMap` protected by `pa
 - **Fair multi-tenancy** — organization limits prevent noisy-neighbor effects across tenants
 - **Graceful degradation** — backpressure check is cheapest and fires first, shedding load before consuming tokens
 - **Informative rejections** — `RESOURCE_EXHAUSTED` with `retry-after-ms` metadata enables intelligent client backoff
-- **Runtime tunable** — operators can adjust limits without restart via `UpdateConfig` RPC or SIGHUP
+- **Runtime tunable** — operators can adjust limits without restart via `UpdateConfig` RPC
 
 ### Negative
 

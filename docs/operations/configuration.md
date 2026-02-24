@@ -421,4 +421,4 @@ allowed_sources = ["engine", "control"]
 max_ingest_batch_size = 500
 ```
 
-Runtime-updatable fields (via `UpdateConfig` RPC or SIGHUP): `enabled`, `default_ttl_days`, `system_log_enabled`, `organization_log_enabled`, `ingest_enabled`, `ingest_rate_limit_per_source`.
+Runtime-updatable fields (via `UpdateConfig` RPC): `enabled`, `default_ttl_days`, `system_log_enabled`, `organization_log_enabled`, `ingest_enabled`, `ingest_rate_limit_per_source`.

@@ -817,7 +817,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 #### Enterprise Features
 
 - `graceful_shutdown.rs`: 6-phase shutdown coordinator
-- `runtime_config.rs`: Hot-reload via SIGHUP + ArcSwap
+- `runtime_config.rs`: Hot-reload via UpdateConfig RPC + ArcSwap
 - `backup.rs`: Snapshot-based backups with S3/GCS/Azure
 - `auto_recovery.rs`: Automatic divergence recovery
 - `api_version.rs`: API version negotiation
@@ -1041,15 +1041,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Graceful shutdown: 6 phases (health drain, Raft snapshot, job stop, Raft shutdown, connection drain, service stop)
 - **Insights**: Central orchestration point. Spawns background jobs and holds `JoinHandle`s to keep them alive. Events GC runs on all nodes (not leader-only) since `events.db` is node-local.
 
-#### `config.rs` (1863 lines)
+#### `config.rs` (1704 lines)
 
-- **Purpose**: ServerConfig with all subsystem configs, SIGHUP reload support, and comprehensive tests
+- **Purpose**: ServerConfig with all subsystem configs, CLI/env-based configuration, and comprehensive tests
 - **Key Types/Functions**:
-  - `ServerConfig`: Root config (raft, storage, batch, rate_limit, validation, tls, otel, events, etc.)
-  - `load_config(path) -> Result<ServerConfig>`: Load from TOML file
-  - `reload_config(path, handle) -> Result<()>`: Hot-reload via SIGHUP (PRD Task 10)
+  - `Config`: Root config struct (raft, storage, batch, rate_limit, validation, tls, otel, events, etc.) via clap `#[derive(Parser)]`
+  - `generate_runtime_config_schema()`: JSON Schema export for RuntimeConfig (used by `config schema` subcommand)
   - Env var overrides: `INFERADB__LEDGER__<FIELD>` convention
-- **Insights**: TOML config with env var overrides. Hot-reload for runtime reconfiguration. JSON Schema export for validation.
+- **Insights**: CLI args + env vars (no config file). Runtime reconfiguration via `UpdateConfig` RPC (JSON). JSON Schema export for validation.
 
 #### `coordinator.rs` (552 lines)
 
@@ -1087,15 +1086,6 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Returns receiver that triggers on signal
   - Used by `serve_with_shutdown(addr, shutdown_signal)`
 - **Insights**: watch channel for shutdown broadcast. Multiple tasks can wait on same receiver.
-
-#### `config_reload.rs` (227 lines)
-
-- **Purpose**: SIGHUP-driven runtime config hot-reload (PRD Task 10)
-- **Key Types/Functions**:
-  - `install_sighup_handler(config_path, runtime_handle)`
-  - Loads TOML file, validates, swaps config atomically via ArcSwap
-  - Audit logs config changes
-- **Insights**: SIGHUP is Unix standard for config reload. Validation prevents invalid configs. Audit logging for compliance.
 
 #### Integration Tests (19 test files + 2 helper modules, 12547 lines total)
 
@@ -1269,7 +1259,7 @@ The codebase has comprehensive observability:
 The codebase includes 40+ production-ready features:
 
 - **Graceful shutdown**: 6-phase shutdown (health drain, Raft snapshot, job stop, Raft shutdown, connection drain, service stop). ConnectionTracker and BackgroundJobWatchdog.
-- **Runtime reconfiguration**: Hot-reload via SIGHUP, UpdateConfig/GetConfig RPCs, lock-free reads via ArcSwap.
+- **Runtime reconfiguration**: UpdateConfig/GetConfig RPCs, lock-free reads via ArcSwap.
 - **Backup & restore**: Snapshot-based backups with zstd compression, chain verification, S3/GCS/Azure backends.
 - **Circuit breaker**: Per-endpoint state machine (Closed→Open→HalfOpen) in SDK. Prevents cascade failures.
 - **Request cancellation**: CancellationToken support in SDK. Manual retry loop with `tokio::select!` for cancellation.

@@ -712,16 +712,6 @@ pub struct Config {
     #[builder(default)]
     pub logging: LoggingConfig,
 
-    // === Runtime Config ===
-    /// Path to a TOML config file for hot-reloadable runtime settings.
-    ///
-    /// When set, the server re-reads this file on SIGHUP and applies
-    /// reconfigurable parameters (rate limits, hot key thresholds,
-    /// compaction intervals, validation limits) without restart.
-    #[arg(long = "config", env = "INFERADB__LEDGER__CONFIG")]
-    #[serde(default)]
-    pub config_file: Option<PathBuf>,
-
     // === Backup ===
     /// Backup configuration for automated and on-demand backups.
     ///
@@ -793,7 +783,6 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             logging: LoggingConfig::default(),
-            config_file: None,
             backup: None,
             events: inferadb_ledger_types::events::EventConfig::default(),
         }
@@ -1027,16 +1016,12 @@ pub enum CliCommand {
 /// Configuration subcommand actions.
 #[derive(Debug, clap::Subcommand)]
 pub enum ConfigAction {
-    /// Output JSON Schema for the runtime configuration file.
+    /// Output JSON Schema for the runtime configuration.
     ///
-    /// The schema describes the structure of the TOML config file
-    /// used with `--config` for hot-reloadable settings. Use this
-    /// schema for IDE autocomplete and external validation.
+    /// The schema describes the structure of `RuntimeConfig`, which is
+    /// used by the `UpdateConfig` RPC. Use this schema for IDE
+    /// autocomplete and external validation of config payloads.
     Schema,
-    /// Output a fully-commented example TOML configuration file.
-    ///
-    /// All fields are shown with their default values and descriptions.
-    Example,
 }
 
 /// Generates JSON Schema for the runtime configuration.
@@ -1047,182 +1032,6 @@ pub enum ConfigAction {
 pub fn generate_runtime_config_schema() -> String {
     let schema = schemars::schema_for!(inferadb_ledger_types::config::RuntimeConfig);
     serde_json::to_string_pretty(&schema).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
-}
-
-/// Generates a fully-commented example TOML configuration file.
-///
-/// Serializes `RuntimeConfig::default()` to TOML and prepends each
-/// section with descriptive comments.
-#[must_use]
-pub fn generate_runtime_config_example() -> String {
-    let mut output = String::new();
-    output.push_str("# InferaDB Ledger Runtime Configuration\n");
-    output.push_str("#\n");
-    output.push_str("# This file configures hot-reloadable runtime parameters.\n");
-    output.push_str("# Apply changes via SIGHUP or the UpdateConfig RPC.\n");
-    output
-        .push_str("# All sections are optional — omitted sections retain their current values.\n");
-    output.push_str("#\n");
-    output.push_str("# Usage:\n");
-    output.push_str("#   inferadb-ledger --config /etc/inferadb/runtime.toml\n");
-    output.push('\n');
-
-    output.push_str("# Rate limiting thresholds.\n");
-    output.push_str("# Controls per-client and per-organization request rate limits.\n");
-    output.push_str("[rate_limit]\n");
-    let rl = inferadb_ledger_types::config::RateLimitConfig::default();
-    output.push_str(&format!(
-        "client_burst = {}           # Max burst per client\n",
-        rl.client_burst
-    ));
-    output.push_str(&format!(
-        "client_rate = {:.1}          # Sustained rate per client (req/sec)\n",
-        rl.client_rate
-    ));
-    output.push_str(&format!(
-        "organization_burst = {}        # Max burst per organization\n",
-        rl.organization_burst
-    ));
-    output.push_str(&format!(
-        "organization_rate = {:.1}       # Sustained rate per organization (req/sec)\n",
-        rl.organization_rate
-    ));
-    output.push_str(&format!(
-        "backpressure_threshold = {} # Pending proposals before backpressure\n",
-        rl.backpressure_threshold
-    ));
-    output.push('\n');
-
-    output.push_str("# Hot key detection thresholds.\n");
-    output.push_str("# Identifies frequently accessed keys for operator alerting.\n");
-    output.push_str("[hot_key]\n");
-    let hk = inferadb_ledger_types::config::HotKeyConfig::default();
-    output.push_str(&format!(
-        "window_secs = {}            # Sliding window duration (seconds)\n",
-        hk.window_secs
-    ));
-    output.push_str(&format!(
-        "threshold = {}              # Access count to classify as hot\n",
-        hk.threshold
-    ));
-    output.push_str(&format!("cms_width = {}            # Count-Min Sketch width\n", hk.cms_width));
-    output.push_str(&format!(
-        "cms_depth = {}               # Count-Min Sketch depth\n",
-        hk.cms_depth
-    ));
-    output.push_str(&format!("top_k = {}                 # Track top-k hottest keys\n", hk.top_k));
-    output.push('\n');
-
-    output.push_str("# B+ tree compaction parameters.\n");
-    output.push_str("# Controls when and how aggressively leaf pages are merged.\n");
-    output.push_str("[compaction]\n");
-    let c = inferadb_ledger_types::config::BTreeCompactionConfig::default();
-    output.push_str(&format!(
-        "min_fill_factor = {:.1}      # Minimum leaf fill ratio before merge\n",
-        c.min_fill_factor
-    ));
-    output.push_str(&format!(
-        "interval_secs = {}           # Seconds between compaction cycles\n",
-        c.interval_secs
-    ));
-    output.push('\n');
-
-    output.push_str("# Input validation limits.\n");
-    output.push_str("# Constrains request payload sizes to prevent abuse.\n");
-    output.push_str("[validation]\n");
-    let v = inferadb_ledger_types::config::ValidationConfig::default();
-    output.push_str(&format!(
-        "max_key_bytes = {}          # Maximum entity key size\n",
-        v.max_key_bytes
-    ));
-    output.push_str(&format!(
-        "max_value_bytes = {}      # Maximum entity value size\n",
-        v.max_value_bytes
-    ));
-    output.push_str(&format!(
-        "max_operations_per_write = {} # Maximum operations per write request\n",
-        v.max_operations_per_write
-    ));
-    output.push_str(&format!(
-        "max_batch_payload_bytes = {} # Maximum total batch payload\n",
-        v.max_batch_payload_bytes
-    ));
-    output.push_str(&format!(
-        "max_organization_name_chars = {} # Maximum organization name length (characters)\n",
-        v.max_organization_name_chars
-    ));
-    output.push_str(&format!(
-        "max_relationship_string_bytes = {} # Maximum relationship string length\n",
-        v.max_relationship_string_bytes
-    ));
-    output.push('\n');
-
-    output.push_str(
-        "# Default organization quota applied to new organizations without explicit quotas.\n",
-    );
-    output.push_str("[default_quota]\n");
-    let q = inferadb_ledger_types::config::OrganizationQuota::default();
-    output.push_str(&format!(
-        "max_storage_bytes = {}  # Maximum storage per organization (bytes)\n",
-        q.max_storage_bytes
-    ));
-    output.push_str(&format!(
-        "max_vaults = {}           # Maximum vaults per organization\n",
-        q.max_vaults
-    ));
-    output.push_str(&format!(
-        "max_write_ops_per_sec = {} # Maximum write operations per second\n",
-        q.max_write_ops_per_sec
-    ));
-    output.push_str(&format!(
-        "max_read_ops_per_sec = {} # Maximum read operations per second\n",
-        q.max_read_ops_per_sec
-    ));
-    output.push('\n');
-
-    output.push_str("# Integrity scrubber parameters.\n");
-    output.push_str("# Controls background page checksum and B-tree invariant verification.\n");
-    output.push_str("[integrity]\n");
-    let i = inferadb_ledger_types::config::IntegrityConfig::default();
-    output.push_str(&format!(
-        "scrub_interval_secs = {}  # Seconds between scrub cycles\n",
-        i.scrub_interval_secs
-    ));
-    output.push_str(&format!(
-        "pages_per_cycle_percent = {:.1} # Percentage of pages per cycle\n",
-        i.pages_per_cycle_percent
-    ));
-    output.push_str(&format!(
-        "full_scan_period_secs = {} # Seconds for a complete scan\n",
-        i.full_scan_period_secs
-    ));
-    output.push('\n');
-
-    output.push_str("# Metric cardinality budgets.\n");
-    output.push_str("# Limits label cardinality to prevent Prometheus OOM.\n");
-    output.push_str("[metrics_cardinality]\n");
-    let mc = inferadb_ledger_types::config::MetricsCardinalityConfig::default();
-    output.push_str(&format!(
-        "warn_cardinality = {}     # Warn when estimated distinct label sets exceed this\n",
-        mc.warn_cardinality
-    ));
-    output.push_str(&format!(
-        "max_cardinality = {}    # Drop observations above this cardinality\n",
-        mc.max_cardinality
-    ));
-    output.push('\n');
-
-    output.push_str("# Event logging configuration (hot-reloadable subset).\n");
-    output.push_str("# Controls event audit trail behavior at runtime.\n");
-    output.push_str("[events]\n");
-    output.push_str("enabled = true              # Master switch for event logging\n");
-    output.push_str("default_ttl_days = 90       # Default TTL for event entries (1..=3650)\n");
-    output.push_str("system_log_enabled = true    # Enable system-level events\n");
-    output.push_str("organization_log_enabled = true # Enable org-level events\n");
-    output.push_str("ingest_enabled = true        # Master switch for external ingestion\n");
-    output.push_str("ingest_rate_limit_per_source = 10000 # Events/sec per source service\n");
-
-    output
 }
 
 #[cfg(test)]
@@ -1885,38 +1694,5 @@ mod tests {
         assert!(defs.contains_key("RateLimitConfig"), "Missing RateLimitConfig definition");
         assert!(defs.contains_key("HotKeyConfig"), "Missing HotKeyConfig definition");
         assert!(defs.contains_key("ValidationConfig"), "Missing ValidationConfig definition");
-    }
-
-    #[test]
-    fn test_generate_runtime_config_example_is_valid_toml() {
-        let example = generate_runtime_config_example();
-        // Parse the example as TOML (comments are ignored by TOML parser).
-        let parsed: toml::Value = toml::from_str(&example).unwrap();
-        let table = parsed.as_table().unwrap();
-        assert!(table.contains_key("rate_limit"), "Missing rate_limit section");
-        assert!(table.contains_key("hot_key"), "Missing hot_key section");
-        assert!(table.contains_key("compaction"), "Missing compaction section");
-        assert!(table.contains_key("validation"), "Missing validation section");
-        assert!(table.contains_key("default_quota"), "Missing default_quota section");
-        assert!(table.contains_key("integrity"), "Missing integrity section");
-        assert!(table.contains_key("metrics_cardinality"), "Missing metrics_cardinality section");
-    }
-
-    #[test]
-    fn test_generate_runtime_config_example_roundtrips_through_runtime_config() {
-        let example = generate_runtime_config_example();
-        // The example should parse as a valid RuntimeConfig.
-        let parsed: inferadb_ledger_types::config::RuntimeConfig =
-            toml::from_str(&example).unwrap();
-        // All sections present.
-        assert!(parsed.rate_limit.is_some());
-        assert!(parsed.hot_key.is_some());
-        assert!(parsed.compaction.is_some());
-        assert!(parsed.validation.is_some());
-        assert!(parsed.default_quota.is_some());
-        assert!(parsed.integrity.is_some());
-        assert!(parsed.metrics_cardinality.is_some());
-        // Validation should pass.
-        parsed.validate().unwrap();
     }
 }

@@ -1987,6 +1987,7 @@ mod tests {
     ///
     /// Uses 1000 mixed operations across 10 organizations and 50 vaults.
     #[test]
+    #[ignore = "benchmark: performance ratio varies on CI runners"]
     fn test_apply_loop_throughput_benchmark() {
         let (state, pending) = build_benchmark_state_and_pending();
 

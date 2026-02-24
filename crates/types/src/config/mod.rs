@@ -1,6 +1,6 @@
 //! Configuration types for InferaDB Ledger.
 //!
-//! Configuration is loaded from TOML files and environment variables.
+//! Configuration is loaded from CLI arguments and environment variables.
 //! All config structs validate their values at construction time via
 //! fallible builders. Post-deserialization validation is available via
 //! the `validate()` method on each struct.

@@ -331,9 +331,9 @@ impl EventStore {
 
     /// Scans all apply-phase events for inclusion in Raft snapshots.
     ///
-    /// Uses thin deserialization ([`EmissionMeta`]) to read only the `emission`
-    /// discriminant (~1–2 bytes) for each event, skipping full deserialization
-    /// of handler-phase events (~55% of total). Apply-phase events are then
+    /// Uses thin deserialization ([`EmissionMeta`](inferadb_ledger_types::events::EmissionMeta)) to
+    /// read only the `emission` discriminant (~1–2 bytes) for each event, skipping full
+    /// deserialization of handler-phase events (~55% of total). Apply-phase events are then
     /// fully deserialized, sorted newest-first, and truncated to `max_entries`.
     ///
     /// # Errors

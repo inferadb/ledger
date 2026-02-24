@@ -581,7 +581,7 @@ impl<B: StorageBackend> EventHandle<B> {
 ///
 /// The rate limit is runtime-updatable via `AtomicU64` — no restart required
 /// when the operator changes `IngestionConfig.ingest_rate_limit_per_source`
-/// through `UpdateConfig` RPC or SIGHUP.
+/// through `UpdateConfig` RPC.
 pub struct IngestionRateLimiter {
     /// Per-source token buckets. Key = `source_service`.
     buckets: parking_lot::Mutex<std::collections::HashMap<String, IngestionTokenBucket>>,
