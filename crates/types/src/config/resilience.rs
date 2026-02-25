@@ -621,3 +621,105 @@ impl ValidationConfig {
         Ok(())
     }
 }
+
+// =============================================================================
+// Saga Configuration
+// =============================================================================
+
+/// Default saga orchestrator poll interval in seconds.
+const fn default_saga_poll_interval_secs() -> u64 {
+    30
+}
+
+/// Configuration for the saga orchestrator background job.
+///
+/// The saga orchestrator periodically polls for pending cross-organization
+/// sagas and drives their state transitions through Raft consensus.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::SagaConfig;
+/// let config = SagaConfig::default();
+/// assert_eq!(config.poll_interval_secs, 30);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SagaConfig {
+    /// Interval between saga poll cycles in seconds.
+    ///
+    /// Each cycle scans for pending sagas and executes the next step.
+    /// Must be >= 1. Default: 30.
+    #[serde(default = "default_saga_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+}
+
+impl Default for SagaConfig {
+    fn default() -> Self {
+        Self { poll_interval_secs: default_saga_poll_interval_secs() }
+    }
+}
+
+impl SagaConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if `poll_interval_secs` is zero.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.poll_interval_secs == 0 {
+            return Err(ConfigError::Validation {
+                message: "saga poll_interval_secs must be >= 1".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Default orphan cleanup interval in seconds (1 hour).
+const fn default_cleanup_interval_secs() -> u64 {
+    3600
+}
+
+/// Configuration for the orphan cleanup background job.
+///
+/// The orphan cleanup job periodically scans for membership records
+/// that reference deleted users and removes them.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::CleanupConfig;
+/// let config = CleanupConfig::default();
+/// assert_eq!(config.interval_secs, 3600);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CleanupConfig {
+    /// Interval between cleanup cycles in seconds.
+    ///
+    /// Each cycle scans for orphaned membership records and removes them.
+    /// Must be >= 1. Default: 3600 (1 hour).
+    #[serde(default = "default_cleanup_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for CleanupConfig {
+    fn default() -> Self {
+        Self { interval_secs: default_cleanup_interval_secs() }
+    }
+}
+
+impl CleanupConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if `interval_secs` is zero.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.interval_secs == 0 {
+            return Err(ConfigError::Validation {
+                message: "cleanup interval_secs must be >= 1".to_string(),
+            });
+        }
+        Ok(())
+    }
+}

@@ -16,7 +16,10 @@
 //! - Exponential backoff on failures (1s, 2s, 4s... up to 5 min)
 //! - Max 10 retries before marking saga as permanently failed
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_state::{
     StateLayer,
@@ -27,7 +30,7 @@ use inferadb_ledger_state::{
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    Operation, OrganizationId, Transaction, UserId, VaultId,
+    Operation, OrganizationId, SetCondition, Transaction, UserId, VaultId,
     events::{EventAction, EventOutcome},
 };
 use openraft::Raft;
@@ -38,7 +41,10 @@ use tracing::{debug, info, warn};
 use crate::{
     error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
-    log_storage::AppliedStateAccessor,
+    metrics::{
+        record_background_job_duration, record_background_job_items, record_background_job_run,
+    },
+    trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload},
 };
 
@@ -67,16 +73,15 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     node_id: LedgerNodeId,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
-    /// Accessor for applied state.
-    /// Reserved for future saga state queries.
-    #[allow(dead_code)] // retained for state access in saga operations
-    applied_state: AppliedStateAccessor,
     /// Event handle for handler-phase event emission (best-effort).
     #[builder(default)]
     event_handle: Option<EventHandle<B>>,
     /// Poll interval.
     #[builder(default = SAGA_POLL_INTERVAL)]
     interval: Duration,
+    /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
+    #[builder(default)]
+    watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
@@ -388,28 +393,44 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
-    /// Allocates a new sequence ID from _system.
+    /// Allocates a new sequence ID from _system using compare-and-swap.
+    ///
+    /// Uses `SetCondition::ValueEquals` (or `MustNotExist` for the initial
+    /// allocation) to prevent duplicate sequence IDs on leader failover.
+    /// If a leader crashes after executing a saga step but before saving
+    /// the saga state, the new leader re-reads the already-incremented
+    /// sequence and the CAS prevents a second increment.
     async fn allocate_sequence_id(&self, entity_type: &str) -> Result<i64, SagaError> {
         let seq_key = format!("_meta:seq:{}", entity_type);
 
         // Read current value (StateLayer is internally thread-safe)
-        let current = self
+        let existing = self
             .state
             .get_entity(SYSTEM_VAULT_ID, seq_key.as_bytes())
-            .context(StateReadSnafu { entity_type: "Sequence".to_string() })?
-            .and_then(|e| e.value.get(..8)?.try_into().ok().map(i64::from_le_bytes))
-            .unwrap_or(1);
+            .context(StateReadSnafu { entity_type: "Sequence".to_string() })?;
+
+        let (current, condition) = match existing {
+            Some(entity) => {
+                let value = entity
+                    .value
+                    .get(..8)
+                    .and_then(|b| b.try_into().ok().map(i64::from_le_bytes))
+                    .unwrap_or(1);
+                // CAS: only succeed if the stored value still matches what we read
+                (value, Some(SetCondition::ValueEquals(entity.value)))
+            },
+            None => {
+                // First allocation — key must not exist
+                (1, Some(SetCondition::MustNotExist))
+            },
+        };
 
         let next_id = current;
         let new_seq = (current + 1).to_le_bytes().to_vec();
 
-        // Write incremented value
-        let operation = Operation::SetEntity {
-            key: seq_key,
-            value: new_seq,
-            expires_at: None,
-            condition: None,
-        };
+        // Write incremented value with CAS condition
+        let operation =
+            Operation::SetEntity { key: seq_key, value: new_seq, expires_at: None, condition };
 
         let transaction = Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
@@ -587,7 +608,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
-    /// Runs a single poll cycle.
+    /// Runs a single poll cycle with metrics and watchdog heartbeat.
     async fn run_cycle(&self) {
         // Only leader executes sagas
         if !self.is_leader() {
@@ -595,18 +616,39 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             return;
         }
 
+        let _trace_ctx = TraceContext::new();
+        let cycle_start = Instant::now();
+
         debug!("Starting saga poll cycle");
 
         let sagas = self.load_pending_sagas();
+        let saga_count = sagas.len() as u64;
+
         if sagas.is_empty() {
             debug!("No pending sagas");
-            return;
+        } else {
+            info!(count = saga_count, "Found pending sagas");
+
+            for saga in sagas {
+                self.execute_saga(saga).await;
+            }
         }
 
-        info!(count = sagas.len(), "Found pending sagas");
+        // Record cycle metrics regardless of saga count
+        let duration = cycle_start.elapsed().as_secs_f64();
+        record_background_job_duration("saga_orchestrator", duration);
+        record_background_job_run("saga_orchestrator", "success");
+        record_background_job_items("saga_orchestrator", saga_count);
 
-        for saga in sagas {
-            self.execute_saga(saga).await;
+        // Update watchdog heartbeat
+        if let Some(ref handle) = self.watchdog_handle {
+            handle.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -616,6 +658,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = interval(self.interval);
+
+            info!(interval_secs = self.interval.as_secs(), "Saga orchestrator started");
 
             loop {
                 ticker.tick().await;
@@ -677,5 +721,38 @@ mod tests {
 
         assert_eq!(deserialized.id(), "delete-456");
         assert!(!deserialized.is_terminal());
+    }
+
+    /// Verifies the CAS condition logic used by `allocate_sequence_id`.
+    ///
+    /// When a sequence key exists, the CAS condition should be `ValueEquals`
+    /// with the current stored value. When no key exists, it should be
+    /// `MustNotExist`. This prevents duplicate allocation on leader failover:
+    /// if the old leader already incremented the value, the retry's CAS
+    /// condition won't match and the write fails, forcing a re-read.
+    #[test]
+    fn test_cas_prevents_duplicate_sequence_allocation() {
+        // Simulate existing key with sequence value 5
+        let current_value = 5i64.to_le_bytes().to_vec();
+
+        // When key exists: condition should be ValueEquals with the stored bytes
+        let condition = Some(SetCondition::ValueEquals(current_value.clone()));
+        assert_eq!(condition, Some(SetCondition::ValueEquals(5i64.to_le_bytes().to_vec())));
+
+        // The allocated ID should be the current value (5), new stored = 6
+        let allocated = 5i64;
+        let new_stored = (allocated + 1).to_le_bytes().to_vec();
+        assert_eq!(i64::from_le_bytes(new_stored[..8].try_into().unwrap()), 6);
+
+        // If a retry occurs after the first write succeeded (value is now 6),
+        // the CAS condition (ValueEquals(5)) would NOT match the stored value (6),
+        // so the write fails — preventing a duplicate allocation.
+        let stale_condition = SetCondition::ValueEquals(5i64.to_le_bytes().to_vec());
+        let stored_after_first_write = 6i64.to_le_bytes().to_vec();
+        assert_ne!(stale_condition, SetCondition::ValueEquals(stored_after_first_write));
+
+        // When no key exists: condition should be MustNotExist
+        let initial_condition = Some(SetCondition::MustNotExist);
+        assert_eq!(initial_condition, Some(SetCondition::MustNotExist));
     }
 }

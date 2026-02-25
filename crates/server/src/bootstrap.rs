@@ -18,7 +18,8 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
     GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId, LedgerServer, LedgerTypeConfig,
-    RaftLogStore, ResourceMetricsCollector, RuntimeConfigHandle, TtlGarbageCollector,
+    OrphanCleanupJob, RaftLogStore, ResourceMetricsCollector, RuntimeConfigHandle,
+    SagaOrchestrator, TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_state::{BlockArchive, EventsDatabase, SnapshotManager, StateLayer};
@@ -111,6 +112,12 @@ pub struct BootstrappedNode {
     /// Runtime configuration handle for hot-reloadable settings (used by UpdateConfig RPC).
     #[allow(dead_code)] // retained: handle is cloned into LedgerServer during bootstrap
     pub runtime_config: RuntimeConfigHandle,
+    /// Saga orchestrator background task handle.
+    #[allow(dead_code)] // retained to keep background task alive
+    pub saga_handle: tokio::task::JoinHandle<()>,
+    /// Orphan cleanup background task handle.
+    #[allow(dead_code)] // retained to keep background task alive
+    pub orphan_cleanup_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Bootstraps a new cluster, joins an existing one, or resumes from saved state.
@@ -313,6 +320,7 @@ pub async fn bootstrap_node(
     // Shared across WriteService, AdminService, and SagaOrchestrator via Clone.
     let event_config = Arc::new(config.events.clone());
     let event_handle = EventHandle::new(Arc::clone(&events_db), event_config, node_id);
+    let event_handle_for_saga = Some(event_handle.clone());
 
     let server = LedgerServer::builder()
         .raft(raft.clone())
@@ -384,7 +392,7 @@ pub async fn bootstrap_node(
     let learner_refresh_handle = LearnerRefreshJob::builder()
         .raft(raft.clone())
         .node_id(node_id)
-        .applied_state(applied_state_accessor)
+        .applied_state(applied_state_accessor.clone())
         .watchdog_handle(watchdog.map(|w| w.register("learner_refresh", 5)))
         .build()
         .start();
@@ -443,6 +451,30 @@ pub async fn bootstrap_node(
         None
     };
 
+    // Start saga orchestrator for cross-organization operations (leader-only)
+    let saga_handle = SagaOrchestrator::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .state(state.clone())
+        .event_handle(event_handle_for_saga)
+        .interval(Duration::from_secs(config.saga.poll_interval_secs))
+        .watchdog_handle(watchdog.map(|w| w.register("saga_orchestrator", 60)))
+        .build()
+        .start();
+    tracing::info!("Started saga orchestrator");
+
+    // Start orphan cleanup job for removing stale membership records (leader-only)
+    let orphan_cleanup_handle = OrphanCleanupJob::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .state(state.clone())
+        .applied_state(applied_state_accessor)
+        .interval(Duration::from_secs(config.cleanup.interval_secs))
+        .watchdog_handle(watchdog.map(|w| w.register("orphan_cleanup", 7200)))
+        .build()
+        .start();
+    tracing::info!("Started orphan cleanup job");
+
     Ok(BootstrappedNode {
         raft,
         state,
@@ -455,6 +487,8 @@ pub async fn bootstrap_node(
         backup_handle,
         events_gc_handle,
         runtime_config,
+        saga_handle,
+        orphan_cleanup_handle,
     })
 }
 

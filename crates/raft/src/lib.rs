@@ -170,6 +170,8 @@ pub use multi_raft::{MultiRaftConfig, MultiRaftManager, ShardConfig, ShardGroup}
 #[doc(hidden)]
 pub use multi_shard_server::MultiShardLedgerServer;
 #[doc(hidden)]
+pub use orphan_cleanup::OrphanCleanupJob;
+#[doc(hidden)]
 pub use raft_network::GrpcRaftNetworkFactory;
 #[doc(hidden)]
 pub use rate_limit::RateLimiter;
@@ -177,6 +179,8 @@ pub use rate_limit::RateLimiter;
 pub use resource_metrics::ResourceMetricsCollector;
 #[doc(hidden)]
 pub use runtime_config::RuntimeConfigHandle;
+#[doc(hidden)]
+pub use saga_orchestrator::SagaOrchestrator;
 #[doc(hidden)]
 pub use server::LedgerServer;
 #[doc(hidden)]

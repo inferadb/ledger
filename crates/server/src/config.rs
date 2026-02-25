@@ -731,6 +731,25 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     pub events: inferadb_ledger_types::events::EventConfig,
+
+    // === Saga Orchestrator ===
+    /// Saga orchestrator configuration for cross-organization operations.
+    ///
+    /// Controls the poll interval for pending saga discovery and execution.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub saga: inferadb_ledger_types::config::SagaConfig,
+
+    // === Orphan Cleanup ===
+    /// Orphan cleanup configuration for removing stale membership records.
+    ///
+    /// Controls the interval for scanning and removing memberships that
+    /// reference deleted users.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub cleanup: inferadb_ledger_types::config::CleanupConfig,
 }
 
 // Default value functions
@@ -785,6 +804,8 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             backup: None,
             events: inferadb_ledger_types::events::EventConfig::default(),
+            saga: inferadb_ledger_types::config::SagaConfig::default(),
+            cleanup: inferadb_ledger_types::config::CleanupConfig::default(),
         }
     }
 }
@@ -927,6 +948,8 @@ impl Config {
         }
         self.logging.validate()?;
         self.events.validate()?;
+        self.saga.validate().map_err(|e| ConfigError::Validation { message: e.to_string() })?;
+        self.cleanup.validate().map_err(|e| ConfigError::Validation { message: e.to_string() })?;
         Ok(())
     }
 
