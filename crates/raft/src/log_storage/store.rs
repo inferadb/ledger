@@ -1654,6 +1654,7 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[ignore = "benchmark: absolute timing threshold varies on CI runners"]
     fn test_load_performance_large_dataset() {
         let dir = tempdir().unwrap();
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).unwrap();
