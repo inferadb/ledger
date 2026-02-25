@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771972984156,
+  "lastUpdate": 1771978521267,
   "repoUrl": "https://github.com/inferadb/ledger",
   "entries": {
     "InferaDB Ledger Benchmarks": [
@@ -5290,6 +5290,282 @@ window.BENCHMARK_DATA = {
           {
             "name": "logging/operation_types/count/20",
             "value": 763,
+            "range": "± 4",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "hello@evansims.com",
+            "name": "Evan Sims",
+            "username": "evansims"
+          },
+          "committer": {
+            "email": "hello@evansims.com",
+            "name": "Evan Sims",
+            "username": "evansims"
+          },
+          "distinct": true,
+          "id": "9f19a455061d0fa855aba80f1b76e41a2c07f8ee",
+          "message": "refactor: remove obsolete TOML config support",
+          "timestamp": "2026-02-24T17:59:23-06:00",
+          "tree_id": "ae727fc38b1f9062a4d6240089bd5e64315121f3",
+          "url": "https://github.com/inferadb/ledger/commit/9f19a455061d0fa855aba80f1b76e41a2c07f8ee"
+        },
+        "date": 1771978520768,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "btree/point_lookup/sequential/1k",
+            "value": 1584,
+            "range": "± 66",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/point_lookup/sequential/10k",
+            "value": 1212,
+            "range": "± 54",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/point_lookup/sequential/100k",
+            "value": 1421,
+            "range": "± 148",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/missing_key/10k_entries",
+            "value": 1377,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/batch_insert/size/10",
+            "value": 354758,
+            "range": "± 48730",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/batch_insert/size/100",
+            "value": 778225,
+            "range": "± 105067",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/batch_insert/size/1000",
+            "value": 2431354,
+            "range": "± 187153",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/insert_memory/batch_100",
+            "value": 171756,
+            "range": "± 15554",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/iteration/full_scan/1k",
+            "value": 151388,
+            "range": "± 162",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/iteration/full_scan/10k",
+            "value": 1432402,
+            "range": "± 3088",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/iteration/full_scan/1M",
+            "value": 201096502,
+            "range": "± 928129",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/range_scan/10pct_of_10k",
+            "value": 154294,
+            "range": "± 504",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/mixed_workload/90r_10w",
+            "value": 434578,
+            "range": "± 29067",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "btree/compaction/100k_30pct_frag",
+            "value": 19960927,
+            "range": "± 356722",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_reads/entities/1000",
+            "value": 1140,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_reads/entities/10000",
+            "value": 1589,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_reads/entities/100000",
+            "value": 1919,
+            "range": "± 215",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "sequential_reads/100_keys",
+            "value": 159211,
+            "range": "± 493",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "random_reads/100_random_keys",
+            "value": 156822,
+            "range": "± 627",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "multi_vault_reads/10_vaults",
+            "value": 16710,
+            "range": "± 170",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "missing_key_reads/missing_key",
+            "value": 1382,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_writes/vault/1",
+            "value": 268156,
+            "range": "± 30901",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_writes/vault/10",
+            "value": 268287,
+            "range": "± 26168",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "single_writes/vault/100",
+            "value": 298388,
+            "range": "± 43567",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_writes/batch_size/10",
+            "value": 599926,
+            "range": "± 56008",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_writes/batch_size/100",
+            "value": 3064492,
+            "range": "± 464021",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_writes/batch_size/1000",
+            "value": 7736047,
+            "range": "± 280252",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "state_root/entities/100",
+            "value": 5796,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "state_root/entities/1000",
+            "value": 5796,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "state_root/entities/10000",
+            "value": 5798,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrent_vault_writes/10_vaults",
+            "value": 3077404,
+            "range": "± 366008",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/context_creation/new",
+            "value": 733,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/field_population/minimal_fields",
+            "value": 876,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/field_population/all_fields",
+            "value": 1127,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/sampling/should_sample_success",
+            "value": 21,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/sampling/should_sample_error",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/end_to_end/write_request",
+            "value": 1065,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/end_to_end/read_request",
+            "value": 1014,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/operation_types/count/1",
+            "value": 738,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/operation_types/count/5",
+            "value": 741,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/operation_types/count/10",
+            "value": 749,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "logging/operation_types/count/20",
+            "value": 748,
             "range": "± 4",
             "unit": "ns/iter"
           }
