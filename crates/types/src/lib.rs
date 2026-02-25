@@ -34,7 +34,7 @@ pub use codec::{CodecError, decode, encode};
 pub use error::{ErrorCode, LedgerError, Result};
 pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,
-    compute_tx_merkle_root, sha256, sha256_concat, tx_hash, vault_entry_hash,
+    compute_tx_merkle_root, hash_eq, sha256, sha256_concat, tx_hash, vault_entry_hash,
 };
 pub use types::{
     // Structs

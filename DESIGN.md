@@ -402,7 +402,7 @@ Batching amortizes Raft consensus overhead:
 Default batch configuration:
 
 - Maximum batch size: 100 transactions
-- Maximum batch delay: 5ms (TOML config default); 2ms (runtime `BatchWriter` default)
+- Maximum batch delay: 5ms (env var default); 2ms (runtime `BatchWriter` default)
 - Tick interval: 500µs (runtime `BatchWriter` polling interval)
 
 ### Fault Tolerance & Recovery
@@ -1153,7 +1153,7 @@ Deliberate deviations from earlier versions of this specification, with rational
 | Area              | Original Spec                     | Implementation                                         | Rationale                                                                                        |
 | ----------------- | --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
 | Table count       | 13 tables                         | 18 tables                                              | Added slug indexes, vault-scoped state tables; removed `TimeTravelConfig` and `TimeTravelIndex` (superseded by audit events) |
-| Batch timeout     | 5ms                               | 5ms (TOML default), 2ms (runtime `BatchWriter`)        | Runtime batch writer uses tighter timing for lower latency; TOML config allows operator override |
+| Batch timeout     | 5ms                               | 5ms (env var default), 2ms (runtime `BatchWriter`)      | Runtime batch writer uses tighter timing for lower latency; env vars allow operator override     |
 | `TxId` generation | "At block creation"               | In response path after Raft commit                     | Avoids assigning IDs to proposals that may not commit; UUID generation is cheap                  |
 | Identifier types  | Type aliases                      | Newtypes via `define_id!` macro                        | Type safety prevents `OrganizationId`/`VaultId` confusion at compile time                           |
 | `VaultBlock`      | Flat struct                       | `BlockHeader` + `transactions` split                   | Header alone needed for most operations (hashing, forwarding); avoids copying transaction data   |

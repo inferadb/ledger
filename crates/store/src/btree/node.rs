@@ -68,14 +68,6 @@ const BRANCH_CELL_PTRS_OFFSET: usize = PAGE_HEADER_SIZE + 6 + 8; // +8 for right
 /// Size of a cell pointer.
 const CELL_PTR_SIZE: usize = 2;
 
-/// Minimum cell size for leaf: key_len(2) + val_len(2) + min_key(1) = 5
-#[allow(dead_code)] // reserved for page overflow calculations
-const MIN_LEAF_CELL_SIZE: usize = 5;
-
-/// Minimum cell size for branch: key_len(2) + child_page(8) + min_key(1) = 11
-#[allow(dead_code)] // reserved for page overflow calculations
-const MIN_BRANCH_CELL_SIZE: usize = 11;
-
 /// A search result for finding a key in a node.
 #[derive(Debug, Clone, Copy)]
 pub enum SearchResult {

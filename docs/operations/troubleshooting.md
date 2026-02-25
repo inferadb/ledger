@@ -94,8 +94,7 @@ curl -s localhost:9090/metrics | grep ledger_batch_flush_latency_seconds
 
 1. If `proposals_pending` > 50: Network latency or disk I/O bottleneck
 2. If `apply_latency` high: Disk fsync performance
-3. Increase `--batch-size` for throughput (trades latency)
-4. Decrease `--batch-delay` for lower latency (trades throughput)
+3. Tune batching via `INFERADB__LEDGER__BATCH_SIZE` and `INFERADB__LEDGER__BATCH_DELAY` environment variables
 
 ### Read Operations Failing
 

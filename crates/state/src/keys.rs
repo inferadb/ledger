@@ -34,18 +34,6 @@ pub fn encode_storage_key(vault_id: VaultId, local_key: &[u8]) -> Vec<u8> {
     key
 }
 
-/// Encodes a key with explicit bucket_id (for range scans).
-///
-/// This is used for scanning all keys in a specific bucket.
-#[allow(dead_code)] // public API: reserved for bucket-based key encoding
-pub fn encode_key_with_bucket(vault_id: VaultId, bucket_id: u8, local_key: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(9 + local_key.len());
-    key.extend_from_slice(&vault_id.value().to_be_bytes());
-    key.push(bucket_id);
-    key.extend_from_slice(local_key);
-    key
-}
-
 /// Creates a prefix for scanning all keys in a vault.
 pub fn vault_prefix(vault_id: VaultId) -> [u8; 8] {
     vault_id.value().to_be_bytes()
@@ -72,14 +60,6 @@ pub fn decode_storage_key(key: &[u8]) -> Option<StorageKey> {
     let local_key = key[9..].to_vec();
 
     Some(StorageKey { vault_id: VaultId::new(vault_id), bucket_id, local_key })
-}
-
-/// Encodes a relationship key.
-///
-/// Format: rel:{resource}#{relation}@{subject}
-#[allow(dead_code)] // public API: reserved for relationship key encoding
-pub fn encode_relationship_key(resource: &str, relation: &str, subject: &str) -> Vec<u8> {
-    format!("rel:{}#{}@{}", resource, relation, subject).into_bytes()
 }
 
 /// Encodes an object index key.
@@ -121,22 +101,6 @@ mod tests {
         let key2 = encode_storage_key(VaultId::new(2), b"a");
 
         assert!(key1 < key2, "vault 1 < vault 2");
-    }
-
-    #[test]
-    fn test_bucket_prefix() {
-        let vault_id = VaultId::new(42);
-        let prefix = bucket_prefix(vault_id, 5);
-
-        let key = encode_key_with_bucket(vault_id, 5, b"test");
-
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn test_relationship_key_format() {
-        let key = encode_relationship_key("doc:123", "viewer", "user:alice");
-        assert_eq!(key, b"rel:doc:123#viewer@user:alice");
     }
 
     #[test]

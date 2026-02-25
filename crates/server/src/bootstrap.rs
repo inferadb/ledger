@@ -49,8 +49,7 @@ pub enum BootstrapError {
     Raft(String),
     /// Failed to initialize cluster.
     Initialize(String),
-    /// Failed to join existing cluster (reserved for join-cluster mode).
-    #[allow(dead_code)] // reserved for join-cluster mode
+    /// Failed to join existing cluster.
     Join(String),
     /// Failed to resolve or generate node ID.
     NodeId(String),

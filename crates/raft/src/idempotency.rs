@@ -51,24 +51,6 @@ impl IdempotencyKey {
     ) -> Self {
         Self { organization_id, vault_id, client_id, idempotency_key }
     }
-
-    /// Creates a new idempotency key from a byte slice.
-    ///
-    /// Returns `None` if the slice is not exactly 16 bytes.
-    #[allow(dead_code)]
-    pub fn from_bytes(
-        organization_id: i64,
-        vault_id: i64,
-        client_id: String,
-        idempotency_key_bytes: &[u8],
-    ) -> Option<Self> {
-        if idempotency_key_bytes.len() != 16 {
-            return None;
-        }
-        let mut key = [0u8; 16];
-        key.copy_from_slice(idempotency_key_bytes);
-        Some(Self::new(organization_id, vault_id, client_id, key))
-    }
 }
 
 /// Result of checking the idempotency cache.
@@ -386,31 +368,6 @@ mod tests {
             matches!(check, IdempotencyCheckResult::NewRequest),
             "different organization should be new request"
         );
-    }
-
-    /// Test IdempotencyKey::from_bytes validation.
-    #[test]
-    fn test_idempotency_key_from_bytes() {
-        // Valid 16-byte key
-        let bytes = [1u8; 16];
-        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &bytes);
-        assert!(key.is_some());
-        assert_eq!(key.unwrap().idempotency_key, bytes);
-
-        // Invalid: too short
-        let short_bytes = [1u8; 15];
-        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &short_bytes);
-        assert!(key.is_none());
-
-        // Invalid: too long
-        let long_bytes = [1u8; 17];
-        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &long_bytes);
-        assert!(key.is_none());
-
-        // Invalid: empty
-        let empty_bytes: [u8; 0] = [];
-        let key = IdempotencyKey::from_bytes(1, 1, "client".to_string(), &empty_bytes);
-        assert!(key.is_none());
     }
 
     /// Test that assigned_sequence is properly stored and retrieved.

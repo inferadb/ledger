@@ -155,12 +155,6 @@ impl BucketRootBuilder {
         Self { hasher: BucketHasher::new(), bucket_id }
     }
 
-    /// Returns the bucket ID this builder is for.
-    #[allow(dead_code)] // public API: accessor for bucket identification
-    pub fn bucket_id(&self) -> u8 {
-        self.bucket_id
-    }
-
     /// Adds an entity to the bucket hash.
     ///
     /// Entities should be added in lexicographic key order.
@@ -271,7 +265,6 @@ mod tests {
     #[test]
     fn test_bucket_root_builder() {
         let mut builder = BucketRootBuilder::new(42);
-        assert_eq!(builder.bucket_id(), 42);
 
         builder.add_entity(&Entity {
             key: b"key".to_vec(),

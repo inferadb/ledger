@@ -14,8 +14,6 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 | `INFERADB__LEDGER__PEERS_TTL`        | `--peers-ttl`     | `3600`            | Peer cache TTL (seconds)               |
 | `INFERADB__LEDGER__PEERS_TIMEOUT`    | `--peers-timeout` | `60`              | Peer discovery timeout (seconds)       |
 | `INFERADB__LEDGER__PEERS_POLL`       | `--peers-poll`    | `2`               | Peer discovery poll interval (seconds) |
-| `INFERADB__LEDGER__BATCH_SIZE`       | `--batch-size`    | `100`             | Max transactions per batch             |
-| `INFERADB__LEDGER__BATCH_DELAY`      | `--batch-delay`   | `0.01`            | Max batch wait time (seconds)          |
 | `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent`    | `100`             | Max concurrent requests                |
 | `INFERADB__LEDGER__TIMEOUT`          | `--timeout`       | `30`              | Request timeout (seconds)              |
 | `INFERADB__LEDGER__LOG_FORMAT`       | -                 | `auto`            | Log format (text/json/auto)            |
@@ -340,22 +338,20 @@ inferadb-ledger \
   --peers-ttl 3600 \
   --peers-timeout 120 \
   --peers-poll 5 \
-  --batch-size 100 \
-  --batch-delay 0.01 \
   --concurrent 100 \
   --timeout 30
 ```
 
 ## Storage Configuration
 
-Snapshot and cache settings. Configured via TOML file or `UpdateConfig` RPC.
+Snapshot and cache settings. Configured via `UpdateConfig` RPC at runtime.
 
-| TOML Key                        | Type     | Default     | Description                              |
-| ------------------------------- | -------- | ----------- | ---------------------------------------- |
-| `storage.cache_size_bytes`      | usize    | `268435456` | B+ tree page cache size (256 MB default) |
-| `storage.hot_cache_snapshots`   | usize    | `3`         | Snapshots to keep in hot cache           |
-| `storage.snapshot_interval`     | duration | `5m`        | Interval between automatic snapshots     |
-| `storage.compression_level`     | i32      | `3`         | zstd compression level (1–22)            |
+| Field                    | Type     | Default     | Description                              |
+| ------------------------ | -------- | ----------- | ---------------------------------------- |
+| `cache_size_bytes`       | usize    | `268435456` | B+ tree page cache size (256 MB default) |
+| `hot_cache_snapshots`    | usize    | `3`         | Snapshots to keep in hot cache           |
+| `snapshot_interval`      | duration | `5m`        | Interval between automatic snapshots     |
+| `compression_level`      | i32      | `3`         | zstd compression level (1–22)            |
 
 **Compression level trade-offs**: Level 3 (default) balances speed and ratio well for typical workloads (~3–4x compression). Higher levels (6–10) yield marginally better compression at increasing CPU cost. Levels above 10 are rarely worthwhile for Ledger's data patterns.
 
@@ -363,24 +359,25 @@ Snapshot and cache settings. Configured via TOML file or `UpdateConfig` RPC.
 
 Controls how expired client sequence entries are purged from the replicated state. These entries enable cross-failover idempotency deduplication within the TTL window.
 
-| TOML Key                                           | Type | Default | Description                                        |
-| -------------------------------------------------- | ---- | ------- | -------------------------------------------------- |
-| `raft.client_sequence_eviction.eviction_interval`  | u64  | `1000`  | Evict when `last_applied.index % interval == 0`    |
-| `raft.client_sequence_eviction.ttl_seconds`         | i64  | `86400` | Entry TTL in seconds (24 hours default)            |
+| Field                | Type | Default | Description                                     |
+| -------------------- | ---- | ------- | ----------------------------------------------- |
+| `eviction_interval`  | u64  | `1000`  | Evict when `last_applied.index % interval == 0` |
+| `ttl_seconds`        | i64  | `86400` | Entry TTL in seconds (24 hours default)         |
 
 **Eviction is deterministic**: triggered by the Raft log index, ensuring all replicas evict identical entries at the same point. Lower `eviction_interval` means more frequent checks (slightly more CPU per apply cycle). Higher values mean entries may live slightly beyond TTL.
 
-### TOML Example
+### UpdateConfig RPC Example
 
-```toml
-[storage]
-cache_size_bytes = 536870912  # 512 MB
-compression_level = 3
-snapshot_interval = "5m"
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"compaction\":{\"target_fill_ratio\":0.85}}"
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
+```
 
-[raft.client_sequence_eviction]
-eviction_interval = 1000
-ttl_seconds = 86400
+Use `GetConfig` to inspect current runtime configuration:
+
+```bash
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetConfig
 ```
 
 ## Events Configuration
@@ -407,18 +404,15 @@ Audit event logging and external ingestion. See [Events Operations Guide](events
 | `INFERADB__LEDGER__EVENTS__INGESTION__MAX_INGEST_BATCH_SIZE`        | u32  | `500`                  | Max events per IngestEvents call  |
 | `INFERADB__LEDGER__EVENTS__INGESTION__INGEST_RATE_LIMIT_PER_SOURCE` | u32  | `10000`                | Events/sec per source service     |
 
-### TOML Example
+### Runtime Reconfiguration
 
-```toml
-[events]
-enabled = true
-default_ttl_days = 90
-max_details_size_bytes = 4096
+These fields are updatable at runtime via the `UpdateConfig` RPC without restart:
 
-[events.ingestion]
-ingest_enabled = true
-allowed_sources = ["engine", "control"]
-max_ingest_batch_size = 500
+- `enabled`, `default_ttl_days`, `system_log_enabled`, `organization_log_enabled`
+- `ingest_enabled`, `ingest_rate_limit_per_source`
+
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"events\":{\"default_ttl_days\":30,\"ingest_rate_limit_per_source\":5000}}"
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
-
-Runtime-updatable fields (via `UpdateConfig` RPC): `enabled`, `default_ttl_days`, `system_log_enabled`, `organization_log_enabled`, `ingest_enabled`, `ingest_rate_limit_per_source`.

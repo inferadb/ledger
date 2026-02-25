@@ -18,7 +18,6 @@
 //! - Snapshot-based state reconstruction
 
 use std::{
-    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Seek, SeekFrom, Write},
     path::PathBuf,
@@ -120,9 +119,6 @@ pub struct BlockArchive<B: StorageBackend> {
     db: Arc<Database<B>>,
     /// Directory for segment files (optional, for large deployments).
     blocks_dir: Option<PathBuf>,
-    /// Cached segment indexes.
-    #[allow(dead_code)] // reserved for segment-based block retrieval
-    segment_indexes: RwLock<HashMap<u64, Vec<BlockIndex>>>,
     /// Current segment writer (for file-based storage).
     current_segment: RwLock<Option<SegmentWriter>>,
 }
@@ -131,12 +127,7 @@ pub struct BlockArchive<B: StorageBackend> {
 impl<B: StorageBackend> BlockArchive<B> {
     /// Creates a new block archive backed by inferadb-ledger-store.
     pub fn new(db: Arc<Database<B>>) -> Self {
-        Self {
-            db,
-            blocks_dir: None,
-            segment_indexes: RwLock::new(HashMap::new()),
-            current_segment: RwLock::new(None),
-        }
+        Self { db, blocks_dir: None, current_segment: RwLock::new(None) }
     }
 
     /// Creates a block archive with file-based segment storage.
@@ -148,12 +139,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// Returns [`BlockArchiveError::Io`] if creating the blocks directory fails.
     pub fn with_segment_files(db: Arc<Database<B>>, blocks_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&blocks_dir).context(IoSnafu)?;
-        Ok(Self {
-            db,
-            blocks_dir: Some(blocks_dir),
-            segment_indexes: RwLock::new(HashMap::new()),
-            current_segment: RwLock::new(None),
-        })
+        Ok(Self { db, blocks_dir: Some(blocks_dir), current_segment: RwLock::new(None) })
     }
 
     /// Appends a block to the archive.

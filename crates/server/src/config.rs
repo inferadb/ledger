@@ -674,21 +674,6 @@ pub struct Config {
     #[builder(default = default_peers_poll_secs())]
     pub peers_poll_secs: u64,
 
-    // === Batching ===
-    /// Maximum transactions per batch.
-    #[arg(long = "batch-size", env = "INFERADB__LEDGER__BATCH_SIZE", default_value_t = 100)]
-    #[serde(default = "default_batch_max_size")]
-    #[builder(default = default_batch_max_size())]
-    #[allow(dead_code)] // reserved for LedgerServer batching integration
-    pub batch_max_size: usize,
-
-    /// Maximum batch fill wait time, in seconds (supports fractions, e.g., 0.01 = 10ms).
-    #[arg(long = "batch-delay", env = "INFERADB__LEDGER__BATCH_DELAY", default_value_t = 0.01)]
-    #[serde(default = "default_batch_max_delay_secs")]
-    #[builder(default = default_batch_max_delay_secs())]
-    #[allow(dead_code)] // reserved for LedgerServer batching integration
-    pub batch_max_delay_secs: f64,
-
     // === Request Limits ===
     /// Maximum concurrent requests.
     #[arg(long = "concurrent", env = "INFERADB__LEDGER__MAX_CONCURRENT", default_value_t = 100)]
@@ -789,12 +774,6 @@ fn default_peers_timeout_secs() -> u64 {
 fn default_peers_poll_secs() -> u64 {
     2
 }
-fn default_batch_max_size() -> usize {
-    100
-}
-fn default_batch_max_delay_secs() -> f64 {
-    0.01 // 10ms
-}
 fn default_max_concurrent() -> usize {
     100
 }
@@ -816,8 +795,6 @@ impl Default for Config {
             peers_ttl_secs: default_peers_ttl_secs(),
             peers_timeout_secs: default_peers_timeout_secs(),
             peers_poll_secs: default_peers_poll_secs(),
-            batch_max_size: default_batch_max_size(),
-            batch_max_delay_secs: default_batch_max_delay_secs(),
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             logging: LoggingConfig::default(),
@@ -1096,8 +1073,6 @@ mod tests {
         assert_eq!(config.cluster, Some(3));
         assert_eq!(config.peers_timeout_secs, 60);
         assert_eq!(config.peers_poll_secs, 2);
-        assert_eq!(config.batch_max_size, 100);
-        assert!((config.batch_max_delay_secs - 0.01).abs() < f64::EPSILON);
         assert_eq!(config.max_concurrent, 100);
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.peers_ttl_secs, 3600);
@@ -1244,11 +1219,6 @@ mod tests {
         assert_eq!(from_builder.peers_ttl_secs, from_default.peers_ttl_secs);
         assert_eq!(from_builder.peers_timeout_secs, from_default.peers_timeout_secs);
         assert_eq!(from_builder.peers_poll_secs, from_default.peers_poll_secs);
-        assert_eq!(from_builder.batch_max_size, from_default.batch_max_size);
-        assert!(
-            (from_builder.batch_max_delay_secs - from_default.batch_max_delay_secs).abs()
-                < f64::EPSILON
-        );
         assert_eq!(from_builder.max_concurrent, from_default.max_concurrent);
         assert_eq!(from_builder.timeout_secs, from_default.timeout_secs);
     }
@@ -1264,8 +1234,6 @@ mod tests {
             .peers_ttl_secs(7200)
             .peers_timeout_secs(120)
             .peers_poll_secs(5)
-            .batch_max_size(500)
-            .batch_max_delay_secs(0.05)
             .max_concurrent(200)
             .timeout_secs(60)
             .build();
@@ -1279,8 +1247,6 @@ mod tests {
         assert_eq!(config.peers_ttl_secs, 7200);
         assert_eq!(config.peers_timeout_secs, 120);
         assert_eq!(config.peers_poll_secs, 5);
-        assert_eq!(config.batch_max_size, 500);
-        assert!((config.batch_max_delay_secs - 0.05).abs() < f64::EPSILON);
         assert_eq!(config.max_concurrent, 200);
         assert_eq!(config.timeout_secs, 60);
     }

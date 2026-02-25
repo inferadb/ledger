@@ -46,10 +46,17 @@ pub fn sha256_concat(hashes: &[Hash]) -> Hash {
     hasher.finalize().into()
 }
 
-/// Constant-time hash comparison to prevent timing attacks.
+/// Constant-time hash comparison using `subtle::ConstantTimeEq`.
 ///
-/// Use this for all security-critical hash comparisons.
-#[allow(dead_code)]
+/// Standard `PartialEq` on `[u8; 32]` short-circuits on the first
+/// mismatched byte, leaking prefix-length information through timing.
+/// This function processes all 32 bytes unconditionally, preventing
+/// timing side-channel attacks.
+///
+/// Use for all security-sensitive comparisons: Merkle proof verification,
+/// state root validation, block chain continuity checks. Use `==` only
+/// where timing leakage is irrelevant (e.g., test assertions, routing).
+#[must_use]
 #[inline]
 pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
     a.ct_eq(b).into()

@@ -26,7 +26,7 @@ use inferadb_ledger_types::{
     VaultId as DomainVaultId, ZERO_HASH,
     config::ValidationConfig,
     events::{EventAction, EventOutcome as EventOutcomeType},
-    validation,
+    hash_eq, validation,
 };
 use openraft::{BasicNode, Raft};
 use sha2::{Digest, Sha256};
@@ -1143,7 +1143,7 @@ impl AdminService for AdminServiceImpl {
 
                     // Verify chain continuity (previous_vault_hash)
                     if let Some(expected_prev) = last_vault_hash
-                        && entry.previous_vault_hash != expected_prev
+                        && !hash_eq(&entry.previous_vault_hash, &expected_prev)
                     {
                         issues.push(IntegrityIssue {
                             block_height: height,
@@ -1869,7 +1869,7 @@ impl AdminService for AdminServiceImpl {
 
             // Verify chain continuity
             if let Some(expected_prev) = last_vault_hash
-                && entry.previous_vault_hash != expected_prev
+                && !hash_eq(&entry.previous_vault_hash, &expected_prev)
             {
                 tracing::warn!(
                     height,

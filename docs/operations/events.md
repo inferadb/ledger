@@ -40,24 +40,6 @@ Ledger serves as the central audit store. Engine and Control write events via th
 | `ingestion.max_ingest_batch_size`        | `INFERADB__LEDGER__EVENTS__INGESTION__MAX_INGEST_BATCH_SIZE`        | `500`                  | Max events per IngestEvents call  |
 | `ingestion.ingest_rate_limit_per_source` | `INFERADB__LEDGER__EVENTS__INGESTION__INGEST_RATE_LIMIT_PER_SOURCE` | `10000`                | Events/sec per source service     |
 
-### TOML Example
-
-```toml
-[events]
-enabled = true
-default_ttl_days = 90
-max_details_size_bytes = 4096
-system_log_enabled = true
-organization_log_enabled = true
-max_snapshot_events = 100000
-
-[events.ingestion]
-ingest_enabled = true
-allowed_sources = ["engine", "control"]
-max_ingest_batch_size = 500
-ingest_rate_limit_per_source = 10000
-```
-
 ### Runtime Reconfiguration
 
 These fields are updatable via the `UpdateConfig` RPC without restart:

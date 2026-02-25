@@ -61,10 +61,6 @@ pub struct LedgerServer {
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Server address.
     addr: SocketAddr,
-    /// Rate limit: requests per second (reserved for future use).
-    #[allow(dead_code)] // reserved for rate limiting configuration
-    #[builder(default = 1000)]
-    requests_per_second: u64,
     /// Max concurrent requests per connection.
     #[builder(default = 100)]
     max_concurrent: usize,

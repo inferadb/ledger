@@ -58,18 +58,6 @@ impl ShutdownCoordinator {
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
         self.notify.subscribe()
     }
-
-    /// Sends the shutdown signal to all active subscribers.
-    pub fn shutdown(&self) {
-        let _ = self.notify.send(());
-    }
-
-    /// Awaits Ctrl-C or SIGTERM, then broadcasts shutdown.
-    #[allow(dead_code)] // utility for graceful shutdown coordination
-    pub async fn wait_for_signal(&self) {
-        shutdown_signal().await;
-        self.shutdown();
-    }
 }
 
 impl Default for ShutdownCoordinator {

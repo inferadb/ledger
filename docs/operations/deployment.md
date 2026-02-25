@@ -327,8 +327,6 @@ These defaults work well for most deployments. See [consensus internals](../inte
 | -------------------- | ------------------------------------------- | ------- | --------------------------------------- |
 | `--peers-timeout`| `INFERADB__LEDGER__PEERS_TIMEOUT`  | `60`    | How long to wait for other nodes (secs) |
 | `--peers-poll`             | `INFERADB__LEDGER__PEERS_POLL`     | `2`     | How often to check for other nodes      |
-| `--batch-size`       | `INFERADB__LEDGER__BATCH_SIZE`          | `100`   | Writes to group before committing       |
-| `--batch-delay`      | `INFERADB__LEDGER__BATCH_DELAY`      | `0.005` | Max wait before committing a batch (secs) |
 | `--concurrent`       | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
 | `--timeout`          | `INFERADB__LEDGER__TIMEOUT`   | `30`    | Max time for a request to complete      |
 

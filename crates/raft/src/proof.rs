@@ -12,7 +12,7 @@ use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, Transaction, VaultId, VaultSlug,
-    hash::{Hash, tx_hash},
+    hash::{Hash, hash_eq, tx_hash},
     merkle::MerkleTree,
 };
 use snafu::{ResultExt, Snafu};
@@ -336,7 +336,7 @@ pub fn verify_state_proof(
 
     // 4. Compute state root and verify
     let computed_state_root = sha256_concat(&all_roots);
-    if &computed_state_root != expected_state_root {
+    if !hash_eq(&computed_state_root, expected_state_root) {
         return StateProofVerification::InvalidStateRoot;
     }
 
