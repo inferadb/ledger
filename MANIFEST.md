@@ -374,10 +374,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports public API (StateLayer, Entity/Relationship stores, ShardManager)
 - **Key Types/Functions**:
-  - Modules: `block_archive`, `bucket`, `engine`, `entity`, `events`, `events_keys`, `indexes`, `keys`, `relationship`, `shard`, `snapshot`, `state`, `tiered_storage`, `time_travel`, `system`
+  - Modules: `block_archive`, `bucket`, `engine`, `entity`, `events`, `events_keys`, `indexes`, `keys`, `relationship`, `shard`, `snapshot`, `state`, `tiered_storage`, `system`
   - Re-exports from `events`: `EventIndex`, `EventStore`, `Events`, `EventsDatabase`, `EventsDatabaseError`, `EventStoreError`
   - Re-exports from `events_keys`: `encode_event_key`, `encode_event_index_key`, `encode_event_index_value`, `primary_key_from_index_value`, `EVENT_INDEX_KEY_LEN`, `EVENT_INDEX_VALUE_LEN`, `EVENT_KEY_LEN`, `DecodedEventKey`, `decode_event_key`, `org_prefix`, `org_time_prefix`
-- **Insights**: Rich feature set: snapshots, time travel, tiered storage, multi-shard, saga-based cross-shard transactions, and dedicated events storage.
+- **Insights**: Rich feature set: snapshots, tiered storage, multi-shard, saga-based cross-shard transactions, and dedicated events storage.
 
 #### `engine.rs` (118 lines)
 
@@ -530,16 +530,6 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `TieredSnapshotManager`: Orchestrates snapshot storage across tiers (`store()`, `load()`, `promote()`, `demote()`)
   - `TieredConfig`: Tier thresholds and retention settings
 - **Insights**: `ObjectStorageBackend` is a single generic implementation (not separate S3/GCS/Azure backends) — URL scheme determines provider. Cost optimization for large deployments.
-
-#### `time_travel.rs` (561 lines)
-
-- **Purpose**: Historical versioning with inverted height keys for efficient latest-version queries
-- **Key Types/Functions**:
-  - `create_versioned_entity(tx, key, value, height)`: Store entity with version
-  - `read_entity_at_height(tx, key, height) -> Option<Entity>`: Historical read
-  - `read_latest_entity(tx, key) -> Option<Entity>`: Current version (inverted key optimization)
-  - Key encoding: `entity_key + (u64::MAX - height)` for reverse chronological ordering
-- **Insights**: Inverted height encoding enables latest-version queries via prefix scan. No secondary index needed. Clever optimization.
 
 #### `system/mod.rs` (28 lines)
 

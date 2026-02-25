@@ -306,11 +306,12 @@ struct StateLayer<B: StorageBackend> {
     vault_commitments: RwLock<HashMap<VaultId, VaultCommitment>>,
 }
 
-// The Database contains 15 compile-time tables including:
+// The Database contains 18 compile-time tables including:
 //   Entities, Relationships, ObjIndex, SubjIndex,
 //   Blocks, VaultBlockIndex, VaultMeta, OrganizationMeta,
 //   Sequences, ClientSequences, CompactionMeta,
-//   RaftLog, RaftState, TimeTravelConfig, TimeTravelIndex
+//   RaftLog, RaftState, OrganizationSlugIndex, VaultSlugIndex,
+//   VaultHeights, VaultHashes, VaultHealth
 
 impl StateLayer {
     fn get(&self, key: &[u8]) -> Option<Value> {
@@ -1151,7 +1152,7 @@ Deliberate deviations from earlier versions of this specification, with rational
 
 | Area              | Original Spec                     | Implementation                                         | Rationale                                                                                        |
 | ----------------- | --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| Table count       | 13 tables                         | 15 tables                                              | Added `TimeTravelConfig` and `TimeTravelIndex` for historical state queries                      |
+| Table count       | 13 tables                         | 18 tables                                              | Added slug indexes, vault-scoped state tables; removed `TimeTravelConfig` and `TimeTravelIndex` (superseded by audit events) |
 | Batch timeout     | 5ms                               | 5ms (TOML default), 2ms (runtime `BatchWriter`)        | Runtime batch writer uses tighter timing for lower latency; TOML config allows operator override |
 | `TxId` generation | "At block creation"               | In response path after Raft commit                     | Avoids assigning IDs to proposals that may not commit; UUID generation is cheap                  |
 | Identifier types  | Type aliases                      | Newtypes via `define_id!` macro                        | Type safety prevents `OrganizationId`/`VaultId` confusion at compile time                           |

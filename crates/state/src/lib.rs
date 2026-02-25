@@ -33,7 +33,6 @@ mod state;
 /// primary service interface.
 pub mod system;
 mod tiered_storage;
-mod time_travel;
 
 pub use block_archive::{BlockArchive, BlockArchiveError};
 pub use bucket::{NUM_BUCKETS, VaultCommitment};
@@ -61,7 +60,4 @@ pub use state::{StateError, StateLayer};
 pub use tiered_storage::{
     LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredSnapshotManager,
     TieredStorageConfig, TieredStorageError,
-};
-pub use time_travel::{
-    TimeTravelConfig, TimeTravelEntry, TimeTravelError, TimeTravelIndex, TimeTravelStats,
 };

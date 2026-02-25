@@ -397,8 +397,6 @@ fn iter_table_raw(
         TableId::Sequences => collect_table!(tables::Sequences),
         TableId::ClientSequences => collect_table!(tables::ClientSequences),
         TableId::CompactionMeta => collect_table!(tables::CompactionMeta),
-        TableId::TimeTravelConfig => collect_table!(tables::TimeTravelConfig),
-        TableId::TimeTravelIndex => collect_table!(tables::TimeTravelIndex),
         TableId::OrganizationSlugIndex => collect_table!(tables::OrganizationSlugIndex),
         TableId::VaultSlugIndex => collect_table!(tables::VaultSlugIndex),
         TableId::VaultHeights => collect_table!(tables::VaultHeights),

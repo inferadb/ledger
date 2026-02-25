@@ -1,6 +1,6 @@
 //! Fixed table definitions for the store engine.
 //!
-//! The store has exactly 20 tables, all known at compile time.
+//! The store has exactly 18 tables, all known at compile time.
 //! This enables type-safe access and eliminates dynamic table lookup overhead.
 
 use crate::types::KeyType;
@@ -62,42 +62,33 @@ pub enum TableId {
     CompactionMeta = 12,
 
     // ========================================================================
-    // Time-Travel Tables
-    // ========================================================================
-    /// Time-travel configuration per vault.
-    TimeTravelConfig = 13,
-
-    /// Time-travel index entries for historical lookups.
-    TimeTravelIndex = 14,
-
-    // ========================================================================
     // Organization Index Tables
     // ========================================================================
     /// Organization slug → internal ID mapping for external identifier resolution.
-    OrganizationSlugIndex = 15,
+    OrganizationSlugIndex = 13,
 
     // ========================================================================
     // Vault Index Tables
     // ========================================================================
     /// Vault slug → internal ID mapping for external identifier resolution.
-    VaultSlugIndex = 16,
+    VaultSlugIndex = 14,
 
     // ========================================================================
     // Vault-Scoped State Tables (composite key: {organization_id:8BE}{vault_id:8BE})
     // ========================================================================
     /// Vault block heights: composite key → `u64` vault block height.
-    VaultHeights = 17,
+    VaultHeights = 15,
 
     /// Vault hashes: composite key → `[u8; 32]` SHA-256 hash.
-    VaultHashes = 18,
+    VaultHashes = 16,
 
     /// Vault health status: composite key → postcard `VaultHealthStatus`.
-    VaultHealth = 19,
+    VaultHealth = 17,
 }
 
 impl TableId {
     /// Total number of tables.
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 18;
 
     /// Returns the key type for this table.
     #[inline]
@@ -118,20 +109,13 @@ impl TableId {
             | Self::ObjIndex
             | Self::SubjIndex
             | Self::VaultBlockIndex
-            | Self::TimeTravelIndex
             | Self::ClientSequences
             | Self::VaultHeights
             | Self::VaultHashes
             | Self::VaultHealth => KeyType::Bytes,
 
-            // u64 keys (time-travel config uses vault_id)
-            Self::TimeTravelConfig => KeyType::U64,
-
-            // u64 keys (organization slug → internal ID)
-            Self::OrganizationSlugIndex => KeyType::U64,
-
-            // u64 keys (vault slug → internal ID)
-            Self::VaultSlugIndex => KeyType::U64,
+            // u64 keys (slug → internal ID)
+            Self::OrganizationSlugIndex | Self::VaultSlugIndex => KeyType::U64,
         }
     }
 
@@ -152,8 +136,6 @@ impl TableId {
             Self::Sequences => "sequences",
             Self::ClientSequences => "client_sequences",
             Self::CompactionMeta => "compaction_meta",
-            Self::TimeTravelConfig => "time_travel_config",
-            Self::TimeTravelIndex => "time_travel_index",
             Self::OrganizationSlugIndex => "organization_slug_index",
             Self::VaultSlugIndex => "vault_slug_index",
             Self::VaultHeights => "vault_heights",
@@ -178,8 +160,6 @@ impl TableId {
             Self::Sequences,
             Self::ClientSequences,
             Self::CompactionMeta,
-            Self::TimeTravelConfig,
-            Self::TimeTravelIndex,
             Self::OrganizationSlugIndex,
             Self::VaultSlugIndex,
             Self::VaultHeights,
@@ -205,13 +185,11 @@ impl TableId {
             10 => Some(Self::Sequences),
             11 => Some(Self::ClientSequences),
             12 => Some(Self::CompactionMeta),
-            13 => Some(Self::TimeTravelConfig),
-            14 => Some(Self::TimeTravelIndex),
-            15 => Some(Self::OrganizationSlugIndex),
-            16 => Some(Self::VaultSlugIndex),
-            17 => Some(Self::VaultHeights),
-            18 => Some(Self::VaultHashes),
-            19 => Some(Self::VaultHealth),
+            13 => Some(Self::OrganizationSlugIndex),
+            14 => Some(Self::VaultSlugIndex),
+            15 => Some(Self::VaultHeights),
+            16 => Some(Self::VaultHashes),
+            17 => Some(Self::VaultHealth),
             _ => None,
         }
     }
@@ -348,22 +326,6 @@ impl Table for CompactionMeta {
     type ValueType = u64;
 }
 
-/// Time-travel configuration table: per-vault config.
-pub struct TimeTravelConfig;
-impl Table for TimeTravelConfig {
-    const ID: TableId = TableId::TimeTravelConfig;
-    type KeyType = u64;
-    type ValueType = Vec<u8>;
-}
-
-/// Time-travel index table: historical entity versions.
-pub struct TimeTravelIndex;
-impl Table for TimeTravelIndex {
-    const ID: TableId = TableId::TimeTravelIndex;
-    type KeyType = Vec<u8>;
-    type ValueType = Vec<u8>;
-}
-
 /// Organization slug index: maps external slugs to internal organization IDs.
 pub struct OrganizationSlugIndex;
 impl Table for OrganizationSlugIndex {
@@ -417,7 +379,7 @@ impl Table for VaultHealth {
 /// On-disk representation of a table's metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct TableEntry {
-    /// Table identifier (0-19).
+    /// Table identifier (0-17).
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,
@@ -481,7 +443,7 @@ mod tests {
     #[test]
     fn test_new_vault_tables_round_trip() {
         for (id, expected_byte) in
-            [(TableId::VaultHeights, 17u8), (TableId::VaultHashes, 18), (TableId::VaultHealth, 19)]
+            [(TableId::VaultHeights, 15u8), (TableId::VaultHashes, 16), (TableId::VaultHealth, 17)]
         {
             assert_eq!(id as u8, expected_byte);
             let recovered = TableId::from_u8(expected_byte).expect("from_u8 should succeed");
@@ -509,23 +471,23 @@ mod tests {
     }
 
     #[test]
-    fn test_table_count_is_20() {
-        assert_eq!(TableId::COUNT, 20);
-        assert_eq!(TableId::all().len(), 20);
+    fn test_table_count_is_18() {
+        assert_eq!(TableId::COUNT, 18);
+        assert_eq!(TableId::all().len(), 18);
     }
 
     #[test]
     fn test_from_u8_rejects_out_of_range() {
-        assert!(TableId::from_u8(20).is_none());
+        assert!(TableId::from_u8(18).is_none());
         assert!(TableId::from_u8(255).is_none());
     }
 
     #[test]
     fn test_directory_page_fits_minimum_page_size() {
-        // With COUNT=20 tables, the directory occupies 20 * 17 = 340 bytes.
+        // With COUNT=18 tables, the directory occupies 18 * 17 = 306 bytes.
         // This must fit within the minimum 512-byte page size.
         let directory_size = TableId::COUNT * TableEntry::SIZE;
-        assert_eq!(directory_size, 340);
+        assert_eq!(directory_size, 306);
         assert!(
             directory_size <= 512,
             "directory size {directory_size} exceeds minimum 512-byte page"

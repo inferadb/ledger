@@ -665,11 +665,11 @@ pub const SNAPSHOT_TABLE_IDS: &[u8] = &[
     9,  // OrganizationMeta
     10, // Sequences
     11, // ClientSequences
-    15, // OrganizationSlugIndex
-    16, // VaultSlugIndex
-    17, // VaultHeights
-    18, // VaultHashes
-    19, // VaultHealth
+    13, // OrganizationSlugIndex
+    14, // VaultSlugIndex
+    15, // VaultHeights
+    16, // VaultHashes
+    17, // VaultHealth
 ];
 
 /// Validates that a table_id is a known table.
@@ -1201,8 +1201,8 @@ mod tests {
             writer.write_table_entry(&key, &value).await.unwrap();
         }
 
-        // Table 3: VaultHeights (table_id=17) — composite keys
-        writer.write_table_header(17, 200).await.unwrap();
+        // Table 3: VaultHeights (table_id=15) — composite keys
+        writer.write_table_header(15, 200).await.unwrap();
         for i in 0..200 {
             let mut key = Vec::with_capacity(16);
             key.extend_from_slice(&((i / 4) as i64).to_be_bytes()); // org_id
