@@ -1,9 +1,11 @@
 //! Background integrity scrubber job.
 //!
 //! Periodically verifies page checksums and B-tree structural invariants
-//! to detect silent data corruption (bit rot). Only runs on the leader node.
-//! Uses progressive scanning — each cycle checks a percentage of total pages,
-//! advancing a cursor that wraps around the full page space.
+//! to detect silent data corruption (bit rot). Runs on **all nodes** (leader
+//! and followers) because scrubbing is read-only — each node independently
+//! verifies its own local storage. Uses progressive scanning — each cycle
+//! checks a percentage of total pages, advancing a cursor that wraps around
+//! the full page space.
 
 use std::{
     sync::{
@@ -16,7 +18,6 @@ use std::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{IntegrityScrubber, StorageBackend};
 use inferadb_ledger_types::config::IntegrityConfig;
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -26,7 +27,6 @@ use crate::{
         record_integrity_errors, record_integrity_pages_checked, record_integrity_scan_duration,
     },
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerTypeConfig},
 };
 
 /// Default scrub interval (1 hour).
@@ -38,18 +38,17 @@ const DEFAULT_PAGES_PER_CYCLE_PERCENT: f64 = 1.0;
 /// Background job that progressively scrubs page integrity.
 ///
 /// Each cycle:
-/// 1. Checks if this node is the leader
-/// 2. Computes which page range to scrub based on the cursor position
+/// 1. Computes which page range to scrub based on the cursor position
+/// 2. Wraps sync page I/O in `spawn_blocking` to avoid blocking Tokio
 /// 3. Verifies checksums for those pages
 /// 4. Periodically runs full B-tree invariant checks
 /// 5. Records metrics and advances the cursor
+///
+/// Runs on **all nodes** — scrubbing is read-only, so every node
+/// independently detects corruption in its own local storage.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct IntegrityScrubberJob<B: StorageBackend + 'static> {
-    /// Raft consensus handle for verifying leadership before scrubbing.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
     /// State layer providing database access.
     state: Arc<StateLayer<B>>,
     /// Interval between scrub cycles.
@@ -58,49 +57,36 @@ pub struct IntegrityScrubberJob<B: StorageBackend + 'static> {
     /// Percentage of pages to check per cycle.
     #[builder(default = DEFAULT_PAGES_PER_CYCLE_PERCENT)]
     pages_per_cycle_percent: f64,
+    /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
+    #[builder(default)]
+    watchdog_handle: Option<Arc<AtomicU64>>,
 }
 
 impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
     /// Creates from a configuration struct.
-    pub fn from_config(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
-        state: Arc<StateLayer<B>>,
-        config: &IntegrityConfig,
-    ) -> Self {
+    pub fn from_config(state: Arc<StateLayer<B>>, config: &IntegrityConfig) -> Self {
         Self {
-            raft,
-            node_id,
             state,
             interval: Duration::from_secs(config.scrub_interval_secs),
             pages_per_cycle_percent: config.pages_per_cycle_percent,
+            watchdog_handle: None,
         }
-    }
-
-    /// Checks if this node is the current leader.
-    fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
     }
 
     /// Runs a single scrub cycle.
     ///
-    /// Scrubs a range of pages starting from the current cursor position,
-    /// then verifies B-tree invariants.
-    fn run_cycle(&self, cursor: &AtomicU64) {
-        if !self.is_leader() {
-            debug!("Skipping integrity scrub cycle (not leader)");
-            return;
-        }
-
+    /// Wraps the synchronous page I/O in `spawn_blocking` to avoid blocking
+    /// the Tokio worker thread during large scans.
+    async fn run_cycle(&self, cursor: &AtomicU64) {
         let trace_ctx = TraceContext::new();
         let cycle_start = Instant::now();
 
-        let db = self.state.database();
+        let db = self.state.database().clone();
         let total_pages = db.total_page_count();
 
         if total_pages == 0 {
             debug!(trace_id = %trace_ctx.trace_id, "Skipping scrub (no pages)");
+            self.heartbeat();
             return;
         }
 
@@ -115,17 +101,32 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
         // Advance cursor for next cycle
         cursor.store((start + pages_to_check) % total_pages, Ordering::Relaxed);
 
-        let scrubber = IntegrityScrubber::new(db);
+        let check_btree = start + pages_to_check >= total_pages;
 
-        // Phase 1: Checksum verification
-        let checksum_result = scrubber.verify_page_checksums(&page_ids);
+        // Offload synchronous page verification to a blocking thread to avoid
+        // stalling the Tokio executor during large scans (e.g. 10k page reads).
+        let scrub_result = tokio::task::spawn_blocking(move || {
+            let scrubber = IntegrityScrubber::new(&db);
 
-        // Phase 2: B-tree structural invariants (only when cursor wraps around)
-        let structural_result = if start + pages_to_check >= total_pages {
-            // Full wrap — run structural checks
-            scrubber.verify_btree_invariants()
-        } else {
-            Default::default()
+            // Phase 1: Checksum verification
+            let checksum_result = scrubber.verify_page_checksums(&page_ids);
+
+            // Phase 2: B-tree structural invariants (only when cursor wraps around)
+            let structural_result =
+                if check_btree { scrubber.verify_btree_invariants() } else { Default::default() };
+
+            (checksum_result, structural_result)
+        })
+        .await;
+
+        let (checksum_result, structural_result) = match scrub_result {
+            Ok(results) => results,
+            Err(e) => {
+                warn!(error = %e, "Integrity scrub spawn_blocking panicked");
+                record_background_job_run("integrity_scrub", "failure");
+                self.heartbeat();
+                return;
+            },
         };
 
         let total_checked = checksum_result.pages_checked + structural_result.pages_checked;
@@ -178,6 +179,21 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
                 "Integrity scrub cycle complete (no errors)"
             );
         }
+
+        self.heartbeat();
+    }
+
+    /// Updates the watchdog heartbeat timestamp.
+    fn heartbeat(&self) {
+        if let Some(ref handle) = self.watchdog_handle {
+            handle.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Ordering::Relaxed,
+            );
+        }
     }
 
     /// Starts the integrity scrubber background task.
@@ -195,7 +211,7 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
 
             loop {
                 ticker.tick().await;
-                self.run_cycle(&cursor);
+                self.run_cycle(&cursor).await;
             }
         })
     }

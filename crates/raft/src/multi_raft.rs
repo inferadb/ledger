@@ -620,11 +620,7 @@ impl MultiRaftManager {
         info!(shard_id = shard_id.value(), "Started B+ tree compactor");
 
         // Integrity Scrubber
-        let integrity_scrubber = IntegrityScrubberJob::builder()
-            .raft(raft)
-            .node_id(self.config.node_id)
-            .state(state)
-            .build();
+        let integrity_scrubber = IntegrityScrubberJob::builder().state(state).build();
         let integrity_scrubber_handle = integrity_scrubber.start();
         info!(shard_id = shard_id.value(), "Started integrity scrubber");
 

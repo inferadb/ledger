@@ -750,6 +750,16 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     pub cleanup: inferadb_ledger_types::config::CleanupConfig,
+
+    // === Integrity Scrubber ===
+    /// Integrity scrubber configuration for background page checksum verification.
+    ///
+    /// Controls the scrub interval, percentage of pages per cycle, and
+    /// full scan target period.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub integrity: inferadb_ledger_types::config::IntegrityConfig,
 }
 
 // Default value functions
@@ -806,6 +816,7 @@ impl Default for Config {
             events: inferadb_ledger_types::events::EventConfig::default(),
             saga: inferadb_ledger_types::config::SagaConfig::default(),
             cleanup: inferadb_ledger_types::config::CleanupConfig::default(),
+            integrity: inferadb_ledger_types::config::IntegrityConfig::default(),
         }
     }
 }
@@ -950,6 +961,9 @@ impl Config {
         self.events.validate()?;
         self.saga.validate().map_err(|e| ConfigError::Validation { message: e.to_string() })?;
         self.cleanup.validate().map_err(|e| ConfigError::Validation { message: e.to_string() })?;
+        self.integrity
+            .validate()
+            .map_err(|e| ConfigError::Validation { message: e.to_string() })?;
         Ok(())
     }
 

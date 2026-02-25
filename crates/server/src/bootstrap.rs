@@ -17,9 +17,9 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
-    GrpcRaftNetworkFactory, LearnerRefreshJob, LedgerNodeId, LedgerServer, LedgerTypeConfig,
-    OrphanCleanupJob, RaftLogStore, ResourceMetricsCollector, RuntimeConfigHandle,
-    SagaOrchestrator, TtlGarbageCollector,
+    GrpcRaftNetworkFactory, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId, LedgerServer,
+    LedgerTypeConfig, OrphanCleanupJob, RaftLogStore, ResourceMetricsCollector,
+    RuntimeConfigHandle, SagaOrchestrator, TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_state::{BlockArchive, EventsDatabase, SnapshotManager, StateLayer};
@@ -118,6 +118,9 @@ pub struct BootstrappedNode {
     /// Orphan cleanup background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub orphan_cleanup_handle: tokio::task::JoinHandle<()>,
+    /// Integrity scrubber background task handle.
+    #[allow(dead_code)] // retained to keep background task alive
+    pub integrity_scrub_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Bootstraps a new cluster, joins an existing one, or resumes from saved state.
@@ -475,6 +478,16 @@ pub async fn bootstrap_node(
         .start();
     tracing::info!("Started orphan cleanup job");
 
+    // Start integrity scrubber for background page checksum verification (all nodes)
+    let integrity_scrub_handle = IntegrityScrubberJob::builder()
+        .state(state.clone())
+        .interval(Duration::from_secs(config.integrity.scrub_interval_secs))
+        .pages_per_cycle_percent(config.integrity.pages_per_cycle_percent)
+        .watchdog_handle(watchdog.map(|w| w.register("integrity_scrub", 7200)))
+        .build()
+        .start();
+    tracing::info!("Started integrity scrubber");
+
     Ok(BootstrappedNode {
         raft,
         state,
@@ -489,6 +502,7 @@ pub async fn bootstrap_node(
         runtime_config,
         saga_handle,
         orphan_cleanup_handle,
+        integrity_scrub_handle,
     })
 }
 
