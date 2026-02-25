@@ -22,7 +22,10 @@ use inferadb_ledger_raft::{
     RuntimeConfigHandle, SagaOrchestrator, TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
-use inferadb_ledger_state::{BlockArchive, EventsDatabase, SnapshotManager, StateLayer};
+use inferadb_ledger_state::{
+    BlockArchive, EventsDatabase, LocalBackend, ObjectStorageBackend, SnapshotManager, StateLayer,
+    TieredSnapshotManager,
+};
 use inferadb_ledger_store::{Database, FileBackend};
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use tokio::sync::broadcast;
@@ -121,6 +124,9 @@ pub struct BootstrappedNode {
     /// Integrity scrubber background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub integrity_scrub_handle: tokio::task::JoinHandle<()>,
+    /// Snapshot demotion background task handle (only active when warm tier is configured).
+    #[allow(dead_code)] // retained to keep background task alive
+    pub snapshot_demotion_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Bootstraps a new cluster, joins an existing one, or resumes from saved state.
@@ -299,8 +305,29 @@ pub async fn bootstrap_node(
     let block_archive_for_compactor = block_archive.clone();
     let block_archive_for_recovery = block_archive.clone();
     let snapshot_dir = data_dir.join("snapshots");
-    let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir, 5));
+    let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir.clone(), 5));
     let snapshot_manager_for_backup = snapshot_manager.clone();
+
+    // Construct tiered snapshot manager wrapping the local (hot) snapshot directory.
+    // When warm_url is configured, old snapshots are periodically demoted to object storage.
+    let tiered_config = config.tiered_storage.clone();
+    let demote_interval_secs = tiered_config.demote_interval_secs;
+    let tiered_manager: Option<Arc<TieredSnapshotManager>> =
+        if let Some(ref warm_url) = tiered_config.warm_url {
+            let hot = Box::new(LocalBackend::new(snapshot_dir.clone(), tiered_config.hot_count));
+            let warm = Box::new(
+                ObjectStorageBackend::with_multipart_threshold(
+                    warm_url,
+                    tiered_config.multipart_threshold_bytes,
+                )
+                .map_err(|e| {
+                    BootstrapError::Config(format!("failed to create warm storage backend: {e}"))
+                })?,
+            );
+            Some(Arc::new(TieredSnapshotManager::new_with_warm(hot, warm, tiered_config)))
+        } else {
+            None
+        };
 
     // Create runtime config handle for hot-reloadable settings.
     // Services read from this handle on every request via lock-free ArcSwap::load().
@@ -488,6 +515,33 @@ pub async fn bootstrap_node(
         .start();
     tracing::info!("Started integrity scrubber");
 
+    // Start snapshot demotion task if warm tier is configured.
+    // Periodically moves old snapshots from local SSD to object storage.
+    // S3 unavailability degrades gracefully: logs the error and retries next cycle.
+    let snapshot_demotion_handle = tiered_manager.map(|mgr| {
+        let interval = Duration::from_secs(demote_interval_secs);
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                match mgr.demote_to_warm() {
+                    Ok(0) => {},
+                    Ok(count) => {
+                        tracing::info!(demoted = count, "Demoted snapshots from hot to warm tier");
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Snapshot demotion failed, hot tier continues operating normally"
+                        );
+                    },
+                }
+            }
+        });
+        tracing::info!(interval_secs = demote_interval_secs, "Started snapshot demotion task");
+        handle
+    });
+
     Ok(BootstrappedNode {
         raft,
         state,
@@ -503,6 +557,7 @@ pub async fn bootstrap_node(
         saga_handle,
         orphan_cleanup_handle,
         integrity_scrub_handle,
+        snapshot_demotion_handle,
     })
 }
 

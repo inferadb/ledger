@@ -760,6 +760,15 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     pub integrity: inferadb_ledger_types::config::IntegrityConfig,
+
+    /// Tiered snapshot storage configuration.
+    ///
+    /// Controls snapshot distribution across hot (local SSD) and warm (S3/GCS/Azure) tiers.
+    /// When `warm_url` is absent, operates in local-only mode with zero overhead.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub tiered_storage: inferadb_ledger_types::config::TieredStorageConfig,
 }
 
 // Default value functions
@@ -817,6 +826,7 @@ impl Default for Config {
             saga: inferadb_ledger_types::config::SagaConfig::default(),
             cleanup: inferadb_ledger_types::config::CleanupConfig::default(),
             integrity: inferadb_ledger_types::config::IntegrityConfig::default(),
+            tiered_storage: inferadb_ledger_types::config::TieredStorageConfig::default(),
         }
     }
 }
@@ -962,6 +972,9 @@ impl Config {
         self.saga.validate().map_err(|e| ConfigError::Validation { message: e.to_string() })?;
         self.cleanup.validate().map_err(|e| ConfigError::Validation { message: e.to_string() })?;
         self.integrity
+            .validate()
+            .map_err(|e| ConfigError::Validation { message: e.to_string() })?;
+        self.tiered_storage
             .validate()
             .map_err(|e| ConfigError::Validation { message: e.to_string() })?;
         Ok(())

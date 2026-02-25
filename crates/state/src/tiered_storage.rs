@@ -178,6 +178,8 @@ pub struct ObjectStorageBackend {
     prefix: ObjectPath,
     /// Tokio runtime handle for running async operations.
     runtime: tokio::runtime::Handle,
+    /// Size threshold for switching to multipart upload (bytes).
+    multipart_threshold: usize,
     /// Simulated storage for testing (only used in test mode).
     #[cfg(test)]
     test_storage: Arc<RwLock<HashMap<u64, Vec<u8>>>>,
@@ -215,7 +217,23 @@ impl ObjectStorageBackend {
     ///
     /// Returns `TieredStorageError::ObjectStorage` if the URL is invalid, the scheme is
     /// unsupported, required credentials are missing, or no tokio runtime is available.
+    /// Default multipart threshold (50 MB).
+    const DEFAULT_MULTIPART_THRESHOLD: usize = 50 * 1024 * 1024;
+
+    /// Multipart upload chunk size (8 MB).
+    const MULTIPART_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+
+    /// Creates a new object storage backend from a URL with default multipart threshold (50 MB).
     pub fn new(url: &str) -> Result<Self> {
+        Self::with_multipart_threshold(url, Self::DEFAULT_MULTIPART_THRESHOLD)
+    }
+
+    /// Creates a new object storage backend with a custom multipart threshold.
+    ///
+    /// Snapshots larger than `multipart_threshold` bytes are uploaded using
+    /// multipart upload for reliability (per-chunk retries) and S3 compatibility
+    /// (single PUTs are limited to 5 GB).
+    pub fn with_multipart_threshold(url: &str, multipart_threshold: usize) -> Result<Self> {
         let parsed = Url::parse(url).map_err(|e| TieredStorageError::ObjectStorage {
             message: format!("Invalid URL '{}': {}", url, e),
         })?;
@@ -233,6 +251,7 @@ impl ObjectStorageBackend {
             store,
             prefix,
             runtime,
+            multipart_threshold,
             #[cfg(test)]
             test_storage: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(test)]
@@ -259,6 +278,7 @@ impl ObjectStorageBackend {
                     .handle()
                     .clone()
             }),
+            multipart_threshold: Self::DEFAULT_MULTIPART_THRESHOLD,
             test_storage: Arc::new(RwLock::new(HashMap::new())),
             is_test_backend: true,
         }
@@ -452,13 +472,34 @@ impl StorageBackend for ObjectStorageBackend {
         let data = std::fs::read(&temp_path).context(IoSnafu)?;
 
         let path = self.object_path(snapshot.shard_height());
-        let payload = PutPayload::from(Bytes::from(data));
 
-        self.block_on(async { self.store.put(&path, payload).await }).map_err(|e| {
-            TieredStorageError::ObjectStorage {
-                message: format!("Failed to upload snapshot: {}", e),
-            }
-        })?;
+        if data.len() > self.multipart_threshold {
+            // Multipart upload for large snapshots: per-chunk retries and
+            // avoids the S3 5 GB single-PUT limit.
+            self.block_on(async {
+                let upload = self.store.put_multipart(&path).await.map_err(|e| {
+                    TieredStorageError::ObjectStorage {
+                        message: format!("Failed to initiate multipart upload: {}", e),
+                    }
+                })?;
+
+                let mut writer = object_store::WriteMultipart::new_with_chunk_size(
+                    upload,
+                    Self::MULTIPART_CHUNK_SIZE,
+                );
+                writer.write(&data);
+                writer.finish().await.map_err(|e| TieredStorageError::ObjectStorage {
+                    message: format!("Failed to complete multipart upload: {}", e),
+                })
+            })?;
+        } else {
+            let payload = PutPayload::from(Bytes::from(data));
+            self.block_on(async { self.store.put(&path, payload).await }).map_err(|e| {
+                TieredStorageError::ObjectStorage {
+                    message: format!("Failed to upload snapshot: {}", e),
+                }
+            })?;
+        }
 
         Ok(())
     }
@@ -585,22 +626,7 @@ pub struct SnapshotLocation {
     pub created_at: u64,
 }
 
-/// Configuration for tiered storage.
-#[derive(Debug, Clone)]
-pub struct TieredConfig {
-    /// Number of snapshots to keep in hot tier.
-    pub hot_count: usize,
-    /// Number of days to keep in warm tier before moving to cold.
-    pub warm_days: u32,
-    /// Whether cold tier is enabled.
-    pub cold_enabled: bool,
-}
-
-impl Default for TieredConfig {
-    fn default() -> Self {
-        Self { hot_count: 3, warm_days: 30, cold_enabled: false }
-    }
-}
+pub use inferadb_ledger_types::config::TieredStorageConfig;
 
 /// Tiered snapshot manager.
 ///
@@ -614,14 +640,14 @@ pub struct TieredSnapshotManager {
     /// Cold tier (archive), optional.
     cold: Option<Box<dyn StorageBackend>>,
     /// Configuration.
-    config: TieredConfig,
+    config: TieredStorageConfig,
     /// Location cache.
     locations: RwLock<HashMap<u64, StorageTier>>,
 }
 
 impl TieredSnapshotManager {
     /// Creates a new tiered manager with only hot tier.
-    pub fn new_hot_only(hot: Box<dyn StorageBackend>, config: TieredConfig) -> Self {
+    pub fn new_hot_only(hot: Box<dyn StorageBackend>, config: TieredStorageConfig) -> Self {
         Self { hot, warm: None, cold: None, config, locations: RwLock::new(HashMap::new()) }
     }
 
@@ -629,7 +655,7 @@ impl TieredSnapshotManager {
     pub fn new_with_warm(
         hot: Box<dyn StorageBackend>,
         warm: Box<dyn StorageBackend>,
-        config: TieredConfig,
+        config: TieredStorageConfig,
     ) -> Self {
         Self { hot, warm: Some(warm), cold: None, config, locations: RwLock::new(HashMap::new()) }
     }
@@ -791,6 +817,22 @@ impl TieredSnapshotManager {
         Ok(all.into_iter().filter(|l| l.height <= target_height).map(|l| l.height).max())
     }
 
+    /// Loads the most recent snapshot from the hot (local) tier only.
+    ///
+    /// Bypasses tier fallback to avoid S3 latency on the critical
+    /// Raft follower catch-up path. Returns `None` if the hot tier is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if listing or loading from the hot tier fails.
+    pub fn load_latest_hot(&self) -> Result<Option<Snapshot>> {
+        let hot_snapshots = self.hot.list()?;
+        match hot_snapshots.last() {
+            Some(&height) => Ok(Some(self.hot.load(height)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Returns the tier where a snapshot is stored.
     ///
     /// # Errors
@@ -882,7 +924,7 @@ mod tests {
         let temp = TempDir::new().expect("create temp dir");
         let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
 
-        let config = TieredConfig { hot_count: 3, ..Default::default() };
+        let config = TieredStorageConfig { hot_count: 3, ..Default::default() };
 
         let manager = TieredSnapshotManager::new_hot_only(hot, config);
 
@@ -916,7 +958,7 @@ mod tests {
             "snapshots".to_string(),
         ));
 
-        let config = TieredConfig { hot_count: 2, ..Default::default() };
+        let config = TieredStorageConfig { hot_count: 2, ..Default::default() };
 
         let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
 
@@ -959,7 +1001,7 @@ mod tests {
         let temp = TempDir::new().expect("create temp dir");
         let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
 
-        let manager = TieredSnapshotManager::new_hot_only(hot, TieredConfig::default());
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
 
         // Try to load non-existent snapshot
         let result = manager.load(999);
@@ -1026,7 +1068,7 @@ mod tests {
         let warm: Box<dyn StorageBackend> =
             Box::new(ObjectStorageBackend::new(&url).expect("create warm backend"));
 
-        let config = TieredConfig { hot_count: 2, ..Default::default() };
+        let config = TieredStorageConfig { hot_count: 2, ..Default::default() };
 
         let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
 

@@ -463,3 +463,166 @@ impl BackupConfig {
         Ok(())
     }
 }
+
+// =========================================================================
+// TieredStorageConfig
+// =========================================================================
+
+/// Default number of snapshots to keep in hot tier.
+fn default_hot_count() -> usize {
+    3
+}
+
+/// Default days to keep in warm tier before cold demotion.
+fn default_warm_days() -> u32 {
+    30
+}
+
+/// Default demotion interval in seconds (1 hour).
+fn default_demote_interval_secs() -> u64 {
+    3600
+}
+
+/// Default multipart upload threshold (50 MB).
+fn default_multipart_threshold_bytes() -> usize {
+    50 * 1024 * 1024
+}
+
+/// Tiered snapshot storage configuration.
+///
+/// Controls how snapshots are distributed across storage tiers:
+/// - **Hot**: Local SSD for fast access (most recent N snapshots)
+/// - **Warm**: Object storage (S3/GCS/Azure) for older snapshots
+/// - **Cold**: Archive storage (future, not yet implemented)
+///
+/// When `warm_url` is `None`, operates in local-only mode with zero overhead.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::TieredStorageConfig;
+/// let config = TieredStorageConfig::builder()
+///     .hot_count(5)
+///     .warm_url("s3://my-bucket/snapshots".to_string())
+///     .build()
+///     .expect("valid tiered storage config");
+/// assert_eq!(config.demote_interval_secs, 3600);
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TieredStorageConfig {
+    /// Number of snapshots to keep in hot tier (local SSD).
+    ///
+    /// Must be >= 1. Default: 3.
+    #[serde(default = "default_hot_count")]
+    pub hot_count: usize,
+
+    /// Object storage URL for warm tier.
+    ///
+    /// Supported schemes: `s3://`, `gs://`, `az://`, `file://`.
+    /// Credentials are read from environment variables.
+    /// `None` means local-only mode (no warm tier, zero overhead).
+    #[serde(default)]
+    pub warm_url: Option<String>,
+
+    /// Days to keep snapshots in warm tier before cold demotion.
+    ///
+    /// Only relevant when cold tier is enabled. Default: 30.
+    #[serde(default = "default_warm_days")]
+    pub warm_days: u32,
+
+    /// Whether cold tier archival is enabled.
+    ///
+    /// Cold tier support is not yet implemented. Default: false.
+    #[serde(default)]
+    pub cold_enabled: bool,
+
+    /// Interval between demotion cycles in seconds.
+    ///
+    /// Controls how often old snapshots are moved from hot to warm tier.
+    /// Must be >= 60. Default: 3600 (1 hour).
+    #[serde(default = "default_demote_interval_secs")]
+    pub demote_interval_secs: u64,
+
+    /// Size threshold for multipart uploads in bytes.
+    ///
+    /// Snapshots larger than this are uploaded using multipart upload
+    /// for reliability and S3 compatibility (single PUTs limited to 5 GB).
+    /// Must be >= 5 MB. Default: 50 MB.
+    #[serde(default = "default_multipart_threshold_bytes")]
+    pub multipart_threshold_bytes: usize,
+}
+
+impl Default for TieredStorageConfig {
+    fn default() -> Self {
+        Self {
+            hot_count: default_hot_count(),
+            warm_url: None,
+            warm_days: default_warm_days(),
+            cold_enabled: false,
+            demote_interval_secs: default_demote_interval_secs(),
+            multipart_threshold_bytes: default_multipart_threshold_bytes(),
+        }
+    }
+}
+
+/// Minimum multipart threshold: 5 MB (S3 minimum part size).
+const MIN_MULTIPART_THRESHOLD: usize = 5 * 1024 * 1024;
+
+#[bon::bon]
+impl TieredStorageConfig {
+    /// Creates a new tiered storage configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `hot_count` is 0
+    /// - `demote_interval_secs` < 60
+    /// - `multipart_threshold_bytes` < 5 MB
+    #[builder]
+    pub fn new(
+        #[builder(default = default_hot_count())] hot_count: usize,
+        warm_url: Option<String>,
+        #[builder(default = default_warm_days())] warm_days: u32,
+        #[builder(default)] cold_enabled: bool,
+        #[builder(default = default_demote_interval_secs())] demote_interval_secs: u64,
+        #[builder(default = default_multipart_threshold_bytes())] multipart_threshold_bytes: usize,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            hot_count,
+            warm_url,
+            warm_days,
+            cold_enabled,
+            demote_interval_secs,
+            multipart_threshold_bytes,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validates an existing configuration (e.g., after deserialization).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.hot_count == 0 {
+            return Err(ConfigError::Validation {
+                message: "tiered storage hot_count must be >= 1".to_string(),
+            });
+        }
+        if self.demote_interval_secs < 60 {
+            return Err(ConfigError::Validation {
+                message: "tiered storage demote_interval_secs must be >= 60".to_string(),
+            });
+        }
+        if self.multipart_threshold_bytes < MIN_MULTIPART_THRESHOLD {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "tiered storage multipart_threshold_bytes must be >= {} (5 MB)",
+                    MIN_MULTIPART_THRESHOLD
+                ),
+            });
+        }
+        Ok(())
+    }
+}

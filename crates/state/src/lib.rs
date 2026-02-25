@@ -59,8 +59,8 @@ pub use snapshot::{
 };
 pub use state::{StateError, StateLayer};
 pub use tiered_storage::{
-    LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredConfig,
-    TieredSnapshotManager, TieredStorageError,
+    LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredSnapshotManager,
+    TieredStorageConfig, TieredStorageError,
 };
 pub use time_travel::{
     TimeTravelConfig, TimeTravelEntry, TimeTravelError, TimeTravelIndex, TimeTravelStats,
