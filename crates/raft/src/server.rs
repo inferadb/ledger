@@ -103,6 +103,14 @@ pub struct LedgerServer {
     /// Health check configuration for dependency validation.
     #[builder(default)]
     health_check_config: Option<inferadb_ledger_types::config::HealthCheckConfig>,
+    /// Maximum Raft log lag before forwarding reads to the leader.
+    ///
+    /// When a follower's applied index trails its last log index by more than
+    /// this threshold, read requests are transparently forwarded to the leader
+    /// to avoid serving stale data during catch-up.
+    /// Default 0: only serve reads locally when fully caught up.
+    #[builder(default)]
+    max_read_forward_lag: u64,
     /// Events database for the events query service (optional).
     #[builder(default)]
     events_db: Option<inferadb_ledger_state::EventsDatabase<FileBackend>>,
@@ -149,6 +157,7 @@ impl LedgerServer {
             .block_archive(self.block_archive.clone())
             .block_announcements(self.block_announcements.clone())
             .raft(Some(self.raft.clone()))
+            .max_read_forward_lag(self.max_read_forward_lag)
             .build();
         // Create write service with batching enabled for high throughput.
         // Server-level batching coalesces individual Write RPCs into single Raft

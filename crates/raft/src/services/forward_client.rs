@@ -28,16 +28,16 @@
 //! # }
 //! ```
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
-    BatchWriteRequest, BatchWriteResponse, BlockAnnouncement, GetBlockRangeRequest,
-    GetBlockRangeResponse, GetBlockRequest, GetBlockResponse, GetClientStateRequest,
-    GetClientStateResponse, GetTipRequest, GetTipResponse, HistoricalReadRequest,
-    HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse, ListRelationshipsRequest,
-    ListRelationshipsResponse, ListResourcesRequest, ListResourcesResponse, ReadRequest,
-    ReadResponse, VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest, WriteRequest,
-    WriteResponse, read_service_client::ReadServiceClient,
+    BatchReadRequest, BatchReadResponse, BatchWriteRequest, BatchWriteResponse, BlockAnnouncement,
+    GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest, GetBlockResponse,
+    GetClientStateRequest, GetClientStateResponse, GetTipRequest, GetTipResponse,
+    HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
+    ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
+    ListResourcesResponse, ReadRequest, ReadResponse, VerifiedReadRequest, VerifiedReadResponse,
+    WatchBlocksRequest, WriteRequest, WriteResponse, read_service_client::ReadServiceClient,
     write_service_client::WriteServiceClient,
 };
 use inferadb_ledger_types::ShardId;
@@ -283,6 +283,21 @@ impl ForwardClient {
         })
     }
 
+    /// Forwards a BatchRead request to the remote shard.
+    pub async fn forward_batch_read(
+        &mut self,
+        request: BatchReadRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<BatchReadResponse>, Status> {
+        debug!(shard_id = self.shard_id.value(), "Forwarding batch_read request");
+        let req = self.make_request(request, trace_ctx, grpc_deadline);
+        self.read_client.batch_read(req).await.map_err(|e| {
+            warn!(shard_id = self.shard_id.value(), error = %e, "Forward batch_read failed");
+            e
+        })
+    }
+
     // ========================================================================
     // Write Service Forwarding
     // ========================================================================
@@ -318,10 +333,140 @@ impl ForwardClient {
     }
 }
 
+/// Cached gRPC channel to the current Raft leader.
+///
+/// Avoids creating a new TCP+HTTP/2 connection per forwarded request.
+/// The cache is invalidated when the leader changes (detected via node ID comparison).
+/// Uses `connect_lazy()` so channel creation is synchronous — the actual TCP handshake
+/// is deferred until the first RPC call.
+#[derive(Clone)]
+pub struct LeaderChannelCache {
+    inner: Arc<parking_lot::Mutex<Option<(u64, Channel)>>>,
+}
+
+impl Default for LeaderChannelCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LeaderChannelCache {
+    /// Creates a new empty leader channel cache.
+    pub fn new() -> Self {
+        Self { inner: Arc::new(parking_lot::Mutex::new(None)) }
+    }
+
+    /// Returns a `ForwardClient` to the current leader, or `Ok(None)` if this node is the leader.
+    ///
+    /// Uses a cached channel if the leader hasn't changed; creates a new `connect_lazy()`
+    /// channel otherwise.
+    pub fn get_or_connect<NI>(
+        &self,
+        current_leader: Option<u64>,
+        this_node: u64,
+        nodes: NI,
+    ) -> Result<Option<ForwardClient>, Status>
+    where
+        NI: Iterator<Item = (u64, String)>,
+    {
+        // If this node is the leader, serve locally
+        let leader_id = match current_leader {
+            Some(id) if id == this_node => return Ok(None),
+            Some(id) => id,
+            None => {
+                return Err(Status::unavailable("No leader available for forwarding"));
+            },
+        };
+
+        // Check cache
+        {
+            let cache = self.inner.lock();
+            if let Some((cached_id, ref channel)) = *cache
+                && cached_id == leader_id
+            {
+                return Ok(Some(ForwardClient::from_channel(channel.clone(), ShardId::new(0))));
+            }
+        }
+
+        // Cache miss — find leader address and create a lazy channel
+        let leader_addr = nodes
+            .into_iter()
+            .find(|(id, _)| *id == leader_id)
+            .map(|(_, addr)| addr)
+            .ok_or_else(|| Status::unavailable("Leader address not found in membership"))?;
+
+        let endpoint = format!("http://{}", leader_addr);
+        let channel = Channel::from_shared(endpoint)
+            .map_err(|e| Status::unavailable(format!("Invalid leader endpoint: {e}")))?
+            .connect_lazy();
+
+        debug!(leader_id, %leader_addr, "Cached new leader channel");
+
+        let client = ForwardClient::from_channel(channel.clone(), ShardId::new(0));
+        {
+            let mut cache = self.inner.lock();
+            *cache = Some((leader_id, channel));
+        }
+
+        Ok(Some(client))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_forward_client_creation() {
         // Basic struct test - full testing requires gRPC setup
+    }
+
+    #[test]
+    fn test_leader_channel_cache_default() {
+        let cache = LeaderChannelCache::default();
+        // This node is the leader — should return None
+        let result = cache.get_or_connect(Some(1), 1, std::iter::empty());
+        assert!(result.is_ok());
+        assert!(result.as_ref().is_ok_and(|o| o.is_none()));
+    }
+
+    #[test]
+    fn test_leader_channel_cache_no_leader() {
+        let cache = LeaderChannelCache::new();
+        let result = cache.get_or_connect(None, 1, std::iter::empty());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_leader_channel_cache_creates_channel() {
+        let cache = LeaderChannelCache::new();
+        let nodes = vec![(2, "127.0.0.1:50051".to_string())];
+        let result = cache.get_or_connect(Some(2), 1, nodes.into_iter());
+        assert!(result.is_ok());
+        assert!(result.as_ref().is_ok_and(|o| o.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_leader_channel_cache_reuses_channel() {
+        let cache = LeaderChannelCache::new();
+        let nodes = vec![(2, "127.0.0.1:50051".to_string())];
+
+        // First call creates
+        let _ = cache.get_or_connect(Some(2), 1, nodes.clone().into_iter());
+        // Second call should reuse (no nodes needed since cached)
+        let result = cache.get_or_connect(Some(2), 1, std::iter::empty());
+        assert!(result.is_ok());
+        assert!(result.as_ref().is_ok_and(|o| o.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_leader_channel_cache_invalidates_on_leader_change() {
+        let cache = LeaderChannelCache::new();
+        let nodes = vec![(2, "127.0.0.1:50051".to_string())];
+        let _ = cache.get_or_connect(Some(2), 1, nodes.into_iter());
+
+        // Leader changed to 3 — cache miss, but node 3 not in membership
+        let result = cache.get_or_connect(Some(3), 1, std::iter::empty());
+        assert!(result.is_err()); // No address for node 3
     }
 }

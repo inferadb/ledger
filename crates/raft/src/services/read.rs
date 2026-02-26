@@ -41,7 +41,7 @@ use crate::{
     logging::{OperationType, RequestContext, Sampler},
     metrics,
     pagination::{PageToken, PageTokenCodec},
-    services::slug_resolver::SlugResolver,
+    services::{forward_client::LeaderChannelCache, slug_resolver::SlugResolver},
     trace_context,
     types::{LedgerNodeId, LedgerTypeConfig},
 };
@@ -83,6 +83,20 @@ pub struct ReadServiceImpl {
     #[builder(default)]
     #[allow(dead_code)]
     event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
+    /// Maximum Raft log lag before forwarding reads to the leader.
+    ///
+    /// When a follower's `last_log_index - last_applied > max_read_forward_lag`,
+    /// all read requests are transparently forwarded to the leader to avoid
+    /// serving stale data during catch-up. Default 0: only serve reads locally
+    /// when fully caught up.
+    #[builder(default)]
+    max_read_forward_lag: u64,
+    /// Cached leader channel for read forwarding.
+    ///
+    /// Shared across requests to avoid creating a new TCP+HTTP/2 connection
+    /// per forwarded read.
+    #[builder(default)]
+    leader_channel_cache: LeaderChannelCache,
 }
 
 impl ReadServiceImpl {
@@ -97,6 +111,48 @@ impl ReadServiceImpl {
             },
             None => false,
         }
+    }
+
+    /// Checks if this follower is too far behind the leader and should forward reads.
+    ///
+    /// Returns `Ok(None)` if reads can be served locally (leader, caught up, or no Raft).
+    /// Returns `Ok(Some(client))` if reads should be forwarded to the leader.
+    /// Returns `Err(Status)` if forwarding is needed but no leader is available.
+    fn should_forward_to_leader(
+        &self,
+    ) -> Result<Option<super::forward_client::ForwardClient>, Status> {
+        let raft = match &self.raft {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let metrics = raft.metrics().borrow().clone();
+
+        // Leader always serves locally
+        if metrics.current_leader == Some(metrics.id) {
+            return Ok(None);
+        }
+
+        // Check lag: if caught up within tolerance, serve locally
+        let last_log = metrics.last_log_index.unwrap_or(0);
+        let last_applied = metrics.last_applied.map_or(0, |id| id.index);
+        let lag = last_log.saturating_sub(last_applied);
+        if lag <= self.max_read_forward_lag {
+            return Ok(None);
+        }
+
+        // Forward via cached channel
+        let nodes: Vec<(u64, String)> = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .map(|(id, node)| (*id, node.addr.clone()))
+            .collect();
+
+        self.leader_channel_cache.get_or_connect(
+            metrics.current_leader,
+            metrics.id,
+            nodes.into_iter(),
+        )
     }
 
     /// Checks consistency requirements for a read request.
@@ -447,6 +503,13 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("read");
+            return client.forward_read(req, Some(&trace_ctx), deadline).await;
+        }
+
         // Create logging context
         let mut ctx = RequestContext::new("ReadService", "read");
         ctx.set_operation_type(OperationType::Read);
@@ -564,6 +627,13 @@ impl ReadService for ReadServiceImpl {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("batch_read");
+            return client.forward_batch_read(req, Some(&trace_ctx), deadline).await;
+        }
 
         // Create logging context
         let mut ctx = RequestContext::new("ReadService", "batch_read");
@@ -705,6 +775,13 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("verified_read");
+            return client.forward_verified_read(req, Some(&trace_ctx), deadline).await;
+        }
+
         // Create logging context
         let mut ctx = RequestContext::new("ReadService", "verified_read");
         ctx.set_operation_type(OperationType::Read);
@@ -838,6 +915,13 @@ impl ReadService for ReadServiceImpl {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("historical_read");
+            return client.forward_historical_read(req, Some(&trace_ctx), deadline).await;
+        }
 
         // Create logging context
         let mut ctx = RequestContext::new("ReadService", "historical_read");
@@ -1061,6 +1145,15 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<WatchBlocksRequest>,
     ) -> Result<Response<Self::WatchBlocksStream>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("watch_blocks");
+            let resp = client.forward_watch_blocks(req, None, deadline).await?;
+            return Ok(Response::new(Box::pin(resp.into_inner()) as Self::WatchBlocksStream));
+        }
+
         let req = request.into_inner();
 
         // Extract identifiers
@@ -1162,6 +1255,14 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetBlockRequest>,
     ) -> Result<Response<GetBlockResponse>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("get_block");
+            return client.forward_get_block(req, None, deadline).await;
+        }
+
         let req = request.into_inner();
 
         // Get block archive, return empty if not configured
@@ -1210,6 +1311,14 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetBlockRangeRequest>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("get_block_range");
+            return client.forward_get_block_range(req, None, deadline).await;
+        }
+
         let req = request.into_inner();
 
         // Get block archive, return empty if not configured
@@ -1274,6 +1383,14 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetTipRequest>,
     ) -> Result<Response<GetTipResponse>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("get_tip");
+            return client.forward_get_tip(req, None, deadline).await;
+        }
+
         let req = request.into_inner();
 
         // Get the vault specified in the request, or return the global max height
@@ -1318,6 +1435,14 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetClientStateRequest>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("get_client_state");
+            return client.forward_get_client_state(req, None, deadline).await;
+        }
+
         let req = request.into_inner();
 
         // Extract IDs
@@ -1343,6 +1468,14 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<ListRelationshipsRequest>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("list_relationships");
+            return client.forward_list_relationships(req, None, deadline).await;
+        }
+
         let req = request.into_inner();
 
         // Check consistency requirements first
@@ -1466,6 +1599,14 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<ListResourcesRequest>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("list_resources");
+            return client.forward_list_resources(req, None, deadline).await;
+        }
+
         let req = request.into_inner();
 
         // Check consistency requirements first
@@ -1549,6 +1690,14 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader()? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
+            let req = request.into_inner();
+            metrics::record_read_forward("list_entities");
+            return client.forward_list_entities(req, None, deadline).await;
+        }
+
         let req = request.into_inner();
 
         // Check consistency requirements first

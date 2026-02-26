@@ -14,16 +14,14 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{
-    OrganizationId, SetCondition, ShardId, VaultId, config::ValidationConfig,
-};
+use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};
 use openraft::Raft;
 use tokio::sync::Mutex;
-use tonic::{Request, Response, Status, transport::Channel};
+use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use super::forward_client::ForwardClient;
+use super::forward_client::{ForwardClient, LeaderChannelCache};
 pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use crate::{
     batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle},
@@ -104,6 +102,12 @@ pub struct WriteServiceImpl {
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle: Option<crate::event_writer::EventHandle<FileBackend>>,
+    /// Cached leader channel for write forwarding.
+    ///
+    /// Shared across requests to avoid creating a new TCP+HTTP/2 connection
+    /// per forwarded write.
+    #[builder(default)]
+    leader_channel_cache: LeaderChannelCache,
 }
 
 #[allow(clippy::result_large_err)]
@@ -179,6 +183,7 @@ impl WriteServiceImpl {
             proposal_timeout: Duration::from_secs(30),
             quota_checker: None,
             event_handle: None,
+            leader_channel_cache: LeaderChannelCache::new(),
         };
 
         (service, run_future)
@@ -251,43 +256,30 @@ impl WriteServiceImpl {
         self
     }
 
-    /// Checks if this node is the Raft leader. If not, creates a `ForwardClient`
+    /// Checks if this node is the Raft leader. If not, returns a `ForwardClient`
     /// to the current leader for transparent request forwarding.
+    ///
+    /// Uses a cached channel to avoid creating a new TCP+HTTP/2 connection per
+    /// forwarded request.
     ///
     /// Returns `Ok(None)` if this node is the leader (proceed locally).
     /// Returns `Ok(Some(client))` if forwarding is needed.
     /// Returns `Err(Status)` if no leader is known.
-    async fn forward_client_if_follower(&self) -> Result<Option<ForwardClient>, Status> {
+    fn forward_client_if_follower(&self) -> Result<Option<ForwardClient>, Status> {
         let metrics = self.raft.metrics().borrow().clone();
-        if metrics.current_leader == Some(metrics.id) {
-            return Ok(None);
-        }
 
-        let leader_addr = metrics
-            .current_leader
-            .and_then(|leader_id| {
-                metrics
-                    .membership_config
-                    .membership()
-                    .nodes()
-                    .find(|(id, _)| **id == leader_id)
-                    .map(|(_, node)| node.addr.clone())
-            })
-            .ok_or_else(|| Status::unavailable("No leader available for forwarding"))?;
+        let nodes: Vec<(u64, String)> = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .map(|(id, node)| (*id, node.addr.clone()))
+            .collect();
 
-        let endpoint = format!("http://{}", leader_addr);
-        let channel = Channel::from_shared(endpoint)
-            .map_err(|e| Status::unavailable(format!("Invalid leader endpoint: {e}")))?
-            .connect()
-            .await
-            .map_err(|e| Status::unavailable(format!("Failed to connect to leader: {e}")))?;
-
-        debug!(
-            leader_id = metrics.current_leader.unwrap_or(0),
-            leader_addr = %leader_addr,
-            "Forwarding write to leader"
-        );
-        Ok(Some(ForwardClient::from_channel(channel, ShardId::new(0))))
+        self.leader_channel_cache.get_or_connect(
+            metrics.current_leader,
+            metrics.id,
+            nodes.into_iter(),
+        )
     }
 
     /// Validates all operations in a proto operation list.
@@ -536,7 +528,7 @@ impl WriteService for WriteServiceImpl {
         let req = request.into_inner();
 
         // Forward to leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower().await? {
+        if let Some(mut client) = self.forward_client_if_follower()? {
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
         }
@@ -1043,7 +1035,7 @@ impl WriteService for WriteServiceImpl {
         let req = request.into_inner();
 
         // Forward to leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower().await? {
+        if let Some(mut client) = self.forward_client_if_follower()? {
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
         }

@@ -26,6 +26,7 @@ const BATCH_SIZE: &str = "ledger_batch_size";
 const READS_TOTAL: &str = "ledger_reads_total";
 const READS_LATENCY: &str = "ledger_read_latency_seconds";
 const VERIFIED_READS_TOTAL: &str = "ledger_verified_reads_total";
+const READ_FORWARDS_TOTAL: &str = "ledger_read_forwards_total";
 
 // Raft consensus metrics
 const RAFT_PROPOSALS_TOTAL: &str = "inferadb_ledger_raft_proposals_total";
@@ -146,6 +147,14 @@ pub fn record_verified_read(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
     counter!(VERIFIED_READS_TOTAL, "status" => status).increment(1);
     histogram!(READS_LATENCY, "status" => status, "verified" => "true").record(latency_secs);
+}
+
+/// Records a read request forwarded to the leader due to Raft log lag.
+///
+/// `method` is the RPC method name (e.g., `"read"`, `"get_block"`, `"list_entities"`).
+#[inline]
+pub fn record_read_forward(method: &str) {
+    counter!(READ_FORWARDS_TOTAL, "method" => method.to_string()).increment(1);
 }
 
 // =============================================================================
@@ -1057,6 +1066,22 @@ mod tests {
         set_is_leader(true);
         record_idempotency_hit();
         record_grpc_request("WriteService", "write", "OK", "none", 0.001);
+    }
+
+    #[test]
+    fn test_read_forward_metrics_dont_panic() {
+        record_read_forward("read");
+        record_read_forward("batch_read");
+        record_read_forward("verified_read");
+        record_read_forward("historical_read");
+        record_read_forward("get_block");
+        record_read_forward("get_block_range");
+        record_read_forward("get_tip");
+        record_read_forward("get_client_state");
+        record_read_forward("list_relationships");
+        record_read_forward("list_resources");
+        record_read_forward("list_entities");
+        record_read_forward("watch_blocks");
     }
 
     #[test]
