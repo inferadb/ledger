@@ -142,13 +142,17 @@ async fn main() -> Result<(), ServerError> {
     });
 
     tracing::info!("Server ready, accepting connections");
-    let server_result = node.server.serve().await;
+    let server_result = node.server_handle.await;
     let _ = shutdown_handle.await;
 
     // Shutdown OTEL tracer provider gracefully
     otel::shutdown_otel();
 
-    server_result.map_err(ServerError::Server)?;
+    match server_result {
+        Ok(Ok(())) => {},
+        Ok(Err(e)) => return Err(ServerError::Server(e.into())),
+        Err(e) => return Err(ServerError::Server(Box::new(e))),
+    }
 
     tracing::info!("Server shutdown complete");
     Ok(())

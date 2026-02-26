@@ -161,31 +161,22 @@ impl TestCluster {
         // Get the auto-generated Snowflake ID from Raft metrics
         let node_id = bootstrapped.raft.metrics().borrow().id;
 
-        let server = bootstrapped.server;
+        // Server is already running and accepting TCP connections from bootstrap_node().
+        // Extract fields before moving server_handle into the spawned task.
+        let raft_clone = bootstrapped.raft.clone();
+        let state_clone = bootstrapped.state.clone();
+        let bg_server_handle = bootstrapped.server_handle;
         let server_handle = tokio::spawn(async move {
-            if let Err(e) = server.serve().await {
-                tracing::error!("server error: {}", e);
-            }
+            let _ = bg_server_handle.await;
         });
 
-        // Wait for the gRPC server to accept TCP connections before proceeding.
-        // Leader election (via in-memory Raft metrics) can complete before the TCP
-        // listener is bound, causing ConnectionRefused in subsequent gRPC calls.
-        let tcp_start = tokio::time::Instant::now();
-        while tcp_start.elapsed() < Duration::from_secs(5) {
-            if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-
-        let leader_raft = bootstrapped.raft.clone();
+        let leader_raft = raft_clone.clone();
         let leader_addr = addr;
         nodes.push(TestNode {
             id: node_id,
             addr,
-            raft: bootstrapped.raft,
-            state: bootstrapped.state,
+            raft: raft_clone,
+            state: state_clone,
             _temp_dir: temp_dir,
             _server_handle: server_handle,
             _shutdown_tx: shutdown_tx,
@@ -255,22 +246,14 @@ impl TestCluster {
             // Get the auto-generated Snowflake ID from Raft metrics
             let node_id = bootstrapped.raft.metrics().borrow().id;
 
-            // Start server in background
-            let server = bootstrapped.server;
+            // Server is already running and accepting TCP connections from bootstrap_node().
+            // Extract fields before moving server_handle into the spawned task.
+            let raft_clone = bootstrapped.raft.clone();
+            let state_clone = bootstrapped.state.clone();
+            let bg_server_handle = bootstrapped.server_handle;
             let server_handle = tokio::spawn(async move {
-                if let Err(e) = server.serve().await {
-                    tracing::error!("server error: {}", e);
-                }
+                let _ = bg_server_handle.await;
             });
-
-            // Wait for the gRPC server to accept TCP connections before joining.
-            let tcp_start = tokio::time::Instant::now();
-            while tcp_start.elapsed() < Duration::from_secs(5) {
-                if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
 
             // Join the cluster via the current leader's AdminService.
             // Under parallel test execution, leader re-elections can occur, so we
@@ -338,12 +321,12 @@ impl TestCluster {
                 );
             }
 
-            let new_raft = bootstrapped.raft.clone();
+            let new_raft = raft_clone.clone();
             nodes.push(TestNode {
                 id: node_id,
                 addr,
-                raft: bootstrapped.raft,
-                state: bootstrapped.state,
+                raft: raft_clone,
+                state: state_clone,
                 _temp_dir: temp_dir,
                 _server_handle: server_handle,
                 _shutdown_tx: shutdown_tx,

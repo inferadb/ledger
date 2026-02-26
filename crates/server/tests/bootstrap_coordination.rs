@@ -47,20 +47,7 @@ async fn test_single_node_bootstrap() {
 
     let bootstrapped = result.unwrap();
 
-    // Start server to verify it's operational
-    let server = bootstrapped.server;
-    let server_handle = tokio::spawn(async move {
-        let _ = server.serve().await;
-    });
-
-    // Wait for server to accept TCP connections
-    let tcp_start = tokio::time::Instant::now();
-    while tcp_start.elapsed() < Duration::from_secs(5) {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // Server is already running and accepting TCP connections from bootstrap_node()
 
     // Verify node is a cluster member via GetNodeInfo
     let mut client = create_admin_client(addr).await.expect("connect to admin service");
@@ -78,7 +65,7 @@ async fn test_single_node_bootstrap() {
     let persisted_id: u64 = std::fs::read_to_string(&node_id_file).unwrap().trim().parse().unwrap();
     assert_eq!(persisted_id, info.node_id, "persisted ID should match reported ID");
 
-    server_handle.abort();
+    bootstrapped.server_handle.abort();
 }
 
 /// Tests node restart preserves ID and rejoins cluster.
@@ -90,7 +77,7 @@ async fn test_single_node_bootstrap() {
 async fn test_node_restart_preserves_id() {
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
-    let port = allocate_ports(1);
+    let port = allocate_ports(2);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
@@ -121,13 +108,9 @@ async fn test_node_restart_preserves_id() {
         let node_id_file = temp_dir.path().join("node_id");
         assert!(node_id_file.exists(), "node_id file should exist after first start");
 
-        // Let server run briefly
-        let server = bootstrapped.server;
-        let handle = tokio::spawn(async move {
-            let _ = server.serve().await;
-        });
+        // Server is already running from bootstrap_node(), let it run briefly
         tokio::time::sleep(Duration::from_millis(200)).await;
-        handle.abort();
+        bootstrapped.server_handle.abort();
 
         node_id
     };
@@ -162,20 +145,7 @@ async fn test_node_restart_preserves_id() {
         let raft_metrics = bootstrapped.raft.metrics().borrow().clone();
         let node_id = raft_metrics.id;
 
-        // Start server and verify it's operational
-        let server = bootstrapped.server;
-        let handle = tokio::spawn(async move {
-            let _ = server.serve().await;
-        });
-
-        // Wait for server to accept TCP connections
-        let tcp_start = tokio::time::Instant::now();
-        while tcp_start.elapsed() < Duration::from_secs(5) {
-            if tokio::net::TcpStream::connect(addr2).await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        // Server is already running and accepting TCP connections from bootstrap_node()
 
         // Verify cluster membership
         let mut client = create_admin_client(addr2).await.expect("connect");
@@ -184,7 +154,7 @@ async fn test_node_restart_preserves_id() {
 
         assert!(info.is_cluster_member, "restarted node should be cluster member");
 
-        handle.abort();
+        bootstrapped.server_handle.abort();
         node_id
     };
 
@@ -283,21 +253,9 @@ async fn test_late_joiner_finds_existing_cluster() {
     )
     .await
     .expect("leader bootstrap");
-    let leader_server = leader.server;
     let leader_raft = leader.raft.clone();
 
-    let leader_handle = tokio::spawn(async move {
-        let _ = leader_server.serve().await;
-    });
-
-    // Wait for server to accept TCP connections
-    let tcp_start = tokio::time::Instant::now();
-    while tcp_start.elapsed() < Duration::from_secs(5) {
-        if tokio::net::TcpStream::connect(leader_addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // Server is already running and accepting TCP connections from bootstrap_node()
 
     // Wait for leader to become leader
     let start = tokio::time::Instant::now();
@@ -336,7 +294,7 @@ async fn test_late_joiner_finds_existing_cluster() {
     assert_eq!(node_info.node_id, 1, "should have correct node ID");
     assert!(node_info.term > 0, "should have term > 0");
 
-    leader_handle.abort();
+    leader.server_handle.abort();
 }
 
 /// Tests join mode (bootstrap_expect=0) starts without bootstrapping.
@@ -367,20 +325,7 @@ async fn test_join_mode_does_not_bootstrap() {
 
     let bootstrapped = result.unwrap();
 
-    // Start server
-    let server = bootstrapped.server;
-    let server_handle = tokio::spawn(async move {
-        let _ = server.serve().await;
-    });
-
-    // Wait for server to accept TCP connections
-    let tcp_start = tokio::time::Instant::now();
-    while tcp_start.elapsed() < Duration::from_secs(5) {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // Server is already running and accepting TCP connections from bootstrap_node()
 
     // Verify node is NOT a cluster member (hasn't bootstrapped)
     let mut client = create_admin_client(addr).await.expect("connect to admin service");
@@ -389,5 +334,5 @@ async fn test_join_mode_does_not_bootstrap() {
 
     assert!(!info.is_cluster_member, "join mode node should NOT be cluster member");
 
-    server_handle.abort();
+    bootstrapped.server_handle.abort();
 }

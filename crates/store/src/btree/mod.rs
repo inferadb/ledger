@@ -2614,18 +2614,9 @@ mod tests {
         }
 
         // Spot-check first, last, and mid-range entries
-        assert_eq!(
-            tree.get(b"k-000000").unwrap(),
-            Some(b"v-0".to_vec()),
-        );
-        assert_eq!(
-            tree.get(b"k-004999").unwrap(),
-            Some(b"v-4999".to_vec()),
-        );
-        assert_eq!(
-            tree.get(b"k-002500").unwrap(),
-            Some(b"v-2500".to_vec()),
-        );
+        assert_eq!(tree.get(b"k-000000").unwrap(), Some(b"v-0".to_vec()),);
+        assert_eq!(tree.get(b"k-004999").unwrap(), Some(b"v-4999".to_vec()),);
+        assert_eq!(tree.get(b"k-002500").unwrap(), Some(b"v-2500".to_vec()),);
 
         // Verify total entry count via iteration
         let mut iter = tree.range(super::cursor::Range::all()).unwrap();
@@ -2676,9 +2667,6 @@ mod tests {
         assert_eq!(count, 2_000, "should have 2,000 entries after interleaved ops");
 
         // Spot-check an updated entry
-        assert_eq!(
-            tree.get(b"id-000100").unwrap(),
-            Some(b"updated-100".to_vec()),
-        );
+        assert_eq!(tree.get(b"id-000100").unwrap(), Some(b"updated-100".to_vec()),);
     }
 }

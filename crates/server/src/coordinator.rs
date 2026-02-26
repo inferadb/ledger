@@ -136,6 +136,14 @@ pub async fn coordinate_bootstrap(
         // Query each peer for node info
         let discovered = query_peers(&peer_addrs, rpc_timeout).await;
 
+        // Filter out self from discovered peers — our own server is running during
+        // coordination, so it may appear in the peers list. Without filtering, the
+        // coordinator double-counts self (once in discovered, once in the +1) and
+        // the bootstrap decision compares my_node_id against itself, which breaks
+        // the "lowest ID bootstraps" logic.
+        let discovered: Vec<_> =
+            discovered.into_iter().filter(|n| n.node_id != my_node_id).collect();
+
         // Check if any peer is already in a cluster
         if let Some(member) = discovered.iter().find(|n| n.is_cluster_member) {
             info!(

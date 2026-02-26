@@ -57,6 +57,8 @@ pub enum BootstrapError {
     Timeout(String),
     /// Configuration validation failed.
     Config(String),
+    /// gRPC server failed to start.
+    Server(String),
 }
 
 impl std::fmt::Display for BootstrapError {
@@ -70,6 +72,7 @@ impl std::fmt::Display for BootstrapError {
             BootstrapError::NodeId(msg) => write!(f, "node id error: {}", msg),
             BootstrapError::Timeout(msg) => write!(f, "bootstrap timeout: {}", msg),
             BootstrapError::Config(msg) => write!(f, "configuration error: {}", msg),
+            BootstrapError::Server(msg) => write!(f, "server error: {}", msg),
         }
     }
 }
@@ -88,8 +91,8 @@ pub struct BootstrappedNode {
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     #[allow(dead_code)] // retained to maintain Arc reference count for shared state layer
     pub state: Arc<StateLayer<FileBackend>>,
-    /// gRPC server ready to accept connections.
-    pub server: LedgerServer,
+    /// gRPC server running in background.
+    pub server_handle: tokio::task::JoinHandle<Result<(), String>>,
     /// TTL garbage collector background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub gc_handle: tokio::task::JoinHandle<()>,
@@ -249,70 +252,6 @@ pub async fn bootstrap_node(
 
     let raft = Arc::new(raft);
 
-    // Determine whether to bootstrap based on existing state and bootstrap_expect
-    if is_initialized {
-        tracing::info!("Existing Raft state found, resuming");
-    } else if config.is_join_mode() {
-        // Join mode: wait to be added to existing cluster via AdminService
-        tracing::info!(
-            node_id,
-            "Join mode (bootstrap_expect=0): waiting to be added via AdminService"
-        );
-        // Note: We intentionally do NOT bootstrap or call discovery here.
-        // The calling code is responsible for adding this node to the cluster.
-    } else if config.is_single_node() {
-        // Single-node mode: bootstrap immediately without coordination
-        tracing::info!(node_id, "Bootstrapping single-node cluster (bootstrap_expect=1)");
-        bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
-    } else {
-        // Fresh node - use coordinated bootstrap to determine action
-        let my_address = config.listen_addr.to_string();
-
-        let decision = coordinate_bootstrap(node_id, &my_address, config)
-            .await
-            .map_err(|e| BootstrapError::Timeout(e.to_string()))?;
-
-        match decision {
-            BootstrapDecision::Bootstrap { initial_members } => {
-                if initial_members.len() == 1 {
-                    // Single-node bootstrap
-                    tracing::info!(node_id, "Bootstrapping new single-node cluster");
-                    bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
-                } else {
-                    // Multi-node coordinated bootstrap - this node has lowest ID
-                    tracing::info!(
-                        node_id,
-                        member_count = initial_members.len(),
-                        "Bootstrapping new multi-node cluster (lowest ID)"
-                    );
-                    bootstrap_cluster_multi(&raft, initial_members).await?;
-                }
-            },
-            BootstrapDecision::WaitForJoin { leader_addr } => {
-                // Another node has the lowest ID and will bootstrap
-                tracing::info!(
-                    node_id,
-                    leader = %leader_addr,
-                    "Waiting for cluster bootstrap by lowest-ID node"
-                );
-                let timeout = Duration::from_secs(config.peers_timeout_secs);
-                let poll_interval = Duration::from_secs(config.peers_poll_secs);
-                wait_for_cluster_join(&raft, timeout, poll_interval).await?;
-            },
-            BootstrapDecision::JoinExisting { via_peer } => {
-                // Existing cluster found - wait to be added
-                tracing::info!(
-                    node_id,
-                    peer = %via_peer,
-                    "Found existing cluster, waiting to be added via AdminService"
-                );
-                let timeout = Duration::from_secs(config.peers_timeout_secs);
-                let poll_interval = Duration::from_secs(config.peers_poll_secs);
-                wait_for_cluster_join(&raft, timeout, poll_interval).await?;
-            },
-        }
-    }
-
     let block_archive_for_compactor = block_archive.clone();
     let block_archive_for_recovery = block_archive.clone();
     let snapshot_dir = data_dir.join("snapshots");
@@ -387,6 +326,114 @@ pub async fn bootstrap_node(
     } else {
         server
     };
+
+    // Start the gRPC server BEFORE coordination so peers can reach us.
+    // Services gracefully degrade on uninitialized Raft: WriteService returns
+    // UNAVAILABLE, ReadService works, HealthService reports Degraded.
+    let server_addr = config.listen_addr;
+    let server_handle =
+        tokio::spawn(async move { server.serve().await.map_err(|e| e.to_string()) });
+
+    // Wait for TCP listener to bind before proceeding to coordination.
+    let tcp_start = Instant::now();
+    let mut tcp_ready = false;
+    while tcp_start.elapsed() < Duration::from_secs(5) {
+        if server_handle.is_finished() {
+            // Server exited early — likely a bind failure
+            let result =
+                server_handle.await.unwrap_or_else(|e| Err(format!("server task panicked: {e}")));
+            return Err(BootstrapError::Server(
+                result.err().unwrap_or_else(|| "server exited unexpectedly".to_string()),
+            ));
+        }
+        if tokio::net::TcpStream::connect(server_addr).await.is_ok() {
+            tcp_ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    if !tcp_ready {
+        server_handle.abort();
+        return Err(BootstrapError::Server(format!(
+            "server did not accept TCP connections on {} within 5s",
+            server_addr
+        )));
+    }
+
+    // Determine whether to bootstrap based on existing state and bootstrap_expect.
+    // The gRPC server is already running, so peers can reach us via GetNodeInfo.
+    let coordination_result: Result<(), BootstrapError> = async {
+        if is_initialized {
+            tracing::info!("Existing Raft state found, resuming");
+        } else if config.is_join_mode() {
+            // Join mode: wait to be added to existing cluster via AdminService
+            tracing::info!(
+                node_id,
+                "Join mode (bootstrap_expect=0): waiting to be added via AdminService"
+            );
+            // Note: We intentionally do NOT bootstrap or call discovery here.
+            // The calling code is responsible for adding this node to the cluster.
+        } else if config.is_single_node() {
+            // Single-node mode: bootstrap immediately without coordination
+            tracing::info!(node_id, "Bootstrapping single-node cluster (bootstrap_expect=1)");
+            bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
+        } else {
+            // Fresh node - use coordinated bootstrap to determine action
+            let my_address = config.listen_addr.to_string();
+
+            let decision = coordinate_bootstrap(node_id, &my_address, config)
+                .await
+                .map_err(|e| BootstrapError::Timeout(e.to_string()))?;
+
+            match decision {
+                BootstrapDecision::Bootstrap { initial_members } => {
+                    if initial_members.len() == 1 {
+                        // Single-node bootstrap
+                        tracing::info!(node_id, "Bootstrapping new single-node cluster");
+                        bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
+                    } else {
+                        // Multi-node coordinated bootstrap - this node has lowest ID
+                        tracing::info!(
+                            node_id,
+                            member_count = initial_members.len(),
+                            "Bootstrapping new multi-node cluster (lowest ID)"
+                        );
+                        bootstrap_cluster_multi(&raft, initial_members).await?;
+                    }
+                },
+                BootstrapDecision::WaitForJoin { leader_addr } => {
+                    // Another node has the lowest ID and will bootstrap
+                    tracing::info!(
+                        node_id,
+                        leader = %leader_addr,
+                        "Waiting for cluster bootstrap by lowest-ID node"
+                    );
+                    let timeout = Duration::from_secs(config.peers_timeout_secs);
+                    let poll_interval = Duration::from_secs(config.peers_poll_secs);
+                    wait_for_cluster_join(&raft, timeout, poll_interval).await?;
+                },
+                BootstrapDecision::JoinExisting { via_peer } => {
+                    // Existing cluster found - wait to be added
+                    tracing::info!(
+                        node_id,
+                        peer = %via_peer,
+                        "Found existing cluster, waiting to be added via AdminService"
+                    );
+                    let timeout = Duration::from_secs(config.peers_timeout_secs);
+                    let poll_interval = Duration::from_secs(config.peers_poll_secs);
+                    wait_for_cluster_join(&raft, timeout, poll_interval).await?;
+                },
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    // If coordination failed, abort the server task before returning the error.
+    if let Err(e) = coordination_result {
+        server_handle.abort();
+        return Err(e);
+    }
 
     // Register background jobs with the watchdog (if attached to health state).
     // Each job gets an AtomicU64 handle that it writes to on every cycle.
@@ -556,7 +603,7 @@ pub async fn bootstrap_node(
     Ok(BootstrappedNode {
         raft,
         state,
-        server,
+        server_handle,
         gc_handle,
         compactor_handle,
         recovery_handle,
