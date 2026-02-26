@@ -328,7 +328,7 @@ get_node_id() {
   local addr
   addr=$(node_addr "$node_num")
   local result
-  result=$(grpcurl -plaintext "$addr" ledger.v1.AdminService/GetNodeInfo 2>/dev/null)
+  result=$(grpcurl -plaintext "$addr" ledger.v1.AdminService/GetNodeInfo 2>/dev/null) || true
   echo "$result" | jq -r '.nodeId'
 }
 
@@ -350,7 +350,7 @@ join_node_to_cluster() {
   result=$(grpcurl -plaintext \
     -d "{\"node_id\": $joining_id, \"address\": \"$joining_addr\"}" \
     "$leader_addr" \
-    ledger.v1.AdminService/JoinCluster 2>&1)
+    ledger.v1.AdminService/JoinCluster 2>&1) || true
 
   local success
   success=$(echo "$result" | jq -r '.success // false' 2>/dev/null || echo "false")
@@ -526,7 +526,7 @@ create_org() {
   result=$(grpcurl -plaintext \
     -d "{\"name\": \"$name\"}" \
     "$addr" \
-    ledger.v1.AdminService/CreateOrganization 2>&1)
+    ledger.v1.AdminService/CreateOrganization 2>&1) || true
 
   ORG_SLUG=$(echo "$result" | jq -r '.slug.slug // empty' 2>/dev/null)
   if [[ -z "$ORG_SLUG" ]]; then
@@ -547,7 +547,7 @@ create_vault() {
   result=$(grpcurl -plaintext \
     -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}}" \
     "$addr" \
-    ledger.v1.AdminService/CreateVault 2>&1)
+    ledger.v1.AdminService/CreateVault 2>&1) || true
 
   VAULT_SLUG=$(echo "$result" | jq -r '.vault.slug // empty' 2>/dev/null)
   if [[ -z "$VAULT_SLUG" ]]; then
@@ -589,7 +589,7 @@ write_entity() {
       }]
     }" \
     "$addr" \
-    ledger.v1.WriteService/Write 2>&1)
+    ledger.v1.WriteService/Write 2>&1) || true
 
   local block_height
   block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null)
@@ -617,7 +617,7 @@ read_entity() {
       \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"
     }" \
     "$addr" \
-    ledger.v1.ReadService/Read 2>&1)
+    ledger.v1.ReadService/Read 2>&1) || true
 
   # Value is base64-encoded bytes — decode it
   local value_b64
@@ -658,7 +658,7 @@ list_entities() {
     fi
 
     local result
-    result=$(grpcurl -plaintext -d "$request" "$addr" ledger.v1.ReadService/ListEntities 2>&1)
+    result=$(grpcurl -plaintext -d "$request" "$addr" ledger.v1.ReadService/ListEntities 2>&1) || true
 
     # Extract entities: key + base64-decoded value
     local entities
@@ -688,13 +688,15 @@ get_tip() {
   local addr
   addr=$(node_addr "$node_num")
 
-  grpcurl -plaintext \
+  local result
+  result=$(grpcurl -plaintext \
     -d "{
       \"organization\": {\"slug\": \"$ORG_SLUG\"},
       \"vault\": {\"slug\": \"$VAULT_SLUG\"}
     }" \
     "$addr" \
-    ledger.v1.ReadService/GetTip 2>/dev/null
+    ledger.v1.ReadService/GetTip 2>/dev/null) || true
+  echo "$result"
 }
 
 # ---------------------------------------------------------------------------
@@ -983,11 +985,10 @@ for i in 1 2 3; do
   kill_node "$i"
 done
 
-# Wait for node 4 to stabilize as sole member / new leader
-log_info "Waiting for node 4 to stabilize..."
-sleep "$SETTLE_TIME"
+# Wait for node 4 to elect itself leader (it's the sole remaining voter).
+# This replaces a blind sleep — the election timeout is non-deterministic.
+wait_for_leader 4
 
-# Verify node 4 is still responsive
 log_info "Writing Phase 4 data to surviving node 4..."
 write_entity 4 "user:frank" "Frank from Phase 4"
 write_entity 4 "event:migration" "original-3-shutdown"
