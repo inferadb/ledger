@@ -399,7 +399,9 @@ wait_for_voter() {
   return 1
 }
 
-# Remove a node from the cluster via LeaveCluster RPC (best-effort).
+# Remove a node from the cluster via LeaveCluster RPC.
+# Retries automatically when a prior membership change is still in-flight
+# (Raft allows only one at a time).
 # Args: leader_node_number leaving_node_number
 leave_cluster() {
   local leader_num=$1
@@ -409,10 +411,68 @@ leave_cluster() {
   local leaving_id
   leaving_id=$(get_node_id "$leaving_num")
 
-  grpcurl -plaintext \
-    -d "{\"node_id\": $leaving_id}" \
-    "$leader_addr" \
-    ledger.v1.AdminService/LeaveCluster 2>/dev/null || true
+  local attempts=0
+  local max_attempts=10
+  while [[ $attempts -lt $max_attempts ]]; do
+    local result
+    result=$(grpcurl -plaintext \
+      -d "{\"node_id\": $leaving_id}" \
+      "$leader_addr" \
+      ledger.v1.AdminService/LeaveCluster 2>&1 || true)
+
+    # Success
+    local success
+    success=$(echo "$result" | jq -r '.success // false' 2>/dev/null || echo "false")
+    if [[ "$success" == "true" ]]; then
+      return 0
+    fi
+
+    # Retryable: prior membership change still committing
+    if echo "$result" | grep -q "already undergoing a configuration change"; then
+      attempts=$((attempts + 1))
+      log_info "    Membership change in progress, retrying ($attempts/$max_attempts)..."
+      sleep 2
+      continue
+    fi
+
+    # Non-retryable failure
+    log_warn "LeaveCluster response: $result"
+    return 0
+  done
+
+  log_warn "LeaveCluster retries exhausted for node $leaving_num"
+}
+
+# Wait for a node to disappear from cluster membership.
+# Polls GetClusterInfo on the query node until the target is gone.
+# Args: removed_node_number query_node_number
+wait_for_member_removed() {
+  local removed_num=$1
+  local query_num=$2
+  local elapsed=0
+  local timeout=15
+
+  local removed_id
+  removed_id=$(get_node_id "$removed_num")
+
+  while [[ $elapsed -lt $timeout ]]; do
+    local query_addr
+    query_addr=$(node_addr "$query_num")
+    local result
+    result=$(grpcurl -plaintext "$query_addr" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+
+    # Check if the removed node is still listed
+    local found
+    found=$(echo "$result" | jq -r ".members[] | select(.nodeId == \"$removed_id\") | .nodeId" 2>/dev/null || true)
+    if [[ -z "$found" ]]; then
+      return 0
+    fi
+
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  log_warn "Node $removed_num still in membership after ${timeout}s (proceeding anyway)"
 }
 
 # Kill a node process by node number.
@@ -895,13 +955,27 @@ if [[ "$LEADER" -le 3 ]]; then
   NODES_TO_REMOVE+=("$LEADER")
 fi
 
+# Track which nodes are still active for leader queries.
+# Querying removed-but-still-running nodes returns stale leader info.
+ACTIVE_QUERY_NODES=(1 2 3 4)
+
 for node_num in "${NODES_TO_REMOVE[@]}"; do
-  # Re-find leader since it may shift after each removal
-  CURRENT_LEADER=$(find_leader 1 2 3 4)
+  # Re-find leader from active (non-removed) nodes only
+  CURRENT_LEADER=$(find_leader "${ACTIVE_QUERY_NODES[@]}")
   CURRENT_LEADER=${CURRENT_LEADER:-4}
   log_step "Removing node $node_num (via leader $CURRENT_LEADER)"
   leave_cluster "$CURRENT_LEADER" "$node_num"
-  sleep 2
+
+  # Remove this node from query list (it may report stale leader info)
+  CLEANED_NODES=()
+  for n in "${ACTIVE_QUERY_NODES[@]}"; do
+    [[ "$n" -ne "$node_num" ]] && CLEANED_NODES+=("$n")
+  done
+  ACTIVE_QUERY_NODES=("${CLEANED_NODES[@]}")
+
+  # Wait for the membership change to actually commit before the next one.
+  # Raft allows only one membership change at a time.
+  wait_for_member_removed "$node_num" "${ACTIVE_QUERY_NODES[0]}"
 done
 
 log_info "Killing original nodes..."
