@@ -1252,7 +1252,6 @@ async fn test_stress_read_throughput() {
 
 /// Standard stress test - moderate load for CI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore] // Takes ~15s, run with: cargo test stress_standard -- --ignored --nocapture
 async fn test_stress_standard() {
     run_stress_test(StressConfig {
         write_workers: 4,
@@ -1261,57 +1260,6 @@ async fn test_stress_standard() {
         batch_size: 5,
         max_concurrent_writes: 50,
         max_concurrent_reads: 500,
-        ..Default::default()
-    })
-    .await;
-}
-
-/// Heavy stress test - high load to find limits.
-/// Run with: cargo test --release stress_heavy -- --ignored --nocapture
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-#[ignore] // Too heavy for CI, run manually
-async fn test_stress_heavy() {
-    run_stress_test(StressConfig {
-        write_workers: 16,
-        read_workers: 32,
-        duration: Duration::from_secs(60),
-        batch_size: 10,
-        max_concurrent_writes: 200,
-        max_concurrent_reads: 2000,
-        ..Default::default()
-    })
-    .await;
-}
-
-/// Maximum throughput test - push to the limit.
-/// Run with: cargo test --release stress_max -- --ignored --nocapture
-#[tokio::test(flavor = "multi_thread", worker_threads = 32)]
-#[ignore] // Too heavy for CI, run manually
-async fn test_stress_max_throughput() {
-    run_stress_test(StressConfig {
-        write_workers: 32,
-        read_workers: 64,
-        duration: Duration::from_secs(120),
-        batch_size: 20,
-        max_concurrent_writes: 500,
-        max_concurrent_reads: 5000,
-        ..Default::default()
-    })
-    .await;
-}
-
-/// Sustained reliability test - long-running stability.
-/// Run with: cargo test --release stress_sustained -- --ignored --nocapture
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore] // Long running, use for stability testing
-async fn test_stress_sustained() {
-    run_stress_test(StressConfig {
-        write_workers: 8,
-        read_workers: 16,
-        duration: Duration::from_secs(300), // 5 minutes
-        batch_size: 5,
-        max_concurrent_writes: 100,
-        max_concurrent_reads: 1000,
         ..Default::default()
     })
     .await;

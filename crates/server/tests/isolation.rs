@@ -17,8 +17,6 @@
 
 use std::time::Duration;
 
-use serial_test::serial;
-
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
@@ -144,7 +142,6 @@ async fn read_entity(
 ///
 /// This is the fundamental isolation guarantee: each vault is a separate
 /// data container with its own independent key space.
-#[serial]
 #[tokio::test]
 async fn test_vault_isolation_same_organization() {
     let cluster = TestCluster::new(1).await;
@@ -188,7 +185,6 @@ async fn test_vault_isolation_same_organization() {
 }
 
 /// Tests that data in vault A is not visible when reading from vault B.
-#[serial]
 #[tokio::test]
 async fn test_vault_isolation_key_not_found() {
     let cluster = TestCluster::new(1).await;
@@ -217,7 +213,6 @@ async fn test_vault_isolation_key_not_found() {
 }
 
 /// Tests isolation with multiple keys across multiple vaults.
-#[serial]
 #[tokio::test]
 async fn test_multi_vault_isolation() {
     let cluster = TestCluster::new(1).await;
@@ -273,7 +268,6 @@ async fn test_multi_vault_isolation() {
 ///
 /// Even though vault IDs are globally unique, organizations provide an
 /// organizational boundary. This test verifies the isolation model.
-#[serial]
 #[tokio::test]
 async fn test_organization_isolation() {
     let cluster = TestCluster::new(1).await;
@@ -328,7 +322,6 @@ async fn test_organization_isolation() {
 /// This test documents the current behavior. Actual data isolation is ensured
 /// by the global uniqueness of vaults - you cannot access another vault's
 /// data without knowing its vault.
-#[serial]
 #[tokio::test]
 async fn test_vault_is_authoritative_identifier() {
     let cluster = TestCluster::new(1).await;
@@ -465,7 +458,6 @@ async fn test_concurrent_vault_writes() {
 // ============================================================================
 
 /// Verifies that vault IDs are monotonically increasing and globally unique.
-#[serial]
 #[tokio::test]
 async fn test_vault_global_uniqueness() {
     let cluster = TestCluster::new(1).await;
@@ -565,7 +557,6 @@ async fn test_isolation_across_replicas() {
 // ============================================================================
 
 /// Tests that empty vaults are properly isolated (no data leakage).
-#[serial]
 #[tokio::test]
 async fn test_empty_vault_isolation() {
     let cluster = TestCluster::new(1).await;
@@ -593,7 +584,6 @@ async fn test_empty_vault_isolation() {
 }
 
 /// Tests that deletion in one vault doesn't affect another.
-#[serial]
 #[tokio::test]
 async fn test_deletion_isolation() {
     let cluster = TestCluster::new(1).await;

@@ -443,6 +443,36 @@ mod tests {
         assert_eq!(combined, expected);
     }
 
+    /// Verifies that a single-bit flip in one bucket root causes `sha256_concat`
+    /// to produce a different state root — the foundation of state divergence
+    /// detection between leader and followers.
+    #[test]
+    fn test_bit_flip_detected_via_state_root_mismatch() {
+        let mut bucket_roots = [EMPTY_HASH; 256];
+
+        // Populate some buckets (simulating entities in those buckets)
+        bucket_roots[10] = [10u8; 32];
+        bucket_roots[20] = [20u8; 32];
+        bucket_roots[30] = [30u8; 32];
+
+        let leader_root = sha256_concat(&bucket_roots);
+
+        // Flip a single bit in bucket 20 (simulating corruption on a follower)
+        let mut corrupted_roots = bucket_roots;
+        corrupted_roots[20][0] ^= 0x01;
+
+        let follower_root = sha256_concat(&corrupted_roots);
+
+        assert_ne!(
+            leader_root, follower_root,
+            "State root mismatch should be detected after bit flip"
+        );
+
+        // Verify the leader root is stable (no mutation)
+        let leader_root_again = sha256_concat(&bucket_roots);
+        assert_eq!(leader_root, leader_root_again);
+    }
+
     #[test]
     fn test_hash_eq_constant_time() {
         let a = sha256(b"test");

@@ -262,6 +262,53 @@ mod tests {
         assert!(!commitment.is_dirty());
     }
 
+    /// Verifies that corrupting one entity's value produces a different bucket root.
+    ///
+    /// This is the hash-level integrity guarantee: any change to any entity
+    /// in a bucket is detected by re-computing the bucket root.
+    #[test]
+    fn test_corrupted_entity_detected_on_rehash() {
+        let entities_original = vec![
+            Entity {
+                key: b"entity1".to_vec(),
+                value: b"value1".to_vec(),
+                expires_at: 0,
+                version: 1,
+            },
+            Entity {
+                key: b"entity2".to_vec(),
+                value: b"value2".to_vec(),
+                expires_at: 100,
+                version: 2,
+            },
+        ];
+
+        let original_root = VaultCommitment::compute_bucket_root_from_entities(&entities_original);
+
+        let entities_corrupted = vec![
+            Entity {
+                key: b"entity1".to_vec(),
+                value: b"CORRUPTED".to_vec(),
+                expires_at: 0,
+                version: 1,
+            },
+            Entity {
+                key: b"entity2".to_vec(),
+                value: b"value2".to_vec(),
+                expires_at: 100,
+                version: 2,
+            },
+        ];
+
+        let corrupted_root =
+            VaultCommitment::compute_bucket_root_from_entities(&entities_corrupted);
+
+        assert_ne!(
+            original_root, corrupted_root,
+            "Bucket root mismatch should detect corrupted entity value"
+        );
+    }
+
     #[test]
     fn test_bucket_root_builder() {
         let mut builder = BucketRootBuilder::new(42);

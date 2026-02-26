@@ -10,8 +10,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-use serial_test::serial;
-
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
@@ -160,7 +158,6 @@ async fn force_gc(
 /// Tests that ForceGc removes expired entities.
 ///
 /// DESIGN.md §6.4: Expired entities remain in state until garbage collection.
-#[serial]
 #[tokio::test]
 async fn test_force_gc_removes_expired_entities() {
     let cluster = TestCluster::new(1).await;
@@ -250,7 +247,6 @@ async fn test_force_gc_removes_expired_entities() {
 }
 
 /// Tests that GC on empty vault succeeds.
-#[serial]
 #[tokio::test]
 async fn test_force_gc_empty_vault() {
     let cluster = TestCluster::new(1).await;
@@ -271,7 +267,6 @@ async fn test_force_gc_empty_vault() {
 }
 
 /// Tests that GC runs on all vaults when no filter specified.
-#[serial]
 #[tokio::test]
 async fn test_force_gc_all_vaults() {
     let cluster = TestCluster::new(1).await;
@@ -324,7 +319,6 @@ async fn test_force_gc_all_vaults() {
 ///
 /// Only entities whose TTL has passed should be collected; entities with
 /// future TTLs should remain in storage.
-#[serial]
 #[tokio::test]
 async fn test_force_gc_multiple_ttl_timings() {
     let cluster = TestCluster::new(1).await;
@@ -377,7 +371,6 @@ async fn test_force_gc_multiple_ttl_timings() {
 ///
 /// After all expired entities are collected, subsequent GC runs should find
 /// nothing to expire.
-#[serial]
 #[tokio::test]
 async fn test_force_gc_idempotent() {
     let cluster = TestCluster::new(1).await;
@@ -418,7 +411,6 @@ async fn test_force_gc_idempotent() {
 ///
 /// DESIGN.md: Expired entities remain in state until GC runs, but reads
 /// should filter them out based on current time vs expires_at.
-#[serial]
 #[tokio::test]
 async fn test_expired_entity_not_returned_by_read() {
     let cluster = TestCluster::new(1).await;

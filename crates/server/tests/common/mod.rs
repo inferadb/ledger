@@ -18,7 +18,23 @@
     clippy::disallowed_methods
 )]
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU16, Ordering},
+    },
+    time::Duration,
+};
+
+/// Monotonically increasing port counter — guarantees each test gets unique
+/// ports even when tests run in parallel (no `#[serial]` required).
+static NEXT_PORT: AtomicU16 = AtomicU16::new(30_000);
+
+/// Allocates `count` contiguous ports from the global counter.
+pub fn allocate_ports(count: u16) -> u16 {
+    NEXT_PORT.fetch_add(count, Ordering::Relaxed)
+}
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
 use inferadb_ledger_raft::{
@@ -74,6 +90,22 @@ impl TestNode {
     }
 }
 
+/// Builds a Raft config with aggressive timeouts for fast test execution.
+///
+/// Production defaults (100ms heartbeat, 300-500ms election) are tuned for
+/// real networks. Tests run on localhost but under heavy parallelism (8 threads,
+/// each spawning 1-3 tokio runtimes), so we use 50ms heartbeat and 150-300ms
+/// election timeouts — 2x faster than production while remaining stable under
+/// CPU contention from parallel test execution.
+fn test_raft_config() -> inferadb_ledger_types::config::RaftConfig {
+    inferadb_ledger_types::config::RaftConfig::builder()
+        .heartbeat_interval(Duration::from_millis(50))
+        .election_timeout_min(Duration::from_millis(150))
+        .election_timeout_max(Duration::from_millis(300))
+        .build()
+        .expect("valid test raft config")
+}
+
 /// A test cluster of Raft nodes.
 pub struct TestCluster {
     /// The nodes in the cluster.
@@ -89,8 +121,7 @@ impl TestCluster {
     pub async fn new(size: usize) -> Self {
         assert!(size >= 1, "cluster must have at least 1 node");
 
-        // Use wide random range to minimize port conflicts when tests run in parallel
-        let base_port = 40000 + (rand::random::<u16>() % 5000);
+        let base_port = allocate_ports(size as u16);
         let mut nodes = Vec::with_capacity(size);
 
         // Step 1: Start the bootstrap node as a SINGLE-NODE cluster (no peers)
@@ -112,6 +143,7 @@ impl TestCluster {
             data_dir: Some(data_dir.clone()),
             single: true, // Single-node mode for immediate bootstrap
             backup: Some(backup_config),
+            raft: Some(test_raft_config()),
             ..inferadb_ledger_server::config::Config::default()
         };
 
@@ -144,7 +176,7 @@ impl TestCluster {
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
         let leader_raft = bootstrapped.raft.clone();
@@ -159,15 +191,17 @@ impl TestCluster {
             _shutdown_tx: shutdown_tx,
         });
 
-        // Wait for the bootstrap node to become leader
+        // Wait for the bootstrap node to become leader.
+        // With test Raft config (150-300ms election timeout on localhost), 3 seconds
+        // is ~10 election cycles — more than enough unless something is fundamentally broken.
         let start = tokio::time::Instant::now();
-        let timeout_duration = Duration::from_secs(5);
+        let timeout_duration = Duration::from_secs(3);
         while start.elapsed() < timeout_duration {
             let metrics = leader_raft.metrics().borrow().clone();
             if metrics.current_leader == Some(node_id) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
         // Verify leader election succeeded
@@ -200,6 +234,7 @@ impl TestCluster {
                 data_dir: Some(data_dir.clone()),
                 join: true, // Join mode: wait to be added to existing cluster
                 backup: Some(backup_config),
+                raft: Some(test_raft_config()),
                 ..inferadb_ledger_server::config::Config::default()
             };
 
@@ -234,24 +269,35 @@ impl TestCluster {
                 if tokio::net::TcpStream::connect(addr).await.is_ok() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
 
-            // Join the cluster via the leader's AdminService with retry.
-            // We use more attempts with exponential backoff since membership changes
-            // are serialized in OpenRaft and may take time if a previous change is
-            // still in progress.
-            let endpoint = format!("http://{}", leader_addr);
+            // Join the cluster via the current leader's AdminService.
+            // Under parallel test execution, leader re-elections can occur, so we
+            // discover the actual leader from Raft metrics on each attempt rather
+            // than assuming the bootstrap node is still leader.
             let mut join_success = false;
             let mut last_error = String::new();
-            let max_attempts = 10;
+            let max_attempts = 20;
 
             for attempt in 0..max_attempts {
-                let mut client = match AdminServiceClient::connect(endpoint.clone()).await {
+                // Discover the current leader by checking all existing nodes' metrics.
+                // This handles the case where the bootstrap node lost leadership
+                // during cluster formation under heavy parallel test load.
+                let current_leader_addr = nodes
+                    .iter()
+                    .find_map(|n| {
+                        let leader_id = n.raft.metrics().borrow().current_leader?;
+                        nodes.iter().find(|n2| n2.id == leader_id).map(|n2| n2.addr)
+                    })
+                    .unwrap_or(leader_addr);
+
+                let endpoint = format!("http://{}", current_leader_addr);
+                let mut client = match AdminServiceClient::connect(endpoint).await {
                     Ok(c) => c,
                     Err(e) => {
                         last_error = format!("connect failed: {}", e);
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     },
                 };
@@ -266,20 +312,21 @@ impl TestCluster {
                             break;
                         } else {
                             last_error = resp.message.clone();
-                            // If membership change in progress, wait longer
+                            // Membership conflicts and timeouts need backoff to let
+                            // the cluster stabilize before retrying
                             let backoff = if resp.message.contains("membership")
                                 || resp.message.contains("Timeout")
                             {
-                                Duration::from_millis(500 * (attempt + 1) as u64)
-                            } else {
                                 Duration::from_millis(100 * (attempt + 1) as u64)
+                            } else {
+                                Duration::from_millis(25 * (attempt + 1) as u64)
                             };
                             tokio::time::sleep(backoff).await;
                         }
                     },
                     Err(e) => {
                         last_error = format!("join RPC failed: {}", e);
-                        tokio::time::sleep(Duration::from_millis(200 * (attempt + 1) as u64)).await;
+                        tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
                     },
                 }
             }
@@ -306,7 +353,7 @@ impl TestCluster {
             // This is critical to ensure the membership change is fully committed
             // before we try to add another node
             let sync_start = tokio::time::Instant::now();
-            let sync_timeout = Duration::from_secs(30);
+            let sync_timeout = Duration::from_secs(10);
             while sync_start.elapsed() < sync_timeout {
                 let metrics = new_raft.metrics().borrow().clone();
                 let membership = metrics.membership_config.membership();
@@ -315,7 +362,7 @@ impl TestCluster {
                 if is_voter && metrics.current_leader.is_some() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
             // CRITICAL: Wait for the LEADER's membership to exit joint consensus.
@@ -333,12 +380,9 @@ impl TestCluster {
                 if joint_config.len() == 1 {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
-
-        // Wait for cluster to fully stabilize
-        tokio::time::sleep(Duration::from_millis(500)).await;
 
         Self { nodes }
     }
@@ -362,7 +406,7 @@ impl TestCluster {
                     return Some(leader_id);
                 }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         None
@@ -385,7 +429,7 @@ impl TestCluster {
                 return Some(first);
             }
 
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         None
@@ -428,7 +472,7 @@ impl TestCluster {
                     return true;
                 }
 
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -582,8 +626,7 @@ impl MultiShardTestCluster {
         assert!(num_nodes >= 1, "cluster must have at least 1 node");
         assert!(num_data_shards >= 1, "must have at least 1 data shard");
 
-        // Use wide random range (non-overlapping with TestCluster) to minimize port conflicts
-        let base_port = 50000 + (rand::random::<u16>() % 5000);
+        let base_port = allocate_ports(num_nodes as u16);
         let mut nodes = Vec::with_capacity(num_nodes);
 
         // Build the member list for all shards
@@ -644,8 +687,14 @@ impl MultiShardTestCluster {
                 }
             });
 
-            // Give server time to bind
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait for the gRPC server to accept TCP connections
+            let tcp_start = tokio::time::Instant::now();
+            while tcp_start.elapsed() < Duration::from_secs(5) {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
 
             nodes.push(MultiShardTestNode {
                 id: node_id,
@@ -685,7 +734,7 @@ impl MultiShardTestCluster {
                 break 'outer;
             }
 
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         Self { nodes, num_shards: num_data_shards }
@@ -747,7 +796,7 @@ impl MultiShardTestCluster {
                 return true;
             }
 
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         false

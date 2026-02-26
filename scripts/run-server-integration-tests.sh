@@ -203,7 +203,7 @@ for i in $(seq 1 "$NODE_COUNT"); do
   fi
 
   PIDS+=($!)
-  log_info "  Node $i: PID ${PIDS[-1]}, port $PORT"
+  log_info "  Node $i: PID $!, port $PORT"
 done
 
 # ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ echo ""
 
 log_info "Running server integration tests..."
 
-TEST_CMD="cargo +1.92 test -p inferadb-ledger-server --test background_jobs"
+TEST_CMD="cargo +1.92 test -p inferadb-ledger-server --test external"
 if [[ -n "$TEST_PATTERN" ]]; then
   TEST_CMD="$TEST_CMD $TEST_PATTERN"
 fi

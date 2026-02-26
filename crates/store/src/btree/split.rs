@@ -125,7 +125,7 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
     {
         let mut left = LeafNode::from_page(original)?;
         for (i, (key, value)) in entries[..split_at].iter().enumerate() {
-            left.insert(i, key, value);
+            left.insert(i, key, value)?;
         }
         // Maintain linked list: left→right
         left.set_next_leaf(new_page.id);
@@ -135,7 +135,7 @@ pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitR
     {
         let mut right = LeafNode::from_page(new_page)?;
         for (i, (key, value)) in entries[split_at..].iter().enumerate() {
-            right.insert(i, key, value);
+            right.insert(i, key, value)?;
         }
         // Maintain linked list: right→old_successor
         right.set_next_leaf(old_next_leaf);
@@ -221,7 +221,7 @@ pub fn split_leaf_for_key(
                 if !left.can_insert(key, value) {
                     return Ok(false);
                 }
-                left.insert(i, key, value);
+                left.insert(i, key, value)?;
             }
             if new_key_goes_left && !left.can_insert(new_key, new_value) {
                 return Ok(false);
@@ -235,7 +235,7 @@ pub fn split_leaf_for_key(
                 if !right.can_insert(key, value) {
                     return Ok(false);
                 }
-                right.insert(i, key, value);
+                right.insert(i, key, value)?;
             }
             if !new_key_goes_left && !right.can_insert(new_key, new_value) {
                 return Ok(false);
@@ -339,7 +339,7 @@ pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSp
     {
         let mut left = BranchNode::init(original, left_rightmost);
         for (i, (key, child)) in entries[..split_at].iter().enumerate() {
-            left.insert(i, key, *child);
+            left.insert(i, key, *child)?;
         }
     }
 
@@ -347,7 +347,7 @@ pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSp
     {
         let mut right = BranchNode::init(new_page, rightmost_child);
         for (i, (key, child)) in entries[split_at + 1..].iter().enumerate() {
-            right.insert(i, key, *child);
+            right.insert(i, key, *child)?;
         }
     }
 
@@ -412,7 +412,7 @@ pub fn merge_leaves(left: &mut Page, right: &mut Page) -> Result<()> {
     {
         let mut left_node = LeafNode::init(left);
         for (i, (key, value)) in all_entries.iter().enumerate() {
-            left_node.insert(i, key, value);
+            left_node.insert(i, key, value)?;
         }
         // Maintain linked list: left now points to right's successor
         left_node.set_next_leaf(right_next_leaf);
@@ -519,7 +519,7 @@ mod tests {
             for i in 0..10u8 {
                 let key = vec![i];
                 let value = vec![i; 100];
-                node.insert(i as usize, &key, &value);
+                node.insert(i as usize, &key, &value).unwrap();
             }
             assert_eq!(node.cell_count(), 10);
         }
@@ -553,7 +553,7 @@ mod tests {
             let mut node = BranchNode::init(&mut original, 100);
             for i in 0..9u8 {
                 let key = vec![i * 10]; // Keys: 0, 10, 20, ..., 80
-                node.insert(i as usize, &key, i as PageId);
+                node.insert(i as usize, &key, i as PageId).unwrap();
             }
             assert_eq!(node.cell_count(), 9);
         }
@@ -583,13 +583,13 @@ mod tests {
         // Add entries to both
         {
             let mut l = LeafNode::init(&mut left);
-            l.insert(0, b"a", b"1");
-            l.insert(1, b"b", b"2");
+            l.insert(0, b"a", b"1").unwrap();
+            l.insert(1, b"b", b"2").unwrap();
         }
         {
             let mut r = LeafNode::init(&mut right);
-            r.insert(0, b"c", b"3");
-            r.insert(1, b"d", b"4");
+            r.insert(0, b"c", b"3").unwrap();
+            r.insert(1, b"d", b"4").unwrap();
         }
 
         // Merge right into left
@@ -627,7 +627,7 @@ mod tests {
         let mut right = Page::new(2, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
         {
             let mut l = LeafNode::init(&mut left);
-            l.insert(0, b"a", b"1");
+            l.insert(0, b"a", b"1").unwrap();
         }
         // init() writes the leaf header so free_end is valid
         LeafNode::init(&mut right);
@@ -642,12 +642,12 @@ mod tests {
 
         {
             let mut l = LeafNode::init(&mut left);
-            l.insert(0, b"a", b"1");
-            l.insert(1, b"b", b"2");
+            l.insert(0, b"a", b"1").unwrap();
+            l.insert(1, b"b", b"2").unwrap();
         }
         {
             let mut r = LeafNode::init(&mut right);
-            r.insert(0, b"c", b"3");
+            r.insert(0, b"c", b"3").unwrap();
         }
 
         // Small entries should easily fit

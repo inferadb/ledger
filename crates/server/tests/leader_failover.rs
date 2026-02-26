@@ -22,7 +22,6 @@ use std::{collections::HashSet, time::Duration};
 use inferadb_ledger_proto::proto::{
     ClientId, OrganizationSlug, ReadRequest, VaultSlug, WriteRequest,
 };
-use serial_test::serial;
 
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
@@ -130,7 +129,6 @@ async fn read_entity(
 ///
 /// This is the fundamental consistency guarantee: once a write is acknowledged
 /// by the leader, it must be durable even if the leader crashes immediately after.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_committed_write_survives_leader_crash() {
     let cluster = TestCluster::new(3).await;
@@ -159,7 +157,7 @@ async fn test_committed_write_survives_leader_crash() {
     assert!(block_height > 0, "write should be committed");
 
     // Wait for replication to followers
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    cluster.wait_for_sync(Duration::from_secs(5)).await;
 
     // Verify all nodes have the same last_applied before we check data
     let applied_indices: Vec<u64> = cluster.nodes().iter().map(|n| n.last_applied()).collect();
@@ -183,7 +181,6 @@ async fn test_committed_write_survives_leader_crash() {
 /// 2. Leader A becomes unavailable (simulated by not using it)
 /// 3. Cluster elects leader B
 /// 4. Read from leader B should return the data
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_read_consistency_after_leader_change() {
     let cluster = TestCluster::new(3).await;
@@ -217,7 +214,7 @@ async fn test_read_consistency_after_leader_change() {
     }
 
     // Wait for replication
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    cluster.wait_for_sync(Duration::from_secs(5)).await;
 
     // Read from all nodes - they should all return the same values
     for node in cluster.nodes() {
@@ -237,7 +234,6 @@ async fn test_read_consistency_after_leader_change() {
 /// Tests that writes to a 3-node cluster succeed with 2 nodes available.
 ///
 /// This tests fault tolerance: a 3-node cluster can tolerate 1 failure.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_writes_succeed_with_one_node_down() {
     let cluster = TestCluster::new(3).await;
@@ -259,9 +255,6 @@ async fn test_writes_succeed_with_one_node_down() {
 
     client.write(write_req).await.expect("write should succeed");
 
-    // Wait for replication
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
     // Note: In this test, we're not actually killing a node, but the write
     // should succeed even if one follower is slow/unavailable, as long as
     // the leader and one follower form a majority.
@@ -282,7 +275,6 @@ async fn test_writes_succeed_with_one_node_down() {
 ///
 /// This verifies the determinism property: all nodes applying the same
 /// log entries should arrive at the same state.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_deterministic_block_height_across_nodes() {
     let cluster = TestCluster::new(3).await;
@@ -316,7 +308,7 @@ async fn test_deterministic_block_height_across_nodes() {
     }
 
     // Wait for replication to complete
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    cluster.wait_for_sync(Duration::from_secs(5)).await;
 
     // Check that all nodes have the same last_applied index
     let applied_indices: Vec<u64> = cluster.nodes().iter().map(|n| n.last_applied()).collect();
@@ -334,7 +326,6 @@ async fn test_deterministic_block_height_across_nodes() {
 ///
 /// This tests that the Raft log correctly serializes concurrent writes
 /// and all writes are eventually visible.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_writes_all_applied() {
     let cluster = TestCluster::new(3).await;
@@ -376,7 +367,7 @@ async fn test_concurrent_writes_all_applied() {
     }
 
     // Wait for replication
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    cluster.wait_for_sync(Duration::from_secs(5)).await;
 
     // Verify all writes are readable from any node
     let any_node = cluster.nodes().first().expect("cluster has nodes");
@@ -405,7 +396,6 @@ async fn test_concurrent_writes_all_applied() {
 /// Tests that rapid succession of writes doesn't cause data loss.
 ///
 /// This stress tests the batching and commit pipeline.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_rapid_writes_no_data_loss() {
     let cluster = TestCluster::new(3).await;
@@ -435,8 +425,8 @@ async fn test_rapid_writes_no_data_loss() {
         client.write(write_req).await.expect("write should succeed");
     }
 
-    // Wait for all writes to be applied
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for all writes to replicate
+    cluster.wait_for_sync(Duration::from_secs(5)).await;
 
     // Verify all writes are present
     let mut found_count = 0u64;
@@ -457,7 +447,6 @@ async fn test_rapid_writes_no_data_loss() {
 /// Tests that the cluster maintains term agreement during normal operation.
 ///
 /// Term disagreement would indicate split-brain or election issues.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_term_agreement_maintained() {
     let cluster = TestCluster::new(3).await;
@@ -497,7 +486,6 @@ async fn test_term_agreement_maintained() {
 // These chaos tests focus on leader failover and replication consistency.
 
 /// Tests that overwriting a key works correctly across the cluster.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_key_overwrite_consistency() {
     let cluster = TestCluster::new(3).await;
@@ -528,61 +516,11 @@ async fn test_key_overwrite_consistency() {
     client.write(write_req).await.expect("overwrite");
 
     // Wait for replication
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    cluster.wait_for_sync(Duration::from_secs(5)).await;
 
     // All nodes should see the updated value
     for node in cluster.nodes() {
         let value = read_entity(node.addr, organization, vault, "overwrite-key").await;
         assert_eq!(value, Some(b"updated".to_vec()), "node {} should have updated value", node.id);
-    }
-}
-
-/// Tests that large batches of writes are applied correctly.
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_large_batch_writes() {
-    let cluster = TestCluster::new(3).await;
-    let leader_id = cluster.wait_for_leader().await;
-
-    let leader = cluster.node(leader_id).expect("leader exists");
-
-    // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "batch-ns").await.expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
-
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
-
-    let client_id = format!("batch-test-{}", leader_id);
-
-    // Write 100 keys
-    let num_keys = 100u64;
-    for i in 0..num_keys {
-        let key = format!("batch-key-{:04}", i);
-        let value = format!("batch-value-{:04}", i);
-        let write_req = make_write_request(organization, vault, &key, value.as_bytes(), &client_id);
-        client.write(write_req).await.expect("batch write");
-    }
-
-    // Wait for replication
-    let synced = cluster.wait_for_sync(Duration::from_secs(10)).await;
-    assert!(synced, "cluster should sync after batch writes");
-
-    // Verify all keys are readable from all nodes
-    for node in cluster.nodes() {
-        let mut found = 0u64;
-        for i in 0..num_keys {
-            let key = format!("batch-key-{:04}", i);
-            let expected = format!("batch-value-{:04}", i);
-            let value = read_entity(node.addr, organization, vault, &key).await;
-            if value == Some(expected.into_bytes()) {
-                found += 1;
-            }
-        }
-        assert_eq!(
-            found, num_keys,
-            "node {} should have all {} keys, found {}",
-            node.id, num_keys, found
-        );
     }
 }

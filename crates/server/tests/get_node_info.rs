@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use inferadb_ledger_proto::proto::GetNodeInfoRequest;
 use inferadb_ledger_server::discovery::discover_node_info;
-use serial_test::serial;
 
 use crate::common::{TestCluster, create_admin_client};
 
@@ -17,7 +16,6 @@ use crate::common::{TestCluster, create_admin_client};
 ///
 /// This test verifies that GetNodeInfo is available and returns the node's
 /// Snowflake ID even before the cluster is fully bootstrapped.
-#[serial]
 #[tokio::test]
 async fn test_get_node_info_returns_node_id() {
     let cluster = TestCluster::new(1).await;
@@ -40,7 +38,6 @@ async fn test_get_node_info_returns_node_id() {
 ///
 /// After a node has bootstrapped and become a cluster member, the
 /// is_cluster_member flag should be true.
-#[serial]
 #[tokio::test]
 async fn test_get_node_info_shows_cluster_member_after_bootstrap() {
     let cluster = TestCluster::new(1).await;
@@ -63,8 +60,7 @@ async fn test_get_node_info_shows_cluster_member_after_bootstrap() {
 ///
 /// Verifies that each node returns its own ID and all nodes report
 /// consistent cluster membership after joining.
-#[serial]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_get_node_info_three_node_cluster() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -107,7 +103,6 @@ async fn test_get_node_info_three_node_cluster() {
 ///
 /// The term returned by GetNodeInfo should match the current Raft term
 /// from the node's metrics.
-#[serial]
 #[tokio::test]
 async fn test_get_node_info_term_matches_raft_metrics() {
     let cluster = TestCluster::new(1).await;
@@ -128,7 +123,6 @@ async fn test_get_node_info_term_matches_raft_metrics() {
 ///
 /// Verifies that the discovery helper function correctly queries a node
 /// via the GetNodeInfo RPC and returns a DiscoveredNode.
-#[serial]
 #[tokio::test]
 async fn test_discover_node_info_against_running_node() {
     let cluster = TestCluster::new(1).await;
@@ -153,7 +147,6 @@ async fn test_discover_node_info_against_running_node() {
 ///
 /// When a peer is not reachable, discover_node_info should return None
 /// rather than failing with an error.
-#[serial]
 #[tokio::test]
 async fn test_discover_node_info_unreachable_returns_none() {
     // Try to discover a node at an address that's not running

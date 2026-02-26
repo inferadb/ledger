@@ -10,8 +10,6 @@
 
 use std::time::Duration;
 
-use serial_test::serial;
-
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
@@ -130,7 +128,6 @@ async fn read_entity(
 // ============================================================================
 
 /// Tests that orphan cleanup job starts and runs without errors.
-#[serial]
 #[tokio::test]
 async fn test_orphan_cleanup_job_starts() {
     let cluster = TestCluster::new(1).await;
@@ -171,7 +168,6 @@ async fn test_orphan_cleanup_leader_only() {
 /// Tests detection of deleted users.
 ///
 /// Per DESIGN.md: Users with deleted_at or status=DELETED/DELETING are considered deleted.
-#[serial]
 #[tokio::test]
 async fn test_deleted_user_detection() {
     let cluster = TestCluster::new(1).await;
@@ -267,7 +263,6 @@ async fn test_deleted_user_detection() {
 }
 
 /// Tests membership data format for orphan detection.
-#[serial]
 #[tokio::test]
 async fn test_membership_data_format() {
     let cluster = TestCluster::new(1).await;
@@ -306,7 +301,6 @@ async fn test_membership_data_format() {
 /// Tests that orphan cleanup does not remove non-orphaned records.
 ///
 /// Records that belong to active users should survive cleanup cycles.
-#[serial]
 #[tokio::test]
 async fn test_orphan_cleanup_skips_active_records() {
     let cluster = TestCluster::new(1).await;
@@ -344,7 +338,6 @@ async fn test_orphan_cleanup_skips_active_records() {
 }
 
 /// Tests orphan cleanup handles empty organizations gracefully.
-#[serial]
 #[tokio::test]
 async fn test_orphan_cleanup_handles_empty_organization() {
     let cluster = TestCluster::new(1).await;
@@ -363,10 +356,10 @@ async fn test_orphan_cleanup_handles_empty_organization() {
 }
 
 /// Tests concurrent background jobs don't interfere.
-#[serial]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_orphan_cleanup_with_concurrent_jobs() {
     let cluster = TestCluster::new(3).await;
+    let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("has leader");
 
     // Create some state to exercise all background jobs

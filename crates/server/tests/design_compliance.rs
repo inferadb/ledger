@@ -14,8 +14,6 @@
 
 use std::time::Duration;
 
-use serial_test::serial;
-
 use crate::{
     common,
     common::{TestCluster, create_admin_client, create_health_client, create_read_client},
@@ -69,7 +67,6 @@ async fn create_vault(
 
 /// Verifies that reusing an idempotency key with a different payload returns
 /// `IdempotencyKeyReused`.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_idempotency_key_reuse_detection() {
     let cluster = TestCluster::new(1).await;
@@ -148,7 +145,6 @@ async fn test_idempotency_key_reuse_detection() {
 }
 
 /// Tests that two writes to the same vault with unique idempotency keys both succeed.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_same_vault_two_writes() {
     let cluster = TestCluster::new(1).await;
@@ -222,7 +218,6 @@ async fn test_same_vault_two_writes() {
 }
 
 /// Tests writing only to vault 2 (no vault 1 involved).
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_only_vault_2() {
     let cluster = TestCluster::new(1).await;
@@ -296,7 +291,6 @@ async fn test_only_vault_2() {
 }
 
 /// Tests writing to vault 2 first, then vault 1, then vault 2 again.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_2_first_then_1_then_2() {
     let cluster = TestCluster::new(1).await;
@@ -407,7 +401,6 @@ async fn test_vault_2_first_then_1_then_2() {
 
 /// Tests that the server assigns monotonically increasing sequences across
 /// multiple vaults. Each vault has its own independent sequence counter.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_two_vault_server_assigned_sequences() {
     let cluster = TestCluster::new(1).await;
@@ -537,7 +530,6 @@ async fn test_two_vault_server_assigned_sequences() {
 ///
 /// This test verifies that when one vault's state root diverges (perhaps due to
 /// a bug or corruption), other vaults continue to operate normally.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_divergence_does_not_affect_other_vaults() {
     // Use 1-node cluster to simplify debugging
@@ -715,7 +707,6 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 ///
 /// When a vault's computed state root doesn't match the expected root,
 /// the vault should be marked as diverged and return UNAVAILABLE.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_diverged_vault_returns_unavailable() {
     let cluster = TestCluster::new(3).await;
@@ -839,7 +830,6 @@ async fn test_diverged_vault_returns_unavailable() {
 ///
 /// When a follower applies log entries, it must verify that its computed
 /// state root matches the state root included in the log entry from the leader.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_follower_state_root_verification() {
     let cluster = TestCluster::new(3).await;
@@ -922,7 +912,6 @@ async fn test_follower_state_root_verification() {
 /// The test uses leave_cluster to remove the leader, triggering a new election.
 /// The idempotency cache is stored in the replicated applied state, so the new
 /// leader should still detect duplicate idempotency keys.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_idempotency_survives_leader_failover() {
     let cluster = TestCluster::new(3).await;

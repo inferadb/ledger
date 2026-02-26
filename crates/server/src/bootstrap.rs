@@ -212,12 +212,24 @@ pub async fn bootstrap_node(
     let applied_state_accessor = log_store.accessor();
 
     let network = GrpcRaftNetworkFactory::with_trace_config(config.logging.otel.trace_raft_rpcs);
-    let raft_config = openraft::Config {
-        cluster_name: "ledger".to_string(),
-        heartbeat_interval: 150,
-        election_timeout_min: 300,
-        election_timeout_max: 600,
-        ..Default::default()
+    let raft_config = if let Some(ref rc) = config.raft {
+        openraft::Config {
+            cluster_name: "ledger".to_string(),
+            heartbeat_interval: rc.heartbeat_interval.as_millis() as u64,
+            election_timeout_min: rc.election_timeout_min.as_millis() as u64,
+            election_timeout_max: rc.election_timeout_max.as_millis() as u64,
+            max_payload_entries: rc.max_entries_per_rpc,
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(rc.snapshot_threshold),
+            ..Default::default()
+        }
+    } else {
+        openraft::Config {
+            cluster_name: "ledger".to_string(),
+            heartbeat_interval: 150,
+            election_timeout_min: 300,
+            election_timeout_max: 600,
+            ..Default::default()
+        }
     };
 
     // Create adaptor to split RaftStorage into log storage and state machine

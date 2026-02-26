@@ -8,7 +8,6 @@
 mod common;
 mod turmoil_common;
 
-mod background_jobs;
 mod backup_restore;
 mod bootstrap_coordination;
 mod chaos_consistency;
@@ -23,7 +22,6 @@ mod network_simulation;
 mod orphan_cleanup;
 mod replication;
 mod saga_orchestrator;
-mod stress_test;
 mod ttl_gc;
 mod watch_blocks_realtime;
 mod write_read;

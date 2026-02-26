@@ -268,13 +268,21 @@ impl<'a> LeafNode<'a> {
     ///
     /// Also updates the embedded bloom filter incrementally.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `index > cell_count` or if there is insufficient free
-    /// space. Call [`can_insert`](Self::can_insert) first to check.
-    pub fn insert(&mut self, index: usize, key: &[u8], value: &[u8]) {
+    /// Returns [`Error::PageFull`] if there is insufficient free space.
+    /// Returns [`Error::Corrupted`] if `index > cell_count`.
+    pub fn insert(&mut self, index: usize, key: &[u8], value: &[u8]) -> Result<()> {
         let count = self.cell_count() as usize;
-        assert!(index <= count);
+        if index > count {
+            return Err(Error::Corrupted {
+                reason: format!("leaf insert index {index} exceeds cell count {count}"),
+            });
+        }
+
+        if self.free_space() < Self::cell_size(key, value) {
+            return Err(Error::PageFull);
+        }
 
         // Calculate cell size (excluding pointer, which is separate)
         let cell_data_size = 2 + 2 + key.len() + value.len(); // key_len + val_len + key + value
@@ -324,6 +332,7 @@ impl<'a> LeafNode<'a> {
         self.set_bloom_filter(&filter);
 
         self.page.dirty = true;
+        Ok(())
     }
 
     /// Updates the value at the given cell index in place.
@@ -365,9 +374,17 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Deletes the cell at a given index.
-    pub fn delete(&mut self, index: usize) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Corrupted`] if `index >= cell_count`.
+    pub fn delete(&mut self, index: usize) -> Result<()> {
         let count = self.cell_count() as usize;
-        assert!(index < count);
+        if index >= count {
+            return Err(Error::Corrupted {
+                reason: format!("leaf delete index {index} out of bounds (count {count})"),
+            });
+        }
 
         // Shift cell pointers down
         if index < count - 1 {
@@ -394,6 +411,7 @@ impl<'a> LeafNode<'a> {
 
         // Note: Cell data becomes dead space (would need compaction to reclaim)
         self.page.dirty = true;
+        Ok(())
     }
 
     /// Returns the next leaf page ID in the linked list (0 = no next leaf).
@@ -563,9 +581,22 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Inserts a separator key with its left child at the given index.
-    pub fn insert(&mut self, index: usize, key: &[u8], left_child: PageId) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PageFull`] if there is insufficient free space.
+    /// Returns [`Error::Corrupted`] if `index > cell_count`.
+    pub fn insert(&mut self, index: usize, key: &[u8], left_child: PageId) -> Result<()> {
         let count = self.cell_count() as usize;
-        assert!(index <= count);
+        if index > count {
+            return Err(Error::Corrupted {
+                reason: format!("branch insert index {index} exceeds cell count {count}"),
+            });
+        }
+
+        if self.free_space() < Self::cell_size(key) {
+            return Err(Error::PageFull);
+        }
 
         // Calculate cell size (excluding pointer)
         let cell_data_size = 2 + 8 + key.len(); // key_len + child_page + key
@@ -609,6 +640,7 @@ impl<'a> BranchNode<'a> {
             .copy_from_slice(&new_count.to_le_bytes());
 
         self.page.dirty = true;
+        Ok(())
     }
 
     /// Deletes the separator key and its left child at the given index.
@@ -617,9 +649,17 @@ impl<'a> BranchNode<'a> {
     /// The caller is responsible for updating child pointers as needed
     /// (e.g., when merging sibling leaves, the right sibling's subtree
     /// is absorbed into the left sibling).
-    pub fn delete(&mut self, index: usize) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Corrupted`] if `index >= cell_count`.
+    pub fn delete(&mut self, index: usize) -> Result<()> {
         let count = self.cell_count() as usize;
-        assert!(index < count);
+        if index >= count {
+            return Err(Error::Corrupted {
+                reason: format!("branch delete index {index} out of bounds (count {count})"),
+            });
+        }
 
         // Shift cell pointers down to fill the gap
         if index < count - 1 {
@@ -643,6 +683,7 @@ impl<'a> BranchNode<'a> {
 
         // Cell data becomes dead space (page-level compaction would reclaim)
         self.page.dirty = true;
+        Ok(())
     }
 
     /// Returns the underlying page.
@@ -886,14 +927,14 @@ mod tests {
         assert!(node.free_space() > 3700); // Most of 4KB minus bloom filter should be free
 
         // Insert some data
-        node.insert(0, b"key1", b"value1");
+        node.insert(0, b"key1", b"value1").unwrap();
         assert_eq!(node.cell_count(), 1);
         assert_eq!(node.key(0), b"key1");
         assert_eq!(node.value(0), b"value1");
 
         // Insert more
-        node.insert(1, b"key2", b"value2");
-        node.insert(0, b"key0", b"value0"); // Insert at beginning
+        node.insert(1, b"key2", b"value2").unwrap();
+        node.insert(0, b"key0", b"value0").unwrap(); // Insert at beginning
 
         assert_eq!(node.cell_count(), 3);
         assert_eq!(node.key(0), b"key0");
@@ -906,9 +947,9 @@ mod tests {
         let mut page = make_leaf_page(0);
         let mut node = LeafNode::init(&mut page);
 
-        node.insert(0, b"apple", b"1");
-        node.insert(1, b"banana", b"2");
-        node.insert(2, b"cherry", b"3");
+        node.insert(0, b"apple", b"1").unwrap();
+        node.insert(1, b"banana", b"2").unwrap();
+        node.insert(2, b"cherry", b"3").unwrap();
 
         assert!(matches!(node.search(b"apple"), SearchResult::Found(0)));
         assert!(matches!(node.search(b"banana"), SearchResult::Found(1)));
@@ -923,11 +964,11 @@ mod tests {
         let mut page = make_leaf_page(0);
         let mut node = LeafNode::init(&mut page);
 
-        node.insert(0, b"a", b"1");
-        node.insert(1, b"b", b"2");
-        node.insert(2, b"c", b"3");
+        node.insert(0, b"a", b"1").unwrap();
+        node.insert(1, b"b", b"2").unwrap();
+        node.insert(2, b"c", b"3").unwrap();
 
-        node.delete(1); // Delete middle
+        node.delete(1).unwrap(); // Delete middle
 
         assert_eq!(node.cell_count(), 2);
         assert_eq!(node.key(0), b"a");
@@ -943,7 +984,7 @@ mod tests {
         assert_eq!(node.rightmost_child(), 100);
 
         // Insert separator: keys < "m" go to child 10
-        node.insert(0, b"m", 10);
+        node.insert(0, b"m", 10).unwrap();
         assert_eq!(node.cell_count(), 1);
         assert_eq!(node.key(0), b"m");
         assert_eq!(node.child(0), 10);
@@ -996,5 +1037,138 @@ mod tests {
         // NODE_HEADER_SIZE is 16 (cell_count:2 + free_start:2 + free_end:2 + reserved:2 +
         // next_leaf:8)
         const _: () = assert!(NODE_HEADER_SIZE == 16);
+    }
+
+    // ====================================================================
+    // PageFull / bounds-check error path tests
+    // ====================================================================
+
+    #[test]
+    fn test_leaf_insert_returns_page_full_when_full() {
+        let mut page = make_leaf_page(0);
+        let mut node = LeafNode::init(&mut page);
+
+        // Fill the leaf until can_insert reports no space
+        let mut i = 0u32;
+        loop {
+            let key = i.to_be_bytes();
+            let value = [0u8; 100];
+            if !node.can_insert(&key, &value) {
+                // This insert should return PageFull, not panic
+                let result = node.insert(i as usize, &key, &value);
+                assert!(result.is_err(), "insert into full leaf should fail");
+                assert!(
+                    matches!(result, Err(Error::PageFull)),
+                    "error should be PageFull, got: {:?}",
+                    result
+                );
+                break;
+            }
+            node.insert(i as usize, &key, &value).unwrap();
+            i += 1;
+        }
+        assert!(i > 0, "should have inserted at least one entry before filling");
+    }
+
+    #[test]
+    fn test_leaf_insert_returns_corrupted_on_invalid_index() {
+        let mut page = make_leaf_page(0);
+        let mut node = LeafNode::init(&mut page);
+
+        // Insert at index 5 when count is 0
+        let result = node.insert(5, b"key", b"value");
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(Error::Corrupted { .. })),
+            "out-of-bounds index should return Corrupted, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_leaf_delete_returns_corrupted_on_invalid_index() {
+        let mut page = make_leaf_page(0);
+        let mut node = LeafNode::init(&mut page);
+
+        node.insert(0, b"a", b"1").unwrap();
+
+        // Delete at index 5 when count is 1
+        let result = node.delete(5);
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(Error::Corrupted { .. })),
+            "out-of-bounds delete should return Corrupted, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_leaf_insert_oversized_value_returns_page_full() {
+        let mut page = make_leaf_page(0);
+        let mut node = LeafNode::init(&mut page);
+
+        // A value larger than the entire usable page space
+        let big_value = vec![0u8; 4000];
+        let result = node.insert(0, b"k", &big_value);
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(Error::PageFull)),
+            "oversized value should return PageFull, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_branch_insert_returns_page_full_when_full() {
+        let mut page = make_branch_page(0);
+        let mut node = BranchNode::init(&mut page, 999);
+
+        let mut i = 0u32;
+        loop {
+            let key = i.to_be_bytes();
+            if !node.can_insert(&key) {
+                let result = node.insert(i as usize, &key, i as PageId);
+                assert!(result.is_err(), "insert into full branch should fail");
+                assert!(
+                    matches!(result, Err(Error::PageFull)),
+                    "error should be PageFull, got: {:?}",
+                    result
+                );
+                break;
+            }
+            node.insert(i as usize, &key, i as PageId).unwrap();
+            i += 1;
+        }
+        assert!(i > 0, "should have inserted at least one entry before filling");
+    }
+
+    #[test]
+    fn test_branch_insert_returns_corrupted_on_invalid_index() {
+        let mut page = make_branch_page(0);
+        let mut node = BranchNode::init(&mut page, 999);
+
+        let result = node.insert(10, b"key", 42);
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(Error::Corrupted { .. })),
+            "out-of-bounds index should return Corrupted, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_branch_delete_returns_corrupted_on_invalid_index() {
+        let mut page = make_branch_page(0);
+        let mut node = BranchNode::init(&mut page, 999);
+
+        node.insert(0, b"m", 10).unwrap();
+
+        let result = node.delete(5);
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(Error::Corrupted { .. })),
+            "out-of-bounds delete should return Corrupted, got: {:?}",
+            result
+        );
     }
 }

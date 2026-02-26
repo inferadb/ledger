@@ -12,8 +12,6 @@
 
 use std::time::Duration;
 
-use serial_test::serial;
-
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
@@ -65,7 +63,6 @@ async fn create_vault(
 // ============================================================================
 
 /// Tests single-node cluster bootstrap and leader election.
-#[serial]
 #[tokio::test]
 async fn test_single_node_bootstrap() {
     let cluster = TestCluster::new(1).await;
@@ -139,7 +136,6 @@ async fn test_three_node_cluster_formation() {
 // ============================================================================
 
 /// Tests single-node write and read cycle.
-#[serial]
 #[tokio::test]
 async fn test_single_node_write_read() {
     let cluster = TestCluster::new(1).await;
@@ -193,7 +189,6 @@ async fn test_single_node_write_read() {
 }
 
 /// Tests write idempotency - same client_id + idempotency_key should return cached result.
-#[serial]
 #[tokio::test]
 async fn test_write_idempotency() {
     let cluster = TestCluster::new(1).await;
@@ -255,7 +250,6 @@ async fn test_write_idempotency() {
 ///
 /// DESIGN.md §3.2.1: State root is computed after applying transactions.
 /// DESIGN.md §7.1: GetBlock returns stored block with header and transactions.
-#[serial]
 #[tokio::test]
 async fn test_write_creates_retrievable_block() {
     let cluster = TestCluster::new(1).await;

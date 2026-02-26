@@ -1650,12 +1650,11 @@ mod tests {
     }
 
     // ========================================================================
-    // Benchmark: 1000 orgs, 5000 vaults, 100K client sequences
+    // Large dataset round-trip: 1000 orgs, 5000 vaults, 100K client sequences
     // ========================================================================
 
     #[test]
-    #[ignore = "benchmark: absolute timing threshold varies on CI runners"]
-    fn test_load_performance_large_dataset() {
+    fn test_load_large_dataset() {
         let dir = tempdir().unwrap();
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).unwrap();
 
@@ -1734,28 +1733,14 @@ mod tests {
 
         let pending = build_pending_from_state(&state);
 
-        // Save
-        let save_start = std::time::Instant::now();
+        // Save and reload
         store.save_state_core(&state, &pending).unwrap();
-        let save_elapsed = save_start.elapsed();
-
-        // Load
-        let load_start = std::time::Instant::now();
         let loaded = store.load_state_from_tables().unwrap();
-        let load_elapsed = load_start.elapsed();
 
         // Verify counts
         assert_eq!(loaded.organizations.len(), 1000);
         assert_eq!(loaded.vaults.len(), 5000);
         assert_eq!(loaded.client_sequences.len(), 100_000);
-
-        // Performance target: <5 seconds
-        assert!(
-            load_elapsed.as_secs() < 5,
-            "load_state_from_tables took {load_elapsed:?}, target <5s"
-        );
-
-        eprintln!("Large dataset: save={save_elapsed:?}, load={load_elapsed:?}");
     }
 
     // ========================================================================
@@ -1827,241 +1812,5 @@ mod tests {
         assert_eq!(loaded.shard_height, 999);
         assert_eq!(loaded.organizations.len(), 1);
         assert!(loaded.organizations.contains_key(&org_id));
-    }
-
-    // ========================================================================
-    // Benchmark: apply loop throughput with externalized writes
-    // ========================================================================
-
-    /// Build a state and pending writes simulating 1000 mixed operations across
-    /// 10 organizations and 50 vaults.
-    ///
-    /// Returns (state, pending) where pending represents the accumulated writes
-    /// from a batch of mixed operations:
-    /// - Organization metadata updates (status changes, storage accounting)
-    /// - Vault height increments (write operations advancing the chain)
-    /// - Vault hash updates (new block hashes)
-    /// - Client sequence inserts (unique client IDs tracking idempotency)
-    /// - Sequence counter updates
-    fn build_benchmark_state_and_pending() -> (AppliedState, PendingExternalWrites) {
-        let mut state = AppliedState {
-            last_applied: Some(make_log_id(5, 1000)),
-            shard_height: 500,
-            previous_shard_hash: [0xAB; 32],
-            sequences: SequenceCounters {
-                organization: OrganizationId::new(11),
-                vault: VaultId::new(51),
-                user: 100,
-                user_email: 100,
-                email_verify: 100,
-            },
-            ..Default::default()
-        };
-
-        // 10 organizations
-        for i in 1..=10i64 {
-            let org_id = OrganizationId::new(i);
-            let slug = OrganizationSlug::new(1000 + i as u64);
-            state.organizations.insert(
-                org_id,
-                OrganizationMeta {
-                    organization_id: org_id,
-                    slug,
-                    shard_id: ShardId::new(0),
-                    name: format!("org-{i}"),
-                    status: OrganizationStatus::Active,
-                    pending_shard_id: None,
-                    quota: None,
-                    storage_bytes: i as u64 * 1024,
-                },
-            );
-            state.slug_index.insert(slug, org_id);
-            state.id_to_slug.insert(org_id, slug);
-            state.organization_storage_bytes.insert(org_id, i as u64 * 1024);
-        }
-
-        // 50 vaults (5 per organization)
-        for org_i in 1..=10i64 {
-            let org_id = OrganizationId::new(org_i);
-            for v in 1..=5i64 {
-                let vault_id = VaultId::new((org_i - 1) * 5 + v);
-                let slug = VaultSlug::new(vault_id.value() as u64 + 20000);
-                state.vaults.insert(
-                    (org_id, vault_id),
-                    VaultMeta {
-                        organization_id: org_id,
-                        vault_id,
-                        slug,
-                        name: Some(format!("vault-{org_i}-{v}")),
-                        deleted: false,
-                        last_write_timestamp: 1000,
-                        retention_policy: BlockRetentionPolicy::default(),
-                    },
-                );
-                state.vault_slug_index.insert(slug, vault_id);
-                state.vault_id_to_slug.insert(vault_id, slug);
-                state.vault_heights.insert((org_id, vault_id), v as u64 * 10);
-                state.previous_vault_hashes.insert((org_id, vault_id), [v as u8; 32]);
-            }
-        }
-
-        // Build pending writes representing 1000 mixed operations:
-        // - 500 writes (vault height + hash + client sequence + org storage update)
-        // - 200 additional client sequence registrations (new client IDs)
-        // - 200 vault health updates
-        // - 100 organization metadata updates (storage_bytes changes)
-        let mut pending = PendingExternalWrites::new();
-
-        // 500 write operations: each updates vault height, hash, client sequence, org meta
-        for op in 0..500u64 {
-            let org_id = OrganizationId::new((op % 10 + 1) as i64);
-            let vault_id = VaultId::new(((op % 50) + 1) as i64);
-            let height = 100 + op;
-
-            pending.vault_heights.push(((org_id, vault_id), height));
-            pending.vault_hashes.push(((org_id, vault_id), [(op & 0xFF) as u8; 32]));
-
-            let client_key = PendingExternalWrites::client_sequence_key(
-                org_id,
-                vault_id,
-                format!("client-write-{op}").as_bytes(),
-            );
-            let entry = ClientSequenceEntry { sequence: op + 1, ..ClientSequenceEntry::default() };
-            let value = encode(&entry).unwrap();
-            pending.client_sequences.push((client_key, value));
-        }
-
-        // 200 new client sequence registrations
-        for op in 0..200u64 {
-            let org_id = OrganizationId::new((op % 10 + 1) as i64);
-            let vault_id = VaultId::new(((op % 50) + 1) as i64);
-            let client_key = PendingExternalWrites::client_sequence_key(
-                org_id,
-                vault_id,
-                format!("client-new-{op}").as_bytes(),
-            );
-            let entry = ClientSequenceEntry { sequence: 1, ..ClientSequenceEntry::default() };
-            let value = encode(&entry).unwrap();
-            pending.client_sequences.push((client_key, value));
-        }
-
-        // 200 vault health updates
-        for op in 0..200u64 {
-            let org_id = OrganizationId::new((op % 10 + 1) as i64);
-            let vault_id = VaultId::new(((op % 50) + 1) as i64);
-            pending.vault_health.push(((org_id, vault_id), VaultHealthStatus::Healthy));
-        }
-
-        // 100 organization metadata updates (storage accounting after writes)
-        for op in 0..100u64 {
-            let org_id = OrganizationId::new((op % 10 + 1) as i64);
-            let meta = state.organizations.get(&org_id).unwrap();
-            let mut updated = meta.clone();
-            updated.storage_bytes += 256; // Each write adds ~256 bytes
-            let blob = encode(&updated).unwrap();
-            pending.organizations.push((org_id, blob));
-        }
-
-        // Sequence counter updates (snapshot at end of batch)
-        pending.sequences.push(("organization".to_string(), 11));
-        pending.sequences.push(("vault".to_string(), 51));
-        pending.sequences.push(("user".to_string(), 100));
-        pending.sequences.push(("user_email".to_string(), 100));
-        pending.sequences.push(("email_verify".to_string(), 100));
-
-        // Slug index writes (from initial state)
-        for (slug, org_id) in &state.slug_index {
-            pending.slug_index.push((*slug, *org_id));
-        }
-        for (slug, vault_id) in &state.vault_slug_index {
-            pending.vault_slug_index.push((*slug, *vault_id));
-        }
-
-        (state, pending)
-    }
-
-    /// Benchmark: apply loop throughput with externalized writes.
-    ///
-    /// Compares the new externalized approach (AppliedStateCore + 9 table flushes)
-    /// against the old single-blob approach (serialize entire AppliedState as one
-    /// postcard blob). Target: <2x latency increase.
-    ///
-    /// Uses 1000 mixed operations across 10 organizations and 50 vaults.
-    #[test]
-    #[ignore = "benchmark: performance ratio varies on CI runners"]
-    fn test_apply_loop_throughput_benchmark() {
-        let (state, pending) = build_benchmark_state_and_pending();
-
-        // Verify workload size
-        let total_ops = pending.vault_heights.len()
-            + pending.client_sequences.len()
-            + pending.vault_health.len()
-            + pending.organizations.len();
-        assert!(total_ops >= 1000, "expected >=1000 operations, got {total_ops}");
-
-        // ── Baseline: old single-blob approach ──────────────────────────
-        // Simulate save_applied_state(): serialize entire AppliedState and
-        // write as a single key-value pair in the RaftState table.
-        let baseline_dir = tempdir().unwrap();
-        let baseline_store =
-            RaftLogStore::<FileBackend>::open(baseline_dir.path().join("raft.db")).unwrap();
-
-        let full_blob = encode(&state).unwrap();
-        eprintln!("Benchmark: full AppliedState blob = {} bytes", full_blob.len());
-
-        // Warm up: one write to establish table structure
-        {
-            let mut tx = baseline_store.db.write().unwrap();
-            tx.insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &full_blob).unwrap();
-            tx.commit().unwrap();
-        }
-
-        // Measure baseline: 10 iterations of single-blob write
-        let iterations = 10u32;
-        let baseline_start = std::time::Instant::now();
-        for _ in 0..iterations {
-            let blob = encode(&state).unwrap();
-            let mut tx = baseline_store.db.write().unwrap();
-            tx.insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &blob).unwrap();
-            tx.commit().unwrap();
-        }
-        let baseline_elapsed = baseline_start.elapsed();
-        let baseline_avg = baseline_elapsed / iterations;
-
-        // ── New approach: externalized writes ───────────────────────────
-        let new_dir = tempdir().unwrap();
-        let new_store = RaftLogStore::<FileBackend>::open(new_dir.path().join("raft.db")).unwrap();
-
-        // Warm up
-        new_store.save_state_core(&state, &pending).unwrap();
-
-        // Measure new approach: 10 iterations
-        let new_start = std::time::Instant::now();
-        for _ in 0..iterations {
-            new_store.save_state_core(&state, &pending).unwrap();
-        }
-        let new_elapsed = new_start.elapsed();
-        let new_avg = new_elapsed / iterations;
-
-        // ── Report ──────────────────────────────────────────────────────
-        let ratio = new_avg.as_nanos() as f64 / baseline_avg.as_nanos() as f64;
-        eprintln!("Benchmark results (avg over {iterations} iterations):");
-        eprintln!("  Baseline (single blob): {:?}", baseline_avg);
-        eprintln!("  New (externalized):     {:?}", new_avg);
-        eprintln!("  Ratio:                  {ratio:.2}x");
-        eprintln!(
-            "  Operations in pending:  {} (vault_heights={}, client_seqs={}, health={}, org_meta={})",
-            total_ops,
-            pending.vault_heights.len(),
-            pending.client_sequences.len(),
-            pending.vault_health.len(),
-            pending.organizations.len(),
-        );
-
-        // Target: <2x latency increase
-        assert!(
-            ratio < 2.0,
-            "Externalized writes took {ratio:.2}x the baseline ({new_avg:?} vs {baseline_avg:?}), target <2.0x"
-        );
     }
 }

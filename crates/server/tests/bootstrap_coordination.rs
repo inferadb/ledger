@@ -15,20 +15,18 @@ use inferadb_ledger_server::{
     bootstrap::bootstrap_node, config::Config, node_id::load_or_generate_node_id,
 };
 use inferadb_ledger_test_utils::TestDir;
-use serial_test::serial;
 
-use crate::common::{TestCluster, create_admin_client};
+use crate::common::{TestCluster, allocate_ports, create_admin_client};
 
 /// Tests single-node bootstrap with `bootstrap_expect=1`.
 ///
 /// Verifies that a single node can bootstrap immediately when configured
 /// with `bootstrap_expect=1`.
-#[serial]
 #[tokio::test]
 async fn test_single_node_bootstrap() {
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
-    let port = 45000 + (rand::random::<u16>() % 1000);
+    let port = allocate_ports(1);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     // Create config with single-node mode
@@ -61,7 +59,7 @@ async fn test_single_node_bootstrap() {
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     // Verify node is a cluster member via GetNodeInfo
@@ -88,12 +86,11 @@ async fn test_single_node_bootstrap() {
 /// Verifies that when a node restarts:
 /// 1. It loads the existing Snowflake ID from disk
 /// 2. It resumes its cluster membership
-#[serial]
 #[tokio::test]
 async fn test_node_restart_preserves_id() {
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
-    let port = 46000 + (rand::random::<u16>() % 1000);
+    let port = allocate_ports(1);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
@@ -177,7 +174,7 @@ async fn test_node_restart_preserves_id() {
             if tokio::net::TcpStream::connect(addr2).await.is_ok() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         // Verify cluster membership
@@ -221,8 +218,7 @@ async fn test_snowflake_ids_are_time_ordered_across_nodes() {
 ///
 /// This verifies that the existing test infrastructure works correctly
 /// with the coordinated bootstrap system.
-#[serial]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_cluster_uses_coordinated_bootstrap() {
     // TestCluster uses single-node mode for the first node and dynamic
     // join for subsequent nodes via AdminService
@@ -259,13 +255,12 @@ async fn test_three_node_cluster_uses_coordinated_bootstrap() {
 ///
 /// When a node starts and discovers peers that are already cluster members,
 /// it should return JoinExisting decision (via is_cluster_member=true).
-#[serial]
 #[tokio::test]
 async fn test_late_joiner_finds_existing_cluster() {
     // Start a single-node cluster first
     let leader_dir = TestDir::new();
     let leader_data_dir = leader_dir.path().to_path_buf();
-    let leader_port = 47000 + (rand::random::<u16>() % 1000);
+    let leader_port = allocate_ports(1);
     let leader_addr: std::net::SocketAddr = format!("127.0.0.1:{}", leader_port).parse().unwrap();
 
     // Pre-write node_id for deterministic test behavior
@@ -301,7 +296,7 @@ async fn test_late_joiner_finds_existing_cluster() {
         if tokio::net::TcpStream::connect(leader_addr).await.is_ok() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     // Wait for leader to become leader
@@ -311,7 +306,7 @@ async fn test_late_joiner_finds_existing_cluster() {
         if metrics.current_leader == Some(1) {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     // Wait for server to be ready and retry connection
@@ -348,12 +343,11 @@ async fn test_late_joiner_finds_existing_cluster() {
 ///
 /// Verifies that a node with bootstrap_expect=0 starts successfully but
 /// does not initialize a Raft cluster - it waits to be added via AdminService.
-#[serial]
 #[tokio::test]
 async fn test_join_mode_does_not_bootstrap() {
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
-    let port = 48500 + (rand::random::<u16>() % 1000);
+    let port = allocate_ports(1);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     let config = Config {
@@ -385,7 +379,7 @@ async fn test_join_mode_does_not_bootstrap() {
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     // Verify node is NOT a cluster member (hasn't bootstrapped)

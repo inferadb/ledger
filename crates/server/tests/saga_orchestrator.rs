@@ -12,7 +12,6 @@
 use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationId, UserId};
-use serial_test::serial;
 
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
@@ -127,7 +126,6 @@ async fn read_entity(
 // ============================================================================
 
 /// Tests that saga orchestrator runs without errors on a single-node cluster.
-#[serial]
 #[tokio::test]
 async fn test_saga_orchestrator_starts() {
     let cluster = TestCluster::new(1).await;
@@ -168,7 +166,6 @@ async fn test_saga_orchestrator_leader_only() {
 /// Tests that a CreateOrg saga stored in storage will be picked up and executed.
 ///
 /// This tests the full saga lifecycle: pending -> user_created -> organization_created -> completed
-#[serial]
 #[tokio::test]
 async fn test_create_org_saga_execution() {
     use inferadb_ledger_state::system::{CreateOrgInput, CreateOrgSaga, Saga};
@@ -201,9 +198,9 @@ async fn test_create_org_saga_execution() {
         .await
         .expect("write saga");
 
-    // Give saga orchestrator time to pick up and execute the saga
-    // Note: In tests, the saga poll interval is shorter
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // The saga entity is committed through Raft when write_entity returns.
+    // A short delay lets async state-machine application complete.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Read the saga back and verify it round-trips correctly
     let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
@@ -227,7 +224,6 @@ async fn test_create_org_saga_execution() {
 }
 
 /// Tests that a DeleteUser saga progresses through its states.
-#[serial]
 #[tokio::test]
 async fn test_delete_user_saga_state_transitions() {
     use inferadb_ledger_state::system::{DeleteUserInput, DeleteUserSaga, Saga};
@@ -272,8 +268,8 @@ async fn test_delete_user_saga_state_transitions() {
         .await
         .expect("write delete saga");
 
-    // Give orchestrator time to process
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // The saga entity is committed through Raft when write_entity returns.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Read saga and verify it round-trips correctly
     let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
@@ -293,7 +289,6 @@ async fn test_delete_user_saga_state_transitions() {
 }
 
 /// Tests that terminal sagas are not re-executed.
-#[serial]
 #[tokio::test]
 async fn test_completed_saga_not_reexecuted() {
     use inferadb_ledger_state::system::{CreateOrgInput, CreateOrgSaga, CreateOrgSagaState, Saga};
@@ -331,8 +326,8 @@ async fn test_completed_saga_not_reexecuted() {
         .await
         .expect("write completed saga");
 
-    // Give orchestrator time
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Give orchestrator time to cycle and potentially (incorrectly) re-execute
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Read saga back - it should still be in Completed state (not re-processed)
     let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
@@ -355,7 +350,6 @@ async fn test_completed_saga_not_reexecuted() {
 }
 
 /// Tests saga serialization round-trip through storage.
-#[serial]
 #[tokio::test]
 async fn test_saga_serialization_roundtrip() {
     use inferadb_ledger_state::system::{CreateOrgInput, CreateOrgSaga, Saga};

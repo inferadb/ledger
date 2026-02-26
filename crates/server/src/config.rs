@@ -687,6 +687,16 @@ pub struct Config {
     #[builder(default = default_timeout_secs())]
     pub timeout_secs: u64,
 
+    // === Raft Consensus ===
+    /// Raft consensus timing and tuning configuration.
+    ///
+    /// Controls heartbeat interval, election timeouts, snapshot threshold,
+    /// and other Raft protocol parameters. When absent, uses production defaults
+    /// (100ms heartbeat, 300-500ms election timeout).
+    #[arg(skip)]
+    #[serde(default)]
+    pub raft: Option<inferadb_ledger_types::config::RaftConfig>,
+
     // === Logging ===
     /// Logging configuration for comprehensive request logging.
     ///
@@ -797,6 +807,7 @@ impl Default for Config {
             peers_poll_secs: default_peers_poll_secs(),
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
+            raft: None,
             logging: LoggingConfig::default(),
             backup: None,
             events: inferadb_ledger_types::events::EventConfig::default(),

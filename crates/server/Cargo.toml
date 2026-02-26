@@ -71,10 +71,8 @@ metrics-exporter-prometheus.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-rand.workspace = true
 inferadb-ledger-test-utils.workspace = true
 futures.workspace = true
-serial_test = "3.2"
 uuid.workspace = true
 
 # Network simulation testing
@@ -86,6 +84,12 @@ tower.workspace = true
 
 [[test]]
 name = "integration"
+
+[[test]]
+name = "external"
+
+[[test]]
+name = "stress"
 
 [lints]
 workspace = true

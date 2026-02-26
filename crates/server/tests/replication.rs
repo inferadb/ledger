@@ -12,8 +12,6 @@
 
 use std::time::Duration;
 
-use serial_test::serial;
-
 use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 // ============================================================================
@@ -65,7 +63,6 @@ async fn create_vault(
 // ============================================================================
 
 /// Tests that multiple writes replicate in order.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ordered_replication() {
     let cluster = TestCluster::new(3).await;
@@ -130,7 +127,6 @@ async fn test_ordered_replication() {
 }
 
 /// Tests that followers have consistent state after writes.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_follower_state_consistency() {
     let cluster = TestCluster::new(3).await;
@@ -193,7 +189,6 @@ async fn test_follower_state_consistency() {
 }
 
 /// Tests replication continues after a brief network delay.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_replication_after_delay() {
     let cluster = TestCluster::new(3).await;

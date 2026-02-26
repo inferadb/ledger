@@ -9,8 +9,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-use serial_test::serial;
-
 use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 // ============================================================================
@@ -143,7 +141,6 @@ async fn list_backups(
 ///
 /// Creates data, takes a backup, lists backups, and verifies that the
 /// backup metadata (shard_height, size, checksum, tag) is accurate.
-#[serial]
 #[tokio::test]
 async fn test_backup_create_and_list_metadata() {
     let cluster = TestCluster::new(1).await;
@@ -195,7 +192,6 @@ async fn test_backup_create_and_list_metadata() {
 ///
 /// Writes are submitted concurrently with backup creation to verify
 /// that backup captures a consistent snapshot despite concurrent activity.
-#[serial]
 #[tokio::test]
 async fn test_backup_during_active_writes() {
     let cluster = TestCluster::new(1).await;
@@ -240,7 +236,6 @@ async fn test_backup_during_active_writes() {
 ///
 /// Creates several backups and verifies that ListBackups respects the
 /// limit parameter and returns backups in the expected order.
-#[serial]
 #[tokio::test]
 async fn test_backup_list_with_limit() {
     let cluster = TestCluster::new(1).await;
@@ -286,7 +281,6 @@ async fn test_backup_list_with_limit() {
 ///
 /// The backup response includes a SHA-256 checksum that operators can
 /// use to verify backup integrity during transfers.
-#[serial]
 #[tokio::test]
 async fn test_backup_checksum_present() {
     let cluster = TestCluster::new(1).await;

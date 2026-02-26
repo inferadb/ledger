@@ -229,7 +229,7 @@ impl<P: PageProvider> BTree<P> {
             let mut page = self.new_leaf_page();
             {
                 let mut leaf = LeafNode::from_page(&mut page)?;
-                leaf.insert(0, key, value);
+                leaf.insert(0, key, value)?;
             }
             self.root_page = page.id;
             self.provider.write_page(page);
@@ -244,7 +244,7 @@ impl<P: PageProvider> BTree<P> {
             let mut new_root = self.new_branch_page(new_child);
             {
                 let mut branch = BranchNode::from_page(&mut new_root)?;
-                branch.insert(0, &separator_key, self.root_page);
+                branch.insert(0, &separator_key, self.root_page)?;
             }
             self.root_page = new_root.id;
             self.provider.write_page(new_root);
@@ -273,12 +273,12 @@ impl<P: PageProvider> BTree<P> {
                         old_value = Some(leaf.value(idx).to_vec());
                         if !leaf.update(idx, value) {
                             // Value grew - need to delete and reinsert
-                            leaf.delete(idx);
+                            leaf.delete(idx)?;
                             if leaf.can_insert(key, value) {
                                 // Reinsert in same page
                                 match leaf.search(key) {
                                     SearchResult::NotFound(new_idx) => {
-                                        leaf.insert(new_idx, key, value);
+                                        leaf.insert(new_idx, key, value)?;
                                     },
                                     _ => unreachable!(),
                                 }
@@ -296,7 +296,7 @@ impl<P: PageProvider> BTree<P> {
                     SearchResult::NotFound(idx) => {
                         old_value = None;
                         if leaf.can_insert(key, value) {
-                            leaf.insert(idx, key, value);
+                            leaf.insert(idx, key, value)?;
                             drop(leaf);
                             self.provider.write_page(page);
                             Ok((None, old_value))
@@ -337,14 +337,14 @@ impl<P: PageProvider> BTree<P> {
                             // Inserting at end: original child (left half) becomes left child of
                             // sep, new_child (right half) becomes new
                             // rightmost
-                            branch.insert(insert_idx, &sep_key, child_page_id);
+                            branch.insert(insert_idx, &sep_key, child_page_id)?;
                             branch.set_rightmost_child(new_child);
                         } else {
                             // Inserting in middle:
                             // - Insert separator with original child (left half) as its child
                             // - After shift, the old cell at insert_idx moved to insert_idx+1
                             // - Update that cell's child to be new_child (right half)
-                            branch.insert(insert_idx, &sep_key, child_page_id);
+                            branch.insert(insert_idx, &sep_key, child_page_id)?;
                             branch.set_child(insert_idx + 1, new_child);
                         }
 
@@ -394,7 +394,7 @@ impl<P: PageProvider> BTree<P> {
             let mut leaf = LeafNode::from_page(page)?;
             match leaf.search(key) {
                 SearchResult::NotFound(idx) => {
-                    leaf.insert(idx, key, value);
+                    leaf.insert(idx, key, value)?;
                 },
                 SearchResult::Found(_) => {},
             }
@@ -402,7 +402,7 @@ impl<P: PageProvider> BTree<P> {
             let mut leaf = LeafNode::from_page(&mut new_page)?;
             match leaf.search(key) {
                 SearchResult::NotFound(idx) => {
-                    leaf.insert(idx, key, value);
+                    leaf.insert(idx, key, value)?;
                 },
                 SearchResult::Found(_) => {},
             }
@@ -451,10 +451,10 @@ impl<P: PageProvider> BTree<P> {
 
             // Insert with original child (left half) as the left child of separator
             if insert_idx == count {
-                branch.insert(insert_idx, key, original_child);
+                branch.insert(insert_idx, key, original_child)?;
                 branch.set_rightmost_child(right_child);
             } else {
-                branch.insert(insert_idx, key, original_child);
+                branch.insert(insert_idx, key, original_child)?;
                 branch.set_child(insert_idx + 1, right_child);
             }
         } else {
@@ -470,10 +470,10 @@ impl<P: PageProvider> BTree<P> {
 
             // Insert with original child (left half) as the left child of separator
             if insert_idx == count {
-                branch.insert(insert_idx, key, original_child);
+                branch.insert(insert_idx, key, original_child)?;
                 branch.set_rightmost_child(right_child);
             } else {
-                branch.insert(insert_idx, key, original_child);
+                branch.insert(insert_idx, key, original_child)?;
                 branch.set_child(insert_idx + 1, right_child);
             }
         }
@@ -508,7 +508,7 @@ impl<P: PageProvider> BTree<P> {
         match leaf.search(key) {
             SearchResult::Found(idx) => {
                 let old_value = leaf.value(idx).to_vec();
-                leaf.delete(idx);
+                leaf.delete(idx)?;
                 drop(leaf);
 
                 // Check if leaf is now empty and was root
@@ -750,11 +750,11 @@ impl<P: PageProvider> BTree<P> {
                 if let Some(idx) = sep_idx {
                     if idx + 1 < branch_count {
                         // Right is child(idx+1). Delete separator, update child pointer.
-                        branch.delete(idx);
+                        branch.delete(idx)?;
                         branch.set_child(idx, current_id);
                     } else {
                         // Right is the rightmost_child.
-                        branch.delete(idx);
+                        branch.delete(idx)?;
                         branch.set_rightmost_child(current_id);
                     }
 
@@ -1977,7 +1977,7 @@ mod tests {
             if !node.can_insert(&key, &value) {
                 break;
             }
-            node.insert(i as usize, &key, &value);
+            node.insert(i as usize, &key, &value).unwrap();
             i += 1;
         }
 
@@ -2441,91 +2441,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Compaction benchmark: O(N²) vs O(N)
-    // =========================================================================
-
-    #[test]
-    #[ignore = "benchmark: performance ratio varies on CI runners"]
-    fn test_compact_benchmark_100k_30pct_fragmentation() {
-        use std::time::Instant;
-
-        let mut tree = make_tree();
-
-        // Insert 100K entries
-        for i in 0..100_000u32 {
-            let key = format!("k{:08}", i);
-            let val = format!("v{:08}", i);
-            tree.insert(key.as_bytes(), val.as_bytes()).unwrap();
-        }
-
-        // Delete 30% (every 3rd entry) to create distributed fragmentation
-        for i in (0..100_000u32).step_by(3) {
-            let key = format!("k{:08}", i);
-            tree.delete(key.as_bytes()).unwrap();
-        }
-
-        let remaining = count_all_entries(&tree);
-        let leaf_count = count_leaves(&tree);
-
-        // Snapshot tree state for reproducible comparison
-        let pages_snapshot = tree.provider.pages.clone();
-        let root_snapshot = tree.root_page;
-
-        // --- Measure O(N) forward-only compaction ---
-        let iterations = 5;
-        let mut new_elapsed_total = std::time::Duration::ZERO;
-        let mut merge_count = 0u64;
-
-        for _ in 0..iterations {
-            let start = Instant::now();
-            let stats = tree.compact(0.4).unwrap();
-            new_elapsed_total += start.elapsed();
-            merge_count = stats.pages_merged;
-
-            // Restore fragmented tree state for next iteration
-            tree.provider.pages = pages_snapshot.clone();
-            tree.root_page = root_snapshot;
-        }
-        let new_avg = new_elapsed_total / iterations as u32;
-
-        // --- Simulate O(N²) scanning cost ---
-        // The old algorithm called collect_leaf_info() after every single
-        // merge and restarted from the beginning. This measures the DFS
-        // traversal cost × merge_count — the dominant term that makes the
-        // old approach O(N²). The merge cost is identical in both algorithms,
-        // so this comparison is conservative (new_avg includes merge cost,
-        // old simulation measures only scanning).
-        let mut old_scan_total = std::time::Duration::ZERO;
-
-        for _ in 0..iterations {
-            let start = Instant::now();
-            for _ in 0..merge_count {
-                let _ = tree.collect_leaf_info().unwrap();
-            }
-            old_scan_total += start.elapsed();
-        }
-        let old_avg = old_scan_total / iterations as u32;
-
-        // Report
-        eprintln!("\n=== Compaction Benchmark: 100K entries, 30% fragmentation ===");
-        eprintln!("  Remaining entries: {remaining}");
-        eprintln!("  Leaf count: {leaf_count}");
-        eprintln!("  Merges performed: {merge_count}");
-        eprintln!("  O(N) forward-only compact: {new_avg:?} avg over {iterations} runs");
-        eprintln!(
-            "  O(N²) scan simulation ({merge_count} × collect_leaf_info): {old_avg:?} avg over {iterations} runs"
-        );
-        let speedup = old_avg.as_secs_f64() / new_avg.as_secs_f64();
-        eprintln!("  Speedup: {speedup:.1}x (target: ≥10x)");
-
-        assert!(
-            speedup >= 10.0,
-            "Expected ≥10x speedup for O(N) vs O(N²) compaction, got {speedup:.1}x \
-             (new={new_avg:?}, old_scan={old_avg:?}, merges={merge_count})"
-        );
-    }
-
     #[test]
     fn test_delete_all_from_mid_leaf_predecessor_next_leaf_updated() {
         // Scenario: predecessor → target → successor, where target has all
@@ -2659,6 +2574,111 @@ mod tests {
         assert!(
             final_leaves < initial_leaves,
             "Should have fewer leaves after compaction ({final_leaves} >= {initial_leaves})"
+        );
+    }
+
+    // ====================================================================
+    // PageFull propagation and sustained-volume tests
+    // ====================================================================
+
+    /// Verifies that BTree::insert() returns PageFull (not a panic) when a
+    /// single key+value exceeds page capacity.
+    #[test]
+    fn test_btree_insert_oversized_entry_returns_page_full() {
+        let mut tree = make_tree();
+
+        // A value larger than the entire usable leaf space (~3808 bytes).
+        // This must propagate as Error::PageFull through the split path,
+        // since even after splitting, neither half can hold the entry.
+        let big_value = vec![0xAB; 4000];
+        let result = tree.insert(b"big-key", &big_value);
+        assert!(result.is_err(), "oversized entry should fail, not panic");
+        assert!(
+            matches!(result, Err(Error::PageFull)),
+            "error should be PageFull, got: {:?}",
+            result
+        );
+    }
+
+    /// Regression test: sustained sequential writes at the volume that
+    /// previously triggered the `free_end -= cell_data_size` underflow panic.
+    /// Exercises 5,000 inserts — the original failure threshold.
+    #[test]
+    fn test_btree_5000_sequential_inserts_no_panic() {
+        let mut tree = make_tree();
+
+        for i in 0..5_000u32 {
+            let key = format!("k-{i:06}");
+            let value = format!("v-{i}");
+            tree.insert(key.as_bytes(), value.as_bytes()).unwrap();
+        }
+
+        // Spot-check first, last, and mid-range entries
+        assert_eq!(
+            tree.get(b"k-000000").unwrap(),
+            Some(b"v-0".to_vec()),
+        );
+        assert_eq!(
+            tree.get(b"k-004999").unwrap(),
+            Some(b"v-4999".to_vec()),
+        );
+        assert_eq!(
+            tree.get(b"k-002500").unwrap(),
+            Some(b"v-2500".to_vec()),
+        );
+
+        // Verify total entry count via iteration
+        let mut iter = tree.range(super::cursor::Range::all()).unwrap();
+        let mut count = 0u32;
+        while iter.next_entry().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 5_000, "all 5,000 entries should be retrievable");
+    }
+
+    /// Verifies that interleaved inserts and deletes at volume don't trigger
+    /// underflow panics in the delete→reinsert (update) or compact paths.
+    #[test]
+    fn test_btree_insert_delete_interleave_at_volume() {
+        let mut tree = make_tree();
+
+        // Insert 2,000 entries
+        for i in 0..2_000u32 {
+            let key = format!("id-{i:06}");
+            let value = format!("val-{i}");
+            tree.insert(key.as_bytes(), value.as_bytes()).unwrap();
+        }
+
+        // Delete odd-numbered keys, update even-numbered keys
+        for i in 0..2_000u32 {
+            let key = format!("id-{i:06}");
+            if i % 2 == 1 {
+                tree.delete(key.as_bytes()).unwrap();
+            } else {
+                let new_value = format!("updated-{i}");
+                tree.insert(key.as_bytes(), new_value.as_bytes()).unwrap();
+            }
+        }
+
+        // Insert 1,000 more to exercise reuse of freed space after splits
+        for i in 2_000..3_000u32 {
+            let key = format!("id-{i:06}");
+            let value = format!("val-{i}");
+            tree.insert(key.as_bytes(), value.as_bytes()).unwrap();
+        }
+
+        // Verify: 1,000 even originals + 1,000 new = 2,000 total
+        let mut iter = tree.range(super::cursor::Range::all()).unwrap();
+        let mut count = 0u32;
+        while iter.next_entry().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 2_000, "should have 2,000 entries after interleaved ops");
+
+        // Spot-check an updated entry
+        assert_eq!(
+            tree.get(b"id-000100").unwrap(),
+            Some(b"updated-100".to_vec()),
         );
     }
 }
