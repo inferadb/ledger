@@ -255,6 +255,12 @@ impl LedgerServer {
         // RaftService handles inter-node Raft RPCs (Vote, AppendEntries, InstallSnapshot)
         let raft_service = RaftServiceImpl::new(self.raft.clone());
 
+        // gRPC reflection allows tools like grpcurl to discover services
+        // without requiring proto files on the client side.
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(inferadb_ledger_proto::FILE_DESCRIPTOR_SET)
+            .build_v1()?;
+
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 
         let mut router = Server::builder()
@@ -279,7 +285,8 @@ impl LedgerServer {
             ))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
-            .add_service(RaftServiceServer::new(raft_service));
+            .add_service(RaftServiceServer::new(raft_service))
+            .add_service(reflection_service);
 
         // EventsService is optional — only registered when events_db is provided.
         // The bootstrap code (Task 11) provides the EventsDatabase at server start.

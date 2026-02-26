@@ -27,5 +27,12 @@ pub mod proto {
     tonic::include_proto!("ledger.v1");
 }
 
+/// Serialized `FileDescriptorSet` for gRPC reflection.
+///
+/// Embedded at compile time from the prost-generated descriptor binary.
+/// Only available when building from source (not pre-generated code).
+#[cfg(not(use_pregenerated_proto))]
+pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("ledger_v1_descriptor");
+
 /// Bidirectional conversions between domain and protobuf types.
 pub mod convert;

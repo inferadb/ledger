@@ -17,7 +17,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if proto_path.exists() {
         println!("cargo::rerun-if-changed=../../proto/ledger/v1/ledger.proto");
 
+        let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
+
         tonic_prost_build::configure()
+            .file_descriptor_set_path(out_dir.join("ledger_v1_descriptor.bin"))
             .build_server(true)
             .build_client(true)
             .emit_rerun_if_changed(true)
