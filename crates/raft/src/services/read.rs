@@ -153,10 +153,11 @@ impl ReadServiceImpl {
         let shard_block = archive.read_block(shard_height).ok()?;
 
         // Find the vault entry
-        let entry = shard_block
-            .vault_entries
-            .iter()
-            .find(|e| e.organization == organization_id && e.vault == vault_id)?;
+        let entry = shard_block.vault_entries.iter().find(|e| {
+            e.organization == organization_id
+                && e.vault == vault_id
+                && e.vault_height == vault_height
+        })?;
 
         // Build proto block header
         Some(inferadb_ledger_proto::proto::BlockHeader {
@@ -220,11 +221,11 @@ impl ReadServiceImpl {
         };
 
         // Find the vault entry
-        let entry = match shard_block
-            .vault_entries
-            .iter()
-            .find(|e| e.organization == organization_id && e.vault == vault_id)
-        {
+        let entry = match shard_block.vault_entries.iter().find(|e| {
+            e.organization == organization_id
+                && e.vault == vault_id
+                && e.vault_height == vault_height
+        }) {
             Some(e) => e,
             None => return (None, None),
         };

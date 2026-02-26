@@ -805,7 +805,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             // Update previous vault hashes for each entry
             for entry in &vault_entries {
-                let vault_block = shard_block.extract_vault_block(entry.organization, entry.vault);
+                let vault_block = shard_block.extract_vault_block(
+                    entry.organization,
+                    entry.vault,
+                    entry.vault_height,
+                );
                 if let Some(vb) = vault_block {
                     let block_hash = inferadb_ledger_types::hash::block_hash(&vb.header);
                     let key = (entry.organization, entry.vault);

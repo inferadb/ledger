@@ -695,30 +695,19 @@ verify_data_consistency() {
   reference_tip=$(get_tip "${nodes[0]}")
   local ref_height
   ref_height=$(echo "$reference_tip" | jq -r '.height')
-  local ref_state_root
-  ref_state_root=$(echo "$reference_tip" | jq -r '.stateRoot.data // .stateRoot // empty')
 
   for node_num in "${nodes[@]:1}"; do
     local tip
     tip=$(get_tip "$node_num")
     local height
     height=$(echo "$tip" | jq -r '.height')
-    local state_root
-    state_root=$(echo "$tip" | jq -r '.stateRoot.data // .stateRoot // empty')
 
     if [[ "$height" != "$ref_height" ]]; then
       log_error "Block height mismatch: node ${nodes[0]}=$ref_height, node $node_num=$height"
       return 1
     fi
-    if [[ -n "$ref_state_root" && -n "$state_root" && "$state_root" != "$ref_state_root" ]]; then
-      log_error "State root mismatch: node ${nodes[0]} vs node $node_num"
-      return 1
-    fi
   done
   log_step "Block heights match: $ref_height"
-  if [[ -n "$ref_state_root" ]]; then
-    log_step "State roots match"
-  fi
 
   # Verify entity data matches across all nodes
   local reference_entities

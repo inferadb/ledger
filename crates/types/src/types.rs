@@ -417,9 +417,14 @@ impl ShardBlock {
         &self,
         organization: OrganizationId,
         vault: VaultId,
+        vault_height: u64,
     ) -> Option<VaultBlock> {
-        self.vault_entries.iter().find(|e| e.organization == organization && e.vault == vault).map(
-            |e| VaultBlock {
+        self.vault_entries
+            .iter()
+            .find(|e| {
+                e.organization == organization && e.vault == vault && e.vault_height == vault_height
+            })
+            .map(|e| VaultBlock {
                 header: BlockHeader {
                     height: e.vault_height,
                     organization: e.organization,
@@ -432,8 +437,7 @@ impl ShardBlock {
                     committed_index: self.committed_index,
                 },
                 transactions: e.transactions.clone(),
-            },
-        )
+            })
     }
 }
 
@@ -1244,5 +1248,62 @@ mod tests {
         let slug = VaultSlug::new(0);
         assert_eq!(slug.value(), 0);
         assert_eq!(format!("{slug}"), "0");
+    }
+
+    // ========================================================================
+    // ShardBlock Tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_vault_block_selects_correct_height() {
+        let org = OrganizationId::new(1);
+        let vault = VaultId::new(10);
+        let timestamp = Utc::now();
+
+        let entry_h5 = VaultEntry {
+            organization: org,
+            vault,
+            vault_height: 5,
+            previous_vault_hash: [0xAA; 32],
+            transactions: vec![],
+            tx_merkle_root: ZERO_HASH,
+            state_root: [0x55; 32],
+        };
+        let entry_h6 = VaultEntry {
+            organization: org,
+            vault,
+            vault_height: 6,
+            previous_vault_hash: [0xBB; 32],
+            transactions: vec![],
+            tx_merkle_root: ZERO_HASH,
+            state_root: [0x66; 32],
+        };
+
+        let block = ShardBlock {
+            shard_id: ShardId::new(1),
+            shard_height: 100,
+            previous_shard_hash: ZERO_HASH,
+            vault_entries: vec![entry_h5, entry_h6],
+            timestamp,
+            leader_id: "node-1".into(),
+            term: 1,
+            committed_index: 100,
+        };
+
+        let vb5 = block.extract_vault_block(org, vault, 5).unwrap();
+        assert_eq!(vb5.header.height, 5);
+        assert_eq!(vb5.header.previous_hash, [0xAA; 32]);
+        assert_eq!(vb5.header.state_root, [0x55; 32]);
+
+        let vb6 = block.extract_vault_block(org, vault, 6).unwrap();
+        assert_eq!(vb6.header.height, 6);
+        assert_eq!(vb6.header.previous_hash, [0xBB; 32]);
+        assert_eq!(vb6.header.state_root, [0x66; 32]);
+
+        // Non-existent height returns None
+        assert!(block.extract_vault_block(org, vault, 7).is_none());
+
+        // Different vault returns None
+        assert!(block.extract_vault_block(org, VaultId::new(99), 5).is_none());
     }
 }
