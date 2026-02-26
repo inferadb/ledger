@@ -646,9 +646,9 @@ mod tests {
     fn test_vault_and_org_slugs_independent() {
         let svc = create_test_service();
 
-        // Register an org slug and a vault slug with the same numeric value
-        let org_slug = OrganizationSlug::new(42);
-        let vault_slug = VaultSlug::new(42);
+        // Register an organization and vault with the same numeric slug value
+        let organization = OrganizationSlug::new(42);
+        let vault = VaultSlug::new(42);
         let vault_id = VaultId::new(7);
 
         let registry = OrganizationRegistry {
@@ -661,16 +661,16 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        svc.register_organization(&registry, org_slug).unwrap();
-        svc.register_vault_slug(vault_slug, vault_id).unwrap();
+        svc.register_organization(&registry, organization).unwrap();
+        svc.register_vault_slug(vault, vault_id).unwrap();
 
         // Org slug lookup returns org, not vault
-        let org = svc.get_organization_by_slug(org_slug).unwrap();
+        let org = svc.get_organization_by_slug(organization).unwrap();
         assert!(org.is_some());
         assert_eq!(org.unwrap().organization_id, OrganizationId::new(1));
 
         // Vault slug lookup returns vault, not org
-        let vault = svc.get_vault_id_by_slug(vault_slug).unwrap();
-        assert_eq!(vault, Some(vault_id));
+        let resolved = svc.get_vault_id_by_slug(vault).unwrap();
+        assert_eq!(resolved, Some(vault_id));
     }
 }

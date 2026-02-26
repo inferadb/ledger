@@ -254,7 +254,7 @@ pub type ClientId = String;
 /// Block header containing cryptographic chain metadata.
 ///
 /// Block headers are hashed with a fixed 148-byte encoding:
-/// height (8) + organization_id (8) + vault_id (8) + previous_hash (32) + tx_merkle_root (32)
+/// height (8) + organization (8) + vault (8) + previous_hash (32) + tx_merkle_root (32)
 /// + state_root (32) + timestamp_secs (8) + timestamp_nanos (4) + term (8) + committed_index (8)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct BlockHeader {
@@ -262,10 +262,10 @@ pub struct BlockHeader {
     pub height: u64,
     /// Organization owning this vault.
     #[builder(into)]
-    pub organization_id: OrganizationId,
+    pub organization: OrganizationId,
     /// Vault identifier within the organization.
     #[builder(into)]
-    pub vault_id: VaultId,
+    pub vault: VaultId,
     /// Hash of the previous block (ZERO_HASH for genesis).
     pub previous_hash: Hash,
     /// Merkle root of transactions in this block.
@@ -286,7 +286,7 @@ pub struct BlockHeader {
 /// independent chain for cryptographic isolation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultBlock {
-    /// Block header with chain metadata (includes organization_id, vault_id).
+    /// Block header with chain metadata (includes organization, vault).
     pub header: BlockHeader,
     /// Transactions in this block.
     pub transactions: Vec<Transaction>,
@@ -295,14 +295,14 @@ pub struct VaultBlock {
 impl VaultBlock {
     /// Returns the organization that owns this vault block.
     #[inline]
-    pub fn organization_id(&self) -> OrganizationId {
-        self.header.organization_id
+    pub fn organization(&self) -> OrganizationId {
+        self.header.organization
     }
 
     /// Returns the vault identifier for this block.
     #[inline]
-    pub fn vault_id(&self) -> VaultId {
-        self.header.vault_id
+    pub fn vault(&self) -> VaultId {
+        self.header.vault
     }
 
     /// Returns the block height in the vault chain.
@@ -340,9 +340,9 @@ pub struct ShardBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultEntry {
     /// Organization owning this vault.
-    pub organization_id: OrganizationId,
+    pub organization: OrganizationId,
     /// Vault identifier.
-    pub vault_id: VaultId,
+    pub vault: VaultId,
     /// Per-vault height (independent of shard height).
     pub vault_height: u64,
     /// Hash of previous vault block.
@@ -397,8 +397,8 @@ impl ShardBlock {
 
         BlockHeader {
             height: self.shard_height,
-            organization_id: OrganizationId::new(0), // Shard-level aggregate, not vault-specific
-            vault_id: VaultId::new(self.shard_id.value() as i64),
+            organization: OrganizationId::new(0), // Shard-level aggregate, not vault-specific
+            vault: VaultId::new(self.shard_id.value() as i64),
             previous_hash: self.previous_shard_hash,
             tx_merkle_root,
             state_root,
@@ -411,21 +411,19 @@ impl ShardBlock {
     /// Extracts a standalone VaultBlock for client verification.
     ///
     /// Clients verify per-vault chains and never see ShardBlock directly.
-    /// Requires both organization_id and vault_id since multiple organizations
+    /// Requires both organization and vault since multiple organizations
     /// can share a shard.
     pub fn extract_vault_block(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
     ) -> Option<VaultBlock> {
-        self.vault_entries
-            .iter()
-            .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)
-            .map(|e| VaultBlock {
+        self.vault_entries.iter().find(|e| e.organization == organization && e.vault == vault).map(
+            |e| VaultBlock {
                 header: BlockHeader {
                     height: e.vault_height,
-                    organization_id: e.organization_id,
-                    vault_id: e.vault_id,
+                    organization: e.organization,
+                    vault: e.vault,
                     previous_hash: e.previous_vault_hash,
                     tx_merkle_root: e.tx_merkle_root,
                     state_root: e.state_root,
@@ -434,7 +432,8 @@ impl ShardBlock {
                     committed_index: self.committed_index,
                 },
                 transactions: e.transactions.clone(),
-            })
+            },
+        )
     }
 }
 
@@ -801,8 +800,8 @@ mod tests {
         let timestamp = Utc::now();
         let header = BlockHeader::builder()
             .height(100)
-            .organization_id(1)
-            .vault_id(2)
+            .organization(1)
+            .vault(2)
             .previous_hash(ZERO_HASH)
             .tx_merkle_root(ZERO_HASH)
             .state_root(ZERO_HASH)
@@ -812,8 +811,8 @@ mod tests {
             .build();
 
         assert_eq!(header.height, 100);
-        assert_eq!(header.organization_id, OrganizationId::new(1));
-        assert_eq!(header.vault_id, VaultId::new(2));
+        assert_eq!(header.organization, OrganizationId::new(1));
+        assert_eq!(header.vault, VaultId::new(2));
         assert_eq!(header.previous_hash, ZERO_HASH);
         assert_eq!(header.tx_merkle_root, ZERO_HASH);
         assert_eq!(header.state_root, ZERO_HASH);
@@ -826,8 +825,8 @@ mod tests {
     fn test_block_header_builder_genesis_block() {
         let header = BlockHeader::builder()
             .height(0) // Genesis
-            .organization_id(1)
-            .vault_id(1)
+            .organization(1)
+            .vault(1)
             .previous_hash(ZERO_HASH) // ZERO_HASH for genesis
             .tx_merkle_root(ZERO_HASH)
             .state_root(ZERO_HASH)
@@ -1126,8 +1125,8 @@ mod tests {
     fn test_block_header_builder_with_newtype_ids() {
         let header = BlockHeader::builder()
             .height(1)
-            .organization_id(OrganizationId::new(10))
-            .vault_id(VaultId::new(20))
+            .organization(OrganizationId::new(10))
+            .vault(VaultId::new(20))
             .previous_hash(ZERO_HASH)
             .tx_merkle_root(ZERO_HASH)
             .state_root(ZERO_HASH)
@@ -1136,8 +1135,8 @@ mod tests {
             .committed_index(0)
             .build();
 
-        assert_eq!(header.organization_id, OrganizationId::new(10));
-        assert_eq!(header.vault_id, VaultId::new(20));
+        assert_eq!(header.organization, OrganizationId::new(10));
+        assert_eq!(header.vault, VaultId::new(20));
     }
 
     #[test]

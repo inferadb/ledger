@@ -9,10 +9,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-mod common;
-
-use common::{TestCluster, create_admin_client, create_write_client};
 use serial_test::serial;
+
+use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -58,16 +57,15 @@ async fn create_vault(
         })
         .await?;
 
-    let vault_slug =
-        response.into_inner().vault.map(|v| v.slug).ok_or("No vault_slug in response")?;
-    Ok(vault_slug)
+    let vault = response.into_inner().vault.map(|v| v.slug).ok_or("No vault in response")?;
+    Ok(vault)
 }
 
 /// Writes an entity and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_slug: u64,
+    vault: u64,
     key: &str,
     value: &[u8],
 ) -> Result<u64, Box<dyn std::error::Error>> {
@@ -77,7 +75,7 @@ async fn write_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "backup-test-client".to_string(),
         }),
@@ -155,13 +153,13 @@ async fn test_backup_create_and_list_metadata() {
     // Create some data to back up
     let ns_id =
         create_organization(leader.addr, "backup-metadata").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     for i in 0..5 {
         write_entity(
             leader.addr,
             ns_id,
-            vault_slug,
+            vault,
             &format!("key-{}", i),
             format!("value-{}", i).as_bytes(),
         )
@@ -206,11 +204,11 @@ async fn test_backup_during_active_writes() {
 
     let ns_id =
         create_organization(leader.addr, "backup-concurrent").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Write initial data
     for i in 0..3 {
-        write_entity(leader.addr, ns_id, vault_slug, &format!("initial-{}", i), b"initial-value")
+        write_entity(leader.addr, ns_id, vault, &format!("initial-{}", i), b"initial-value")
             .await
             .expect("write initial entity");
     }
@@ -220,8 +218,7 @@ async fn test_backup_during_active_writes() {
     let write_handle = tokio::spawn(async move {
         for i in 0..5 {
             let _ =
-                write_entity(addr, ns_id, vault_slug, &format!("concurrent-{}", i), b"concurrent")
-                    .await;
+                write_entity(addr, ns_id, vault, &format!("concurrent-{}", i), b"concurrent").await;
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     });
@@ -252,7 +249,7 @@ async fn test_backup_list_with_limit() {
 
     let ns_id =
         create_organization(leader.addr, "backup-limit").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Write data and create multiple backups
     let mut backup_ids = Vec::new();
@@ -260,7 +257,7 @@ async fn test_backup_list_with_limit() {
         write_entity(
             leader.addr,
             ns_id,
-            vault_slug,
+            vault,
             &format!("data-{}", i),
             format!("value-{}", i).as_bytes(),
         )
@@ -298,7 +295,7 @@ async fn test_backup_checksum_present() {
 
     let ns_id =
         create_organization(leader.addr, "backup-checksum").await.expect("create organization");
-    let _vault_slug = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let _vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     let backup =
         create_backup(leader.addr, Some("checksum-test"), None).await.expect("create backup");

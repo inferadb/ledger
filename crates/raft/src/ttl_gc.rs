@@ -127,8 +127,8 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,

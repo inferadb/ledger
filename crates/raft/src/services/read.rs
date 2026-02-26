@@ -156,7 +156,7 @@ impl ReadServiceImpl {
         let entry = shard_block
             .vault_entries
             .iter()
-            .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)?;
+            .find(|e| e.organization == organization_id && e.vault == vault_id)?;
 
         // Build proto block header
         Some(inferadb_ledger_proto::proto::BlockHeader {
@@ -164,13 +164,13 @@ impl ReadServiceImpl {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: self
                     .applied_state
-                    .resolve_id_to_slug(entry.organization_id)
-                    .map_or(entry.organization_id.value() as u64, |s| s.value()),
+                    .resolve_id_to_slug(entry.organization)
+                    .map_or(entry.organization.value() as u64, |s| s.value()),
             }),
             vault: Some(inferadb_ledger_proto::proto::VaultSlug {
                 slug: self
                     .applied_state
-                    .resolve_vault_id_to_slug(entry.vault_id)
+                    .resolve_vault_id_to_slug(entry.vault)
                     .map_or(0, |s| s.value()),
             }),
             previous_hash: Some(inferadb_ledger_proto::proto::Hash {
@@ -223,7 +223,7 @@ impl ReadServiceImpl {
         let entry = match shard_block
             .vault_entries
             .iter()
-            .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)
+            .find(|e| e.organization == organization_id && e.vault == vault_id)
         {
             Some(e) => e,
             None => return (None, None),
@@ -401,9 +401,7 @@ impl ReadServiceImpl {
 
             // Find the vault entry in the shard block
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.organization_id == organization_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             }) {
                 // Compute vault block hash using the same function as get_tip_hashes
                 let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
@@ -412,13 +410,13 @@ impl ReadServiceImpl {
                     organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                         slug: self
                             .applied_state
-                            .resolve_id_to_slug(entry.organization_id)
-                            .map_or(entry.organization_id.value() as u64, |s| s.value()),
+                            .resolve_id_to_slug(entry.organization)
+                            .map_or(entry.organization.value() as u64, |s| s.value()),
                     }),
                     vault: Some(inferadb_ledger_proto::proto::VaultSlug {
                         slug: self
                             .applied_state
-                            .resolve_vault_id_to_slug(entry.vault_id)
+                            .resolve_vault_id_to_slug(entry.vault)
                             .map_or(0, |s| s.value()),
                     }),
                     height: entry.vault_height,
@@ -492,9 +490,9 @@ impl ReadService for ReadServiceImpl {
         };
         let vault_id =
             SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
-        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(org_slug, vault_slug_val);
+        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(organization_id, vault_id);
@@ -618,9 +616,9 @@ impl ReadService for ReadServiceImpl {
         };
         let vault_id =
             SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
-        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(org_slug, vault_slug_val);
+        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(organization_id, vault_id);
@@ -738,9 +736,9 @@ impl ReadService for ReadServiceImpl {
         };
         let vault_id =
             SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
-        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(org_slug, vault_slug_val);
+        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
         let health = self.applied_state.vault_health(organization_id, vault_id);
@@ -879,9 +877,9 @@ impl ReadService for ReadServiceImpl {
         };
         let vault_id =
             SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
-        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(org_slug, vault_slug_val);
+        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(organization, vault);
 
         // Get block archive - required for historical reads
         let archive = match &self.block_archive {
@@ -962,9 +960,7 @@ impl ReadService for ReadServiceImpl {
 
             // Find the vault entry
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.organization_id == organization_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
@@ -1128,7 +1124,7 @@ impl ReadService for ReadServiceImpl {
         // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
         // not slug-to-internal-id, since announcements carry the original slug)
         let watch_slug = req.organization.as_ref().map_or(0u64, |n| n.slug);
-        let vault_slug_raw = req.vault.as_ref().map_or(0u64, |v| v.slug);
+        let vault_raw = req.vault.as_ref().map_or(0u64, |v| v.slug);
         let broadcast_stream =
             tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
                 async move {
@@ -1141,7 +1137,7 @@ impl ReadService for ReadServiceImpl {
                                 return None;
                             }
                             // Filter by vault
-                            if announcement.vault.as_ref().map_or(0, |v| v.slug) != vault_slug_raw {
+                            if announcement.vault.as_ref().map_or(0, |v| v.slug) != vault_raw {
                                 return None;
                             }
                             // Skip blocks we already sent from history
@@ -1199,15 +1195,12 @@ impl ReadService for ReadServiceImpl {
 
         // Find the vault entry in the shard block
         let vault_entry = shard_block.vault_entries.iter().find(|e| {
-            e.organization_id == organization_id
-                && e.vault_id == vault_id
-                && e.vault_height == height
+            e.organization == organization_id && e.vault == vault_id && e.vault_height == height
         });
 
-        let vault_slug =
+        let vault =
             self.applied_state.resolve_vault_id_to_slug(vault_id).unwrap_or(VaultSlug::new(0));
-        let block =
-            vault_entry.map(|entry| vault_entry_to_proto_block(entry, &shard_block, vault_slug));
+        let block = vault_entry.map(|entry| vault_entry_to_proto_block(entry, &shard_block, vault));
 
         Ok(Response::new(GetBlockResponse { block }))
     }
@@ -1260,15 +1253,13 @@ impl ReadService for ReadServiceImpl {
 
             // Find the vault entry
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.organization_id == organization_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             }) {
-                let vault_slug = self
+                let vault = self
                     .applied_state
                     .resolve_vault_id_to_slug(vault_id)
                     .unwrap_or(VaultSlug::new(0));
-                blocks.push(vault_entry_to_proto_block(entry, &shard_block, vault_slug));
+                blocks.push(vault_entry_to_proto_block(entry, &shard_block, vault));
             }
         }
 

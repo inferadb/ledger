@@ -252,8 +252,8 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization_id,
-            vault_id: SYSTEM_VAULT_ID,
+            organization: organization_id,
+            vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,

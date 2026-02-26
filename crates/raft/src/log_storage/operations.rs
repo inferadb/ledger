@@ -78,21 +78,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
         match request {
             LedgerRequest::Write {
-                organization_id,
-                vault_id,
+                organization,
+                vault,
                 transactions,
                 idempotency_key,
                 request_hash,
             } => {
                 // Check organization status before processing write
-                if let Some(org_meta) = state.organizations.get(organization_id) {
+                if let Some(org_meta) = state.organizations.get(organization) {
                     match org_meta.status {
                         OrganizationStatus::Suspended => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is suspended and not accepting writes",
-                                        organization_id
+                                        organization
                                     ),
                                 },
                                 None,
@@ -103,7 +103,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is migrating and not accepting writes",
-                                        organization_id
+                                        organization
                                     ),
                                 },
                                 None,
@@ -114,7 +114,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is deleted and not accepting writes",
-                                        organization_id
+                                        organization
                                     ),
                                 },
                                 None,
@@ -124,13 +124,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 }
 
-                let key = (*organization_id, *vault_id);
+                let key = (*organization, *vault);
                 if let Some(VaultHealthStatus::Diverged { .. }) = state.vault_health.get(&key) {
                     return (
                         LedgerResponse::Error {
                             message: format!(
                                 "Vault {}:{} is diverged and not accepting writes",
-                                organization_id, vault_id
+                                organization, vault
                             ),
                         },
                         None,
@@ -155,7 +155,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                     // Apply operations (StateLayer is internally thread-safe via
                     // inferadb-ledger-store MVCC)
-                    if let Err(e) = state_layer.apply_operations(*vault_id, &all_ops, new_height) {
+                    if let Err(e) = state_layer.apply_operations(*vault, &all_ops, new_height) {
                         // On CAS failure, return current state for conflict resolution
                         return match e {
                             StateError::PreconditionFailed {
@@ -182,7 +182,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
 
                     // Compute state root
-                    match state_layer.compute_state_root(*vault_id) {
+                    match state_layer.compute_state_root(*vault) {
                         Ok(root) => root,
                         Err(e) => {
                             return (
@@ -223,7 +223,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let transactions_with_sequences: Vec<_> = transactions
                     .iter()
                     .map(|tx| {
-                        let client_key = (*organization_id, *vault_id, tx.client_id.clone());
+                        let client_key = (*organization, *vault, tx.client_id.clone());
                         let current_seq =
                             state.client_sequences.get(&client_key).map_or(0, |e| e.sequence);
                         let new_sequence = current_seq + 1;
@@ -237,8 +237,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                         // Mirror to pending external writes
                         let cs_key = PendingExternalWrites::client_sequence_key(
-                            *organization_id,
-                            *vault_id,
+                            *organization,
+                            *vault,
                             tx.client_id.as_bytes(),
                         );
                         if let Ok(value) = encode(&ClientSequenceEntry {
@@ -264,8 +264,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Build VaultEntry for ShardBlock with server-assigned sequences
                 let vault_entry = VaultEntry {
-                    organization_id: *organization_id,
-                    vault_id: *vault_id,
+                    organization: *organization,
+                    vault: *vault,
                     vault_height: new_height,
                     previous_vault_hash,
                     transactions: transactions_with_sequences,
@@ -276,20 +276,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Update organization storage accounting.
                 // Increment for sets/creates, decrement for deletes.
                 let storage_delta = estimate_write_storage_delta(transactions);
-                let entry = state.organization_storage_bytes.entry(*organization_id).or_insert(0);
+                let entry = state.organization_storage_bytes.entry(*organization).or_insert(0);
                 if storage_delta >= 0 {
                     *entry = entry.saturating_add(storage_delta as u64);
                 } else {
                     *entry = entry.saturating_sub(storage_delta.unsigned_abs());
                 }
-                crate::metrics::set_organization_storage_bytes(organization_id.value(), *entry);
-                crate::metrics::record_organization_operation(organization_id.value(), "write");
+                crate::metrics::set_organization_storage_bytes(organization.value(), *entry);
+                crate::metrics::record_organization_operation(organization.value(), "write");
 
                 // Mirror updated OrganizationMeta (with new storage_bytes) to pending
-                if let Some(org_meta) = state.organizations.get_mut(organization_id) {
+                if let Some(org_meta) = state.organizations.get_mut(organization) {
                     org_meta.storage_bytes = *entry;
                     if let Ok(blob) = encode(org_meta) {
-                        pending.organizations.push((*organization_id, blob));
+                        pending.organizations.push((*organization, blob));
                     }
                 }
 
@@ -298,18 +298,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
 
                 // Emit WriteCommitted event
-                let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
-                let vault_slug_val = state.vault_id_to_slug.get(vault_id).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let vault_slug = state.vault_id_to_slug.get(vault).map(|s| s.value());
                 let ops_count: u32 = transactions.iter().map(|tx| tx.operations.len() as u32).sum();
                 let mut emitter = ApplyPhaseEmitter::for_organization(
                     EventAction::WriteCommitted,
-                    *organization_id,
+                    *organization,
                     org_slug,
                 )
                 .outcome(EventOutcome::Success)
                 .operations_count(ops_count);
-                if let Some(vs) = vault_slug_val {
-                    emitter = emitter.vault_slug(vs);
+                if let Some(vs) = vault_slug {
+                    emitter = emitter.vault(vs);
                 }
                 events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
                 *op_index += 1;
@@ -320,13 +320,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Operation::ExpireEntity { key, .. } = op {
                             let mut exp_emitter = ApplyPhaseEmitter::for_organization(
                                 EventAction::EntityExpired,
-                                *organization_id,
+                                *organization,
                                 org_slug,
                             )
                             .detail("key", key)
                             .outcome(EventOutcome::Success);
-                            if let Some(vs) = vault_slug_val {
-                                exp_emitter = exp_emitter.vault_slug(vs);
+                            if let Some(vs) = vault_slug {
+                                exp_emitter = exp_emitter.vault(vs);
                             }
                             events.push(exp_emitter.build(
                                 block_height,
@@ -431,23 +431,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 (
                     LedgerResponse::OrganizationCreated {
-                        organization_id,
+                        organization: organization_id,
                         shard_id: assigned_shard,
                     },
                     None,
                 )
             },
 
-            LedgerRequest::CreateVault { organization_id, slug, name, retention_policy } => {
+            LedgerRequest::CreateVault { organization, slug, name, retention_policy } => {
                 // Check organization status before creating vault
-                if let Some(org_meta) = state.organizations.get(organization_id) {
+                if let Some(org_meta) = state.organizations.get(organization) {
                     match org_meta.status {
                         OrganizationStatus::Suspended => {
                             return (
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is suspended and not accepting new vaults",
-                                        organization_id
+                                        organization
                                     ),
                                 },
                                 None,
@@ -458,7 +458,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is migrating and not accepting new vaults",
-                                        organization_id
+                                        organization
                                     ),
                                 },
                                 None,
@@ -469,7 +469,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is deleted and not accepting new vaults",
-                                        organization_id
+                                        organization
                                     ),
                                 },
                                 None,
@@ -480,13 +480,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
 
                 let vault_id = state.sequences.next_vault();
-                let key = (*organization_id, vault_id);
+                let key = (*organization, vault_id);
                 state.vault_heights.insert(key, 0);
                 pending.vault_heights.push((key, 0));
                 state.vault_health.insert(key, VaultHealthStatus::Healthy);
                 pending.vault_health.push((key, VaultHealthStatus::Healthy));
                 let vault_meta = VaultMeta {
-                    organization_id: *organization_id,
+                    organization_id: *organization,
                     vault_id,
                     slug: *slug,
                     name: name.clone(),
@@ -505,45 +505,45 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 pending.vault_slug_index.push((*slug, vault_id));
 
                 // Emit VaultCreated event
-                let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
                 events.push(
                     ApplyPhaseEmitter::for_organization(
                         EventAction::VaultCreated,
-                        *organization_id,
+                        *organization,
                         org_slug,
                     )
-                    .vault_slug(slug.value())
+                    .vault(slug.value())
                     .detail("vault_name", name.as_deref().unwrap_or(""))
                     .outcome(EventOutcome::Success)
                     .build(block_height, *op_index, block_timestamp, ttl_days),
                 );
                 *op_index += 1;
 
-                (LedgerResponse::VaultCreated { vault_id, slug: *slug }, None)
+                (LedgerResponse::VaultCreated { vault: vault_id, slug: *slug }, None)
             },
 
-            LedgerRequest::DeleteOrganization { organization_id } => {
+            LedgerRequest::DeleteOrganization { organization } => {
                 // Capture slug before deletion (may be removed from index)
-                let org_slug_val = state.id_to_slug.get(organization_id).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
                 // Count active vaults at deletion time (for audit context)
                 let active_vault_count = state
                     .vaults
                     .iter()
-                    .filter(|((org, _), v)| *org == *organization_id && !v.deleted)
+                    .filter(|((org, _), v)| *org == *organization && !v.deleted)
                     .count();
                 // Collect active (non-deleted) vault IDs for this organization
                 let blocking_vault_ids: Vec<VaultId> = state
                     .vaults
                     .iter()
-                    .filter(|((org, _), v)| *org == *organization_id && !v.deleted)
+                    .filter(|((org, _), v)| *org == *organization && !v.deleted)
                     .map(|((_, vault_id), _)| *vault_id)
                     .collect();
 
-                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+                let response = if let Some(org) = state.organizations.get_mut(organization) {
                     // Check current status
                     match org.status {
                         OrganizationStatus::Deleted => LedgerResponse::Error {
-                            message: format!("Organization {} is already deleted", organization_id),
+                            message: format!("Organization {} is already deleted", organization),
                         },
                         OrganizationStatus::Deleting => {
                             // Already deleting - check if vaults are gone now
@@ -551,10 +551,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 org.status = OrganizationStatus::Deleted;
                                 // Re-serialize after in-place mutation
                                 if let Ok(blob) = encode(org) {
-                                    pending.organizations.push((*organization_id, blob));
+                                    pending.organizations.push((*organization, blob));
                                 }
                                 // Clean up slug index on final deletion
-                                if let Some(slug) = state.id_to_slug.remove(organization_id) {
+                                if let Some(slug) = state.id_to_slug.remove(organization) {
                                     state.slug_index.remove(&slug);
                                     pending.slug_index_deleted.push(slug);
                                 }
@@ -565,7 +565,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             } else {
                                 // Still has vaults
                                 LedgerResponse::OrganizationDeleting {
-                                    organization_id: *organization_id,
+                                    organization: *organization,
                                     blocking_vault_ids,
                                 }
                             }
@@ -577,10 +577,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 org.status = OrganizationStatus::Deleted;
                                 // Re-serialize after in-place mutation
                                 if let Ok(blob) = encode(org) {
-                                    pending.organizations.push((*organization_id, blob));
+                                    pending.organizations.push((*organization, blob));
                                 }
                                 // Clean up slug index on final deletion
-                                if let Some(slug) = state.id_to_slug.remove(organization_id) {
+                                if let Some(slug) = state.id_to_slug.remove(organization) {
                                     state.slug_index.remove(&slug);
                                     pending.slug_index_deleted.push(slug);
                                 }
@@ -593,10 +593,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 org.status = OrganizationStatus::Deleting;
                                 // Re-serialize after in-place mutation
                                 if let Ok(blob) = encode(org) {
-                                    pending.organizations.push((*organization_id, blob));
+                                    pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::OrganizationDeleting {
-                                    organization_id: *organization_id,
+                                    organization: *organization,
                                     blocking_vault_ids,
                                 }
                             }
@@ -604,7 +604,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Organization {} not found", organization_id),
+                        message: format!("Organization {} not found", organization),
                     }
                 };
 
@@ -612,10 +612,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 if matches!(response, LedgerResponse::OrganizationDeleted { success: true, .. }) {
                     let mut emitter =
                         ApplyPhaseEmitter::for_system(EventAction::OrganizationDeleted)
-                            .detail("organization_id", &organization_id.to_string())
+                            .detail("organization_id", &organization.to_string())
                             .detail("vault_count", &active_vault_count.to_string())
                             .outcome(EventOutcome::Success);
-                    if let Some(slug) = org_slug_val {
+                    if let Some(slug) = org_slug {
                         emitter = emitter.detail("organization_slug", &slug.to_string());
                     }
                     events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
@@ -625,46 +625,46 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::DeleteVault { organization_id, vault_id } => {
-                let key = (*organization_id, *vault_id);
+            LedgerRequest::DeleteVault { organization, vault } => {
+                let key = (*organization, *vault);
                 // Mark vault as deleted (keep heights for historical queries)
-                let response = if let Some(vault) = state.vaults.get_mut(&key) {
-                    vault.deleted = true;
+                let response = if let Some(vault_meta) = state.vaults.get_mut(&key) {
+                    vault_meta.deleted = true;
                     // Re-serialize vault meta after in-place mutation
-                    if let Ok(blob) = encode(vault) {
-                        pending.vaults.push((vault.vault_id, blob));
+                    if let Ok(blob) = encode(vault_meta) {
+                        pending.vaults.push((vault_meta.vault_id, blob));
                     }
 
                     // Clean up vault slug index
-                    if let Some(slug) = state.vault_id_to_slug.remove(vault_id) {
+                    if let Some(slug) = state.vault_id_to_slug.remove(vault) {
                         state.vault_slug_index.remove(&slug);
                         pending.vault_slug_index_deleted.push(slug);
                     }
 
                     // Check if organization is in Deleting state and this was the last vault
-                    if let Some(org) = state.organizations.get_mut(organization_id)
+                    if let Some(org) = state.organizations.get_mut(organization)
                         && org.status == OrganizationStatus::Deleting
                     {
                         // Check if any active vaults remain
                         let remaining_vaults = state
                             .vaults
                             .iter()
-                            .any(|((org_id, _), v)| *org_id == *organization_id && !v.deleted);
+                            .any(|((org_id, _), v)| *org_id == *organization && !v.deleted);
 
                         if !remaining_vaults {
                             // Auto-transition organization to Deleted
                             org.status = OrganizationStatus::Deleted;
                             // Re-serialize org meta after in-place mutation
                             if let Ok(blob) = encode(org) {
-                                pending.organizations.push((*organization_id, blob));
+                                pending.organizations.push((*organization, blob));
                             }
                             // Clean up slug index
-                            if let Some(slug) = state.id_to_slug.remove(organization_id) {
+                            if let Some(slug) = state.id_to_slug.remove(organization) {
                                 state.slug_index.remove(&slug);
                                 pending.slug_index_deleted.push(slug);
                             }
                             tracing::info!(
-                                organization_id = organization_id.value(),
+                                organization_id = organization.value(),
                                 "Organization auto-transitioned to Deleted after last vault deleted"
                             );
                         }
@@ -673,20 +673,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     LedgerResponse::VaultDeleted { success: true }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Vault {}:{} not found", organization_id, vault_id),
+                        message: format!("Vault {}:{} not found", organization, vault),
                     }
                 };
 
                 // Emit VaultDeleted event on successful deletion
                 if matches!(response, LedgerResponse::VaultDeleted { success: true }) {
-                    let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
+                    let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
                     events.push(
                         ApplyPhaseEmitter::for_organization(
                             EventAction::VaultDeleted,
-                            *organization_id,
+                            *organization,
                             org_slug,
                         )
-                        .detail("vault_id", &vault_id.to_string())
+                        .detail("vault_id", &vault.to_string())
                         .outcome(EventOutcome::Success)
                         .build(
                             block_height,
@@ -701,35 +701,30 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::SuspendOrganization { organization_id, reason } => {
-                let org_slug_val = state.id_to_slug.get(organization_id).map(|s| s.value());
-                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+            LedgerRequest::SuspendOrganization { organization, reason } => {
+                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Deleted => LedgerResponse::Error {
                             message: format!(
                                 "Cannot suspend deleted organization {}",
-                                organization_id
+                                organization
                             ),
                         },
                         OrganizationStatus::Suspended => LedgerResponse::Error {
-                            message: format!(
-                                "Organization {} is already suspended",
-                                organization_id
-                            ),
+                            message: format!("Organization {} is already suspended", organization),
                         },
                         _ => {
                             org.status = OrganizationStatus::Suspended;
                             if let Ok(blob) = encode(org) {
-                                pending.organizations.push((*organization_id, blob));
+                                pending.organizations.push((*organization, blob));
                             }
-                            LedgerResponse::OrganizationSuspended {
-                                organization_id: *organization_id,
-                            }
+                            LedgerResponse::OrganizationSuspended { organization: *organization }
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Organization {} not found", organization_id),
+                        message: format!("Organization {} not found", organization),
                     }
                 };
 
@@ -737,9 +732,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 if matches!(response, LedgerResponse::OrganizationSuspended { .. }) {
                     let mut emitter =
                         ApplyPhaseEmitter::for_system(EventAction::OrganizationSuspended)
-                            .detail("organization_id", &organization_id.to_string())
+                            .detail("organization_id", &organization.to_string())
                             .outcome(EventOutcome::Success);
-                    if let Some(slug) = org_slug_val {
+                    if let Some(slug) = org_slug {
                         emitter = emitter.detail("organization_slug", &slug.to_string());
                     }
                     if let Some(r) = reason {
@@ -752,38 +747,33 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::ResumeOrganization { organization_id } => {
-                let org_slug_val = state.id_to_slug.get(organization_id).map(|s| s.value());
-                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+            LedgerRequest::ResumeOrganization { organization } => {
+                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Suspended => {
                             org.status = OrganizationStatus::Active;
                             if let Ok(blob) = encode(org) {
-                                pending.organizations.push((*organization_id, blob));
+                                pending.organizations.push((*organization, blob));
                             }
-                            LedgerResponse::OrganizationResumed {
-                                organization_id: *organization_id,
-                            }
+                            LedgerResponse::OrganizationResumed { organization: *organization }
                         },
                         OrganizationStatus::Active => LedgerResponse::Error {
-                            message: format!("Organization {} is not suspended", organization_id),
+                            message: format!("Organization {} is not suspended", organization),
                         },
                         OrganizationStatus::Deleted => LedgerResponse::Error {
-                            message: format!(
-                                "Cannot resume deleted organization {}",
-                                organization_id
-                            ),
+                            message: format!("Cannot resume deleted organization {}", organization),
                         },
                         other => LedgerResponse::Error {
                             message: format!(
                                 "Cannot resume organization {} in state {:?}",
-                                organization_id, other
+                                organization, other
                             ),
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Organization {} not found", organization_id),
+                        message: format!("Organization {} not found", organization),
                     }
                 };
 
@@ -791,9 +781,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 if matches!(response, LedgerResponse::OrganizationResumed { .. }) {
                     let mut emitter =
                         ApplyPhaseEmitter::for_system(EventAction::OrganizationResumed)
-                            .detail("organization_id", &organization_id.to_string())
+                            .detail("organization_id", &organization.to_string())
                             .outcome(EventOutcome::Success);
-                    if let Some(slug) = org_slug_val {
+                    if let Some(slug) = org_slug {
                         emitter = emitter.detail("organization_slug", &slug.to_string());
                     }
                     events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
@@ -803,8 +793,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::StartMigration { organization_id, target_shard_id } => {
-                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+            LedgerRequest::StartMigration { organization, target_shard_id } => {
+                let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Active => {
                             // Validate target shard is different
@@ -812,45 +802,42 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is already on shard {}",
-                                        organization_id, target_shard_id
+                                        organization, target_shard_id
                                     ),
                                 }
                             } else {
                                 org.status = OrganizationStatus::Migrating;
                                 org.pending_shard_id = Some(*target_shard_id);
                                 if let Ok(blob) = encode(org) {
-                                    pending.organizations.push((*organization_id, blob));
+                                    pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::MigrationStarted {
-                                    organization_id: *organization_id,
+                                    organization: *organization,
                                     target_shard_id: *target_shard_id,
                                 }
                             }
                         },
                         OrganizationStatus::Migrating => LedgerResponse::Error {
-                            message: format!(
-                                "Organization {} is already migrating",
-                                organization_id
-                            ),
+                            message: format!("Organization {} is already migrating", organization),
                         },
                         OrganizationStatus::Suspended => LedgerResponse::Error {
                             message: format!(
                                 "Cannot start migration on suspended organization {}",
-                                organization_id
+                                organization
                             ),
                         },
                         OrganizationStatus::Deleting | OrganizationStatus::Deleted => {
                             LedgerResponse::Error {
                                 message: format!(
                                     "Cannot start migration on deleted organization {}",
-                                    organization_id
+                                    organization
                                 ),
                             }
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Organization {} not found", organization_id),
+                        message: format!("Organization {} not found", organization),
                     }
                 };
 
@@ -858,7 +845,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 if matches!(response, LedgerResponse::MigrationStarted { .. }) {
                     events.push(
                         ApplyPhaseEmitter::for_system(EventAction::MigrationStarted)
-                            .detail("organization_id", &organization_id.to_string())
+                            .detail("organization_id", &organization.to_string())
                             .detail("target_shard_id", &target_shard_id.to_string())
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
@@ -869,8 +856,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::CompleteMigration { organization_id } => {
-                let response = if let Some(org) = state.organizations.get_mut(organization_id) {
+            LedgerRequest::CompleteMigration { organization } => {
+                let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Migrating => {
                             if let Some(target_shard) = org.pending_shard_id {
@@ -879,10 +866,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 org.status = OrganizationStatus::Active;
                                 org.pending_shard_id = None;
                                 if let Ok(blob) = encode(org) {
-                                    pending.organizations.push((*organization_id, blob));
+                                    pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::MigrationCompleted {
-                                    organization_id: *organization_id,
+                                    organization: *organization,
                                     old_shard_id: old_shard,
                                     new_shard_id: target_shard,
                                 }
@@ -891,24 +878,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is migrating but has no target shard",
-                                        organization_id
+                                        organization
                                     ),
                                 }
                             }
                         },
                         OrganizationStatus::Active => LedgerResponse::Error {
-                            message: format!("Organization {} is not migrating", organization_id),
+                            message: format!("Organization {} is not migrating", organization),
                         },
                         other => LedgerResponse::Error {
                             message: format!(
                                 "Cannot complete migration for organization {} in state {:?}",
-                                organization_id, other
+                                organization, other
                             ),
                         },
                     }
                 } else {
                     LedgerResponse::Error {
-                        message: format!("Organization {} not found", organization_id),
+                        message: format!("Organization {} not found", organization),
                     }
                 };
 
@@ -916,7 +903,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 if let LedgerResponse::MigrationCompleted { new_shard_id, .. } = &response {
                     events.push(
                         ApplyPhaseEmitter::for_system(EventAction::MigrationCompleted)
-                            .detail("organization_id", &organization_id.to_string())
+                            .detail("organization_id", &organization.to_string())
                             .detail("shard_id", &new_shard_id.to_string())
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
@@ -928,8 +915,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::UpdateVaultHealth {
-                organization_id,
-                vault_id,
+                organization,
+                vault,
                 healthy,
                 expected_root,
                 computed_root,
@@ -937,20 +924,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 recovery_attempt,
                 recovery_started_at,
             } => {
-                let key = (*organization_id, *vault_id);
+                let key = (*organization, *vault);
                 if *healthy {
                     // Mark vault as healthy
                     let status = VaultHealthStatus::Healthy;
                     state.vault_health.insert(key, status.clone());
                     pending.vault_health.push((key, status));
                     crate::metrics::set_vault_health(
-                        organization_id.value(),
-                        vault_id.value(),
+                        organization.value(),
+                        vault.value(),
                         "healthy",
                     );
                     tracing::info!(
-                        organization_id = organization_id.value(),
-                        vault_id = vault_id.value(),
+                        organization_id = organization.value(),
+                        vault_id = vault.value(),
                         "Vault health updated to Healthy via Raft"
                     );
                 } else if let (Some(attempt), Some(started_at)) =
@@ -964,13 +951,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     state.vault_health.insert(key, status.clone());
                     pending.vault_health.push((key, status));
                     crate::metrics::set_vault_health(
-                        organization_id.value(),
-                        vault_id.value(),
+                        organization.value(),
+                        vault.value(),
                         "recovering",
                     );
                     tracing::info!(
-                        organization_id = organization_id.value(),
-                        vault_id = vault_id.value(),
+                        organization_id = organization.value(),
+                        vault_id = vault.value(),
                         attempt,
                         "Vault health updated to Recovering via Raft"
                     );
@@ -983,20 +970,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     state.vault_health.insert(key, status.clone());
                     pending.vault_health.push((key, status));
                     crate::metrics::set_vault_health(
-                        organization_id.value(),
-                        vault_id.value(),
+                        organization.value(),
+                        vault.value(),
                         "diverged",
                     );
                     tracing::warn!(
-                        organization_id = organization_id.value(),
-                        vault_id = vault_id.value(),
+                        organization_id = organization.value(),
+                        vault_id = vault.value(),
                         at_height,
                         "Vault health updated to Diverged via Raft"
                     );
                 }
                 // Emit VaultHealthUpdated event
-                let org_slug = state.id_to_slug.get(organization_id).map(|s| s.value());
-                let vault_slug_val = state.vault_id_to_slug.get(vault_id).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let vault_slug = state.vault_id_to_slug.get(vault).map(|s| s.value());
                 let health_status = if *healthy {
                     "healthy"
                 } else if recovery_attempt.is_some() && recovery_started_at.is_some() {
@@ -1006,13 +993,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 };
                 let mut emitter = ApplyPhaseEmitter::for_organization(
                     EventAction::VaultHealthUpdated,
-                    *organization_id,
+                    *organization,
                     org_slug,
                 )
                 .detail("health_status", health_status)
                 .outcome(EventOutcome::Success);
-                if let Some(vs) = vault_slug_val {
-                    emitter = emitter.vault_slug(vs);
+                if let Some(vs) = vault_slug {
+                    emitter = emitter.vault(vs);
                 }
                 events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
                 *op_index += 1;
@@ -1029,7 +1016,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     SystemRequest::AddNode { .. } | SystemRequest::RemoveNode { .. } => {
                         LedgerResponse::Empty
                     },
-                    SystemRequest::UpdateOrganizationRouting { organization_id, shard_id } => {
+                    SystemRequest::UpdateOrganizationRouting { organization, shard_id } => {
                         // Validate shard_id is non-negative
                         if *shard_id < 0 {
                             LedgerResponse::Error {
@@ -1038,12 +1025,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     shard_id
                                 ),
                             }
-                        } else if let Some(org) = state.organizations.get_mut(organization_id) {
+                        } else if let Some(org) = state.organizations.get_mut(organization) {
                             if org.status == OrganizationStatus::Deleted {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Cannot migrate deleted organization {}",
-                                        organization_id
+                                        organization
                                     ),
                                 }
                             } else {
@@ -1054,17 +1041,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     inferadb_ledger_types::ShardId::new(*shard_id as u32);
                                 org.shard_id = new_shard_id;
                                 if let Ok(blob) = encode(org) {
-                                    pending.organizations.push((*organization_id, blob));
+                                    pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::OrganizationMigrated {
-                                    organization_id: *organization_id,
+                                    organization: *organization,
                                     old_shard_id,
                                     new_shard_id,
                                 }
                             }
                         } else {
                             LedgerResponse::Error {
-                                message: format!("Organization {} not found", organization_id),
+                                message: format!("Organization {} not found", organization),
                             }
                         }
                     },
@@ -1111,11 +1098,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                     (
                         LedgerResponse::OrganizationMigrated { new_shard_id, .. },
-                        SystemRequest::UpdateOrganizationRouting { organization_id, .. },
+                        SystemRequest::UpdateOrganizationRouting { organization, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::RoutingUpdated)
-                                .detail("organization_id", &organization_id.to_string())
+                                .detail("organization_id", &organization.to_string())
                                 .detail("shard_id", &new_shard_id.to_string())
                                 .outcome(EventOutcome::Success)
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
@@ -1153,18 +1140,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Emit BatchWriteCommitted event for the batch itself
                 if let Some(ref ve) = last_vault_entry {
-                    let org_slug = state.id_to_slug.get(&ve.organization_id).map(|s| s.value());
-                    let vault_slug_val =
-                        state.vault_id_to_slug.get(&ve.vault_id).map(|s| s.value());
+                    let org_slug = state.id_to_slug.get(&ve.organization).map(|s| s.value());
+                    let vault_slug = state.vault_id_to_slug.get(&ve.vault).map(|s| s.value());
                     let mut emitter = ApplyPhaseEmitter::for_organization(
                         EventAction::BatchWriteCommitted,
-                        ve.organization_id,
+                        ve.organization,
                         org_slug,
                     )
                     .outcome(EventOutcome::Success)
                     .operations_count(requests.len() as u32);
-                    if let Some(vs) = vault_slug_val {
-                        emitter = emitter.vault_slug(vs);
+                    if let Some(vs) = vault_slug {
+                        emitter = emitter.vault(vs);
                     }
                     events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
                     *op_index += 1;

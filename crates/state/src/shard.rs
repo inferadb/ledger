@@ -204,7 +204,7 @@ impl<B: StorageBackend> ShardManager<B> {
             for tx in &entry.transactions {
                 let _statuses = self
                     .state
-                    .apply_operations(entry.vault_id, &tx.operations, entry.vault_height)
+                    .apply_operations(entry.vault, &tx.operations, entry.vault_height)
                     .context(StateSnafu)?;
 
                 // Track that we have dirty keys
@@ -235,13 +235,12 @@ impl<B: StorageBackend> ShardManager<B> {
             }
 
             // Compute and verify state root
-            let computed_root =
-                self.state.compute_state_root(entry.vault_id).context(StateSnafu)?;
+            let computed_root = self.state.compute_state_root(entry.vault).context(StateSnafu)?;
 
             if computed_root != entry.state_root {
                 // Mark vault as diverged
-                let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
-                    organization_id: entry.organization_id,
+                let meta = vault_meta.entry(entry.vault).or_insert_with(|| VaultMeta {
+                    organization_id: entry.organization,
                     height: 0,
                     state_root: EMPTY_HASH,
                     previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -255,15 +254,15 @@ impl<B: StorageBackend> ShardManager<B> {
                 };
 
                 return Err(ShardError::StateRootMismatch {
-                    vault_id: entry.vault_id,
+                    vault_id: entry.vault,
                     expected: entry.state_root,
                     computed: computed_root,
                 });
             }
 
             // Update vault metadata
-            let meta = vault_meta.entry(entry.vault_id).or_insert_with(|| VaultMeta {
-                organization_id: entry.organization_id,
+            let meta = vault_meta.entry(entry.vault).or_insert_with(|| VaultMeta {
+                organization_id: entry.organization,
                 height: 0,
                 state_root: EMPTY_HASH,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -539,8 +538,8 @@ mod tests {
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 vault_height: 1,
                 previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
                 transactions: vec![tx],
@@ -586,8 +585,8 @@ mod tests {
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 vault_height: 1,
                 previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
                 transactions: vec![tx],

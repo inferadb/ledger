@@ -72,9 +72,9 @@ pub enum LedgerRequest {
     /// Writes transactions to a vault.
     Write {
         /// Target organization.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Target vault within the organization.
-        vault_id: VaultId,
+        vault: VaultId,
         /// Transactions to apply atomically.
         transactions: Vec<Transaction>,
         /// Idempotency key (16-byte UUID) for cross-failover deduplication.
@@ -104,7 +104,7 @@ pub enum LedgerRequest {
     /// Creates a new vault within an organization.
     CreateVault {
         /// Organization to create the vault in.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// External slug for API lookups (generated before Raft proposal).
         slug: VaultSlug,
         /// Optional vault name (for display).
@@ -117,22 +117,22 @@ pub enum LedgerRequest {
     /// Deletes an organization.
     DeleteOrganization {
         /// Organization ID to delete.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     },
 
     /// Deletes a vault.
     DeleteVault {
         /// Organization containing the vault.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Vault ID to delete.
-        vault_id: VaultId,
+        vault: VaultId,
     },
 
     /// Suspends an organization (billing hold or policy violation).
     /// Suspended organizations reject writes but allow reads.
     SuspendOrganization {
         /// Organization to suspend.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Optional reason for suspension (e.g., "Payment overdue", "TOS violation").
         reason: Option<String>,
     },
@@ -140,14 +140,14 @@ pub enum LedgerRequest {
     /// Resumes a suspended organization.
     ResumeOrganization {
         /// Organization to resume.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     },
 
     /// Starts organization migration to a new shard.
     /// Sets status to Migrating, blocking writes until CompleteMigration.
     StartMigration {
         /// Organization to migrate.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Target shard ID for migration.
         target_shard_id: ShardId,
     },
@@ -156,15 +156,15 @@ pub enum LedgerRequest {
     /// Updates shard_id and returns status to Active.
     CompleteMigration {
         /// Organization being migrated.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     },
 
     /// Updates vault health status (used during recovery).
     UpdateVaultHealth {
         /// Organization containing the vault.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Vault ID to update.
-        vault_id: VaultId,
+        vault: VaultId,
         /// New health status: true = Healthy, false = Diverged/Recovering.
         healthy: bool,
         /// If diverged, the expected state root.
@@ -226,7 +226,7 @@ pub enum SystemRequest {
     /// Updates organization-to-shard mapping.
     UpdateOrganizationRouting {
         /// Organization to update.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// New shard assignment.
         shard_id: i32,
     },
@@ -254,7 +254,7 @@ pub enum LedgerResponse {
     /// Organization created.
     OrganizationCreated {
         /// Assigned organization ID.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Assigned shard ID.
         shard_id: ShardId,
     },
@@ -262,7 +262,7 @@ pub enum LedgerResponse {
     /// Vault created.
     VaultCreated {
         /// Assigned internal vault ID.
-        vault_id: VaultId,
+        vault: VaultId,
         /// External Snowflake slug for API lookups.
         slug: VaultSlug,
     },
@@ -280,7 +280,7 @@ pub enum LedgerResponse {
     /// Organization migrated to a new shard.
     OrganizationMigrated {
         /// Organization that was migrated.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Previous shard assignment.
         old_shard_id: ShardId,
         /// New shard assignment.
@@ -290,19 +290,19 @@ pub enum LedgerResponse {
     /// Organization suspended.
     OrganizationSuspended {
         /// Organization that was suspended.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     },
 
     /// Organization resumed (suspension lifted).
     OrganizationResumed {
         /// Organization that was resumed.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     },
 
     /// Organization migration started.
     MigrationStarted {
         /// Organization entering migration.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Target shard for migration.
         target_shard_id: ShardId,
     },
@@ -310,7 +310,7 @@ pub enum LedgerResponse {
     /// Organization migration completed.
     MigrationCompleted {
         /// Organization that was migrated.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Previous shard assignment.
         old_shard_id: ShardId,
         /// New shard assignment.
@@ -321,7 +321,7 @@ pub enum LedgerResponse {
     /// Transitions to Deleted once all vaults are deleted.
     OrganizationDeleting {
         /// Organization marked for deletion.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Vault IDs that must be deleted first.
         blocking_vault_ids: Vec<VaultId>,
     },
@@ -380,11 +380,11 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
             },
-            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
-                write!(f, "OrganizationCreated(id={}, shard={})", organization_id, shard_id)
+            LedgerResponse::OrganizationCreated { organization, shard_id } => {
+                write!(f, "OrganizationCreated(id={}, shard={})", organization, shard_id)
             },
-            LedgerResponse::VaultCreated { vault_id, slug } => {
-                write!(f, "VaultCreated(id={}, slug={})", vault_id, slug)
+            LedgerResponse::VaultCreated { vault, slug } => {
+                write!(f, "VaultCreated(id={}, slug={})", vault, slug)
             },
             LedgerResponse::UserCreated { user_id } => {
                 write!(f, "UserCreated(id={})", user_id)
@@ -400,38 +400,34 @@ impl fmt::Display for LedgerResponse {
                     )
                 }
             },
-            LedgerResponse::OrganizationMigrated {
-                organization_id,
-                old_shard_id,
-                new_shard_id,
-            } => {
+            LedgerResponse::OrganizationMigrated { organization, old_shard_id, new_shard_id } => {
                 write!(
                     f,
                     "OrganizationMigrated(id={}, {}->{})",
-                    organization_id, old_shard_id, new_shard_id
+                    organization, old_shard_id, new_shard_id
                 )
             },
-            LedgerResponse::OrganizationSuspended { organization_id } => {
-                write!(f, "OrganizationSuspended(id={})", organization_id)
+            LedgerResponse::OrganizationSuspended { organization } => {
+                write!(f, "OrganizationSuspended(id={})", organization)
             },
-            LedgerResponse::OrganizationResumed { organization_id } => {
-                write!(f, "OrganizationResumed(id={})", organization_id)
+            LedgerResponse::OrganizationResumed { organization } => {
+                write!(f, "OrganizationResumed(id={})", organization)
             },
-            LedgerResponse::MigrationStarted { organization_id, target_shard_id } => {
-                write!(f, "MigrationStarted(id={}, target={})", organization_id, target_shard_id)
+            LedgerResponse::MigrationStarted { organization, target_shard_id } => {
+                write!(f, "MigrationStarted(id={}, target={})", organization, target_shard_id)
             },
-            LedgerResponse::MigrationCompleted { organization_id, old_shard_id, new_shard_id } => {
+            LedgerResponse::MigrationCompleted { organization, old_shard_id, new_shard_id } => {
                 write!(
                     f,
                     "MigrationCompleted(id={}, {}->{})",
-                    organization_id, old_shard_id, new_shard_id
+                    organization, old_shard_id, new_shard_id
                 )
             },
-            LedgerResponse::OrganizationDeleting { organization_id, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleting { organization, blocking_vault_ids } => {
                 write!(
                     f,
                     "OrganizationDeleting(id={}, blocking_vaults={:?})",
-                    organization_id, blocking_vault_ids
+                    organization, blocking_vault_ids
                 )
             },
             LedgerResponse::VaultDeleted { success } => {
@@ -543,8 +539,8 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
         let payload = RaftPayload {
             request: LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
@@ -703,8 +699,8 @@ mod tests {
             fn prop_ledger_request_roundtrip(
                 variant_idx in 0u8..4,
                 name in "[a-z]{1,16}",
-                organization_id in (1i64..10_000).prop_map(OrganizationId::new),
-                vault_id in (1i64..10_000).prop_map(VaultId::new),
+                organization in (1i64..10_000).prop_map(OrganizationId::new),
+                vault in (1i64..10_000).prop_map(VaultId::new),
                 shard_id in (1u32..1_000).prop_map(ShardId::new),
             ) {
                 let request = match variant_idx {
@@ -715,13 +711,13 @@ mod tests {
                         quota: None,
                     },
                     1 => LedgerRequest::CreateVault {
-                        organization_id,
+                        organization,
                         slug: VaultSlug::new(42),
                         name: Some(name.clone()),
                         retention_policy: None,
                     },
-                    2 => LedgerRequest::DeleteOrganization { organization_id },
-                    _ => LedgerRequest::DeleteVault { organization_id, vault_id },
+                    2 => LedgerRequest::DeleteOrganization { organization },
+                    _ => LedgerRequest::DeleteVault { organization, vault },
                 };
 
                 let bytes = postcard::to_allocvec(&request).expect("serialize");

@@ -399,18 +399,17 @@ impl WriteServiceImpl {
         };
 
         // Resolve internal IDs to slugs for response construction
-        let org_slug =
+        let organization =
             self.applied_state.as_ref().and_then(|s| s.resolve_id_to_slug(organization_id));
-        let vault_slug =
-            self.applied_state.as_ref().and_then(|s| s.resolve_vault_id_to_slug(vault_id));
+        let vault = self.applied_state.as_ref().and_then(|s| s.resolve_vault_id_to_slug(vault_id));
 
         // Use the proof module's SNAFU-based implementation
         match proof::generate_write_proof(
             archive,
             organization_id,
-            org_slug,
+            organization,
             vault_id,
-            vault_slug,
+            vault,
             vault_height,
             0,
         ) {
@@ -471,8 +470,8 @@ impl WriteServiceImpl {
         };
 
         Ok(LedgerRequest::Write {
-            organization_id,
-            vault_id: vault_id.unwrap_or(VaultId::new(0)),
+            organization: organization_id,
+            vault: vault_id.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
             idempotency_key,
             request_hash,
@@ -569,9 +568,9 @@ impl WriteService for WriteServiceImpl {
 
         // Populate logging context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(org_slug, vault_slug_val);
+        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(organization, vault);
 
         // Populate write operation fields
         let operation_types = Self::extract_operation_types(&req.operations);
@@ -714,7 +713,7 @@ impl WriteService for WriteServiceImpl {
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault_slug(vault_slug_val)
+                .vault(vault)
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "rate_limited".to_string(),
                 })
@@ -740,7 +739,7 @@ impl WriteService for WriteServiceImpl {
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault_slug(vault_slug_val)
+                .vault(vault)
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "storage_quota_exceeded".to_string(),
                 })
@@ -1048,9 +1047,9 @@ impl WriteService for WriteServiceImpl {
 
         // Populate logging context with request metadata
         ctx.set_client_info(&client_id, 0, None);
-        let org_slug = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(org_slug, vault_slug_val);
+        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(organization, vault);
 
         // Flatten all operations from all groups
         let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
@@ -1066,7 +1065,7 @@ impl WriteService for WriteServiceImpl {
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault_slug(vault_slug_val)
+                .vault(vault)
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: status.message().to_string(),
                 })
@@ -1227,7 +1226,7 @@ impl WriteService for WriteServiceImpl {
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault_slug(vault_slug_val)
+                .vault(vault)
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "rate_limited".to_string(),
                 })
@@ -1254,7 +1253,7 @@ impl WriteService for WriteServiceImpl {
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault_slug(vault_slug_val)
+                .vault(vault)
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "storage_quota_exceeded".to_string(),
                 })

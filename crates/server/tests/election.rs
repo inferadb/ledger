@@ -10,12 +10,11 @@
     clippy::manual_range_contains
 )]
 
-mod common;
-
 use std::time::Duration;
 
-use common::TestCluster;
 use serial_test::serial;
+
+use crate::common::TestCluster;
 
 /// Tests that a single-node cluster immediately elects itself as leader.
 #[serial]

@@ -7,11 +7,11 @@
 //! # Example
 //!
 //! ```no_run
-//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug};
+//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
 //! # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 //! # let organization = OrganizationSlug::new(1);
 //! let results = client
-//!     .batch_read_builder(organization, Some(1))
+//!     .batch_read_builder(organization, Some(VaultSlug::new(1)))
 //!     .key("user:123")
 //!     .key("user:456")
 //!     .keys(["session:a", "session:b"])
@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 
 use inferadb_ledger_types::OrganizationSlug;
 
-use crate::{LedgerClient, client::ReadConsistency, error::Result};
+use crate::{LedgerClient, VaultSlug, client::ReadConsistency, error::Result};
 
 /// Type-state marker: builder has no keys yet.
 pub struct NoKeys(());
@@ -55,7 +55,7 @@ pub struct HasKeys(());
 pub struct BatchReadBuilder<'a, S = NoKeys> {
     client: &'a LedgerClient,
     organization: OrganizationSlug,
-    vault_slug: Option<u64>,
+    vault: Option<VaultSlug>,
     keys: Vec<String>,
     consistency: ReadConsistency,
     cancellation: Option<tokio_util::sync::CancellationToken>,
@@ -67,12 +67,12 @@ impl<'a> BatchReadBuilder<'a, NoKeys> {
     pub(crate) fn new(
         client: &'a LedgerClient,
         organization: OrganizationSlug,
-        vault_slug: Option<u64>,
+        vault: Option<VaultSlug>,
     ) -> Self {
         Self {
             client,
             organization,
-            vault_slug,
+            vault,
             keys: Vec::new(),
             consistency: ReadConsistency::Eventual,
             cancellation: None,
@@ -87,7 +87,7 @@ impl<'a, S> BatchReadBuilder<'a, S> {
         BatchReadBuilder {
             client: self.client,
             organization: self.organization,
-            vault_slug: self.vault_slug,
+            vault: self.vault,
             keys: self.keys,
             consistency: self.consistency,
             cancellation: self.cancellation,
@@ -151,23 +151,16 @@ impl<'a> BatchReadBuilder<'a, HasKeys> {
         match (&self.consistency, &self.cancellation) {
             (ReadConsistency::Eventual, Some(token)) => {
                 self.client
-                    .batch_read_with_token(
-                        self.organization,
-                        self.vault_slug,
-                        self.keys,
-                        token.clone(),
-                    )
+                    .batch_read_with_token(self.organization, self.vault, self.keys, token.clone())
                     .await
             },
             (ReadConsistency::Eventual, None) => {
-                self.client.batch_read(self.organization, self.vault_slug, self.keys).await
+                self.client.batch_read(self.organization, self.vault, self.keys).await
             },
             (ReadConsistency::Linearizable, _) => {
                 // batch_read_consistent doesn't have a _with_token variant;
                 // client-level cancellation still applies.
-                self.client
-                    .batch_read_consistent(self.organization, self.vault_slug, self.keys)
-                    .await
+                self.client.batch_read_consistent(self.organization, self.vault, self.keys).await
             },
         }
     }
@@ -201,7 +194,8 @@ mod tests {
     #[tokio::test]
     async fn batch_read_multiple_keys() {
         let client = test_client().await;
-        let builder = client.batch_read_builder(ORG, Some(1)).key("k1").key("k2").key("k3");
+        let builder =
+            client.batch_read_builder(ORG, Some(VaultSlug::new(1))).key("k1").key("k2").key("k3");
         assert_eq!(builder.collected_keys(), &["k1", "k2", "k3"]);
     }
 
@@ -248,9 +242,10 @@ mod tests {
     #[tokio::test]
     async fn batch_read_preserves_organization_and_vault() {
         let client = test_client().await;
-        let builder = client.batch_read_builder(OrganizationSlug::new(42), Some(99)).key("k");
+        let builder =
+            client.batch_read_builder(OrganizationSlug::new(42), Some(VaultSlug::new(99))).key("k");
         assert_eq!(builder.organization, OrganizationSlug::new(42));
-        assert_eq!(builder.vault_slug, Some(99));
+        assert_eq!(builder.vault, Some(VaultSlug::new(99)));
     }
 
     #[tokio::test]

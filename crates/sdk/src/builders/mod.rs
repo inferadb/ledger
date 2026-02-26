@@ -7,11 +7,11 @@
 //! # Example
 //!
 //! ```no_run
-//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, WriteBuilder};
+//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug, WriteBuilder};
 //! # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 //! # let organization = OrganizationSlug::new(1);
 //! let result = client
-//!     .write_builder(organization, Some(1))
+//!     .write_builder(organization, Some(VaultSlug::new(1)))
 //!     .set("user:123", b"alice".to_vec())
 //!     .set_with_expiry("session:abc", b"token".to_vec(), 1700000000)
 //!     .create_relationship("doc:1", "viewer", "user:123")

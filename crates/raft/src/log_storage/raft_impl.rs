@@ -774,14 +774,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                             slug: state
                                 .id_to_slug
-                                .get(&entry.organization_id)
-                                .map_or(entry.organization_id.value() as u64, |s| s.value()),
+                                .get(&entry.organization)
+                                .map_or(entry.organization.value() as u64, |s| s.value()),
                         }),
                         vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                            slug: state
-                                .vault_id_to_slug
-                                .get(&entry.vault_id)
-                                .map_or(0, |s| s.value()),
+                            slug: state.vault_id_to_slug.get(&entry.vault).map_or(0, |s| s.value()),
                         }),
                         height: entry.vault_height,
                         block_hash: Some(inferadb_ledger_proto::proto::Hash {
@@ -798,8 +795,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     // Ignore send errors - no receivers is valid (fire-and-forget)
                     let _ = sender.send(announcement);
                     tracing::debug!(
-                        organization_id = entry.organization_id.value(),
-                        vault_id = entry.vault_id.value(),
+                        organization_id = entry.organization.value(),
+                        vault_id = entry.vault.value(),
                         height = entry.vault_height,
                         "Block announcement broadcast"
                     );
@@ -808,11 +805,10 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             // Update previous vault hashes for each entry
             for entry in &vault_entries {
-                let vault_block =
-                    shard_block.extract_vault_block(entry.organization_id, entry.vault_id);
+                let vault_block = shard_block.extract_vault_block(entry.organization, entry.vault);
                 if let Some(vb) = vault_block {
                     let block_hash = inferadb_ledger_types::hash::block_hash(&vb.header);
-                    let key = (entry.organization_id, entry.vault_id);
+                    let key = (entry.organization, entry.vault);
                     state.previous_vault_hashes.insert(key, block_hash);
                     pending.vault_hashes.push((key, block_hash));
                 }

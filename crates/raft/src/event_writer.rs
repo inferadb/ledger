@@ -177,8 +177,8 @@ impl<B: StorageBackend> EventWriter<B> {
 pub struct ApplyPhaseEmitter {
     action: EventAction,
     organization_id: OrganizationId,
-    organization_slug: Option<u64>,
-    vault_slug: Option<u64>,
+    organization: Option<u64>,
+    vault: Option<u64>,
     principal: String,
     outcome: EventOutcome,
     details: BTreeMap<String, String>,
@@ -193,8 +193,8 @@ impl ApplyPhaseEmitter {
         Self {
             action,
             organization_id: OrganizationId::new(0),
-            organization_slug: None,
-            vault_slug: None,
+            organization: None,
+            vault: None,
             principal: String::new(),
             outcome: EventOutcome::Success,
             details: BTreeMap::new(),
@@ -208,13 +208,13 @@ impl ApplyPhaseEmitter {
     pub fn for_organization(
         action: EventAction,
         org_id: OrganizationId,
-        org_slug: Option<u64>,
+        organization: Option<u64>,
     ) -> Self {
         Self {
             action,
             organization_id: org_id,
-            organization_slug: org_slug,
-            vault_slug: None,
+            organization,
+            vault: None,
             principal: String::new(),
             outcome: EventOutcome::Success,
             details: BTreeMap::new(),
@@ -224,9 +224,9 @@ impl ApplyPhaseEmitter {
         }
     }
 
-    /// Sets the vault slug context.
-    pub fn vault_slug(mut self, slug: u64) -> Self {
-        self.vault_slug = Some(slug);
+    /// Sets the vault context.
+    pub fn vault(mut self, slug: u64) -> Self {
+        self.vault = Some(slug);
         self
     }
 
@@ -305,8 +305,8 @@ impl ApplyPhaseEmitter {
             emission: EventEmission::ApplyPhase,
             principal: self.principal,
             organization_id: self.organization_id,
-            organization_slug: self.organization_slug,
-            vault_slug: self.vault_slug,
+            organization: self.organization,
+            vault: self.vault,
             outcome: self.outcome,
             details: self.details,
             block_height: Some(block_height),
@@ -344,8 +344,8 @@ impl ApplyPhaseEmitter {
 pub struct HandlerPhaseEmitter {
     action: EventAction,
     organization_id: OrganizationId,
-    organization_slug: Option<u64>,
-    vault_slug: Option<u64>,
+    organization: Option<u64>,
+    vault: Option<u64>,
     node_id: u64,
     principal: String,
     outcome: EventOutcome,
@@ -361,8 +361,8 @@ impl HandlerPhaseEmitter {
         Self {
             action,
             organization_id: OrganizationId::new(0),
-            organization_slug: None,
-            vault_slug: None,
+            organization: None,
+            vault: None,
             node_id,
             principal: String::new(),
             outcome: EventOutcome::Success,
@@ -377,14 +377,14 @@ impl HandlerPhaseEmitter {
     pub fn for_organization(
         action: EventAction,
         org_id: OrganizationId,
-        org_slug: Option<u64>,
+        organization: Option<u64>,
         node_id: u64,
     ) -> Self {
         Self {
             action,
             organization_id: org_id,
-            organization_slug: org_slug,
-            vault_slug: None,
+            organization,
+            vault: None,
             node_id,
             principal: String::new(),
             outcome: EventOutcome::Success,
@@ -395,9 +395,9 @@ impl HandlerPhaseEmitter {
         }
     }
 
-    /// Sets the vault slug context.
-    pub fn vault_slug(mut self, slug: u64) -> Self {
-        self.vault_slug = Some(slug);
+    /// Sets the vault context.
+    pub fn vault(mut self, slug: u64) -> Self {
+        self.vault = Some(slug);
         self
     }
 
@@ -464,8 +464,8 @@ impl HandlerPhaseEmitter {
             emission: EventEmission::HandlerPhase { node_id: self.node_id },
             principal: self.principal,
             organization_id: self.organization_id,
-            organization_slug: self.organization_slug,
-            vault_slug: self.vault_slug,
+            organization: self.organization,
+            vault: self.vault,
             outcome: self.outcome,
             details: self.details,
             block_height: None,
@@ -759,7 +759,7 @@ mod tests {
             OrganizationId::new(42),
             Some(12345),
         )
-        .vault_slug(67890)
+        .vault(67890)
         .principal("user:alice")
         .outcome(EventOutcome::Success)
         .operations_count(5)
@@ -772,8 +772,8 @@ mod tests {
         assert_eq!(entry.scope, EventScope::Organization);
         assert_eq!(entry.emission, EventEmission::ApplyPhase);
         assert_eq!(entry.organization_id, OrganizationId::new(42));
-        assert_eq!(entry.organization_slug, Some(12345));
-        assert_eq!(entry.vault_slug, Some(67890));
+        assert_eq!(entry.organization, Some(12345));
+        assert_eq!(entry.vault, Some(67890));
         assert_eq!(entry.principal, "user:alice");
         assert_eq!(entry.operations_count, Some(5));
         assert_eq!(entry.details.get("vault_name").unwrap(), "my-vault");
@@ -1053,7 +1053,7 @@ mod tests {
             10,
         )
         .principal("client:bot")
-        .vault_slug(55555)
+        .vault(55555)
         .outcome(EventOutcome::Denied { reason: "rate_limited".to_string() })
         .detail("level", "organization")
         .trace_id("trace-123")
@@ -1065,8 +1065,8 @@ mod tests {
         assert_eq!(entry.scope, EventScope::Organization);
         assert_eq!(entry.emission, EventEmission::HandlerPhase { node_id: 10 });
         assert_eq!(entry.organization_id, OrganizationId::new(7));
-        assert_eq!(entry.organization_slug, Some(99999));
-        assert_eq!(entry.vault_slug, Some(55555));
+        assert_eq!(entry.organization, Some(99999));
+        assert_eq!(entry.vault, Some(55555));
         assert_eq!(entry.principal, "client:bot");
         assert_eq!(entry.event_type, "ledger.request.rate_limited");
         assert!(

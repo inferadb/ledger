@@ -7,8 +7,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-mod turmoil_common;
-
 use std::{
     net::SocketAddr,
     sync::{
@@ -25,7 +23,8 @@ use inferadb_ledger_proto::proto::{
 };
 use tonic::{Request, Response, Status, transport::Server};
 use turmoil::Builder;
-use turmoil_common::incoming_stream;
+
+use crate::{turmoil_common, turmoil_common::incoming_stream};
 
 /// Simple counter for tracking RPC calls
 struct RpcCounter {

@@ -360,8 +360,8 @@ mod tests {
                 .prop_map(
                     |(
                         height,
-                        organization_id,
-                        vault_id,
+                        organization,
+                        vault,
                         previous_hash,
                         tx_merkle_root,
                         state_root,
@@ -371,8 +371,8 @@ mod tests {
                     )| {
                         BlockHeader {
                             height,
-                            organization_id,
-                            vault_id,
+                            organization,
+                            vault,
                             previous_hash,
                             tx_merkle_root,
                             state_root,
@@ -468,8 +468,8 @@ mod tests {
                 state_root in arb_hash(),
             ) {
                 let entry = VaultEntry {
-                    organization_id: ns_id,
-                    vault_id,
+                    organization: ns_id,
+                    vault: vault_id,
                     vault_height,
                     previous_vault_hash,
                     transactions,

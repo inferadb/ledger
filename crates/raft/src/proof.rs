@@ -104,9 +104,9 @@ pub struct WriteProof {
 pub fn generate_write_proof(
     archive: &Arc<BlockArchive<FileBackend>>,
     organization_id: OrganizationId,
-    organization_slug: Option<OrganizationSlug>,
+    organization: Option<OrganizationSlug>,
     vault_id: VaultId,
-    vault_slug: Option<VaultSlug>,
+    vault: Option<VaultSlug>,
     vault_height: u64,
     tx_index: usize,
 ) -> Result<WriteProof> {
@@ -123,7 +123,7 @@ pub fn generate_write_proof(
     let entry = block
         .vault_entries
         .iter()
-        .find(|e| e.organization_id == organization_id && e.vault_id == vault_id)
+        .find(|e| e.organization == organization_id && e.vault == vault_id)
         .ok_or(ProofError::VaultEntryNotFound { organization_id, vault_id })?;
 
     // Validate transaction index
@@ -141,9 +141,9 @@ pub fn generate_write_proof(
     let block_header = proto::BlockHeader {
         height: entry.vault_height,
         organization: Some(proto::OrganizationSlug {
-            slug: organization_slug.map_or(entry.organization_id.value() as u64, |s| s.value()),
+            slug: organization.map_or(entry.organization.value() as u64, |s| s.value()),
         }),
-        vault: Some(proto::VaultSlug { slug: vault_slug.map_or(0, |s| s.value()) }),
+        vault: Some(proto::VaultSlug { slug: vault.map_or(0, |s| s.value()) }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),

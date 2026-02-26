@@ -17,15 +17,14 @@
     clippy::manual_range_contains
 )]
 
-mod common;
-
 use std::{collections::HashSet, time::Duration};
 
-use common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 use inferadb_ledger_proto::proto::{
     ClientId, OrganizationSlug, ReadRequest, VaultSlug, WriteRequest,
 };
 use serial_test::serial;
+
+use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // =============================================================================
 // Test Helpers
@@ -52,12 +51,14 @@ async fn create_organization(
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    org_slug: u64,
+    organization: u64,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization,
+            }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -69,15 +70,15 @@ async fn create_vault(
 
 /// Helper to create a write request with a single SetEntity operation.
 fn make_write_request(
-    org_slug: u64,
-    vault_slug: u64,
+    organization: u64,
+    vault: u64,
     key: &str,
     value: &[u8],
     client_id: &str,
 ) -> WriteRequest {
     WriteRequest {
-        organization: Some(OrganizationSlug { slug: org_slug }),
-        vault: Some(VaultSlug { slug: vault_slug }),
+        organization: Some(OrganizationSlug { slug: organization }),
+        vault: Some(VaultSlug { slug: vault }),
         client_id: Some(ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -108,15 +109,15 @@ fn extract_block_height(response: inferadb_ledger_proto::proto::WriteResponse) -
 /// Helper to read an entity and return its value.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    org_slug: u64,
-    vault_slug: u64,
+    organization: u64,
+    vault: u64,
     key: &str,
 ) -> Option<Vec<u8>> {
     let mut client = create_read_client(addr).await.ok()?;
     let response = client
         .read(ReadRequest {
-            organization: Some(OrganizationSlug { slug: org_slug }),
-            vault: Some(VaultSlug { slug: vault_slug }),
+            organization: Some(OrganizationSlug { slug: organization }),
+            vault: Some(VaultSlug { slug: vault }),
             key: key.to_string(),
             consistency: 0, // EVENTUAL (default)
         })
@@ -139,8 +140,9 @@ async fn test_committed_write_survives_leader_crash() {
     let leader_addr = leader.addr;
 
     // Create organization and vault
-    let org_slug = create_organization(leader_addr, "crash-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader_addr, org_slug).await.expect("create vault");
+    let organization =
+        create_organization(leader_addr, "crash-ns").await.expect("create organization");
+    let vault = create_vault(leader_addr, organization).await.expect("create vault");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
@@ -150,7 +152,7 @@ async fn test_committed_write_survives_leader_crash() {
 
     let client_id = format!("test-client-{}", leader_id);
     let write_req =
-        make_write_request(org_slug, vault_slug, "chaos-key", b"chaos-value", &client_id);
+        make_write_request(organization, vault, "chaos-key", b"chaos-value", &client_id);
 
     let response = client.write(write_req).await.expect("write should succeed").into_inner();
     let block_height = extract_block_height(response);
@@ -170,7 +172,7 @@ async fn test_committed_write_survives_leader_crash() {
     // Read from a follower to verify the write was replicated
     let followers = cluster.followers();
     let follower = followers.first().expect("should have follower");
-    let value = read_entity(follower.addr, org_slug, vault_slug, "chaos-key").await;
+    let value = read_entity(follower.addr, organization, vault, "chaos-key").await;
     assert_eq!(value, Some(b"chaos-value".to_vec()), "follower should have the committed write");
 }
 
@@ -190,9 +192,9 @@ async fn test_read_consistency_after_leader_change() {
     let leader = cluster.node(initial_leader_id).expect("leader exists");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "read-consistency-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
@@ -205,8 +207,8 @@ async fn test_read_consistency_after_leader_change() {
     // Write multiple keys to create state
     for i in 0..5u64 {
         let write_req = make_write_request(
-            org_slug,
-            vault_slug,
+            organization,
+            vault,
             &format!("key-{}", i),
             format!("value-{}", i).as_bytes(),
             &client_id,
@@ -220,7 +222,7 @@ async fn test_read_consistency_after_leader_change() {
     // Read from all nodes - they should all return the same values
     for node in cluster.nodes() {
         for i in 0..5 {
-            let value = read_entity(node.addr, org_slug, vault_slug, &format!("key-{}", i)).await;
+            let value = read_entity(node.addr, organization, vault, &format!("key-{}", i)).await;
             assert_eq!(
                 value,
                 Some(format!("value-{}", i).into_bytes()),
@@ -244,16 +246,16 @@ async fn test_writes_succeed_with_one_node_down() {
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "one-down-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write through the leader (all 3 nodes up)
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
     let write_req =
-        make_write_request(org_slug, vault_slug, "before-failure", b"value1", &client_id);
+        make_write_request(organization, vault, "before-failure", b"value1", &client_id);
 
     client.write(write_req).await.expect("write should succeed");
 
@@ -265,12 +267,12 @@ async fn test_writes_succeed_with_one_node_down() {
     // the leader and one follower form a majority.
 
     // Write again - should still succeed
-    let write_req = make_write_request(org_slug, vault_slug, "after-check", b"value2", &client_id);
+    let write_req = make_write_request(organization, vault, "after-check", b"value2", &client_id);
     client.write(write_req).await.expect("write should succeed");
 
     // Verify both writes are readable
-    let value1 = read_entity(leader.addr, org_slug, vault_slug, "before-failure").await;
-    let value2 = read_entity(leader.addr, org_slug, vault_slug, "after-check").await;
+    let value1 = read_entity(leader.addr, organization, vault, "before-failure").await;
+    let value2 = read_entity(leader.addr, organization, vault, "after-check").await;
 
     assert_eq!(value1, Some(b"value1".to_vec()));
     assert_eq!(value2, Some(b"value2".to_vec()));
@@ -289,9 +291,9 @@ async fn test_deterministic_block_height_across_nodes() {
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "det-height-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
@@ -304,8 +306,8 @@ async fn test_deterministic_block_height_across_nodes() {
     let num_writes = 10u64;
     for i in 0..num_writes {
         let write_req = make_write_request(
-            org_slug,
-            vault_slug,
+            organization,
+            vault,
             &format!("det-key-{}", i),
             &(i as u32).to_le_bytes(),
             &client_id,
@@ -342,9 +344,9 @@ async fn test_concurrent_writes_all_applied() {
     let leader_addr = leader.addr;
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader_addr, "concurrent-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader_addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader_addr, organization).await.expect("create vault");
 
     // Spawn multiple concurrent writers
     let mut handles = vec![];
@@ -361,7 +363,7 @@ async fn test_concurrent_writes_all_applied() {
                 let key = format!("concurrent-{}-{}", client_num, seq);
                 let value = format!("value-{}-{}", client_num, seq);
                 let write_req =
-                    make_write_request(org_slug, vault_slug, &key, value.as_bytes(), &client_id);
+                    make_write_request(organization, vault, &key, value.as_bytes(), &client_id);
                 client.write(write_req).await.expect("write should succeed");
             }
         });
@@ -385,7 +387,7 @@ async fn test_concurrent_writes_all_applied() {
             let key = format!("concurrent-{}-{}", client_num, seq);
             let expected_value = format!("value-{}-{}", client_num, seq);
 
-            let value = read_entity(any_node.addr, org_slug, vault_slug, &key).await;
+            let value = read_entity(any_node.addr, organization, vault, &key).await;
             if value == Some(expected_value.into_bytes()) {
                 found_count += 1;
             }
@@ -412,8 +414,9 @@ async fn test_rapid_writes_no_data_loss() {
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // Create organization and vault
-    let org_slug = create_organization(leader.addr, "rapid-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let organization =
+        create_organization(leader.addr, "rapid-ns").await.expect("create organization");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
@@ -423,8 +426,8 @@ async fn test_rapid_writes_no_data_loss() {
     // Submit writes as fast as possible
     for i in 0..num_writes {
         let write_req = make_write_request(
-            org_slug,
-            vault_slug,
+            organization,
+            vault,
             &format!("rapid-{}", i),
             &(i as u32).to_le_bytes(),
             &client_id,
@@ -438,7 +441,7 @@ async fn test_rapid_writes_no_data_loss() {
     // Verify all writes are present
     let mut found_count = 0u64;
     for i in 0..num_writes {
-        let value = read_entity(leader.addr, org_slug, vault_slug, &format!("rapid-{}", i)).await;
+        let value = read_entity(leader.addr, organization, vault, &format!("rapid-{}", i)).await;
         if value.is_some() {
             found_count += 1;
         }
@@ -462,8 +465,9 @@ async fn test_term_agreement_maintained() {
 
     // Create organization and vault
     let leader = cluster.leader().expect("should have leader");
-    let org_slug = create_organization(leader.addr, "term-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let organization =
+        create_organization(leader.addr, "term-ns").await.expect("create organization");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Submit some writes to exercise the cluster
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
@@ -471,8 +475,8 @@ async fn test_term_agreement_maintained() {
     let client_id = format!("term-test-{}", leader_id);
     for i in 0..5u64 {
         let write_req = make_write_request(
-            org_slug,
-            vault_slug,
+            organization,
+            vault,
             &format!("term-key-{}", i),
             b"value",
             &client_id,
@@ -502,9 +506,9 @@ async fn test_key_overwrite_consistency() {
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "overwrite-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
@@ -515,12 +519,12 @@ async fn test_key_overwrite_consistency() {
 
     // Write initial value
     let write_req =
-        make_write_request(org_slug, vault_slug, "overwrite-key", b"initial", &client_id);
+        make_write_request(organization, vault, "overwrite-key", b"initial", &client_id);
     client.write(write_req).await.expect("initial write");
 
     // Overwrite with new value
     let write_req =
-        make_write_request(org_slug, vault_slug, "overwrite-key", b"updated", &client_id);
+        make_write_request(organization, vault, "overwrite-key", b"updated", &client_id);
     client.write(write_req).await.expect("overwrite");
 
     // Wait for replication
@@ -528,7 +532,7 @@ async fn test_key_overwrite_consistency() {
 
     // All nodes should see the updated value
     for node in cluster.nodes() {
-        let value = read_entity(node.addr, org_slug, vault_slug, "overwrite-key").await;
+        let value = read_entity(node.addr, organization, vault, "overwrite-key").await;
         assert_eq!(value, Some(b"updated".to_vec()), "node {} should have updated value", node.id);
     }
 }
@@ -543,8 +547,9 @@ async fn test_large_batch_writes() {
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // Create organization and vault
-    let org_slug = create_organization(leader.addr, "batch-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let organization =
+        create_organization(leader.addr, "batch-ns").await.expect("create organization");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
@@ -555,8 +560,7 @@ async fn test_large_batch_writes() {
     for i in 0..num_keys {
         let key = format!("batch-key-{:04}", i);
         let value = format!("batch-value-{:04}", i);
-        let write_req =
-            make_write_request(org_slug, vault_slug, &key, value.as_bytes(), &client_id);
+        let write_req = make_write_request(organization, vault, &key, value.as_bytes(), &client_id);
         client.write(write_req).await.expect("batch write");
     }
 
@@ -570,7 +574,7 @@ async fn test_large_batch_writes() {
         for i in 0..num_keys {
             let key = format!("batch-key-{:04}", i);
             let expected = format!("batch-value-{:04}", i);
-            let value = read_entity(node.addr, org_slug, vault_slug, &key).await;
+            let value = read_entity(node.addr, organization, vault, &key).await;
             if value == Some(expected.into_bytes()) {
                 found += 1;
             }

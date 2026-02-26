@@ -10,7 +10,13 @@
 //! - `MultiShardTestCluster`: Multi-shard cluster using `MultiRaftManager`. Best for testing
 //!   horizontal scaling, shard routing, and high-throughput.
 
-#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#![allow(
+    dead_code,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 

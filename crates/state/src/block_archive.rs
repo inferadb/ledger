@@ -156,11 +156,8 @@ impl<B: StorageBackend> BlockArchive<B> {
         txn.insert::<tables::Blocks>(&block.shard_height, &encoded).context(StoreSnafu)?;
 
         for entry in &block.vault_entries {
-            let index_key = encode_vault_block_index_key(
-                entry.organization_id,
-                entry.vault_id,
-                entry.vault_height,
-            );
+            let index_key =
+                encode_vault_block_index_key(entry.organization, entry.vault, entry.vault_height);
             txn.insert::<tables::VaultBlockIndex>(&index_key.to_vec(), &block.shard_height)
                 .context(StoreSnafu)?;
         }
@@ -533,8 +530,8 @@ mod tests {
             shard_height,
             previous_shard_hash: [0u8; 32],
             vault_entries: vec![VaultEntry {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 vault_height: shard_height, // Simplify: vault_height == shard_height
                 previous_vault_hash: [0u8; 32],
                 transactions: vec![],
@@ -641,8 +638,8 @@ mod tests {
 
         let mut block = create_test_block(100);
         block.vault_entries.push(VaultEntry {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(2), // Different vault
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(2), // Different vault
             vault_height: 50,
             previous_vault_hash: [0u8; 32],
             transactions: vec![],
@@ -690,8 +687,8 @@ mod tests {
             shard_height,
             previous_shard_hash: [shard_height as u8; 32],
             vault_entries: vec![VaultEntry {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 vault_height: shard_height,
                 previous_vault_hash: [(shard_height.saturating_sub(1)) as u8; 32],
                 transactions,

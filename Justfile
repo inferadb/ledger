@@ -29,16 +29,16 @@ build-crate crate:
 # Test
 # ============================================================================
 
-# Run fast tests (~15s) - quick validation during development
-test-fast:
+# Run unit tests - inline #[cfg(test)] modules only
+test:
     cargo +{{rust}} test --workspace --lib
 
-# Run standard tests (~30s) - includes integration tests
-test:
-    cargo +{{rust}} test --workspace
+# Run integration tests - spawns real clusters, requires ports
+test-integration:
+    cargo +{{rust}} test --workspace --test '*'
 
-# Run full test suite (~5min) - includes ignored/slow tests
-test-full:
+# Run full test suite including slow/ignored tests
+test-all:
     cargo +{{rust}} test --workspace -- --include-ignored
 
 # Run property tests with high iteration count (default: 10000)
@@ -53,24 +53,6 @@ test-crate crate:
 test-one name:
     cargo +{{rust}} test {{name}} -- --nocapture
 
-# ============================================================================
-# Benchmarks
-# ============================================================================
-
-# Run all benchmarks locally
-bench:
-    cargo +{{rust}} bench --workspace
-
-# Run a specific benchmark suite
-bench-suite suite:
-    cargo +{{rust}} bench --workspace --bench {{suite}}
-
-# Run benchmarks with bencher output for CI (machine-readable)
-bench-ci:
-    cargo +{{rust}} bench -p inferadb-ledger-store --bench btree_bench -- --output-format bencher
-    cargo +{{rust}} bench -p inferadb-ledger-server --bench read_bench -- --output-format bencher
-    cargo +{{rust}} bench -p inferadb-ledger-server --bench write_bench -- --output-format bencher
-    cargo +{{rust}} bench -p inferadb-ledger-raft --bench logging_bench -- --output-format bencher
 
 # ============================================================================
 # Code Quality
@@ -94,11 +76,8 @@ check: fmt-check clippy test
 # Quick check (format + clippy only) - faster pre-commit validation
 check-quick: fmt-check clippy
 
-# CI validation: format + clippy + doc + tests (excludes integration tests that require a running cluster)
-ci: fmt-check clippy doc-check
-    cargo +{{rust}} test --workspace --exclude inferadb-ledger-sdk --exclude inferadb-ledger-server
-    cargo +{{rust}} test -p inferadb-ledger-sdk --lib
-    cargo +{{rust}} test -p inferadb-ledger-server --lib
+# CI validation: format + clippy + doc + unit tests
+ci: fmt-check clippy doc-check test
 
 # Pre-PR validation: regenerate protos, autoformat, lint, and test
 ready: proto fmt clippy test

@@ -362,8 +362,8 @@ mod tests {
 
     fn make_request(organization_id: i64, vault_id: i64) -> LedgerRequest {
         LedgerRequest::Write {
-            organization_id: inferadb_ledger_types::OrganizationId::new(organization_id),
-            vault_id: inferadb_ledger_types::VaultId::new(vault_id),
+            organization: inferadb_ledger_types::OrganizationId::new(organization_id),
+            vault: inferadb_ledger_types::VaultId::new(vault_id),
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,

@@ -147,8 +147,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization_id: SYSTEM_ORGANIZATION_ID,
-            vault_id: SYSTEM_VAULT_ID,
+            organization: SYSTEM_ORGANIZATION_ID,
+            vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -445,8 +445,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization_id: SYSTEM_ORGANIZATION_ID,
-            vault_id: SYSTEM_VAULT_ID,
+            organization: SYSTEM_ORGANIZATION_ID,
+            vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -493,8 +493,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -533,8 +533,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,

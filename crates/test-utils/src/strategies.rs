@@ -230,8 +230,8 @@ pub fn arb_block_header() -> impl Strategy<Value = BlockHeader> {
             )| {
                 BlockHeader {
                     height,
-                    organization_id,
-                    vault_id,
+                    organization: organization_id,
+                    vault: vault_id,
                     previous_hash,
                     tx_merkle_root,
                     state_root,
@@ -271,8 +271,8 @@ pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
                 state_root,
             )| {
                 VaultEntry {
-                    organization_id,
-                    vault_id,
+                    organization: organization_id,
+                    vault: vault_id,
                     vault_height,
                     previous_vault_hash,
                     transactions,
@@ -380,8 +380,8 @@ pub fn arb_event_entry() -> impl Strategy<Value = EventEntry> {
         "[a-z]{3,10}",         // principal
     );
     let optional = (
-        proptest::option::of(0u64..100_000),     // organization_slug
-        proptest::option::of(0u64..100_000),     // vault_slug
+        proptest::option::of(0u64..100_000),     // organization
+        proptest::option::of(0u64..100_000),     // vault
         proptest::option::of(0u64..1_000_000),   // block_height
         proptest::option::of("[a-f0-9]{16}"),    // trace_id
         proptest::option::of("[a-z0-9-]{8,20}"), // correlation_id
@@ -401,8 +401,8 @@ pub fn arb_event_entry() -> impl Strategy<Value = EventEntry> {
                 principal,
             ),
             (
-                organization_slug,
-                vault_slug,
+                organization,
+                vault,
                 block_height,
                 trace_id,
                 correlation_id,
@@ -423,8 +423,8 @@ pub fn arb_event_entry() -> impl Strategy<Value = EventEntry> {
                 emission,
                 principal,
                 organization_id,
-                organization_slug,
-                vault_slug,
+                organization,
+                vault,
                 outcome,
                 details,
                 block_height,
@@ -472,8 +472,8 @@ mod tests {
 
         #[test]
         fn strategy_produces_valid_block_headers(header in arb_block_header()) {
-            prop_assert!(header.organization_id.value() > 0);
-            prop_assert!(header.vault_id.value() > 0);
+            prop_assert!(header.organization.value() > 0);
+            prop_assert!(header.vault.value() > 0);
         }
 
         #[test]

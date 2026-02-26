@@ -10,12 +10,11 @@
     clippy::manual_range_contains
 )]
 
-mod common;
-
 use std::time::Duration;
 
-use common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 use serial_test::serial;
+
+use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -44,12 +43,14 @@ async fn create_organization(
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    org_slug: u64,
+    organization: u64,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization,
+            }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -147,9 +148,9 @@ async fn test_single_node_write_read() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "write-read-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create a write client
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
@@ -158,8 +159,8 @@ async fn test_single_node_write_read() {
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "test-client".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -201,9 +202,9 @@ async fn test_write_idempotency() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "idempotency-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
@@ -215,8 +216,8 @@ async fn test_write_idempotency() {
             id: "idempotent-client".to_string(),
         }),
         idempotency_key: idempotency_key.clone(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -263,9 +264,9 @@ async fn test_write_creates_retrievable_block() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "block-test-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create write and read clients
     let mut write_client = create_write_client(leader.addr).await.expect("connect to leader");
@@ -276,8 +277,8 @@ async fn test_write_creates_retrievable_block() {
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "block-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -302,8 +303,8 @@ async fn test_write_creates_retrievable_block() {
 
     // Retrieve the block via GetBlock
     let get_block_request = inferadb_ledger_proto::proto::GetBlockRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         height: block_height,
     };
 
@@ -344,9 +345,9 @@ async fn test_three_node_write_replication() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "replication-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
@@ -356,8 +357,8 @@ async fn test_three_node_write_replication() {
             id: "replication-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {

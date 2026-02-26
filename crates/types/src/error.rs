@@ -346,10 +346,10 @@ pub enum LedgerError {
     /// **Recovery**: Not retryable directly. The `AutoRecoveryJob` will
     /// attempt automatic recovery. Monitor `VaultHealth` status and wait
     /// for the vault to return to `Healthy`.
-    #[snafu(display("Vault {vault_id} diverged at height {height}"))]
+    #[snafu(display("Vault {vault} diverged at height {height}"))]
     VaultDiverged {
         /// Vault identifier.
-        vault_id: VaultId,
+        vault: VaultId,
         /// Block height where divergence detected.
         height: u64,
     },
@@ -358,10 +358,10 @@ pub enum LedgerError {
     ///
     /// **Recovery**: Retry after a short delay. The vault may be undergoing
     /// automatic recovery or migration. Check vault health status for details.
-    #[snafu(display("Vault {vault_id} is unavailable: {reason}"))]
+    #[snafu(display("Vault {vault} is unavailable: {reason}"))]
     VaultUnavailable {
         /// Vault identifier.
-        vault_id: VaultId,
+        vault: VaultId,
         /// Reason for unavailability.
         reason: String,
     },
@@ -370,22 +370,22 @@ pub enum LedgerError {
     ///
     /// **Recovery**: Not retryable. Verify the organization exists via
     /// `AdminService::get_organization` or create it with `create_organization`.
-    #[snafu(display("Organization {organization_id} not found"))]
+    #[snafu(display("Organization {organization} not found"))]
     OrganizationNotFound {
         /// Organization identifier.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     },
 
     /// Vault not found within the organization.
     ///
     /// **Recovery**: Not retryable. Verify the vault exists via
     /// `AdminService::get_vault` or create it with `create_vault`.
-    #[snafu(display("Vault {vault_id} not found in organization {organization_id}"))]
+    #[snafu(display("Vault {vault} not found in organization {organization}"))]
     VaultNotFound {
         /// Organization identifier.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// Vault identifier.
-        vault_id: VaultId,
+        vault: VaultId,
     },
 
     /// Entity not found at the given key.
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = LedgerError::VaultDiverged { vault_id: VaultId::new(42), height: 100 };
+        let err = LedgerError::VaultDiverged { vault: VaultId::new(42), height: 100 };
         assert_eq!(err.to_string(), "Vault vault:42 diverged at height 100");
     }
 
@@ -994,7 +994,7 @@ mod tests {
     #[test]
     fn test_ledger_error_vault_unavailable_retryable() {
         let err = LedgerError::VaultUnavailable {
-            vault_id: VaultId::new(1),
+            vault: VaultId::new(1),
             reason: "recovering".to_string(),
         };
         assert_eq!(err.code(), ErrorCode::AppVaultUnavailable);
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn test_ledger_error_not_found_not_retryable() {
-        let err = LedgerError::OrganizationNotFound { organization_id: OrganizationId::new(1) };
+        let err = LedgerError::OrganizationNotFound { organization: OrganizationId::new(1) };
         assert_eq!(err.code(), ErrorCode::AppOrganizationNotFound);
         assert!(!err.is_retryable());
     }
@@ -1029,12 +1029,12 @@ mod tests {
                 location: snafu::Location::new("", 0, 0),
             },
             LedgerError::HashMismatch { expected: Hash::default(), actual: Hash::default() },
-            LedgerError::VaultDiverged { vault_id: VaultId::new(0), height: 0 },
-            LedgerError::VaultUnavailable { vault_id: VaultId::new(0), reason: String::new() },
-            LedgerError::OrganizationNotFound { organization_id: OrganizationId::new(0) },
+            LedgerError::VaultDiverged { vault: VaultId::new(0), height: 0 },
+            LedgerError::VaultUnavailable { vault: VaultId::new(0), reason: String::new() },
+            LedgerError::OrganizationNotFound { organization: OrganizationId::new(0) },
             LedgerError::VaultNotFound {
-                organization_id: OrganizationId::new(0),
-                vault_id: VaultId::new(0),
+                organization: OrganizationId::new(0),
+                vault: VaultId::new(0),
             },
             LedgerError::EntityNotFound { key: String::new() },
             LedgerError::PreconditionFailed { key: String::new(), reason: String::new() },
@@ -1173,7 +1173,7 @@ mod tests {
     #[test]
     fn test_ledger_error_retryability_matches_code() {
         let err =
-            LedgerError::VaultUnavailable { vault_id: VaultId::new(1), reason: "test".to_string() };
+            LedgerError::VaultUnavailable { vault: VaultId::new(1), reason: "test".to_string() };
         assert_eq!(err.is_retryable(), err.code().is_retryable());
 
         let err2 = LedgerError::InvalidArgument { message: "bad".to_string() };

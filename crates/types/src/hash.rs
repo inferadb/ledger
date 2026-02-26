@@ -66,8 +66,8 @@ pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
 ///
 /// Encoding layout:
 /// - height: 8 bytes (u64 BE)
-/// - organization_id: 8 bytes (i64 BE)
-/// - vault_id: 8 bytes (i64 BE)
+/// - organization: 8 bytes (i64 BE)
+/// - vault: 8 bytes (i64 BE)
 /// - previous_hash: 32 bytes
 /// - tx_merkle_root: 32 bytes
 /// - state_root: 32 bytes
@@ -87,12 +87,12 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
     buf[offset..offset + 8].copy_from_slice(&header.height.to_be_bytes());
     offset += 8;
 
-    // organization_id: i64 BE
-    buf[offset..offset + 8].copy_from_slice(&header.organization_id.value().to_be_bytes());
+    // organization: i64 BE
+    buf[offset..offset + 8].copy_from_slice(&header.organization.value().to_be_bytes());
     offset += 8;
 
-    // vault_id: i64 BE
-    buf[offset..offset + 8].copy_from_slice(&header.vault_id.value().to_be_bytes());
+    // vault: i64 BE
+    buf[offset..offset + 8].copy_from_slice(&header.vault.value().to_be_bytes());
     offset += 8;
 
     // previous_hash: 32 bytes
@@ -317,8 +317,8 @@ pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
 ///
 /// This hash is used to identify a vault entry across all Raft nodes.
 /// It uses only deterministic fields that are identical on all nodes:
-/// - organization_id
-/// - vault_id
+/// - organization
+/// - vault
 /// - vault_height
 /// - previous_vault_hash
 /// - tx_merkle_root
@@ -328,11 +328,11 @@ pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
 pub fn vault_entry_hash(entry: &crate::types::VaultEntry) -> Hash {
     let mut hasher = Sha256::new();
 
-    // organization_id: i64 as LE
-    hasher.update(entry.organization_id.value().to_le_bytes());
+    // organization: i64 as LE
+    hasher.update(entry.organization.value().to_le_bytes());
 
-    // vault_id: i64 as LE
-    hasher.update(entry.vault_id.value().to_le_bytes());
+    // vault: i64 as LE
+    hasher.update(entry.vault.value().to_le_bytes());
 
     // vault_height: u64 as BE (matching block_hash style)
     hasher.update(entry.vault_height.to_be_bytes());
@@ -496,8 +496,8 @@ mod tests {
     fn test_block_hash_deterministic() {
         let header = BlockHeader {
             height: 100,
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(2),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(2),
             previous_hash: ZERO_HASH,
             tx_merkle_root: sha256(b"tx_root"),
             state_root: sha256(b"state_root"),
@@ -626,8 +626,8 @@ mod tests {
     fn test_chain_commitment_single_block() {
         let header = BlockHeader {
             height: 1,
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             previous_hash: ZERO_HASH,
             tx_merkle_root: [1u8; 32],
             state_root: [2u8; 32],
@@ -655,8 +655,8 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=3)
             .map(|i| BlockHeader {
                 height: i,
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],
                 state_root: [(i + 20) as u8; 32],
@@ -689,8 +689,8 @@ mod tests {
         let headers: Vec<BlockHeader> = (1..=5)
             .map(|i| BlockHeader {
                 height: i,
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 previous_hash: [i as u8; 32],
                 tx_merkle_root: [(i + 10) as u8; 32],
                 state_root: [(i + 20) as u8; 32],

@@ -175,9 +175,7 @@ impl MultiShardReadService {
 
             // Find the vault entry
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.organization_id == organization_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
@@ -291,7 +289,7 @@ impl MultiShardReadService {
         // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
         // not slug-to-internal-id, since announcements carry the original slug)
         let watch_slug = req.organization.as_ref().map_or(0u64, |n| n.slug);
-        let vault_slug_raw = req.vault.as_ref().map_or(0u64, |v| v.slug);
+        let vault_raw = req.vault.as_ref().map_or(0u64, |v| v.slug);
         let broadcast_stream = BroadcastStream::new(receiver).filter_map(move |result| {
             async move {
                 match result {
@@ -301,7 +299,7 @@ impl MultiShardReadService {
                             return None;
                         }
                         // Filter by vault
-                        if announcement.vault.as_ref().map_or(0, |v| v.slug) != vault_slug_raw {
+                        if announcement.vault.as_ref().map_or(0, |v| v.slug) != vault_raw {
                             return None;
                         }
                         // Skip blocks we already sent from history
@@ -358,9 +356,7 @@ impl MultiShardReadService {
 
             // Find the vault entry
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.organization_id == organization_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             }) {
                 // Compute block hash from vault entry (hash of previous_hash || state_root ||
                 // tx_merkle_root) For announcements, we use the tx_merkle_root as a
@@ -402,7 +398,7 @@ impl MultiShardReadService {
 
 #[tonic::async_trait]
 impl ReadService for MultiShardReadService {
-    #[instrument(skip(self, request), fields(organization_id, vault_slug, key))]
+    #[instrument(skip(self, request), fields(organization_id, vault, key))]
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         let start = Instant::now();
         let req = request.into_inner();
@@ -417,7 +413,7 @@ impl ReadService for MultiShardReadService {
 
         // Record span fields
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
         tracing::Span::current().record("key", &req.key);
 
         // Check consistency requirements
@@ -459,7 +455,7 @@ impl ReadService for MultiShardReadService {
     }
 
     /// Batches read multiple keys in a single RPC call.
-    #[instrument(skip(self, request), fields(organization_id, vault_slug, batch_size))]
+    #[instrument(skip(self, request), fields(organization_id, vault, batch_size))]
     async fn batch_read(
         &self,
         request: Request<inferadb_ledger_proto::proto::BatchReadRequest>,
@@ -489,7 +485,7 @@ impl ReadService for MultiShardReadService {
 
         // Record span fields
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
         tracing::Span::current().record("batch_size", req.keys.len());
 
         // Check consistency requirements
@@ -544,7 +540,7 @@ impl ReadService for MultiShardReadService {
         Ok(Response::new(BatchReadResponse { results, block_height }))
     }
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug, key))]
+    #[instrument(skip(self, request), fields(organization_id, vault, key))]
     async fn verified_read(
         &self,
         request: Request<VerifiedReadRequest>,
@@ -561,7 +557,7 @@ impl ReadService for MultiShardReadService {
             SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
 
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
         tracing::Span::current().record("key", &req.key);
 
         // Check vault health
@@ -608,7 +604,7 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug))]
+    #[instrument(skip(self, request), fields(organization_id, vault))]
     async fn get_tip(
         &self,
         request: Request<GetTipRequest>,
@@ -623,7 +619,7 @@ impl ReadService for MultiShardReadService {
             SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
 
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
 
         // Get vault height from applied state
         let height = ctx.applied_state.vault_height(organization_id, vault_id);
@@ -635,7 +631,7 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug))]
+    #[instrument(skip(self, request), fields(organization_id, vault))]
     async fn list_relationships(
         &self,
         request: Request<ListRelationshipsRequest>,
@@ -651,7 +647,7 @@ impl ReadService for MultiShardReadService {
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
 
         // Check consistency
         self.check_consistency(organization_id, req.consistency)?;
@@ -764,7 +760,7 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug))]
+    #[instrument(skip(self, request), fields(organization_id, vault))]
     async fn list_resources(
         &self,
         request: Request<ListResourcesRequest>,
@@ -780,7 +776,7 @@ impl ReadService for MultiShardReadService {
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
 
         // Check consistency
         self.check_consistency(organization_id, req.consistency)?;
@@ -813,7 +809,7 @@ impl ReadService for MultiShardReadService {
         }))
     }
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug))]
+    #[instrument(skip(self, request), fields(organization_id, vault))]
     async fn get_client_state(
         &self,
         request: Request<GetClientStateRequest>,
@@ -829,7 +825,7 @@ impl ReadService for MultiShardReadService {
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or_default();
 
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
 
         // Get client sequence from applied state
         let last_committed_sequence =
@@ -841,7 +837,7 @@ impl ReadService for MultiShardReadService {
     // Block-related methods - simplified implementations
     // Full block retrieval would require per-shard block archive infrastructure
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug, height))]
+    #[instrument(skip(self, request), fields(organization_id, vault, height))]
     async fn get_block(
         &self,
         request: Request<GetBlockRequest>,
@@ -888,7 +884,7 @@ impl ReadService for MultiShardReadService {
         Ok(Response::new(GetBlockRangeResponse { blocks: vec![], current_tip }))
     }
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug, at_height))]
+    #[instrument(skip(self, request), fields(organization_id, vault, at_height))]
     async fn historical_read(
         &self,
         request: Request<HistoricalReadRequest>,
@@ -906,7 +902,7 @@ impl ReadService for MultiShardReadService {
             .extract_and_resolve_vault(&req.vault)?;
 
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
         tracing::Span::current().record("at_height", req.at_height);
 
         // Validate at_height
@@ -941,7 +937,7 @@ impl ReadService for MultiShardReadService {
     type WatchBlocksStream =
         Pin<Box<dyn futures::Stream<Item = Result<BlockAnnouncement, Status>> + Send>>;
 
-    #[instrument(skip(self, request), fields(organization_id, vault_slug, start_height))]
+    #[instrument(skip(self, request), fields(organization_id, vault, start_height))]
     async fn watch_blocks(
         &self,
         request: Request<WatchBlocksRequest>,
@@ -958,7 +954,7 @@ impl ReadService for MultiShardReadService {
             .extract_and_resolve_vault(&req.vault)?;
 
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
         tracing::Span::current().record("start_height", req.start_height);
 
         // Check if resolver supports forwarding

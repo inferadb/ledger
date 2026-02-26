@@ -133,54 +133,6 @@ just test-proptest 50000
 
 Property tests run at default iterations (256) on every PR via the standard CI workflow. A dedicated nightly workflow (`.github/workflows/proptest.yml`) runs 10,000 iterations per test to catch rare edge cases.
 
-## Benchmarks
-
-Benchmarks use [criterion](https://bheisler.github.io/criterion.rs/book/) for statistical measurements with automated regression detection in CI.
-
-### Running Benchmarks
-
-```bash
-# Run all benchmarks
-just bench
-
-# Run a specific suite
-just bench-suite btree_bench
-just bench-suite read_bench
-just bench-suite write_bench
-
-# Machine-readable output for CI
-just bench-ci
-```
-
-### Benchmark Suites
-
-| Suite               | Crate    | Measures                                                                      |
-| ------------------- | -------- | ----------------------------------------------------------------------------- |
-| `btree_bench`       | `store`  | B+ tree point lookups, batch inserts, range scans, iteration, mixed workloads |
-| `read_bench`        | `server` | Single/sequential/random reads, multi-vault reads, missing key reads          |
-| `write_bench`       | `server` | Single writes, batch writes, state root computation, concurrent vault writes  |
-| `whitepaper_bench`  | `server` | Whitepaper performance claims: read/write latency percentiles, throughput     |
-| `logging_bench`     | `raft`   | Logging context creation, field population, sampling decisions                |
-| `client_bench`      | `sdk`    | SDK client read/write/batch operations against mock server                    |
-
-### Writing New Benchmarks
-
-1. Add `criterion.workspace = true` to the crate's `[dev-dependencies]`
-2. Create a `benches/<name>.rs` file with `criterion_main!` and `criterion_group!`
-3. Add `[[bench]] name = "<name>" harness = false` to the crate's `Cargo.toml`
-4. Use `Throughput::Elements(n)` for throughput benchmarks to enable ops/sec reporting
-5. Add the benchmark to `.github/workflows/benchmark.yml` for CI tracking
-
-### CI
-
-Benchmarks run on every push to `main` and on PRs via `.github/workflows/benchmark.yml`. The workflow:
-
-- Runs all benchmark suites with `--output-format bencher`
-- Compares results against stored baseline using `benchmark-action/github-action-benchmark`
-- Fails PRs that regress by more than 50% (150% threshold)
-- Comments on PRs with performance comparison
-- Stores historical data on `gh-pages` branch for trend tracking
-
 ## Review Process
 
 1. CI runs tests, linters, and formatters

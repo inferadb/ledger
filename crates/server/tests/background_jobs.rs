@@ -14,12 +14,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-mod common;
-
 use std::time::Duration;
 
-use common::{ExternalCluster, create_admin_client_from_url, create_health_client_from_url};
 use inferadb_ledger_proto::proto;
+
+use crate::common::{ExternalCluster, create_admin_client_from_url, create_health_client_from_url};
 
 /// Skip macro: returns early if no external cluster is available.
 macro_rules! require_cluster {
@@ -114,8 +113,8 @@ async fn test_vault_health_tracking() {
         .await
         .expect("create vault");
 
-    let vault_slug = vault_response.into_inner().vault.map(|v| v.slug).unwrap();
-    assert!(vault_slug > 0, "vault should have valid ID");
+    let vault = vault_response.into_inner().vault.map(|v| v.slug).unwrap();
+    assert!(vault > 0, "vault should have valid ID");
 
     // Wait for auto-recovery job to potentially scan the new vault
     tokio::time::sleep(Duration::from_millis(500)).await;

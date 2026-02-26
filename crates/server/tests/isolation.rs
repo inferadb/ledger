@@ -15,12 +15,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-mod common;
-
 use std::time::Duration;
 
-use common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 use serial_test::serial;
+
+use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -66,17 +65,16 @@ async fn create_vault(
         })
         .await?;
 
-    let vault_slug =
-        response.into_inner().vault.map(|v| v.slug).ok_or("No vault_slug in response")?;
+    let vault = response.into_inner().vault.map(|v| v.slug).ok_or("No vault in response")?;
 
-    Ok(vault_slug)
+    Ok(vault)
 }
 
 /// Writes a key-value pair to a vault.
 async fn write_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_slug: u64,
+    vault: u64,
     key: &str,
     value: &[u8],
     client_id: &str,
@@ -87,7 +85,7 @@ async fn write_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -120,7 +118,7 @@ async fn write_entity(
 async fn read_entity(
     addr: std::net::SocketAddr,
     organization_id: i64,
-    vault_slug: u64,
+    vault: u64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
@@ -129,7 +127,7 @@ async fn read_entity(
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: organization_id as u64,
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -233,8 +231,8 @@ async fn test_multi_vault_isolation() {
     // Create 5 vaults
     let mut vaults = Vec::new();
     for _ in 0..5 {
-        let vault_slug = create_vault(leader.addr, ns_id).await.expect("create vault");
-        vaults.push(vault_slug);
+        let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+        vaults.push(vault);
     }
 
     // Verify all vault IDs are unique
@@ -242,11 +240,11 @@ async fn test_multi_vault_isolation() {
     assert_eq!(unique_count, 5, "All vault IDs should be unique");
 
     // Write to each vault
-    for (i, &vault_slug) in vaults.iter().enumerate() {
+    for (i, &vault) in vaults.iter().enumerate() {
         write_entity(
             leader.addr,
             ns_id,
-            vault_slug,
+            vault,
             "common-key",
             format!("vault-{}-value", i).as_bytes(),
             &format!("client-{}", i),
@@ -256,8 +254,8 @@ async fn test_multi_vault_isolation() {
     }
 
     // Verify each vault has its own value
-    for (i, &vault_slug) in vaults.iter().enumerate() {
-        let value = read_entity(leader.addr, ns_id, vault_slug, "common-key")
+    for (i, &vault) in vaults.iter().enumerate() {
+        let value = read_entity(leader.addr, ns_id, vault, "common-key")
             .await
             .expect("read from vault")
             .expect("should have value");
@@ -322,17 +320,17 @@ async fn test_organization_isolation() {
 
 /// Tests behavior when accessing a vault with a mismatched organization_id.
 ///
-/// DESIGN NOTE: Since vault_slugs are globally unique (generated from a global
-/// sequence counter), the vault_slug alone is sufficient to identify data.
+/// DESIGN NOTE: Since vaults are globally unique (generated from a global
+/// sequence counter), the vault alone is sufficient to identify data.
 /// The organization_id parameter is currently NOT validated on reads - the system
-/// trusts the globally unique vault_slug as the authoritative identifier.
+/// trusts the globally unique vault as the authoritative identifier.
 ///
 /// This test documents the current behavior. Actual data isolation is ensured
-/// by the global uniqueness of vault_slugs - you cannot access another vault's
-/// data without knowing its vault_slug.
+/// by the global uniqueness of vaults - you cannot access another vault's
+/// data without knowing its vault.
 #[serial]
 #[tokio::test]
-async fn test_vault_slug_is_authoritative_identifier() {
+async fn test_vault_is_authoritative_identifier() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
@@ -360,7 +358,7 @@ async fn test_vault_slug_is_authoritative_identifier() {
         .await
         .expect("write to vault 2");
 
-    // Key point: vault_slug is the authoritative identifier
+    // Key point: vault is the authoritative identifier
     // Reading vault_2 with correct IDs gets vault_2's data
     let result = read_entity(leader.addr, ns_2, vault_2, "test-key")
         .await
@@ -376,7 +374,7 @@ async fn test_vault_slug_is_authoritative_identifier() {
     assert_eq!(result, b"vault1-data");
 
     // SECURITY: You CANNOT access vault_1's data using vault_2's ID
-    // The vault_slug being globally unique means you need the correct vault_slug
+    // The vault being globally unique means you need the correct vault
     // to access data - organization_id validation is not the isolation mechanism.
     let result = read_entity(leader.addr, ns_2, vault_2, "test-key")
         .await
@@ -469,7 +467,7 @@ async fn test_concurrent_vault_writes() {
 /// Verifies that vault IDs are monotonically increasing and globally unique.
 #[serial]
 #[tokio::test]
-async fn test_vault_slug_global_uniqueness() {
+async fn test_vault_global_uniqueness() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
@@ -480,40 +478,37 @@ async fn test_vault_slug_global_uniqueness() {
     let ns_3 = create_organization(leader.addr, "uniqueness-ns-3").await.expect("create ns3");
 
     // Collect vault IDs from all organizations
-    let mut all_vault_slugs = Vec::new();
+    let mut all_vaults = Vec::new();
 
     // Create vaults in ns_1
     for _ in 0..3 {
-        let vault_slug = create_vault(leader.addr, ns_1).await.expect("create vault");
-        all_vault_slugs.push(vault_slug);
+        let vault = create_vault(leader.addr, ns_1).await.expect("create vault");
+        all_vaults.push(vault);
     }
 
     // Create vaults in ns_2
     for _ in 0..3 {
-        let vault_slug = create_vault(leader.addr, ns_2).await.expect("create vault");
-        all_vault_slugs.push(vault_slug);
+        let vault = create_vault(leader.addr, ns_2).await.expect("create vault");
+        all_vaults.push(vault);
     }
 
     // Create vaults in ns_3
     for _ in 0..3 {
-        let vault_slug = create_vault(leader.addr, ns_3).await.expect("create vault");
-        all_vault_slugs.push(vault_slug);
+        let vault = create_vault(leader.addr, ns_3).await.expect("create vault");
+        all_vaults.push(vault);
     }
 
     // Verify all IDs are unique
-    let unique_count = all_vault_slugs.iter().collect::<std::collections::HashSet<_>>().len();
+    let unique_count = all_vaults.iter().collect::<std::collections::HashSet<_>>().len();
     assert_eq!(
         unique_count,
-        all_vault_slugs.len(),
+        all_vaults.len(),
         "All vault IDs across all organizations should be unique"
     );
 
     // Verify IDs are monotonically increasing
-    for i in 1..all_vault_slugs.len() {
-        assert!(
-            all_vault_slugs[i] > all_vault_slugs[i - 1],
-            "Vault IDs should be monotonically increasing"
-        );
+    for i in 1..all_vaults.len() {
+        assert!(all_vaults[i] > all_vaults[i - 1], "Vault IDs should be monotonically increasing");
     }
 }
 

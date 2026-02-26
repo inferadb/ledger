@@ -49,7 +49,7 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 **A task is not complete until all of these pass — no "pre-existing issue" exceptions:**
 
 - `cargo build --workspace` — no errors or warnings
-- `cargo nextest run` — all tests pass
+- `cargo test --workspace --lib` — all unit tests pass
 - `cargo +1.92 clippy --workspace --all-targets -- -D warnings` — no warnings
 - `cargo +nightly fmt --all -- --check` — no formatting issues
 
@@ -83,9 +83,9 @@ Use `just` for common tasks (see `Justfile` for all commands):
 just              # list available commands
 just check        # pre-commit: fmt + clippy + test
 just check-quick  # fast pre-commit: fmt + clippy only
-just test-fast    # quick tests (~15s)
-just test         # standard tests (~30s)
-just test-full    # all tests including slow (~5min)
+just test         # unit tests only
+just test-integration  # integration tests (spawns clusters)
+just test-all     # all tests including slow/ignored
 just fmt          # format code
 just clippy       # run linter
 just proto        # generate protobuf code

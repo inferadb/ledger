@@ -20,8 +20,6 @@
     missing_docs
 )]
 
-mod turmoil_common;
-
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -40,7 +38,8 @@ use inferadb_ledger_proto::proto::{
 use parking_lot::Mutex;
 use tonic::{Request, Response, Status, transport::Server};
 use turmoil::Builder;
-use turmoil_common::incoming_stream;
+
+use crate::{turmoil_common, turmoil_common::incoming_stream};
 
 /// Operation types for consistency checking.
 #[derive(Debug, Clone)]

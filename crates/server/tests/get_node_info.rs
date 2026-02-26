@@ -5,14 +5,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-mod common;
-
 use std::time::Duration;
 
-use common::{TestCluster, create_admin_client};
 use inferadb_ledger_proto::proto::GetNodeInfoRequest;
 use inferadb_ledger_server::discovery::discover_node_info;
 use serial_test::serial;
+
+use crate::common::{TestCluster, create_admin_client};
 
 /// Tests GetNodeInfo returns correct node ID before bootstrap.
 ///

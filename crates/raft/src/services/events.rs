@@ -531,7 +531,7 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
         // 6. Resolve organization
         let resolver = SlugResolver::new(self.applied_state.clone());
         let org_id = resolver.extract_and_resolve_for_events(&req.organization)?;
-        let org_slug = req.organization.as_ref().map(|o| o.slug);
+        let organization = req.organization.as_ref().map(|o| o.slug);
 
         // 7. Process each entry — validate and convert to EventEntry
         let now = Utc::now();
@@ -652,8 +652,8 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
                 emission: EventEmission::HandlerPhase { node_id },
                 principal: proto_entry.principal.clone(),
                 organization_id: org_id,
-                organization_slug: org_slug,
-                vault_slug: proto_entry.vault.as_ref().map(|v| v.slug),
+                organization,
+                vault: proto_entry.vault.as_ref().map(|v| v.slug),
                 outcome,
                 details,
                 block_height: None,
@@ -846,8 +846,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "test-user".to_string(),
             organization_id: OrganizationId::new(org_id),
-            organization_slug: None,
-            vault_slug: None,
+            organization: None,
+            vault: None,
             outcome: EventOutcome::Success,
             details: BTreeMap::new(),
             block_height: Some(1),

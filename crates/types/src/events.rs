@@ -98,11 +98,11 @@ pub struct EventEntry {
 
     /// External organization slug (for API responses).
     #[serde(default)]
-    pub organization_slug: Option<u64>,
+    pub organization: Option<u64>,
 
     /// Vault context (when applicable).
     #[serde(default)]
-    pub vault_slug: Option<u64>,
+    pub vault: Option<u64>,
 
     /// Success, failure, or denial.
     pub outcome: EventOutcome,
@@ -872,8 +872,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "user:alice".to_string(),
             organization_id: OrganizationId::new(42),
-            organization_slug: Some(12345),
-            vault_slug: Some(67890),
+            organization: Some(12345),
+            vault: Some(67890),
             outcome: EventOutcome::Success,
             details: BTreeMap::from([("vault_name".to_string(), "my-vault".to_string())]),
             block_height: Some(100),
@@ -912,8 +912,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: String::new(),
             organization_id: OrganizationId::new(0),
-            organization_slug: None,
-            vault_slug: None,
+            organization: None,
+            vault: None,
             outcome: EventOutcome::Success,
             details: BTreeMap::new(),
             block_height: None,
@@ -1045,8 +1045,8 @@ mod tests {
         let entry: EventEntry = serde_json::from_str(json).expect("deserialize with defaults");
         assert!(entry.source_service.is_empty());
         assert!(entry.event_type.is_empty());
-        assert!(entry.organization_slug.is_none());
-        assert!(entry.vault_slug.is_none());
+        assert!(entry.organization.is_none());
+        assert!(entry.vault.is_none());
         assert!(entry.details.is_empty());
         assert!(entry.block_height.is_none());
         assert!(entry.trace_id.is_none());

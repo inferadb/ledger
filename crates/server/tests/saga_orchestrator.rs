@@ -9,13 +9,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-mod common;
-
 use std::time::Duration;
 
-use common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 use inferadb_ledger_types::{OrganizationId, UserId};
 use serial_test::serial;
+
+use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -44,29 +43,30 @@ async fn create_organization(
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    org_slug: u64,
+    organization: u64,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization,
+            }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
         })
         .await?;
 
-    let vault_slug =
-        response.into_inner().vault.map(|v| v.slug).ok_or("No vault_slug in response")?;
+    let vault = response.into_inner().vault.map(|v| v.slug).ok_or("No vault in response")?;
 
-    Ok(vault_slug)
+    Ok(vault)
 }
 
 /// Writes an entity to an organization.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    org_slug: u64,
-    vault_slug: u64,
+    organization: u64,
+    vault: u64,
     key: &str,
     value: &serde_json::Value,
     client_id: &str,
@@ -74,8 +74,8 @@ async fn write_entity(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -105,15 +105,15 @@ async fn write_entity(
 /// Reads an entity from an organization.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    org_slug: u64,
-    vault_slug: u64,
+    organization: u64,
+    vault: u64,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -178,9 +178,9 @@ async fn test_create_org_saga_execution() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault for saga storage
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "saga-exec-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create a CreateOrg saga
     let saga_id = "test-create-org-1".to_string();
@@ -197,7 +197,7 @@ async fn test_create_org_saga_execution() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_entity(leader.addr, org_slug, vault_slug, &saga_key, &saga_value, "saga-test-client")
+    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "saga-test-client")
         .await
         .expect("write saga");
 
@@ -206,7 +206,7 @@ async fn test_create_org_saga_execution() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Read the saga back and verify it round-trips correctly
-    let saga_bytes = read_entity(leader.addr, org_slug, vault_slug, &saga_key)
+    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
         .await
         .expect("read saga")
         .expect("saga exists");
@@ -237,9 +237,9 @@ async fn test_delete_user_saga_state_transitions() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "delete-user-saga-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // First, create a user entity
     let user_id = 12345i64;
@@ -251,7 +251,7 @@ async fn test_delete_user_saga_state_transitions() {
         "status": "ACTIVE",
     });
 
-    write_entity(leader.addr, org_slug, vault_slug, &user_key, &user_value, "delete-test-client")
+    write_entity(leader.addr, organization, vault, &user_key, &user_value, "delete-test-client")
         .await
         .expect("create user");
 
@@ -259,7 +259,7 @@ async fn test_delete_user_saga_state_transitions() {
     let saga_id = "test-delete-user-1".to_string();
     let input = DeleteUserInput {
         user_id: UserId::new(user_id),
-        organization_ids: vec![OrganizationId::new(org_slug as i64)],
+        organization_ids: vec![OrganizationId::new(organization as i64)],
     };
     let saga = DeleteUserSaga::new(saga_id.clone(), input);
     let wrapped = Saga::DeleteUser(saga);
@@ -268,7 +268,7 @@ async fn test_delete_user_saga_state_transitions() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_entity(leader.addr, org_slug, vault_slug, &saga_key, &saga_value, "delete-test-client")
+    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "delete-test-client")
         .await
         .expect("write delete saga");
 
@@ -276,7 +276,7 @@ async fn test_delete_user_saga_state_transitions() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Read saga and verify it round-trips correctly
-    let saga_bytes = read_entity(leader.addr, org_slug, vault_slug, &saga_key)
+    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
         .await
         .expect("read saga")
         .expect("saga should exist");
@@ -303,9 +303,9 @@ async fn test_completed_saga_not_reexecuted() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "completed-saga-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create a saga that's already completed
     let saga_id = "test-completed-saga".to_string();
@@ -327,22 +327,15 @@ async fn test_completed_saga_not_reexecuted() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_entity(
-        leader.addr,
-        org_slug,
-        vault_slug,
-        &saga_key,
-        &saga_value,
-        "completed-test-client",
-    )
-    .await
-    .expect("write completed saga");
+    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "completed-test-client")
+        .await
+        .expect("write completed saga");
 
     // Give orchestrator time
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Read saga back - it should still be in Completed state (not re-processed)
-    let saga_bytes = read_entity(leader.addr, org_slug, vault_slug, &saga_key)
+    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
         .await
         .expect("read saga")
         .expect("saga exists");
@@ -372,9 +365,9 @@ async fn test_saga_serialization_roundtrip() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org_slug =
+    let organization =
         create_organization(leader.addr, "roundtrip-saga-ns").await.expect("create organization");
-    let vault_slug = create_vault(leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create saga with various field values
     let saga_id = "test-roundtrip-saga".to_string();
@@ -391,12 +384,12 @@ async fn test_saga_serialization_roundtrip() {
     let saga_key = format!("saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_entity(leader.addr, org_slug, vault_slug, &saga_key, &saga_value, "roundtrip-client")
+    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "roundtrip-client")
         .await
         .expect("write saga");
 
     // Read back
-    let saga_bytes = read_entity(leader.addr, org_slug, vault_slug, &saga_key)
+    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
         .await
         .expect("read saga")
         .expect("saga exists");

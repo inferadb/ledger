@@ -397,9 +397,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 archive.read_block(shard_height).context(BlockReadSnafu { shard_height })?;
 
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.organization_id == organization_id
-                    && e.vault_id == vault_id
-                    && e.vault_height == height
+                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
@@ -460,8 +458,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         recovery_started_at: Option<i64>,
     ) -> Result<(), RecoveryError> {
         let request = LedgerRequest::UpdateVaultHealth {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             healthy,
             expected_root,
             computed_root,

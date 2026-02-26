@@ -72,11 +72,6 @@ inferadb-ledger-server = { workspace = true }
 inferadb-ledger-test-utils = { workspace = true }
 openraft = { workspace = true }
 serial_test = "3.2"
-criterion.workspace = true
-
-[[bench]]
-name = "client_bench"
-harness = false
 
 [lints]
 workspace = true

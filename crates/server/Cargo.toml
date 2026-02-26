@@ -8,6 +8,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+autotests = false
 
 [lib]
 name = "inferadb_ledger_server"
@@ -73,7 +74,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 rand.workspace = true
 inferadb-ledger-test-utils.workspace = true
 futures.workspace = true
-criterion.workspace = true
 serial_test = "3.2"
 uuid.workspace = true
 
@@ -84,17 +84,8 @@ hyper-util.workspace = true
 async-stream.workspace = true
 tower.workspace = true
 
-[[bench]]
-name = "write_bench"
-harness = false
-
-[[bench]]
-name = "read_bench"
-harness = false
-
-[[bench]]
-name = "whitepaper_bench"
-harness = false
+[[test]]
+name = "integration"
 
 [lints]
 workspace = true

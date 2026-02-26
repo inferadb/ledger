@@ -441,16 +441,16 @@ impl From<&proto::VaultSlug> for VaultSlug {
 /// Converts a VaultEntry from storage to a proto Block.
 ///
 /// This is a free function rather than a `From` impl because it requires additional
-/// context (the ShardBlock and vault slug) to populate the block header.
+/// context (the ShardBlock and vault) to populate the block header.
 ///
-/// The `vault_slug` parameter must be provided by the caller (service layer) since
+/// The `vault` parameter must be provided by the caller (service layer) since
 /// the conversion layer does not have access to the `AppliedState` slug index.
-/// The vault slug is the external Snowflake identifier — never the internal
+/// The vault is the external Snowflake identifier — never the internal
 /// sequential `VaultId`.
 pub fn vault_entry_to_proto_block(
     entry: &inferadb_ledger_types::VaultEntry,
     shard_block: &inferadb_ledger_types::ShardBlock,
-    vault_slug: VaultSlug,
+    vault: VaultSlug,
 ) -> proto::Block {
     use prost_types::Timestamp;
 
@@ -474,8 +474,8 @@ pub fn vault_entry_to_proto_block(
     // Build block header
     let header = proto::BlockHeader {
         height: entry.vault_height,
-        organization: Some(proto::OrganizationSlug { slug: entry.organization_id.value() as u64 }),
-        vault: Some(vault_slug.into()),
+        organization: Some(proto::OrganizationSlug { slug: entry.organization.value() as u64 }),
+        vault: Some(vault.into()),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),
@@ -602,9 +602,9 @@ impl From<&EventEntry> for proto::EventEntry {
             emission_path: proto::EventEmissionPath::from(&entry.emission).into(),
             principal: entry.principal.clone(),
             organization: Some(proto::OrganizationSlug {
-                slug: entry.organization_slug.unwrap_or(entry.organization_id.value() as u64),
+                slug: entry.organization.unwrap_or(entry.organization_id.value() as u64),
             }),
-            vault: entry.vault_slug.map(|s| proto::VaultSlug { slug: s }),
+            vault: entry.vault.map(|s| proto::VaultSlug { slug: s }),
             outcome: proto::EventOutcome::from(&entry.outcome).into(),
             error_code,
             error_detail,
@@ -686,8 +686,8 @@ impl TryFrom<&proto::EventEntry> for EventEntry {
             },
         };
 
-        let organization_slug = proto_entry.organization.as_ref().map(|o| o.slug);
-        let organization_id = OrganizationId::new(organization_slug.unwrap_or(0) as i64);
+        let organization = proto_entry.organization.as_ref().map(|o| o.slug);
+        let organization_id = OrganizationId::new(organization.unwrap_or(0) as i64);
 
         Ok(EventEntry {
             expires_at: proto_entry.expires_at,
@@ -700,8 +700,8 @@ impl TryFrom<&proto::EventEntry> for EventEntry {
             emission,
             principal: proto_entry.principal.clone(),
             organization_id,
-            organization_slug,
-            vault_slug: proto_entry.vault.as_ref().map(|v| v.slug),
+            organization,
+            vault: proto_entry.vault.as_ref().map(|v| v.slug),
             outcome,
             details: proto_entry.details.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             block_height: proto_entry.block_height,
@@ -1050,11 +1050,11 @@ mod tests {
     fn test_vault_entry_to_proto_block_empty_transactions() {
         use chrono::Utc;
 
-        let vault_slug = VaultSlug::new(9_999_999);
+        let vault = VaultSlug::new(9_999_999);
 
         let entry = inferadb_ledger_types::VaultEntry {
-            organization_id: inferadb_ledger_types::OrganizationId::new(1),
-            vault_id: inferadb_ledger_types::VaultId::new(2),
+            organization: inferadb_ledger_types::OrganizationId::new(1),
+            vault: inferadb_ledger_types::VaultId::new(2),
             vault_height: 10,
             previous_vault_hash: Hash::from([0xABu8; 32]),
             transactions: vec![],
@@ -1073,7 +1073,7 @@ mod tests {
             committed_index: 99,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block, vault_slug);
+        let block = vault_entry_to_proto_block(&entry, &shard_block, vault);
 
         let header = block.header.expect("Block should have header");
         assert_eq!(header.height, 10);
@@ -1089,7 +1089,7 @@ mod tests {
     fn test_vault_entry_to_proto_block_with_transaction() {
         use chrono::Utc;
 
-        let vault_slug = VaultSlug::new(77_777_777);
+        let vault = VaultSlug::new(77_777_777);
 
         let tx = inferadb_ledger_types::Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
@@ -1105,8 +1105,8 @@ mod tests {
         };
 
         let entry = inferadb_ledger_types::VaultEntry {
-            organization_id: inferadb_ledger_types::OrganizationId::new(5),
-            vault_id: inferadb_ledger_types::VaultId::new(10),
+            organization: inferadb_ledger_types::OrganizationId::new(5),
+            vault: inferadb_ledger_types::VaultId::new(10),
             vault_height: 1,
             previous_vault_hash: Hash::default(),
             transactions: vec![tx],
@@ -1125,7 +1125,7 @@ mod tests {
             committed_index: 49,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block, vault_slug);
+        let block = vault_entry_to_proto_block(&entry, &shard_block, vault);
 
         let header = block.header.expect("Block should have header");
         assert_eq!(header.vault.unwrap().slug, 77_777_777);
@@ -1141,11 +1141,11 @@ mod tests {
         use chrono::Utc;
 
         // The vault slug is independent of the internal VaultId — verify they differ
-        let vault_slug = VaultSlug::new(12_345_678);
+        let vault = VaultSlug::new(12_345_678);
 
         let entry = inferadb_ledger_types::VaultEntry {
-            organization_id: inferadb_ledger_types::OrganizationId::new(1),
-            vault_id: inferadb_ledger_types::VaultId::new(99), // Internal ID is 99
+            organization: inferadb_ledger_types::OrganizationId::new(1),
+            vault: inferadb_ledger_types::VaultId::new(99), // Internal ID is 99
             vault_height: 1,
             previous_vault_hash: Hash::default(),
             transactions: vec![],
@@ -1164,7 +1164,7 @@ mod tests {
             committed_index: 0,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block, vault_slug);
+        let block = vault_entry_to_proto_block(&entry, &shard_block, vault);
         let header = block.header.unwrap();
 
         // Vault slug in header should be 12_345_678 (external), NOT 99 (internal)
@@ -1517,8 +1517,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "system".to_string(),
             organization_id: OrganizationId::new(42),
-            organization_slug: Some(12345),
-            vault_slug: Some(67890),
+            organization: Some(12345),
+            vault: Some(67890),
             outcome: EventOutcome::Success,
             details: BTreeMap::from([("key".to_string(), "val".to_string())]),
             block_height: Some(100),
@@ -1537,8 +1537,8 @@ mod tests {
         assert_eq!(recovered.action, entry.action);
         assert_eq!(recovered.emission, entry.emission);
         assert_eq!(recovered.principal, entry.principal);
-        assert_eq!(recovered.organization_slug, entry.organization_slug);
-        assert_eq!(recovered.vault_slug, entry.vault_slug);
+        assert_eq!(recovered.organization, entry.organization);
+        assert_eq!(recovered.vault, entry.vault);
         assert_eq!(recovered.outcome, entry.outcome);
         assert_eq!(recovered.details, entry.details);
         assert_eq!(recovered.block_height, entry.block_height);
@@ -1563,8 +1563,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "user:1".to_string(),
             organization_id: OrganizationId::new(1),
-            organization_slug: Some(100),
-            vault_slug: None,
+            organization: Some(100),
+            vault: None,
             outcome: EventOutcome::Failed {
                 code: "E2001".to_string(),
                 detail: "constraint violation".to_string(),
@@ -1600,8 +1600,8 @@ mod tests {
             emission: EventEmission::HandlerPhase { node_id: 7 },
             principal: "client:abc".to_string(),
             organization_id: OrganizationId::new(5),
-            organization_slug: Some(555),
-            vault_slug: None,
+            organization: Some(555),
+            vault: None,
             outcome: EventOutcome::Denied { reason: "rate limit exceeded".to_string() },
             details: BTreeMap::new(),
             block_height: None,
@@ -1636,8 +1636,8 @@ mod tests {
             emission: EventEmission::HandlerPhase { node_id: 42 },
             principal: "system".to_string(),
             organization_id: OrganizationId::new(1),
-            organization_slug: None,
-            vault_slug: None,
+            organization: None,
+            vault: None,
             outcome: EventOutcome::Success,
             details: BTreeMap::new(),
             block_height: None,
@@ -1672,8 +1672,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "system".to_string(),
             organization_id: OrganizationId::new(0),
-            organization_slug: Some(0),
-            vault_slug: None,
+            organization: Some(0),
+            vault: None,
             outcome: EventOutcome::Success,
             details: BTreeMap::new(),
             block_height: Some(50),
@@ -1738,8 +1738,8 @@ mod tests {
                 emission: EventEmission::ApplyPhase,
                 principal: "test".to_string(),
                 organization_id: OrganizationId::new(0),
-                organization_slug: None,
-                vault_slug: None,
+                organization: None,
+                vault: None,
                 outcome: EventOutcome::Success,
                 details: BTreeMap::new(),
                 block_height: None,
@@ -1843,7 +1843,7 @@ mod tests {
                 prop_assert_eq!(entry.action, recovered.action);
                 prop_assert_eq!(&entry.emission, &recovered.emission);
                 prop_assert_eq!(&entry.principal, &recovered.principal);
-                prop_assert_eq!(entry.vault_slug, recovered.vault_slug);
+                prop_assert_eq!(entry.vault, recovered.vault);
                 prop_assert_eq!(&entry.outcome, &recovered.outcome);
                 prop_assert_eq!(&entry.details, &recovered.details);
                 prop_assert_eq!(entry.block_height, recovered.block_height);

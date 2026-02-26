@@ -8,17 +8,16 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-mod common;
-
 use std::time::Duration;
 
-use common::{TestCluster, create_admin_client};
 use inferadb_ledger_proto::proto::GetNodeInfoRequest;
 use inferadb_ledger_server::{
     bootstrap::bootstrap_node, config::Config, node_id::load_or_generate_node_id,
 };
 use inferadb_ledger_test_utils::TestDir;
 use serial_test::serial;
+
+use crate::common::{TestCluster, create_admin_client};
 
 /// Tests single-node bootstrap with `bootstrap_expect=1`.
 ///

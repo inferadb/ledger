@@ -157,7 +157,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => {
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
                 assert_eq!(organization_id, OrganizationId::new(1));
             },
             _ => panic!("unexpected response"),
@@ -508,7 +508,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+            LedgerResponse::OrganizationCreated { organization: organization_id, shard_id } => {
                 assert_eq!(organization_id, OrganizationId::new(5));
                 // Should be assigned to shard 1 (fewer organizations)
                 assert_eq!(shard_id, ShardId::new(1), "Should assign to least-loaded shard");
@@ -552,7 +552,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+            LedgerResponse::OrganizationCreated { organization: organization_id, shard_id } => {
                 assert_eq!(organization_id, OrganizationId::new(2));
                 // Explicit shard_id should override load balancing
                 assert_eq!(
@@ -574,7 +574,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         let request = LedgerRequest::CreateVault {
-            organization_id: OrganizationId::new(1),
+            organization: OrganizationId::new(1),
             slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
@@ -583,7 +583,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => {
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => {
                 assert_eq!(vault_id, VaultId::new(1));
                 assert_eq!(
                     state.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
@@ -609,8 +609,8 @@ mod tests {
         );
 
         let request = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -642,8 +642,8 @@ mod tests {
 
         // Update to healthy
         let request = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: true,
             expected_root: None,
             computed_root: None,
@@ -683,8 +683,8 @@ mod tests {
 
         // Update to diverged
         let request = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: false,
             expected_root: Some([0xAA; 32]),
             computed_root: Some([0xBB; 32]),
@@ -729,8 +729,8 @@ mod tests {
 
         // Update to recovering
         let request = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: false,
             expected_root: None,
             computed_root: None,
@@ -758,8 +758,8 @@ mod tests {
 
         // Test recovery attempt 2 (circuit breaker)
         let request = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: false,
             expected_root: None,
             computed_root: None,
@@ -810,41 +810,43 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault1, &mut state);
         let vault1_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault2, &mut state);
         let vault2_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Try to delete organization - should transition to Deleting with blocking vault IDs
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDeleting { organization_id: ns_id, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleting { organization: ns_id, blocking_vault_ids } => {
                 assert_eq!(ns_id, organization_id);
                 assert_eq!(blocking_vault_ids.len(), 2);
                 assert!(blocking_vault_ids.contains(&vault1_id));
@@ -877,25 +879,28 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Create vault
         let create_vault = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Delete vault first
-        let delete_vault = LedgerRequest::DeleteVault { organization_id, vault_id };
+        let delete_vault =
+            LedgerRequest::DeleteVault { organization: organization_id, vault: vault_id };
         let (response, _) = store.apply_request(&delete_vault, &mut state);
         match response {
             LedgerResponse::VaultDeleted { success } => assert!(success),
@@ -903,7 +908,7 @@ mod tests {
         }
 
         // Now delete organization - should succeed
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
@@ -938,12 +943,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Delete organization immediately - should succeed (no vaults)
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
@@ -965,7 +972,7 @@ mod tests {
 
         // Try to delete non-existent organization
         let delete_ns =
-            LedgerRequest::DeleteOrganization { organization_id: OrganizationId::new(999) };
+            LedgerRequest::DeleteOrganization { organization: OrganizationId::new(999) };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
@@ -994,37 +1001,40 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault1, &mut state);
         let vault1_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault2, &mut state);
         let vault2_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Delete vault1
-        let delete_vault = LedgerRequest::DeleteVault { organization_id, vault_id: vault1_id };
+        let delete_vault =
+            LedgerRequest::DeleteVault { organization: organization_id, vault: vault1_id };
         let (response, _) = store.apply_request(&delete_vault, &mut state);
         match response {
             LedgerResponse::VaultDeleted { success } => assert!(success),
@@ -1033,11 +1043,11 @@ mod tests {
 
         // Try to delete organization - should transition to Deleting, but only vault2 should be in
         // blocking list
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDeleting { organization_id: ns_id, blocking_vault_ids } => {
+            LedgerResponse::OrganizationDeleting { organization: ns_id, blocking_vault_ids } => {
                 assert_eq!(ns_id, organization_id);
                 assert_eq!(blocking_vault_ids.len(), 1);
                 assert!(blocking_vault_ids.contains(&vault2_id));
@@ -1079,7 +1089,7 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+            LedgerResponse::OrganizationCreated { organization: organization_id, shard_id } => {
                 assert_eq!(shard_id, ShardId::new(0));
                 organization_id
             },
@@ -1093,14 +1103,14 @@ mod tests {
 
         // Migrate to shard 1
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id,
+            organization: organization_id,
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
             LedgerResponse::OrganizationMigrated {
-                organization_id: ns_id,
+                organization: ns_id,
                 old_shard_id,
                 new_shard_id,
             } => {
@@ -1127,7 +1137,7 @@ mod tests {
 
         // Try to migrate non-existent organization
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id: OrganizationId::new(999),
+            organization: OrganizationId::new(999),
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
@@ -1158,12 +1168,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Delete the organization
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
         match response {
             LedgerResponse::OrganizationDeleted { success, .. } => assert!(success),
@@ -1176,7 +1188,7 @@ mod tests {
 
         // Try to migrate deleted organization
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id,
+            organization: organization_id,
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
@@ -1206,13 +1218,15 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Try to migrate to invalid negative shard_id
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id,
+            organization: organization_id,
             shard_id: -1,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
@@ -1246,7 +1260,7 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, shard_id } => {
+            LedgerResponse::OrganizationCreated { organization: organization_id, shard_id } => {
                 assert_eq!(shard_id, ShardId::new(0));
                 organization_id
             },
@@ -1255,14 +1269,14 @@ mod tests {
 
         // Migrate to same shard (idempotent case)
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id,
+            organization: organization_id,
             shard_id: 0,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
             LedgerResponse::OrganizationMigrated {
-                organization_id: ns_id,
+                organization: ns_id,
                 old_shard_id,
                 new_shard_id,
             } => {
@@ -1296,13 +1310,15 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Migration 1: shard 0 -> shard 1
         let migrate1 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id,
+            organization: organization_id,
             shard_id: 1,
         });
         let (response, _) = store.apply_request(&migrate1, &mut state);
@@ -1316,7 +1332,7 @@ mod tests {
 
         // Migration 2: shard 1 -> shard 2
         let migrate2 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id,
+            organization: organization_id,
             shard_id: 2,
         });
         let (response, _) = store.apply_request(&migrate2, &mut state);
@@ -1330,7 +1346,7 @@ mod tests {
 
         // Migration 3: shard 2 -> shard 0 (back to original)
         let migrate3 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
-            organization_id,
+            organization: organization_id,
             shard_id: 0,
         });
         let (response, _) = store.apply_request(&migrate3, &mut state);
@@ -1371,7 +1387,9 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
@@ -1381,13 +1399,13 @@ mod tests {
 
         // Suspend the organization
         let suspend = LedgerRequest::SuspendOrganization {
-            organization_id,
+            organization: organization_id,
             reason: Some("Payment overdue".to_string()),
         };
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
-            LedgerResponse::OrganizationSuspended { organization_id: ns_id } => {
+            LedgerResponse::OrganizationSuspended { organization: ns_id } => {
                 assert_eq!(ns_id, organization_id);
             },
             _ => panic!("expected OrganizationSuspended, got {:?}", response),
@@ -1415,11 +1433,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
@@ -1427,11 +1448,11 @@ mod tests {
         }
 
         // Resume the organization
-        let resume = LedgerRequest::ResumeOrganization { organization_id };
+        let resume = LedgerRequest::ResumeOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
-            LedgerResponse::OrganizationResumed { organization_id: ns_id } => {
+            LedgerResponse::OrganizationResumed { organization: ns_id } => {
                 assert_eq!(ns_id, organization_id);
             },
             _ => panic!("expected OrganizationResumed, got {:?}", response),
@@ -1463,17 +1484,21 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration to shard 1
-        let start_migration =
-            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
+        let start_migration = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_shard_id: ShardId::new(1),
+        };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
-            LedgerResponse::MigrationStarted { organization_id: ns_id, target_shard_id } => {
+            LedgerResponse::MigrationStarted { organization: ns_id, target_shard_id } => {
                 assert_eq!(ns_id, organization_id);
                 assert_eq!(target_shard_id, ShardId::new(1));
             },
@@ -1496,7 +1521,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         let start_migration = LedgerRequest::StartMigration {
-            organization_id: OrganizationId::new(999),
+            organization: OrganizationId::new(999),
             target_shard_id: ShardId::new(1),
         };
         let (response, _) = store.apply_request(&start_migration, &mut state);
@@ -1526,19 +1551,25 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration
-        let start_migration =
-            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
+        let start_migration = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_shard_id: ShardId::new(1),
+        };
         let (response, _) = store.apply_request(&start_migration, &mut state);
         assert!(matches!(response, LedgerResponse::MigrationStarted { .. }));
 
         // Try to start another migration - should fail
-        let start_migration2 =
-            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(2) };
+        let start_migration2 = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_shard_id: ShardId::new(2),
+        };
         let (response, _) = store.apply_request(&start_migration2, &mut state);
 
         match response {
@@ -1566,16 +1597,21 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         store.apply_request(&suspend, &mut state);
 
         // Try to start migration - should fail
-        let start_migration =
-            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
+        let start_migration = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_shard_id: ShardId::new(1),
+        };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
@@ -1603,22 +1639,26 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration to shard 1
-        let start_migration =
-            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
+        let start_migration = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_shard_id: ShardId::new(1),
+        };
         store.apply_request(&start_migration, &mut state);
 
         // Complete migration
-        let complete_migration = LedgerRequest::CompleteMigration { organization_id };
+        let complete_migration = LedgerRequest::CompleteMigration { organization: organization_id };
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
             LedgerResponse::MigrationCompleted {
-                organization_id: ns_id,
+                organization: ns_id,
                 old_shard_id,
                 new_shard_id,
             } => {
@@ -1653,12 +1693,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Try to complete migration without starting - should fail
-        let complete_migration = LedgerRequest::CompleteMigration { organization_id };
+        let complete_migration = LedgerRequest::CompleteMigration { organization: organization_id };
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
@@ -1686,31 +1728,35 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         let create_vault = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Start migration
-        let start_migration =
-            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
+        let start_migration = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_shard_id: ShardId::new(1),
+        };
         store.apply_request(&start_migration, &mut state);
 
         // Try to write - should be blocked
         let write = LedgerRequest::Write {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -1742,18 +1788,22 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Start migration
-        let start_migration =
-            LedgerRequest::StartMigration { organization_id, target_shard_id: ShardId::new(1) };
+        let start_migration = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_shard_id: ShardId::new(1),
+        };
         store.apply_request(&start_migration, &mut state);
 
         // Try to create vault - should be blocked
         let create_vault = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
@@ -1789,37 +1839,39 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault1, &mut state);
         let vault1_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         let create_vault2 = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault2, &mut state);
         let vault2_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Mark organization for deletion (transitions to Deleting)
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
         assert!(matches!(response, LedgerResponse::OrganizationDeleting { .. }));
         assert_eq!(
@@ -1828,7 +1880,8 @@ mod tests {
         );
 
         // Delete first vault - organization should still be Deleting
-        let delete_vault1 = LedgerRequest::DeleteVault { organization_id, vault_id: vault1_id };
+        let delete_vault1 =
+            LedgerRequest::DeleteVault { organization: organization_id, vault: vault1_id };
         let (response, _) = store.apply_request(&delete_vault1, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
         assert_eq!(
@@ -1837,7 +1890,8 @@ mod tests {
         );
 
         // Delete second (last) vault - organization should auto-transition to Deleted
-        let delete_vault2 = LedgerRequest::DeleteVault { organization_id, vault_id: vault2_id };
+        let delete_vault2 =
+            LedgerRequest::DeleteVault { organization: organization_id, vault: vault2_id };
         let (response, _) = store.apply_request(&delete_vault2, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
         assert_eq!(
@@ -1863,30 +1917,32 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         let create_vault = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Mark organization for deletion
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         store.apply_request(&delete_ns, &mut state);
 
         // Try to write - should be blocked
         let write = LedgerRequest::Write {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -1918,12 +1974,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         let create_vault = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("existing-vault".to_string()),
             retention_policy: None,
@@ -1931,12 +1989,12 @@ mod tests {
         store.apply_request(&create_vault, &mut state);
 
         // Mark organization for deletion
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         store.apply_request(&delete_ns, &mut state);
 
         // Try to create another vault - should be blocked
         let create_vault2 = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("new-vault".to_string()),
             retention_policy: None,
@@ -1968,25 +2026,28 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Create vault before suspending
         let create_vault = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
         };
         let (response, _) = store.apply_request(&create_vault, &mut state);
         let vault_id = match response {
-            LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+            LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Suspend the organization
-        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
@@ -1995,8 +2056,8 @@ mod tests {
 
         // Try to write to suspended organization - should fail
         let write = LedgerRequest::Write {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -2028,11 +2089,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
@@ -2041,7 +2105,7 @@ mod tests {
 
         // Try to create vault in suspended organization - should fail
         let create_vault = LedgerRequest::CreateVault {
-            organization_id,
+            organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
@@ -2078,11 +2142,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
@@ -2090,7 +2157,8 @@ mod tests {
         }
 
         // Try to suspend again - should fail
-        let suspend2 = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend2 =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend2, &mut state);
 
         match response {
@@ -2124,12 +2192,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
         // Try to resume active organization - should fail
-        let resume = LedgerRequest::ResumeOrganization { organization_id };
+        let resume = LedgerRequest::ResumeOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
@@ -2157,11 +2227,13 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
         match response {
             LedgerResponse::OrganizationDeleted { success, .. } => assert!(success),
@@ -2169,7 +2241,8 @@ mod tests {
         }
 
         // Try to suspend deleted organization - should fail
-        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
@@ -2190,7 +2263,7 @@ mod tests {
 
         // Try to suspend non-existent organization
         let suspend = LedgerRequest::SuspendOrganization {
-            organization_id: OrganizationId::new(999),
+            organization: OrganizationId::new(999),
             reason: None,
         };
         let (response, _) = store.apply_request(&suspend, &mut state);
@@ -2216,8 +2289,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Try to resume non-existent organization
-        let resume =
-            LedgerRequest::ResumeOrganization { organization_id: OrganizationId::new(999) };
+        let resume = LedgerRequest::ResumeOrganization { organization: OrganizationId::new(999) };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
@@ -2248,11 +2320,14 @@ mod tests {
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             _ => panic!("expected OrganizationCreated"),
         };
 
-        let suspend = LedgerRequest::SuspendOrganization { organization_id, reason: None };
+        let suspend =
+            LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
         let (response, _) = store.apply_request(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
@@ -2260,7 +2335,7 @@ mod tests {
         }
 
         // Delete suspended organization - should succeed
-        let delete_ns = LedgerRequest::DeleteOrganization { organization_id };
+        let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
@@ -2316,40 +2391,40 @@ mod tests {
                 quota: None,
             },
             LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("production".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("staging".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(2),
+                organization: OrganizationId::new(2),
                 slug: VaultSlug::new(1),
                 name: Some("main".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
             },
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
             },
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(2),
-                vault_id: VaultId::new(3),
+                organization: OrganizationId::new(2),
+                vault: VaultId::new(3),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -2493,7 +2568,7 @@ mod tests {
 
         // Create vault on both nodes
         let create_vault = LedgerRequest::CreateVault {
-            organization_id: OrganizationId::new(1),
+            organization: OrganizationId::new(1),
             slug: VaultSlug::new(1),
             name: Some("test".to_string()),
             retention_policy: None,
@@ -2504,8 +2579,8 @@ mod tests {
         // Apply multiple writes
         for _ in 0..5 {
             let write = LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -2553,13 +2628,13 @@ mod tests {
                 quota: None,
             },
             LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("vault-a".to_string()),
                 retention_policy: None,
             },
             LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("vault-b".to_string()),
                 retention_policy: None,
@@ -2574,36 +2649,36 @@ mod tests {
         // Interleaved writes to different vaults
         let interleaved: Vec<LedgerRequest> = vec![
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
             },
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(2),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(2),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
             },
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
             },
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(2),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(2),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
             },
             LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -2711,7 +2786,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("vault1".to_string()),
                 retention_policy: None,
@@ -2735,8 +2810,8 @@ mod tests {
         };
 
         let request = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![tx],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -2754,8 +2829,8 @@ mod tests {
 
         // Verify VaultEntry was created
         let entry = vault_entry.expect("VaultEntry should be created");
-        assert_eq!(entry.organization_id, OrganizationId::new(1));
-        assert_eq!(entry.vault_id, VaultId::new(1));
+        assert_eq!(entry.organization, OrganizationId::new(1));
+        assert_eq!(entry.vault, VaultId::new(1));
         assert_eq!(entry.vault_height, 1);
         assert_eq!(entry.transactions.len(), 1);
         // state_root and tx_merkle_root will be ZERO_HASH without StateLayer configured
@@ -3030,20 +3105,22 @@ mod tests {
             };
             let (response, _) = store.apply_request(&create_ns, &mut state);
             let organization_id = match response {
-                LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+                LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                    organization_id
+                },
                 _ => panic!("expected OrganizationCreated"),
             };
             assert_eq!(organization_id, OrganizationId::new(1));
 
             let create_vault = LedgerRequest::CreateVault {
-                organization_id,
+                organization: organization_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
             };
             let (response, _) = store.apply_request(&create_vault, &mut state);
             let vault_id = match response {
-                LedgerResponse::VaultCreated { vault_id, .. } => vault_id,
+                LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
                 _ => panic!("expected VaultCreated"),
             };
             assert_eq!(vault_id, VaultId::new(1));
@@ -3052,8 +3129,8 @@ mod tests {
         // Now call apply_to_state_machine with a Write entry
         // This should broadcast a BlockAnnouncement
         let write_request = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![], // Empty transactions still create a block
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -3124,7 +3201,7 @@ mod tests {
             store.apply_request(&create_ns, &mut state);
 
             let create_vault = LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
@@ -3134,8 +3211,8 @@ mod tests {
 
         // Apply write - should not panic even without sender
         let write_request = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -3181,8 +3258,8 @@ mod tests {
         let far_future = Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap();
 
         let write_request = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![Transaction {
                 id: [42u8; 16],
                 client_id: "test".to_string(),
@@ -3254,7 +3331,7 @@ mod tests {
             store.apply_request(&create_ns, &mut state);
 
             let create_vault = LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
@@ -3265,8 +3342,8 @@ mod tests {
         let far_future = Utc.with_ymd_and_hms(2099, 12, 31, 23, 59, 59).unwrap();
 
         let write_request = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -3299,8 +3376,8 @@ mod tests {
         let far_future = Utc.with_ymd_and_hms(2099, 3, 14, 15, 9, 26).unwrap();
 
         let write_request = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![Transaction {
                 id: [7u8; 16],
                 client_id: "client".to_string(),
@@ -3390,8 +3467,8 @@ mod tests {
 
         // 2. Transition to Diverged (detected by auto-recovery scanner)
         let diverge = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: false,
             expected_root: Some([0xAA; 32]),
             computed_root: Some([0xBB; 32]),
@@ -3409,8 +3486,8 @@ mod tests {
         // 3. Transition to Recovering attempt 1
         let now = chrono::Utc::now().timestamp();
         let recover1 = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: false,
             expected_root: None,
             computed_root: None,
@@ -3430,8 +3507,8 @@ mod tests {
 
         // 4. Recovery succeeds → Healthy
         let healthy = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: true,
             expected_root: None,
             computed_root: None,
@@ -3470,8 +3547,8 @@ mod tests {
         // Simulate escalating recovery attempts (1, 2, 3)
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
             let recover = LedgerRequest::UpdateVaultHealth {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 healthy: false,
                 expected_root: None,
                 computed_root: None,
@@ -3513,8 +3590,8 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
             let recover = LedgerRequest::UpdateVaultHealth {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 healthy: false,
                 expected_root: None,
                 computed_root: None,
@@ -3556,7 +3633,7 @@ mod tests {
         };
         store.apply_request(&create_ns, &mut state);
         let create_vault = LedgerRequest::CreateVault {
-            organization_id: OrganizationId::new(1),
+            organization: OrganizationId::new(1),
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
@@ -3569,8 +3646,8 @@ mod tests {
             VaultHealthStatus::Diverged { expected: [1; 32], computed: [2; 32], at_height: 1 },
         );
         let write = LedgerRequest::Write {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
@@ -3605,8 +3682,8 @@ mod tests {
 
         // Mark healthy twice
         let healthy = LedgerRequest::UpdateVaultHealth {
-            organization_id: OrganizationId::new(1),
-            vault_id: VaultId::new(1),
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
             healthy: true,
             expected_root: None,
             computed_root: None,
@@ -3790,7 +3867,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
@@ -3820,8 +3897,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![tx1],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -3850,8 +3927,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![tx2],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -3885,7 +3962,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
@@ -3909,8 +3986,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![tx_set],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -3932,8 +4009,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![tx_del],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -3966,7 +4043,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
@@ -3987,8 +4064,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![tx],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -4031,7 +4108,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
@@ -4040,7 +4117,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(2),
+                organization: OrganizationId::new(2),
                 slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
@@ -4064,8 +4141,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![tx1],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -4089,8 +4166,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(2),
-                vault_id: VaultId::new(2),
+                organization: OrganizationId::new(2),
+                vault: VaultId::new(2),
                 transactions: vec![tx2],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -4145,7 +4222,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
@@ -4154,7 +4231,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
@@ -4178,8 +4255,8 @@ mod tests {
         };
         store.apply_request(
             &LedgerRequest::Write {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 transactions: vec![tx],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
@@ -4217,7 +4294,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
@@ -4226,7 +4303,7 @@ mod tests {
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
@@ -4241,8 +4318,8 @@ mod tests {
         let mut state = store.applied_state.write();
         store.apply_request(
             &LedgerRequest::DeleteVault {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
             },
             &mut state,
         );
@@ -4278,7 +4355,7 @@ mod tests {
             );
             store.apply_request(
                 &LedgerRequest::CreateVault {
-                    organization_id: OrganizationId::new(1),
+                    organization: OrganizationId::new(1),
                     slug: VaultSlug::new(1),
                     name: Some("v1".to_string()),
                     retention_policy: None,
@@ -4301,8 +4378,8 @@ mod tests {
             };
             store.apply_request(
                 &LedgerRequest::Write {
-                    organization_id: OrganizationId::new(1),
-                    vault_id: VaultId::new(1),
+                    organization: OrganizationId::new(1),
+                    vault: VaultId::new(1),
                     transactions: vec![tx],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
@@ -4351,8 +4428,8 @@ mod tests {
     /// Helper: creates a simple Write request with one set operation.
     fn simple_write_request(org_id: OrganizationId, vault_id: VaultId) -> LedgerRequest {
         LedgerRequest::Write {
-            organization_id: org_id,
-            vault_id,
+            organization: org_id,
+            vault: vault_id,
             transactions: vec![Transaction {
                 id: [1u8; 16],
                 client_id: "test-client".to_string(),
@@ -4533,8 +4610,8 @@ mod tests {
 
         // Write request with two ExpireEntity operations
         let request = LedgerRequest::Write {
-            organization_id: org_id,
-            vault_id,
+            organization: org_id,
+            vault: vault_id,
             transactions: vec![Transaction {
                 id: [2u8; 16],
                 client_id: "gc-client".to_string(),
@@ -4689,7 +4766,7 @@ mod tests {
         let key = (org_id, vault_id);
         state.vaults.get_mut(&key).expect("vault exists").deleted = true;
 
-        let request = LedgerRequest::DeleteOrganization { organization_id: org_id };
+        let request = LedgerRequest::DeleteOrganization { organization: org_id };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
@@ -4843,7 +4920,7 @@ mod tests {
 
         // Suspend with reason
         let suspend = LedgerRequest::SuspendOrganization {
-            organization_id: org_id,
+            organization: org_id,
             reason: Some("billing overdue".to_string()),
         };
         let mut events: Vec<EventEntry> = Vec::new();
@@ -4875,7 +4952,7 @@ mod tests {
         );
 
         // Resume
-        let resume = LedgerRequest::ResumeOrganization { organization_id: org_id };
+        let resume = LedgerRequest::ResumeOrganization { organization: org_id };
         let mut resume_events: Vec<EventEntry> = Vec::new();
         let mut resume_op_index = 0u32;
 
@@ -5047,7 +5124,9 @@ mod tests {
             &mut PendingExternalWrites::default(),
         );
         let org_id = match resp {
-            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+                organization_id
+            },
             other => panic!("expected OrganizationCreated, got {:?}", other),
         };
         events.clear();
@@ -5055,7 +5134,7 @@ mod tests {
 
         // Create a vault
         let create_vault = LedgerRequest::CreateVault {
-            organization_id: org_id,
+            organization: org_id,
             slug: VaultSlug::new(6000),
             name: Some("audit-vault".to_string()),
             retention_policy: None,
@@ -5081,7 +5160,7 @@ mod tests {
 
         assert_eq!(vault_event.scope, EventScope::Organization);
         assert_eq!(vault_event.organization_id, org_id);
-        assert_eq!(vault_event.vault_slug, Some(6000));
+        assert_eq!(vault_event.vault, Some(6000));
         assert_eq!(vault_event.details.get("vault_name").map(|s| s.as_str()), Some("audit-vault"));
     }
 
@@ -5092,7 +5171,7 @@ mod tests {
         let mut state = store.applied_state.write();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
-        let delete_vault = LedgerRequest::DeleteVault { organization_id: org_id, vault_id };
+        let delete_vault = LedgerRequest::DeleteVault { organization: org_id, vault: vault_id };
         let ts = fixed_timestamp();
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
@@ -5136,8 +5215,8 @@ mod tests {
             requests: vec![
                 simple_write_request(org_id, vault_id),
                 LedgerRequest::Write {
-                    organization_id: org_id,
-                    vault_id,
+                    organization: org_id,
+                    vault: vault_id,
                     transactions: vec![Transaction {
                         id: [2u8; 16],
                         client_id: "test-client".to_string(),
@@ -5196,8 +5275,8 @@ mod tests {
 
         // Mark vault as diverged
         let health_request = LedgerRequest::UpdateVaultHealth {
-            organization_id: org_id,
-            vault_id,
+            organization: org_id,
+            vault: vault_id,
             healthy: false,
             expected_root: None,
             computed_root: None,
@@ -5295,8 +5374,8 @@ mod tests {
         // Write to org B
         store.apply_request_with_events(
             &LedgerRequest::Write {
-                organization_id: org_b,
-                vault_id: vault_b,
+                organization: org_b,
+                vault: vault_b,
                 transactions: vec![Transaction {
                     id: [9u8; 16],
                     client_id: "client-b".to_string(),
@@ -5432,8 +5511,8 @@ mod tests {
         op_index = 0;
         store.apply_request_with_events(
             &LedgerRequest::Write {
-                organization_id: org_id,
-                vault_id,
+                organization: org_id,
+                vault: vault_id,
                 transactions: vec![Transaction {
                     id: [3u8; 16],
                     client_id: "test-client".to_string(),
@@ -5529,8 +5608,8 @@ mod tests {
                 emission: EventEmission::ApplyPhase,
                 principal: "admin".to_string(),
                 organization_id: OrganizationId::new(1),
-                organization_slug: None,
-                vault_slug: None,
+                organization: None,
+                vault: None,
                 outcome: EventOutcome::Success,
                 details: BTreeMap::new(),
                 block_height: Some(1),
@@ -5643,8 +5722,8 @@ mod tests {
                 emission: EventEmission::ApplyPhase,
                 principal: "admin".to_string(),
                 organization_id: OrganizationId::new(1),
-                organization_slug: None,
-                vault_slug: None,
+                organization: None,
+                vault: None,
                 outcome: EventOutcome::Success,
                 details: BTreeMap::new(),
                 block_height: Some(1),
@@ -5664,8 +5743,8 @@ mod tests {
                 emission: EventEmission::HandlerPhase { node_id: 42 },
                 principal: "test-user".to_string(),
                 organization_id: OrganizationId::new(1),
-                organization_slug: None,
-                vault_slug: None,
+                organization: None,
+                vault: None,
                 outcome: EventOutcome::Denied { reason: "rate limit exceeded".to_string() },
                 details: BTreeMap::new(),
                 block_height: None,
@@ -6064,7 +6143,7 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 2),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
-                    organization_id: OrganizationId::new(1),
+                    organization: OrganizationId::new(1),
                     slug: VaultSlug::new(100),
                     name: Some("vault-1".to_string()),
                     retention_policy: None,
@@ -6074,8 +6153,8 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 3),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
-                    organization_id: OrganizationId::new(1),
-                    vault_id: VaultId::new(1),
+                    organization: OrganizationId::new(1),
+                    vault: VaultId::new(1),
                     transactions: vec![],
                     idempotency_key: [1u8; 16],
                     request_hash: 42,
@@ -6095,7 +6174,7 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 5),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
-                    organization_id: OrganizationId::new(2),
+                    organization: OrganizationId::new(2),
                     slug: VaultSlug::new(200),
                     name: Some("vault-2".to_string()),
                     retention_policy: None,
@@ -6105,8 +6184,8 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 6),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
-                    organization_id: OrganizationId::new(2),
-                    vault_id: VaultId::new(2),
+                    organization: OrganizationId::new(2),
+                    vault: VaultId::new(2),
                     transactions: vec![],
                     idempotency_key: [2u8; 16],
                     request_hash: 99,

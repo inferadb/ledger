@@ -156,7 +156,7 @@ impl MultiShardWriteService {
 
         // Resolve internal IDs to slugs for response construction
         let slug = ctx.applied_state.resolve_id_to_slug(organization_id);
-        let vault_slug = ctx.applied_state.resolve_vault_id_to_slug(vault_id);
+        let vault = ctx.applied_state.resolve_vault_id_to_slug(vault_id);
 
         // Use the proof module's implementation
         match proof::generate_write_proof(
@@ -164,7 +164,7 @@ impl MultiShardWriteService {
             organization_id,
             slug,
             vault_id,
-            vault_slug,
+            vault,
             vault_height,
             0,
         ) {
@@ -216,8 +216,8 @@ impl MultiShardWriteService {
         };
 
         Ok(LedgerRequest::Write {
-            organization_id,
-            vault_id,
+            organization: organization_id,
+            vault: vault_id,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -227,7 +227,7 @@ impl MultiShardWriteService {
 
 #[tonic::async_trait]
 impl WriteService for MultiShardWriteService {
-    #[instrument(skip(self, request), fields(client_id, organization_id, vault_slug))]
+    #[instrument(skip(self, request), fields(client_id, organization_id, vault))]
     async fn write(
         &self,
         request: Request<WriteRequest>,
@@ -366,7 +366,7 @@ impl WriteService for MultiShardWriteService {
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
 
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
@@ -575,7 +575,7 @@ impl WriteService for MultiShardWriteService {
 
     #[instrument(
         skip(self, request),
-        fields(client_id, sequence, organization_id, vault_slug, batch_size)
+        fields(client_id, sequence, organization_id, vault, batch_size)
     )]
     async fn batch_write(
         &self,
@@ -724,7 +724,7 @@ impl WriteService for MultiShardWriteService {
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
         tracing::Span::current().record("organization_id", organization_id.value());
-        tracing::Span::current().record("vault_slug", req.vault.as_ref().map_or(0, |v| v.slug));
+        tracing::Span::current().record("vault", req.vault.as_ref().map_or(0, |v| v.slug));
         tracing::Span::current().record("batch_size", batch_size);
 
         // Check idempotency cache
