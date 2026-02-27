@@ -149,14 +149,18 @@ impl TestCluster {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+        let health_state = inferadb_ledger_raft::HealthState::new();
         let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
             &config,
             &data_dir,
-            inferadb_ledger_raft::HealthState::new(),
+            health_state.clone(),
             shutdown_rx,
         )
         .await
         .expect("bootstrap node");
+
+        // Mark node as ready (mirrors main.rs post-bootstrap behavior)
+        health_state.mark_ready();
 
         // Get the auto-generated Snowflake ID from Raft metrics
         let node_id = bootstrapped.raft.metrics().borrow().id;
@@ -234,14 +238,18 @@ impl TestCluster {
             // AdminService's JoinCluster RPC.
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+            let health_state = inferadb_ledger_raft::HealthState::new();
             let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
                 &config,
                 &data_dir,
-                inferadb_ledger_raft::HealthState::new(),
+                health_state.clone(),
                 shutdown_rx,
             )
             .await
             .expect("bootstrap node");
+
+            // Mark node as ready (mirrors main.rs post-bootstrap behavior)
+            health_state.mark_ready();
 
             // Get the auto-generated Snowflake ID from Raft metrics
             let node_id = bootstrapped.raft.metrics().borrow().id;
@@ -611,6 +619,8 @@ impl MultiShardTestCluster {
 
         let base_port = allocate_ports(num_nodes as u16);
         let mut nodes = Vec::with_capacity(num_nodes);
+        let mut health_states: Vec<inferadb_ledger_raft::HealthState> =
+            Vec::with_capacity(num_nodes);
 
         // Build the member list for all shards
         let members: Vec<(u64, String)> = (0..num_nodes)
@@ -656,12 +666,16 @@ impl MultiShardTestCluster {
                     .unwrap_or_else(|_| panic!("start data shard {}", shard_id));
             }
 
+            // Create health state (starts in Starting phase, marked Ready after leader election)
+            let health_state = inferadb_ledger_raft::HealthState::new();
+
             // Create and start the multi-shard gRPC server
             let server = MultiShardLedgerServer::builder()
                 .manager(manager.clone())
                 .addr(addr)
                 .max_concurrent(1000)
                 .timeout_secs(30)
+                .health_state(health_state.clone())
                 .build();
 
             let server_handle = tokio::spawn(async move {
@@ -686,6 +700,7 @@ impl MultiShardTestCluster {
                 _temp_dir: temp_dir,
                 _server_handle: server_handle,
             });
+            health_states.push(health_state);
         }
 
         // Wait for all shards to elect leaders
@@ -718,6 +733,11 @@ impl MultiShardTestCluster {
             }
 
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Mark all nodes as ready (mirrors main.rs post-bootstrap behavior)
+        for hs in &health_states {
+            hs.mark_ready();
         }
 
         Self { nodes, num_shards: num_data_shards }
