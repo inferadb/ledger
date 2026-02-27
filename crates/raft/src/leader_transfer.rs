@@ -17,12 +17,13 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::{
-    TriggerElectionRequest, raft_service_client::RaftServiceClient,
+    GetClusterInfoRequest, TriggerElectionRequest, admin_service_client::AdminServiceClient,
+    raft_service_client::RaftServiceClient,
 };
 use openraft::Raft;
 use snafu::{ResultExt, Snafu};
 use tonic::transport::Channel;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::types::LedgerTypeConfig;
 
@@ -149,7 +150,6 @@ pub async fn transfer_leadership(
         return Err(LeaderTransferError::NotLeader);
     }
 
-    let current_term = metrics.current_term;
     let last_log_index = metrics.last_log_index.unwrap_or(0);
 
     // Step 2: Determine transfer target
@@ -217,7 +217,8 @@ pub async fn transfer_leadership(
         .await
         .context(ConnectionSnafu)?;
 
-    let mut client: RaftServiceClient<Channel> = RaftServiceClient::new(channel);
+    let mut raft_client = RaftServiceClient::new(channel.clone());
+    let mut admin_client = AdminServiceClient::new(channel);
 
     // Step 5: Pause heartbeats and disable elections on this node.
     // Heartbeat pause: followers' leases expire after ~election_timeout_max
@@ -231,35 +232,79 @@ pub async fn transfer_leadership(
 
     tokio::time::sleep(config.lease_expiry_wait).await;
 
-    // Step 6: Send TriggerElection to the target
-    let response = client
-        .trigger_election(TriggerElectionRequest { leader_term: current_term, leader_id: my_id })
-        .await
-        .context(RpcSnafu)?;
-
-    let inner = response.into_inner();
-    if !inner.accepted {
-        return Err(LeaderTransferError::TargetRejected { message: inner.message });
-    }
-
-    // Step 7: Poll until a different leader is confirmed.
-    // During the election transition there is a brief window where
-    // `current_leader` is `None`. We must wait through that window until
-    // a concrete new leader ID appears, otherwise we return 0.
+    // Steps 6-7: Repeatedly trigger election on the target until leadership
+    // changes or the overall deadline expires. A single trigger().elect() may
+    // fail due to split votes or term races, so we retry periodically.
+    //
+    // We poll leadership via GetClusterInfo on the target node rather than
+    // local raft metrics, because the local RaftCore may become unresponsive
+    // after stepping down (e.g., assertion failures in debug builds when
+    // receiving AppendEntries from the new leader).
+    let mut attempt = 0u32;
     loop {
-        let fresh = raft.metrics().borrow().clone();
-        if let Some(leader) = fresh.current_leader
-            && leader != my_id
-        {
-            info!(new_leader = leader, target_id, "Leadership transferred");
-            return Ok(leader);
-        }
-
         if tokio::time::Instant::now() >= overall_deadline {
             return Err(LeaderTransferError::Timeout { timeout: config.timeout });
         }
 
-        tokio::time::sleep(config.poll_interval).await;
+        // Read current term from local metrics (may be stale if core panicked,
+        // but best-effort for the TriggerElection term check).
+        let local = raft.metrics().borrow().clone();
+        let trigger_term = local.current_term;
+
+        // Check local metrics first — works when the core is healthy.
+        if let Some(leader) = local.current_leader
+            && leader != my_id
+        {
+            info!(new_leader = leader, target_id, attempt, "Leadership transferred (local)");
+            return Ok(leader);
+        }
+
+        attempt += 1;
+        info!(target_id, leader_term = trigger_term, attempt, "Sending TriggerElection RPC");
+
+        match raft_client
+            .trigger_election(TriggerElectionRequest {
+                leader_term: trigger_term,
+                leader_id: my_id,
+            })
+            .await
+        {
+            Ok(response) => {
+                let inner = response.into_inner();
+                if !inner.accepted {
+                    debug!(message = %inner.message, "Target rejected election trigger");
+                }
+            },
+            Err(status) => {
+                // Stale term or transient error — log and continue.
+                debug!(code = ?status.code(), message = %status.message(), "TriggerElection RPC failed, retrying");
+            },
+        }
+
+        // Poll the target via GetClusterInfo to confirm leadership change.
+        // This is more reliable than local metrics after the old leader steps
+        // down, since the target's RaftCore is healthy and sees the new leader.
+        let retry_deadline =
+            (tokio::time::Instant::now() + Duration::from_secs(2)).min(overall_deadline);
+
+        loop {
+            if let Ok(resp) = admin_client.get_cluster_info(GetClusterInfoRequest {}).await {
+                let info = resp.into_inner();
+                if info.leader_id != 0 && info.leader_id != my_id {
+                    info!(
+                        new_leader = info.leader_id,
+                        target_id, attempt, "Leadership transferred (confirmed via target)"
+                    );
+                    return Ok(info.leader_id);
+                }
+            }
+
+            if tokio::time::Instant::now() >= retry_deadline {
+                break;
+            }
+
+            tokio::time::sleep(config.poll_interval).await;
+        }
     }
 }
 

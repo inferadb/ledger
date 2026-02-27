@@ -15,8 +15,8 @@
 # transfer, and catch-up.
 #
 # Usage:
-#   ./scripts/cluster-lifecycle-test.sh                  # Full test
-#   ./scripts/cluster-lifecycle-test.sh --release        # Release build
+#   ./scripts/cluster-lifecycle-test.sh                  # Full test (release)
+#   ./scripts/cluster-lifecycle-test.sh --debug          # Debug build
 #   ./scripts/cluster-lifecycle-test.sh --skip-build     # Skip cargo build
 #   ./scripts/cluster-lifecycle-test.sh --help           # Show help
 
@@ -29,8 +29,8 @@ cd "$(dirname "$0")/.."
 
 BASE_PORT=50071
 DATA_ROOT="/tmp/ledger-lifecycle-test-$$"
-PROFILE="debug"
-BINARY="target/debug/inferadb-ledger"
+PROFILE="release"
+BINARY="target/release/inferadb-ledger"
 SKIP_BUILD=false
 
 # Timeouts
@@ -71,9 +71,9 @@ NC='\033[0m'
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --release)
-      PROFILE="release"
-      BINARY="target/release/inferadb-ledger"
+    --debug)
+      PROFILE="debug"
+      BINARY="target/debug/inferadb-ledger"
       shift
       ;;
     --skip-build)
@@ -86,7 +86,7 @@ while [[ $# -gt 0 ]]; do
       echo "Cluster lifecycle integration test."
       echo ""
       echo "Options:"
-      echo "  --release      Build in release mode"
+      echo "  --debug        Build in debug mode (default: release)"
       echo "  --skip-build   Skip cargo build (use existing binary)"
       echo "  --help         Show this help"
       exit 0
@@ -146,8 +146,12 @@ cleanup() {
   done
 
   if [[ -d "$DATA_ROOT" ]]; then
-    rm -rf "$DATA_ROOT"
-    log_info "Removed data directory: $DATA_ROOT"
+    if [[ $exit_code -ne 0 ]]; then
+      log_info "Preserving data directory for debugging: $DATA_ROOT"
+    else
+      rm -rf "$DATA_ROOT"
+      log_info "Removed data directory: $DATA_ROOT"
+    fi
   fi
 
   if [[ $exit_code -eq 0 ]]; then
@@ -171,7 +175,7 @@ start_node_cluster() {
   local node_data="$DATA_ROOT/node$node_num"
   mkdir -p "$node_data"
 
-  RUST_LOG=info "$BINARY" \
+  RUST_LOG=info,inferadb_ledger_raft::leader_transfer=debug "$BINARY" \
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
     --cluster "$cluster_size" \
@@ -195,7 +199,7 @@ start_node_join() {
   local node_data="$DATA_ROOT/node$node_num"
   mkdir -p "$node_data"
 
-  RUST_LOG=info "$BINARY" \
+  RUST_LOG=info,inferadb_ledger_raft::leader_transfer=debug "$BINARY" \
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
     --join \
